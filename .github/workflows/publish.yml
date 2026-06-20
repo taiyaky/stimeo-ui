@@ -1,0 +1,61 @@
+# Publish npm + gem from this repo's CI when a release tag (v*) is pushed.
+#
+# Required configuration in the PUBLIC repo (Settings → Secrets/variables → Actions):
+#   - secret NPM_TOKEN : npm automation token (publish access to stimeo-ui).
+#     npm needs a token at least for the FIRST publish — unlike RubyGems (pending
+#     trusted publishers), npm can't pre-configure OIDC for a not-yet-published
+#     package. After v1 you can switch npm to Trusted Publishing too (configure on
+#     npmjs.com; npm >= 11.5.1; drop NODE_AUTH_TOKEN and --provenance) and remove
+#     this secret.
+# The gem uses RubyGems Trusted Publishing (OIDC) — no API key. Register a trusted
+# publisher for gem `stimeo-ui` on rubygems.org (repo taiyaky/stimeo-ui + this
+# workflow). Both jobs use `id-token: write` (OIDC). Only npm provenance requires
+# this repo to be PUBLIC; RubyGems Trusted Publishing works for private repos too
+# (the repo is public by release time anyway).
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required for npm provenance
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14" # pinned
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: bun install
+      - run: bun run build # tsup → dist/ (DTS resolves: @floating-ui/dom is a devDep)
+      - run: npm publish --provenance --access public --tag alpha
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  gem:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14" # pinned
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - run: bun install
+      - run: bun run build # gem packages the built dist/ (see gemspec `files`)
+      - name: Configure RubyGems trusted publishing (OIDC)
+        uses: rubygems/configure-rubygems-credentials@v2.1.0
+      - name: Build & push gem
+        run: |
+          gem build stimeo-ui.gemspec
+          gem push stimeo-ui-*.gem

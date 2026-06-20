@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Lockfiles are intentionally not committed (CI installs fresh; direct deps are
+# exact-pinned). This also keeps the e2e-only dependency tree out of the repo.
+bun.lock
+bun.lockb
+package-lock.json
+
+# Build output (rebuilt by `bun run build`; published to npm, never committed)
+dist/
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+
+# Packaged gem (built in CI from a fresh dist/)
+*.gem
+
+# OS / editor cruft
+.DS_Store

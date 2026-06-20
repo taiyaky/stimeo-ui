@@ -1,0 +1,93 @@
+{
+  "name": "stimeo-ui",
+  "version": "0.1.0-alpha.1",
+  "description": "Headless Stimulus UI framework for Ruby on Rails — behavior-only, accessible components driven by HTML attributes.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Stimeo Labs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taiyaky/stimeo-ui.git"
+  },
+  "homepage": "https://github.com/taiyaky/stimeo-ui#readme",
+  "bugs": {
+    "url": "https://github.com/taiyaky/stimeo-ui/issues"
+  },
+  "keywords": [
+    "stimulus",
+    "rails",
+    "hotwire",
+    "turbo",
+    "headless",
+    "ui",
+    "components",
+    "accessibility",
+    "wai-aria",
+    "a11y"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./controllers/*": {
+      "types": "./dist/controllers/*.d.ts",
+      "import": "./dist/controllers/*.js"
+    },
+    "./positioning": {
+      "types": "./dist/positioning/index.d.ts",
+      "import": "./dist/positioning/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "stimeo": "./dist/inspector/cli_bin.js"
+  },
+  "scripts": {
+    "build": "tsup && bun scripts/postbuild.ts",
+    "dev": "tsup --watch --onSuccess \"bun scripts/postbuild.ts\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write ."
+  },
+  "peerDependencies": {
+    "@floating-ui/dom": ">=1.6.0",
+    "@hotwired/stimulus": ">=3.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@floating-ui/dom": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.16",
+    "@floating-ui/dom": "1.7.6",
+    "@guidepup/virtual-screen-reader": "0.32.1",
+    "@hotwired/stimulus": "3.2.2",
+    "@hotwired/turbo": "8.0.23",
+    "@types/node": "22.19.19",
+    "@vitest/coverage-istanbul": "4.1.8",
+    "axe-core": "4.12.0",
+    "happy-dom": "20.9.0",
+    "tsup": "8.5.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8",
+    "vitest-axe": "0.1.0"
+  },
+  "overrides": {
+    "rollup": "4.61.1"
+  }
+}
