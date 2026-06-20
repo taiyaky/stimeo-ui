@@ -32,7 +32,7 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-      - run: npm install -g npm@latest # Trusted Publishing needs npm >= 11.5.1 (Node 22 ships npm 10)
+      - run: npm install -g npm@11.5.1 # pinned: Trusted Publishing needs npm >= 11.5.1 (Node 22 ships npm 10)
       - run: bun install
       - run: bun run build # tsup → dist/ (DTS resolves: @floating-ui/dom is a devDep)
       - run: npm publish --access public --tag alpha # OIDC Trusted Publishing → tokenless; provenance automatic
