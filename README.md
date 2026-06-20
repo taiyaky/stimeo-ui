@@ -1,5 +1,7 @@
 # Stimeo UI
 
+[![CI](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/stimeo-ui/alpha)](https://www.npmjs.com/package/stimeo-ui) [![gem](https://img.shields.io/gem/vpre/stimeo-ui)](https://rubygems.org/gems/stimeo-ui) [![License: MIT](https://img.shields.io/github/license/taiyaky/stimeo-ui)](LICENSE)
+
 **Headless Stimulus UI framework for Ruby on Rails.** Stimeo UI ships *behavior*
 — ARIA state, keyboard interaction, focus management, Turbo resilience — as
 `data-*`-driven Stimulus controllers. It does **not** ship CSS: the consuming app
