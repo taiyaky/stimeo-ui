@@ -17,7 +17,7 @@ const markup = `
   <div data-controller="stimeo--listbox">
     <span id="lb-label">Favorite fruit</span>
     <button type="button" role="combobox" aria-haspopup="listbox" aria-expanded="false"
-            aria-controls="lb-list" aria-activedescendant=""
+            aria-controls="lb-list"
             aria-labelledby="lb-label lb-value"
             data-stimeo--listbox-target="trigger"
             data-action="click->stimeo--listbox#toggle

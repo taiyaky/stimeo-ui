@@ -9,7 +9,7 @@ import { RovingTabindex } from "../utils/roving_tabindex";
  *   <div data-controller="stimeo--multi-select">
  *     <ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>
  *     <input type="text" role="combobox" aria-expanded="false"
- *            aria-autocomplete="list" aria-controls="ms-list" aria-activedescendant=""
+ *            aria-autocomplete="list" aria-controls="ms-list"
  *            data-stimeo--multi-select-target="input"
  *            data-action="input->stimeo--multi-select#filter
  *                         keydown->stimeo--multi-select#onKeydown

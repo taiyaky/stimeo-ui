@@ -1,4 +1,11 @@
-# Stimeo UI
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/taiyaky/stimeo-ui/main/assets/logo-wordmark-dark.png">
+    <img alt="Stimeo UI" src="https://raw.githubusercontent.com/taiyaky/stimeo-ui/main/assets/logo-wordmark.png" width="240">
+  </picture>
+</h1>
+
+<p align="center"><a href="https://stimeo-labs.com"><strong>Live demo (alpha) →</strong></a></p>
 
 [![CI](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/stimeo-ui/alpha)](https://www.npmjs.com/package/stimeo-ui) [![gem](https://img.shields.io/gem/v/stimeo-ui)](https://rubygems.org/gems/stimeo-ui) [![License: MIT](https://img.shields.io/github/license/taiyaky/stimeo-ui)](LICENSE)
 
@@ -62,6 +69,50 @@ Need only a few controllers? Import them individually from
   work without it via the default flow layout).
 - **No CSS is shipped.** Style the components yourself; controllers only toggle
   ARIA state and `data-*` hooks.
+
+## Linting
+
+Stimeo UI is headless, so **you** author the WAI-ARIA roles, states, and
+properties — and some controllers use explicit roles as selector contracts (the
+data-grid finds its rows via `[role="row"]`). Your markup therefore contains
+valid custom-widget ARIA such as `<ul role="menu">`, `<div role="radio">`, and
+`<table role="grid">…<td role="gridcell">`.
+
+Strict static a11y linters — Biome's `recommended` preset (≥ 2.5) and
+`eslint-plugin-jsx-a11y` — report these valid
+[APG](https://www.w3.org/WAI/ARIA/apg/) patterns as errors, because their
+heuristics assume native semantic elements (there is no native equivalent for a
+custom, fully-stylable radio). Relax the conflicting rules **only for the paths
+where you author Stimeo UI markup** — set `includes` to your own component
+directories (the value below is a placeholder; adjust it to your layout) and
+keep the rules on everywhere else. For Biome:
+
+```json
+{
+  "overrides": [
+    {
+      "includes": ["app/components/**"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "noNoninteractiveElementToInteractiveRole": "off",
+            "noRedundantRoles": "off",
+            "useSemanticElements": "off",
+            "useFocusableInteractive": "off",
+            "noNoninteractiveTabindex": "off"
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+The `eslint-plugin-jsx-a11y` equivalents are
+`no-noninteractive-element-to-interactive-role`, `no-redundant-roles`,
+`prefer-tag-over-role`, `interactive-supports-focus`, and
+`no-noninteractive-tabindex`. These components' real accessibility is exercised
+with axe-core and real screen readers in this project's own test suite.
 
 ## Contributing
 

@@ -10,7 +10,13 @@ export default defineConfig({
     // records are silently dropped, flaking every MutationObserver-driven test
     // (Stimulus disconnect-on-removal, dynamic-insert detection). Pin WeakRef to a
     // strong ref so delivery is deterministic — see the setup file for the full why.
-    setupFiles: ["tests/setup/deterministic-mutation-observer.ts"],
+    setupFiles: [
+      "tests/setup/deterministic-mutation-observer.ts",
+      // happy-dom (>=20.10) reports every <img> as complete=true; this restores the
+      // real-browser loading window (a pending src is complete=false until load/error
+      // fires) so the avatar controller's loading/loaded/error phases stay testable.
+      "tests/setup/deterministic-image-loading.ts",
+    ],
     // The a11y suites run axe-core on the real clock; under a constrained / loaded
     // runner (CI, Docker) those occasionally brush past Vitest's default 5s, flaking
     // across many files at once. A wider ceiling absorbs that without masking real

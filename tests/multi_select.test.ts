@@ -22,7 +22,7 @@ const markup = (attrs = "") => `
   <div data-controller="stimeo--multi-select" ${attrs}>
     <ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>
     <input type="text" role="combobox" aria-expanded="false" aria-autocomplete="list"
-           aria-controls="ms-list" aria-activedescendant="" aria-label="Fruits"
+           aria-controls="ms-list" aria-label="Fruits"
            data-stimeo--multi-select-target="input"
            data-action="input->stimeo--multi-select#filter
                         keydown->stimeo--multi-select#onKeydown
@@ -275,7 +275,7 @@ describe("MultiSelectController", () => {
       <div data-controller="stimeo--multi-select">
         <ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>
         <input type="text" role="combobox" aria-expanded="false" aria-autocomplete="list"
-               aria-controls="ms-list2" aria-activedescendant="" aria-label="Fruits"
+               aria-controls="ms-list2" aria-label="Fruits"
                data-stimeo--multi-select-target="input"
                data-action="input->stimeo--multi-select#filter
                             keydown->stimeo--multi-select#onKeydown

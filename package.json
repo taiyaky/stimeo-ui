@@ -73,21 +73,22 @@
     }
   },
   "devDependencies": {
-    "@biomejs/biome": "2.4.16",
+    "@biomejs/biome": "2.5.0",
     "@floating-ui/dom": "1.7.6",
     "@guidepup/virtual-screen-reader": "0.32.1",
     "@hotwired/stimulus": "3.2.2",
     "@hotwired/turbo": "8.0.23",
-    "@types/node": "22.19.19",
-    "@vitest/coverage-istanbul": "4.1.8",
-    "axe-core": "4.12.0",
-    "happy-dom": "20.9.0",
+    "@types/node": "24.13.2",
+    "@vitest/coverage-istanbul": "4.1.9",
+    "axe-core": "4.12.1",
+    "happy-dom": "20.10.6",
     "tsup": "8.5.1",
     "typescript": "6.0.3",
-    "vitest": "4.1.8",
+    "vitest": "4.1.9",
     "vitest-axe": "0.1.0"
   },
   "overrides": {
-    "rollup": "4.61.1"
+    "rollup": "4.62.2",
+    "playwright-core": "1.61.0"
   }
 }
