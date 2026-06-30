@@ -19,10 +19,16 @@ const BUTTON_BUSY_LABEL = "data-submit-once-busy-label";
  *
  * Markup contract (identifier: `stimeo--submit-once`):
  *   <form data-controller="stimeo--submit-once"
- *         data-stimeo--submit-once-busy-label-value="Submitting…"
- *         data-action="submit->stimeo--submit-once#start">
+ *         data-stimeo--submit-once-busy-label-value="Submitting…">
  *     <button type="submit" data-stimeo--submit-once-target="submit">Send</button>
  *   </form>
+ *
+ * Zero wiring for Turbo forms: `connect()` subscribes to `turbo:submit-start`
+ * itself (symmetric with the `turbo:submit-end` it already listens for), so no
+ * `data-action` is required. The public {@link start} action is kept for back-compat
+ * and for **non-Turbo** forms, where you bind it to the native event yourself:
+ * `data-action="submit->stimeo--submit-once#start"`. Re-entrancy is guarded — once
+ * busy, a second `start` (auto + manual, or a duplicate event) no-ops.
  *
  * On submit it disables every `submit` target (or, with none, the form's native
  * `button[type=submit]` / `input[type=submit]`), sets `aria-busy` on them and
@@ -64,12 +70,22 @@ export class SubmitOnceController extends Controller<HTMLElement> {
   #busy = false;
   #submitter: SubmitButton | null = null;
 
+  readonly #onSubmitStart = (event: Event): void => {
+    this.start(event);
+  };
+
   readonly #onSubmitEnd = (event: Event): void => {
     const success = (event as CustomEvent<{ success?: boolean }>).detail?.success;
     this.#restore(success);
   };
 
   override connect(): void {
+    // Auto-subscribe to both ends of a Turbo submission so a drop-in form needs
+    // no `data-action`. `turbo:submit-start` bubbles from the <form>, so this
+    // works whether the controller is mounted on the form or an ancestor. The
+    // re-entrancy guard in `start` keeps a manual `submit->#start` (non-Turbo)
+    // from double-firing.
+    this.element.addEventListener("turbo:submit-start", this.#onSubmitStart);
     this.element.addEventListener("turbo:submit-end", this.#onSubmitEnd);
     // Idempotent: drop any busy state carried over in a restored snapshot so a
     // cached, disabled button does not stay stuck.
@@ -77,12 +93,17 @@ export class SubmitOnceController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
+    this.element.removeEventListener("turbo:submit-start", this.#onSubmitStart);
     this.element.removeEventListener("turbo:submit-end", this.#onSubmitEnd);
     this.#clearTimeout();
   }
 
-  /** Enters the busy state for the submission started by `event`. */
-  start(event: SubmitEvent): void {
+  /**
+   * Enters the busy state for the submission started by `event`. Accepts both a
+   * native `SubmitEvent` (manual `submit->#start` on non-Turbo forms) and Turbo's
+   * `turbo:submit-start` CustomEvent (auto-subscribed in `connect`).
+   */
+  start(event: Event): void {
     if (this.#busy) return;
     this.#busy = true;
     const buttons = this.#buttons;
@@ -162,12 +183,27 @@ export class SubmitOnceController extends Controller<HTMLElement> {
   }
 
   /** The triggering button: the event's submitter when ours, else the first button. */
-  #resolveSubmitter(event: SubmitEvent, buttons: SubmitButton[]): SubmitButton | null {
-    const submitter = event.submitter;
+  #resolveSubmitter(event: Event, buttons: SubmitButton[]): SubmitButton | null {
+    const submitter = this.#eventSubmitter(event);
     if (submitter && this.#isSubmitButton(submitter) && buttons.includes(submitter)) {
       return submitter;
     }
     return buttons[0] ?? null;
+  }
+
+  /**
+   * Reads the submitter from a native `SubmitEvent` (`event.submitter`) or from
+   * Turbo's `turbo:submit-start` detail (`detail.formSubmission.submitter`), so
+   * the busy label swaps onto the right button under either path.
+   */
+  #eventSubmitter(event: Event): HTMLElement | null {
+    // Guard the `instanceof` with a typeof check: `SubmitEvent` is absent in some
+    // non-browser/older runtimes, where a bare reference would throw ReferenceError.
+    if (typeof SubmitEvent !== "undefined" && event instanceof SubmitEvent) {
+      return event.submitter;
+    }
+    const detail = (event as CustomEvent<{ formSubmission?: { submitter?: HTMLElement } }>).detail;
+    return detail?.formSubmission?.submitter ?? null;
   }
 
   /** The controlled buttons: `submit` targets, or the form's native submit controls. */

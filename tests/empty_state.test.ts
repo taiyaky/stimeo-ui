@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EmptyStateController } from "../src/controllers/empty_state_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 
 /**
  * Behavioral tests for {@link EmptyStateController}: initial sync, the 0 ↔ 1+
@@ -154,5 +155,13 @@ describe("EmptyStateController", () => {
   it("has no a11y violations (empty state visible)", async () => {
     await mount("");
     await expectNoA11yViolations(root());
+  });
+
+  // Layer ③ — speech-order regression: the empty message sits in a polite live
+  // region the controller marks up when the list is empty.
+  it("announces the empty live region when there are no items (layer ③)", async () => {
+    await mount("");
+    const speech = await captureSpeech({ container: empty(), steps: 1 });
+    expect(speech).toEqual(["paragraph", "No items"]);
   });
 });

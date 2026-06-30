@@ -109,6 +109,23 @@ describe("TooltipController", () => {
     expect(trigger().getAttribute("aria-describedby")).toBe("tip");
   });
 
+  it("does not dismiss on scroll unless closeOnScroll is set", () => {
+    fire(trigger(), "mouseenter");
+    expect(content().hidden).toBe(false);
+    window.dispatchEvent(new Event("scroll"));
+    expect(content().hidden).toBe(false);
+  });
+
+  it("dismisses on scroll when closeOnScroll is set", async () => {
+    application.stop();
+    await start('data-stimeo--tooltip-close-on-scroll-value="true"');
+    fire(trigger(), "mouseenter");
+    expect(content().hidden).toBe(false);
+    window.dispatchEvent(new Event("scroll"));
+    expect(content().hidden).toBe(true);
+    expect(content().getAttribute("data-state")).toBe("closed");
+  });
+
   it("clears timers and the Escape listener on disconnect", async () => {
     application.stop();
     await start('data-stimeo--tooltip-show-delay-value="200"');

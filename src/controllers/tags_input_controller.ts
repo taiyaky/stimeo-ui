@@ -83,6 +83,13 @@ export class TagsInputController extends Controller<HTMLElement> {
 
   /** Commits on `Enter`/delimiter and deletes the last tag on empty `Backspace`. */
   onKeydown(event: KeyboardEvent): void {
+    // Ignore keys fired during IME composition: the `Enter` that confirms a
+    // candidate (and arrows that move within it) must not commit/navigate the
+    // chip list. `keyCode === 229` covers browsers that omit `isComposing` on
+    // the confirming keydown. Aligns with the library's IME composition-guard
+    // policy (the keydown-level equivalent of the input-path guards in
+    // character-counter / auto-submit).
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter" || event.key === this.delimiterValue) {
       event.preventDefault();
       this.#commitInput();

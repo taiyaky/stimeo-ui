@@ -640,3 +640,196 @@ describe("FormValidationController with an unwired control", () => {
     expect(document.activeElement).toBe(token);
   });
 });
+
+/**
+ * Declarative, zero-JS message control and custom rules: per-constraint
+ * message overrides authored on the control, a generic fallback override, and the
+ * built-in `disallow="whitespace"` rule. These let a field exceed native
+ * validation — controlled wording + a rule past the native set — with no consumer
+ * JavaScript, and fix headless browsers that return an empty native message.
+ */
+describe("FormValidationController declarative messages and custom rules", () => {
+  let application: Application;
+
+  const mountForm = async (inner: string) => {
+    document.body.innerHTML = `
+      <form data-controller="stimeo--form-validation"
+            data-stimeo--form-validation-stimeo--form-field-outlet="${OUTLET}">
+        ${inner}
+        <button type="submit">Save</button>
+      </form>`;
+    application = Application.start();
+    application.register("stimeo--form-field", FormFieldController);
+    application.register("stimeo--form-validation", FormValidationController);
+    await tick();
+    await tick();
+  };
+
+  afterEach(() => {
+    application.stop();
+    document.body.innerHTML = "";
+  });
+
+  const form = () => document.querySelector<HTMLFormElement>("form") as HTMLFormElement;
+  const errorText = () =>
+    document.querySelector<HTMLElement>("[data-stimeo--form-field-target='error']")?.textContent;
+  const submit = () => {
+    const event = new Event("submit", { bubbles: true, cancelable: true });
+    form().dispatchEvent(event);
+    return event;
+  };
+
+  it("shows a per-constraint override message instead of the native one", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body" required
+               data-stimeo--form-field-message-value-missing="本文を入力してください"
+               data-stimeo--form-field-target="control" />
+        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+
+    const event = submit(); // empty required field -> valueMissing
+
+    expect(event.defaultPrevented).toBe(true);
+    // The override renders even though happy-dom's native validationMessage is "".
+    expect(errorText()).toBe("本文を入力してください");
+  });
+
+  it("falls back to a generic message override for any failing constraint", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body" required
+               data-stimeo--form-field-message="必須項目です"
+               data-stimeo--form-field-target="control" />
+        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+
+    submit();
+
+    expect(errorText()).toBe("必須項目です");
+  });
+
+  it("prefers a per-constraint override over the generic one", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body" required
+               data-stimeo--form-field-message="generic"
+               data-stimeo--form-field-message-value-missing="specific"
+               data-stimeo--form-field-target="control" />
+        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+
+    submit();
+
+    expect(errorText()).toBe("specific");
+  });
+
+  it("still falls back to the native validationMessage when no override is given", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body" required data-stimeo--form-field-target="control" />
+        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    // setCustomValidity makes the native message engine-independent in happy-dom.
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    body.value = "x";
+    body.setCustomValidity("native text");
+
+    submit();
+
+    expect(errorText()).toBe("native text");
+  });
+
+  it("blocks a whitespace-only value via disallow='whitespace'", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-field-disallow="whitespace"
+               data-stimeo--form-field-message-value-missing="空白だけは不可です"
+               data-stimeo--form-field-target="control" />
+        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    body.value = "　　"; // full-width spaces: passes required/minlength, blank after trim
+
+    const event = submit();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(body.getAttribute("aria-invalid")).toBe("true");
+    expect(errorText()).toBe("空白だけは不可です");
+  });
+
+  it("clears a previously-set whitespace custom error once the value is real", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-field-disallow="whitespace"
+               data-stimeo--form-field-target="control" />
+        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+
+    body.value = "   ";
+    expect(submit().defaultPrevented).toBe(true);
+
+    body.value = "real content";
+    const event = submit();
+    expect(event.defaultPrevented).toBe(false); // custom error cleared -> valid
+    expect(body.checkValidity()).toBe(true);
+  });
+
+  it("prefers the per-constraint override over the generic one for a whitespace error", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-field-disallow="whitespace"
+               data-stimeo--form-field-message="generic"
+               data-stimeo--form-field-message-value-missing="空白だけは不可です"
+               data-stimeo--form-field-target="control" />
+        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    body.value = "　　";
+
+    submit();
+
+    expect(errorText()).toBe("空白だけは不可です"); // per-constraint wins over generic
+  });
+
+  it("does not clobber a consumer's setCustomValidity when its own rule passes", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-field-disallow="whitespace"
+               data-stimeo--form-field-target="control" />
+        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    // A real (non-whitespace) value: our rule passes, but the consumer marks it
+    // invalid out-of-band. We must not clear their custom error.
+    body.value = "taken";
+    body.setCustomValidity("Already taken");
+
+    const event = submit();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(errorText()).toBe("Already taken");
+  });
+
+  it("ignores an unknown disallow value (no custom validity written)", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-field-disallow="bogus"
+               data-stimeo--form-field-target="control" />
+        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    body.value = "   "; // whitespace-only, but the rule is unknown -> not enforced
+
+    const event = submit();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(body.checkValidity()).toBe(true);
+  });
+});

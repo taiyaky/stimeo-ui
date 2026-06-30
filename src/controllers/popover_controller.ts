@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { observeScrollDismiss } from "../utils/scroll_dismiss";
 
 /**
  * Headless, accessible **non-modal popover** behavior.
@@ -34,15 +35,26 @@ import { Controller } from "@hotwired/stimulus";
  * - Because it is modeless, focus is *not* trapped: when `Tab` moves focus out of
  *   the panel it closes (detected via `focusout`) without yanking focus back, so
  *   the natural tab destination is preserved.
+ * - Opt-in **dismiss on scroll** (`closeOnScroll`): while open, scrolling a tracked
+ *   scroll-parent ancestor (or the window) closes the panel — the Radix / floating-ui
+ *   convention. Closes without restoring focus (like the modeless `focusout` path)
+ *   so the close never fights the user's scroll. Off by default.
  */
 export class PopoverController extends Controller<HTMLElement> {
   static override targets = ["trigger", "panel"];
+  static override values = {
+    closeOnScroll: { type: Boolean, default: false },
+  };
   static actions = ["close", "open", "toggle"] as const;
 
   declare readonly triggerTarget: HTMLButtonElement;
   declare readonly panelTarget: HTMLElement;
   declare readonly hasTriggerTarget: boolean;
   declare readonly hasPanelTarget: boolean;
+  declare readonly closeOnScrollValue: boolean;
+
+  /** Cleanup for the dismiss-on-scroll listeners while open, or `null`. */
+  #stopScrollDismiss: (() => void) | null = null;
 
   /** Selector for natively focusable elements used to find the first one. */
   static readonly #FOCUSABLE =
@@ -65,6 +77,8 @@ export class PopoverController extends Controller<HTMLElement> {
     document.removeEventListener("click", this.#onOutsideClick);
     document.removeEventListener("keydown", this.#onKeydown);
     if (this.hasPanelTarget) this.panelTarget.removeEventListener("focusout", this.#onFocusOut);
+    this.#stopScrollDismiss?.();
+    this.#stopScrollDismiss = null;
   }
 
   /** Toggles the popover. Bound via `data-action` (click on the trigger). */
@@ -84,6 +98,10 @@ export class PopoverController extends Controller<HTMLElement> {
     // focusout fires as focus settles; register only once the panel is open so an
     // initial close()/connect() does not immediately re-close it.
     this.panelTarget.addEventListener("focusout", this.#onFocusOut);
+    if (this.closeOnScrollValue && !this.#stopScrollDismiss) {
+      // Close (no focus restore) so dismissing never fights the user's scroll.
+      this.#stopScrollDismiss = observeScrollDismiss(this.element, () => this.close());
+    }
     this.#focusFirst();
   }
 
@@ -91,6 +109,8 @@ export class PopoverController extends Controller<HTMLElement> {
   close(): void {
     if (!this.hasPanelTarget) return;
     this.panelTarget.removeEventListener("focusout", this.#onFocusOut);
+    this.#stopScrollDismiss?.();
+    this.#stopScrollDismiss = null;
     this.panelTarget.hidden = true;
     if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "false");
   }

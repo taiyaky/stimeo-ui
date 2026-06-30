@@ -2,7 +2,7 @@
  * Shared types for the Stimeo Inspector CLI (`stimeo check`).
  *
  * The Inspector statically checks HTML/ERB against a *manifest* describing the
- * official `stimeo--` controllers. The same engine powers both internal CI
+ * official `stimeo--` controllers. The same engine powers both the project's own
  * contract checks (e.g. `stimeo check app/views`) and the
  * user-facing product feature; it is therefore intentionally input-path
  * agnostic.

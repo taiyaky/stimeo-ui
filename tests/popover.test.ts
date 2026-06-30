@@ -132,6 +132,38 @@ describe("PopoverController", () => {
     // If the listener leaked it would have closed the (already detached) panel.
     expect(panel().hidden).toBe(false);
   });
+
+  it("does not dismiss on scroll unless closeOnScroll is set", () => {
+    trigger().click();
+    expect(panel().hidden).toBe(false);
+    window.dispatchEvent(new Event("scroll"));
+    expect(panel().hidden).toBe(false);
+  });
+
+  it("dismisses on scroll when closeOnScroll is set (without restoring focus)", async () => {
+    application.stop();
+    document.body.innerHTML = `
+      <main>
+        <div data-controller="stimeo--popover" data-stimeo--popover-close-on-scroll-value="true">
+          <button id="trigger" data-stimeo--popover-target="trigger"
+                  aria-expanded="false" data-action="click->stimeo--popover#toggle">Edit</button>
+          <div id="pop" data-stimeo--popover-target="panel" role="dialog" aria-label="Edit" hidden>
+            <input type="text" />
+          </div>
+        </div>
+      </main>`;
+    application = Application.start();
+    application.register("stimeo--popover", PopoverController);
+    await Promise.resolve();
+
+    trigger().click();
+    expect(panel().hidden).toBe(false);
+    window.dispatchEvent(new Event("scroll"));
+    expect(panel().hidden).toBe(true);
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    // Closing on scroll must not yank focus back to the trigger (would fight scroll).
+    expect(document.activeElement).not.toBe(trigger());
+  });
 });
 
 describe("PopoverController accessibility", () => {

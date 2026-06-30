@@ -35,7 +35,7 @@ jobs:
       - run: npm install -g npm@11.5.1 # pinned: Trusted Publishing needs npm >= 11.5.1 (Node 22 ships npm 10)
       - run: bun install
       - run: bun run build # tsup → dist/ (DTS resolves: @floating-ui/dom is a devDep)
-      - run: npm publish --access public --tag alpha # OIDC Trusted Publishing → tokenless; provenance automatic
+      - run: npm publish --access public # → latest dist-tag (0.x has no stable yet, so the newest release is latest). OIDC Trusted Publishing → tokenless; provenance automatic
 
   gem:
     runs-on: ubuntu-latest

@@ -5,9 +5,9 @@
   </picture>
 </h1>
 
-<p align="center"><a href="https://stimeo-labs.com"><strong>Live demo (alpha) →</strong></a></p>
+<p align="center"><a href="https://stimeo-labs.com"><strong>Live demo (beta) →</strong></a></p>
 
-[![CI](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/stimeo-ui/alpha)](https://www.npmjs.com/package/stimeo-ui) [![gem](https://img.shields.io/gem/v/stimeo-ui)](https://rubygems.org/gems/stimeo-ui) [![License: MIT](https://img.shields.io/github/license/taiyaky/stimeo-ui)](LICENSE)
+[![CI](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/stimeo-ui)](https://www.npmjs.com/package/stimeo-ui) [![gem](https://img.shields.io/gem/v/stimeo-ui)](https://rubygems.org/gems/stimeo-ui) [![License: MIT](https://img.shields.io/github/license/taiyaky/stimeo-ui)](LICENSE)
 
 **Headless Stimulus UI framework for Ruby on Rails.** Stimeo UI ships *behavior*
 — ARIA state, keyboard interaction, focus management, Turbo resilience — as
@@ -23,7 +23,7 @@ owns the look entirely.
 - Public controller identifiers use the `stimeo--` namespace (e.g.
   `stimeo--dropdown`).
 
-> Status: **alpha** (`0.x`). The `stimeo--*` attribute API may still change before
+> Status: **beta** (`0.x`). The `stimeo--*` attribute API may still change before
 > 1.0 — pin your version.
 
 ## Install
@@ -31,7 +31,7 @@ owns the look entirely.
 ### Rails with importmap (recommended)
 
 ```bash
-bundle add stimeo-ui
+bundle add stimeo-ui --version "0.1.0.pre.beta.1"
 bin/rails generate stimeo:install
 ```
 

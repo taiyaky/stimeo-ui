@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { observeScrollDismiss } from "../utils/scroll_dismiss";
 
 /**
  * Headless, accessible **hover card** behavior.
@@ -39,12 +40,17 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *   closes regardless of where focus sits (card, trigger, or elsewhere).
  * - Open/closed flips the trigger's `aria-expanded`, the card's `hidden`, and a
  *   `data-state` (`open`/`closed`). Focus is never stolen on open.
+ * - Opt-in **dismiss on scroll** (`closeOnScroll`): while open, scrolling a tracked
+ *   scroll-parent ancestor (or the window) closes the card — the Radix / floating-ui
+ *   convention. Covers keyboard/programmatic scroll and scrollbar-drag, which the
+ *   pointer-leave close cannot. Off by default.
  */
 export class HoverCardController extends Controller<HTMLElement> {
   static override targets = ["trigger", "card"];
   static override values = {
     openDelay: { type: Number, default: 300 },
     closeDelay: { type: Number, default: 200 },
+    closeOnScroll: { type: Boolean, default: false },
   };
   static actions = ["close", "onKeydown", "open"] as const;
 
@@ -54,21 +60,26 @@ export class HoverCardController extends Controller<HTMLElement> {
   declare readonly hasCardTarget: boolean;
   declare readonly openDelayValue: number;
   declare readonly closeDelayValue: number;
+  declare readonly closeOnScrollValue: boolean;
 
   /** Pending open/close timers, torn down together on disconnect. */
   readonly #timers = new SafeTimeout();
   #pendingOpen: number | null = null;
   #pendingClose: number | null = null;
+  /** Cleanup for the dismiss-on-scroll listeners while open, or `null`. */
+  #stopScrollDismiss: (() => void) | null = null;
 
   /** Starts closed. */
   override connect(): void {
     this.#conceal();
   }
 
-  /** Clears timers and the document `Escape` listener so nothing outlives the element. */
+  /** Clears timers and the document `Escape` / scroll listeners so nothing outlives the element. */
   override disconnect(): void {
     this.#timers.clearAll();
     document.removeEventListener("keydown", this.#onDocumentKeydown);
+    this.#stopScrollDismiss?.();
+    this.#stopScrollDismiss = null;
   }
 
   /** Opens the card, after `openDelay` ms (or immediately at 0). Cancels a pending close. */
@@ -109,22 +120,30 @@ export class HoverCardController extends Controller<HTMLElement> {
     }
   }
 
-  /** Reveals the card, reflects state, and starts watching for a dismissing `Escape`. */
+  /** Reveals the card, reflects state, and starts watching for a dismissing `Escape`/scroll. */
   #reveal(): void {
     if (!this.hasCardTarget) return;
     this.cardTarget.hidden = false;
     this.cardTarget.setAttribute("data-state", "open");
     if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "true");
     document.addEventListener("keydown", this.#onDocumentKeydown);
+    if (this.closeOnScrollValue && !this.#stopScrollDismiss) {
+      this.#stopScrollDismiss = observeScrollDismiss(this.element, () => this.#dismiss());
+    }
   }
 
-  /** Hides the card, reflects state, and stops watching for `Escape`. */
+  /** Hides the card, reflects state, and stops watching for `Escape`/scroll. */
   #conceal(): void {
+    // Release listeners first, unconditionally: if the card target was removed
+    // from the DOM while open, an early return would leak the document keydown
+    // and scroll-dismiss listeners.
+    document.removeEventListener("keydown", this.#onDocumentKeydown);
+    this.#stopScrollDismiss?.();
+    this.#stopScrollDismiss = null;
     if (!this.hasCardTarget) return;
     this.cardTarget.hidden = true;
     this.cardTarget.setAttribute("data-state", "closed");
     if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "false");
-    document.removeEventListener("keydown", this.#onDocumentKeydown);
   }
 
   /** Cancels pending timers and conceals immediately (shared Escape path). */

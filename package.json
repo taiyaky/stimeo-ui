@@ -1,6 +1,6 @@
 {
   "name": "stimeo-ui",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-beta.1",
   "description": "Headless Stimulus UI framework for Ruby on Rails — behavior-only, accessible components driven by HTML attributes.",
   "type": "module",
   "license": "MIT",
@@ -9,7 +9,7 @@
     "type": "git",
     "url": "git+https://github.com/taiyaky/stimeo-ui.git"
   },
-  "homepage": "https://github.com/taiyaky/stimeo-ui#readme",
+  "homepage": "https://stimeo-labs.com",
   "bugs": {
     "url": "https://github.com/taiyaky/stimeo-ui/issues"
   },
@@ -30,7 +30,8 @@
   },
   "sideEffects": false,
   "files": [
-    "dist"
+    "dist",
+    "CHANGELOG.md"
   ],
   "exports": {
     ".": {
@@ -55,6 +56,8 @@
   "scripts": {
     "build": "tsup && bun scripts/postbuild.ts",
     "dev": "tsup --watch --onSuccess \"bun scripts/postbuild.ts\"",
+    "a11y:matrix": "bun scripts/a11y-matrix.ts",
+    "a11y:matrix:check": "bun scripts/a11y-matrix.ts --check",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -73,7 +76,7 @@
     }
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.0",
+    "@biomejs/biome": "2.5.1",
     "@floating-ui/dom": "1.7.6",
     "@guidepup/virtual-screen-reader": "0.32.1",
     "@hotwired/stimulus": "3.2.2",
@@ -89,6 +92,6 @@
   },
   "overrides": {
     "rollup": "4.62.2",
-    "playwright-core": "1.61.0"
+    "playwright-core": "1.61.1"
   }
 }

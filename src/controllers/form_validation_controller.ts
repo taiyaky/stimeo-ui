@@ -5,6 +5,32 @@ import type { FormFieldController } from "./form_field_controller";
 /** Native form controls that participate in constraint validation. */
 type ValidatableControl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
+/**
+ * Maps each `ValidityState` flag (in priority order) to the kebab-case suffix of
+ * its per-constraint message-override attribute. The first flag that is `true`
+ * wins, so e.g. `valueMissing` is reported before a stale `patternMismatch`.
+ */
+const CONSTRAINT_MESSAGE_KEYS: ReadonlyArray<readonly [keyof ValidityState, string]> = [
+  ["valueMissing", "value-missing"],
+  ["typeMismatch", "type-mismatch"],
+  ["patternMismatch", "pattern-mismatch"],
+  ["tooShort", "too-short"],
+  ["tooLong", "too-long"],
+  ["rangeUnderflow", "range-underflow"],
+  ["rangeOverflow", "range-overflow"],
+  ["stepMismatch", "step-mismatch"],
+  ["badInput", "bad-input"],
+];
+
+/** Attribute prefix for a per-constraint message override, authored on the control. */
+const MESSAGE_ATTR_PREFIX = "data-stimeo--form-field-message-";
+/** Attribute for a generic message override applied to any failing constraint. */
+const MESSAGE_ATTR_GENERIC = "data-stimeo--form-field-message";
+/** Attribute opting a control into a declarative custom rule (`"whitespace"`). */
+const DISALLOW_ATTR = "data-stimeo--form-field-disallow";
+/** Default message when `disallow="whitespace"` fails and no override is given. */
+const DISALLOW_WHITESPACE_DEFAULT = "Please enter a value that is not only whitespace.";
+
 /** A field's validatable controls, grouped so the whole field validates together. */
 interface FieldGroup {
   readonly field: FormFieldController | undefined;
@@ -38,10 +64,22 @@ interface FieldGroup {
  * Behavior only — validation **rules** stay in the markup (native HTML
  * constraints: `required`, `type`, `pattern`, `min`/`max`, …) or in the consumer's
  * own `setCustomValidity()` calls, which `checkValidity()` surfaces transparently.
- * This controller never invents rules or messages and never styles. It sets the
- * form's `novalidate` so it can replace the browser's default error bubbles with
- * the accessible, in-page `role="alert"` regions, and restores the attribute on
- * disconnect.
+ * It sets the form's `novalidate` so it can replace the browser's default error
+ * bubbles with the accessible, in-page `role="alert"` regions, and restores the
+ * attribute on disconnect.
+ *
+ * Two declarative escape hatches let a field **exceed** native validation with no
+ * consumer JS (author them on the control):
+ * - **Per-constraint messages** — `data-stimeo--form-field-message-<constraint>`
+ *   (`value-missing`, `too-short`, `too-long`, `pattern-mismatch`, `type-mismatch`,
+ *   `range-overflow`, `range-underflow`, `step-mismatch`, `bad-input`), or a generic
+ *   `data-stimeo--form-field-message` fallback, override the shown text per failing
+ *   `ValidityState` flag — controlled, localizable wording that also fixes headless
+ *   browsers returning an empty native `validationMessage`. Falls back to native.
+ * - **`data-stimeo--form-field-disallow="whitespace"`** — a built-in custom rule
+ *   rejecting a value that is blank after trimming (which slips past `required` /
+ *   `minlength`), wired through `setCustomValidity` so it blocks submit like any
+ *   native constraint.
  *
  * Behavior provided:
  * - On connect, suppresses native bubbles (`novalidate`, restored on disconnect)
@@ -103,6 +141,13 @@ export class FormValidationController extends Controller<HTMLFormElement> {
 
   /** Controls already interacted with — the gate for blur / input (re)validation. */
   readonly #touched = new WeakSet<ValidatableControl>();
+
+  /**
+   * Controls whose `customError` *we* set via the `disallow` rule. Tracked so we
+   * only ever clear our own custom validity — a consumer's `setCustomValidity` on
+   * the same control survives once our rule passes (don't-clobber-authored-state).
+   */
+  readonly #ownedCustomError = new WeakSet<ValidatableControl>();
 
   readonly #onSubmit = (event: SubmitEvent): void => {
     if (event.target !== this.element) return;
@@ -237,15 +282,73 @@ export class FormValidationController extends Controller<HTMLFormElement> {
    * Routing goes through the outlet, so the ARIA wiring is never duplicated here.
    */
   #applyGroup(group: FieldGroup): ValidatableControl | null {
+    // Apply declarative custom rules (e.g. disallow="whitespace") before reading
+    // validity so they participate in checkValidity() like a native constraint.
+    for (const control of group.controls) this.#syncCustomValidity(control);
     const firstInvalid = group.controls.find((control) => !control.checkValidity()) ?? null;
     if (group.field) {
       if (firstInvalid) {
-        group.field.setError(firstInvalid.validationMessage);
+        group.field.setError(this.#messageFor(firstInvalid));
       } else {
         group.field.clearError();
       }
     }
     return firstInvalid;
+  }
+
+  /**
+   * Resolves the message to show for an invalid control: a per-constraint
+   * override (`data-stimeo--form-field-message-<constraint>`) for the first failing
+   * `ValidityState` flag, then a generic `data-stimeo--form-field-message`
+   * override, then the browser's native `validationMessage`. Authoring an override
+   * gives controlled, localizable, theme-able wording with **no consumer JS** —
+   * and sidesteps headless browsers that return an empty native message.
+   */
+  #messageFor(control: ValidatableControl): string {
+    for (const [flag, key] of CONSTRAINT_MESSAGE_KEYS) {
+      if (control.validity[flag]) {
+        return (
+          control.getAttribute(`${MESSAGE_ATTR_PREFIX}${key}`) ??
+          control.getAttribute(MESSAGE_ATTR_GENERIC) ??
+          control.validationMessage
+        );
+      }
+    }
+    // customError (our `disallow` rule, or a consumer's setCustomValidity): for our
+    // rule the message was already resolved with per-constraint > generic > default
+    // precedence when set, and a consumer error carries its own text — so return the
+    // live validationMessage as-is, falling back to the generic override then "".
+    return control.validationMessage || control.getAttribute(MESSAGE_ATTR_GENERIC) || "";
+  }
+
+  /**
+   * Applies (or clears) a declarative custom constraint via `setCustomValidity`,
+   * for controls that opt in with `data-stimeo--form-field-disallow`. The one
+   * supported rule today is `"whitespace"` — a value that is non-empty but blank
+   * after trimming (which slips past `required` / `minlength`); its message follows
+   * the per-constraint (`value-missing`) → generic → default chain.
+   *
+   * Don't-clobber-authored-state: an unknown/absent rule is never touched, and a
+   * custom error is only cleared when *we* set it (tracked in {@link #ownedCustomError}),
+   * so a consumer's own `setCustomValidity` on the same control survives.
+   */
+  #syncCustomValidity(control: ValidatableControl): void {
+    const violates =
+      control.getAttribute(DISALLOW_ATTR) === "whitespace" &&
+      control.value.length > 0 &&
+      control.value.trim() === "";
+    if (violates) {
+      control.setCustomValidity(
+        control.getAttribute(`${MESSAGE_ATTR_PREFIX}value-missing`) ??
+          control.getAttribute(MESSAGE_ATTR_GENERIC) ??
+          DISALLOW_WHITESPACE_DEFAULT,
+      );
+      this.#ownedCustomError.add(control);
+    } else if (this.#ownedCustomError.has(control)) {
+      // Only clear the custom error we previously set; leave a consumer's intact.
+      this.#ownedCustomError.delete(control);
+      control.setCustomValidity("");
+    }
   }
 
   /**

@@ -108,6 +108,26 @@ describe("RatingController", () => {
     expect(field().value).toBe("2");
   });
 
+  it("selects the focused symbol on Space / Enter (from unrated)", async () => {
+    // Clear to 0 first so the first symbol becomes the focused roving tab stop and the
+    // selection is observable. keydown is dispatched only on that focused symbol — as it
+    // would be in real use, since non-tab-stop symbols are tabindex=-1 and never receive it.
+    await start(); // value 2
+    symbols()[1]?.click(); // clicking the selected symbol clears to 0
+    expect(field().value).toBe("0");
+    expect(tabindexes()).toEqual([0, -1, -1]);
+
+    key(0, " "); // Space selects the focused (first) symbol
+    expect(field().value).toBe("1");
+    expect(checked()).toEqual(["true", "false", "false"]);
+
+    symbols()[0]?.click(); // re-clear to 0 (symbol[0] is the selected one)
+    expect(field().value).toBe("0");
+    key(0, "Enter"); // Enter selects the focused symbol
+    expect(field().value).toBe("1");
+    expect(checked()).toEqual(["true", "false", "false"]);
+  });
+
   it("can reach 0 with ArrowLeft and Home when clearable", async () => {
     await start();
     key(1, "ArrowLeft"); // 2 -> 1

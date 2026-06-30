@@ -22,6 +22,8 @@ import { RovingTabindex } from "../utils/roving_tabindex";
  *     </ul>
  *     <span role="status" aria-live="polite" class="visually-hidden"
  *           data-stimeo--multi-select-target="status"></span>
+ *     <!-- Optional: submit the selection as name="fruits[]" hidden inputs. -->
+ *     <div data-stimeo--multi-select-target="fields"></div>
  *     <template data-stimeo--multi-select-target="tagTemplate">…</template>
  *   </div>
  *
@@ -42,11 +44,28 @@ import { RovingTabindex } from "../utils/roving_tabindex";
  *   `Delete`/`Backspace` remove the focused chip, and `Backspace` on an empty
  *   input removes the last; removal re-homes focus to a neighbor or the input.
  * - `max` caps the selection (`0` = unlimited).
+ * - With a `fields` target the selected values are mirrored into named hidden
+ *   inputs (default name `options[]`), so the selection submits with a normal
+ *   form and no consumer JS — parity with {@link TagsInputController}. An optional
+ *   `form` value sets the hidden inputs' `form` attribute, associating them with a
+ *   `<form>` by id even when the picker lives outside it. Purely additive: with no
+ *   `fields` target the behavior is unchanged.
  */
 export class MultiSelectController extends Controller<HTMLElement> {
-  static override targets = ["input", "list", "option", "tags", "tag", "tagTemplate", "status"];
+  static override targets = [
+    "input",
+    "list",
+    "option",
+    "tags",
+    "tag",
+    "tagTemplate",
+    "status",
+    "fields",
+  ];
   static override values = {
     max: { type: Number, default: 0 },
+    name: { type: String, default: "options[]" },
+    form: { type: String, default: "" },
   };
   static actions = ["close", "filter", "onKeydown", "open", "toggleOption"] as const;
   static events = ["change", "filter"] as const;
@@ -58,12 +77,17 @@ export class MultiSelectController extends Controller<HTMLElement> {
   declare readonly tagTargets: HTMLElement[];
   declare readonly tagTemplateTarget: HTMLTemplateElement;
   declare readonly statusTarget: HTMLElement;
+  declare readonly fieldsTarget: HTMLElement;
   declare readonly hasListTarget: boolean;
   declare readonly hasTagsTarget: boolean;
   declare readonly hasTagTemplateTarget: boolean;
   declare readonly hasStatusTarget: boolean;
+  declare readonly hasFieldsTarget: boolean;
 
   declare maxValue: number;
+  declare nameValue: string;
+  declare formValue: string;
+  declare readonly hasFormValue: boolean;
 
   /** The active option (tracked via `aria-activedescendant`), or null. */
   #activeOption: HTMLElement | null = null;
@@ -82,6 +106,9 @@ export class MultiSelectController extends Controller<HTMLElement> {
       for (const option of this.#selectedOptions) this.#appendTag(option);
       if (this.#removeButtons.length > 0) this.#roving.setActive(0);
     }
+    // Seed the hidden fields from any pre-selected options so the form submits
+    // the initial selection without an interaction.
+    this.#syncFields();
     document.addEventListener("click", this.#onOutsideClick);
   }
 
@@ -126,6 +153,13 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Routes input keyboard interaction per the multi-select combobox model. */
   onKeydown(event: KeyboardEvent): void {
+    // Ignore keys fired during IME composition: the `Enter` that confirms a
+    // candidate (and arrows that move within it) must not select an option or
+    // navigate the chip list. `keyCode === 229` covers browsers that omit
+    // `isComposing` on the confirming keydown. Aligns with the library's IME
+    // composition-guard policy (the keydown-level equivalent of the input-path
+    // guards in character-counter / auto-submit).
+    if (event.isComposing || event.keyCode === 229) return;
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
@@ -226,6 +260,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     }
     this.#announce(this.#optionLabel(option));
     this.#refreshRoving();
+    this.#syncFields();
     this.dispatch("change", { detail: { values: this.#values } });
   }
 
@@ -266,6 +301,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // which can differ from its data-value (e.g. "apple").
     this.#announce(option ? this.#optionLabel(option) : value);
     this.#refreshRoving();
+    this.#syncFields();
     this.dispatch("change", { detail: { values: this.#values } });
 
     const remaining = this.#removeButtons;
@@ -319,6 +355,27 @@ export class MultiSelectController extends Controller<HTMLElement> {
     } else {
       this.inputTarget.removeAttribute("aria-activedescendant");
     }
+  }
+
+  /**
+   * Mirrors the selected values into named hidden inputs under the `fields`
+   * target so the selection submits with a normal form (parity with tags-input).
+   * No-ops without a `fields` target, keeping the control back-compat. When the
+   * `form` value is set, each input gets a matching `form` attribute so the picker
+   * can submit with a `<form>` it lives outside of.
+   */
+  #syncFields(): void {
+    if (!this.hasFieldsTarget) return;
+    this.fieldsTarget.replaceChildren(
+      ...this.#values.map((value) => {
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = this.nameValue;
+        input.value = value;
+        if (this.hasFormValue && this.formValue !== "") input.setAttribute("form", this.formValue);
+        return input;
+      }),
+    );
   }
 
   /** Keeps exactly one chip remove button tabbable after the set changes. */

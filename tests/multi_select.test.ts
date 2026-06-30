@@ -43,6 +43,36 @@ const markup = (attrs = "") => `
     </template>
   </div>`;
 
+/** Markup variant with a `fields` target, for the hidden-input mirroring tests. */
+const markupWithFields = (attrs = "", preselected = "") => `
+  <div data-controller="stimeo--multi-select" ${attrs}>
+    <ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>
+    <input type="text" role="combobox" aria-expanded="false" aria-autocomplete="list"
+           aria-controls="ms-list2" aria-label="Fruits"
+           data-stimeo--multi-select-target="input"
+           data-action="input->stimeo--multi-select#filter
+                        keydown->stimeo--multi-select#onKeydown
+                        focus->stimeo--multi-select#open" />
+    <ul id="ms-list2" role="listbox" aria-multiselectable="true" aria-label="Options" hidden
+        data-stimeo--multi-select-target="list">
+      <li id="ms2-apple" role="option" aria-selected="${preselected.includes("apple")}"
+          data-value="apple" data-stimeo--multi-select-target="option"
+          data-action="click->stimeo--multi-select#toggleOption">Apple</li>
+      <li id="ms2-banana" role="option" aria-selected="${preselected.includes("banana")}"
+          data-value="banana" data-stimeo--multi-select-target="option"
+          data-action="click->stimeo--multi-select#toggleOption">Banana</li>
+    </ul>
+    <span role="status" aria-live="polite" class="visually-hidden"
+          data-stimeo--multi-select-target="status"></span>
+    <div data-stimeo--multi-select-target="fields"></div>
+    <template data-stimeo--multi-select-target="tagTemplate">
+      <li data-stimeo--multi-select-target="tag">
+        <span data-multi-select-slot="label"></span>
+        <button type="button" tabindex="-1">×</button>
+      </li>
+    </template>
+  </div>`;
+
 describe("MultiSelectController", () => {
   let application: Application;
 
@@ -52,6 +82,20 @@ describe("MultiSelectController", () => {
     application.register("stimeo--multi-select", MultiSelectController);
     await tick();
   };
+
+  const mountFields = async (attrs = "", preselected = "") => {
+    document.body.innerHTML = markupWithFields(attrs, preselected);
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+  };
+
+  const fields = () =>
+    Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        "[data-stimeo--multi-select-target='fields'] input",
+      ),
+    );
 
   afterEach(() => {
     application.stop();
@@ -147,6 +191,26 @@ describe("MultiSelectController", () => {
     expect(changes).toEqual([["apple"], []]);
   });
 
+  it("ignores the Enter that confirms an IME composition", async () => {
+    await mount();
+    key("ArrowDown"); // open, active apple
+    // The Enter confirming an IME candidate carries isComposing=true: it must
+    // not toggle the active option.
+    input().dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }),
+    );
+    expect(selected()).toEqual(["false", "false", "false"]);
+    expect(tags()).toHaveLength(0);
+    // keyCode 229 (legacy IME signal) is treated the same way.
+    input().dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true }),
+    );
+    expect(selected()).toEqual(["false", "false", "false"]);
+    // A real Enter still selects.
+    key("Enter");
+    expect(selected()).toEqual(["true", "false", "false"]);
+  });
+
   it("selects options by click", async () => {
     await mount();
     input().dispatchEvent(new FocusEvent("focus"));
@@ -154,6 +218,52 @@ describe("MultiSelectController", () => {
     options()[2]?.click(); // Cherry
     expect(selected()).toEqual(["false", "true", "true"]);
     expect(tags().map((t) => t.dataset.value)).toEqual(["banana", "cherry"]);
+  });
+
+  it("mirrors the selection into named hidden fields", async () => {
+    await mountFields('data-stimeo--multi-select-name-value="fruits[]"');
+    expect(fields()).toHaveLength(0); // nothing selected yet
+    options()[0]?.click(); // Apple
+    options()[1]?.click(); // Banana
+    expect(fields().map((f) => f.value)).toEqual(["apple", "banana"]);
+    expect(fields().every((f) => f.name === "fruits[]")).toBe(true);
+    expect(fields().every((f) => f.type === "hidden")).toBe(true);
+  });
+
+  it("defaults the hidden-field name to options[]", async () => {
+    await mountFields();
+    options()[0]?.click();
+    expect(fields().map((f) => f.name)).toEqual(["options[]"]);
+  });
+
+  it("removes a hidden field when its option is deselected", async () => {
+    await mountFields();
+    options()[0]?.click(); // select Apple
+    options()[1]?.click(); // select Banana
+    options()[0]?.click(); // deselect Apple
+    expect(fields().map((f) => f.value)).toEqual(["banana"]);
+  });
+
+  it("removes a hidden field via the chip remove button (#removeTagAt path)", async () => {
+    await mountFields();
+    options()[0]?.click(); // select Apple
+    options()[1]?.click(); // select Banana
+    expect(fields().map((f) => f.value)).toEqual(["apple", "banana"]);
+    // Remove via the chip's remove button — a different code path than option click.
+    buttons()[0]?.click(); // remove the Apple chip
+    expect(fields().map((f) => f.value)).toEqual(["banana"]);
+    expect(selected()).toEqual(["false", "true"]);
+  });
+
+  it("seeds hidden fields from pre-selected options on connect", async () => {
+    await mountFields("", "apple banana");
+    expect(fields().map((f) => f.value)).toEqual(["apple", "banana"]);
+  });
+
+  it("sets the form attribute on hidden fields when the form value is given", async () => {
+    await mountFields('data-stimeo--multi-select-form-value="composer"');
+    options()[0]?.click();
+    expect(fields()[0]?.getAttribute("form")).toBe("composer");
   });
 
   it("enforces the max selection cap", async () => {

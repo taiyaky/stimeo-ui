@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { observeScrollDismiss } from "../utils/scroll_dismiss";
 
 /**
  * Headless, accessible **tooltip** behavior.
@@ -36,12 +37,17 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *   dismisses even when a hover (not focus) triggered it and focus is elsewhere.
  * - Visibility flips `hidden` and `data-state` (`open`/`closed`); the
  *   `aria-describedby` reference is always preserved.
+ * - Opt-in **dismiss on scroll** (`closeOnScroll`): while shown, scrolling a tracked
+ *   scroll-parent ancestor (or the window) hides the tooltip — the Radix / floating-ui
+ *   convention, useful for focus-triggered tooltips that a pointer-leave cannot
+ *   dismiss. Off by default.
  */
 export class TooltipController extends Controller<HTMLElement> {
   static override targets = ["trigger", "content"];
   static override values = {
     showDelay: { type: Number, default: 0 },
     hideDelay: { type: Number, default: 0 },
+    closeOnScroll: { type: Boolean, default: false },
   };
   static actions = ["hide", "onKeydown", "show"] as const;
 
@@ -49,22 +55,27 @@ export class TooltipController extends Controller<HTMLElement> {
   declare readonly hasContentTarget: boolean;
   declare readonly showDelayValue: number;
   declare readonly hideDelayValue: number;
+  declare readonly closeOnScrollValue: boolean;
 
   /** Pending show/hide timers, torn down together on disconnect. */
   readonly #timers = new SafeTimeout();
   /** The id of the currently pending show or hide timer, if any. */
   #pendingShow: number | null = null;
   #pendingHide: number | null = null;
+  /** Cleanup for the dismiss-on-scroll listeners while shown, or `null`. */
+  #stopScrollDismiss: (() => void) | null = null;
 
   /** Starts hidden. */
   override connect(): void {
     this.#conceal();
   }
 
-  /** Clears timers and the document `Escape` listener so nothing outlives the element. */
+  /** Clears timers and the document `Escape` / scroll listeners so nothing outlives the element. */
   override disconnect(): void {
     this.#timers.clearAll();
     document.removeEventListener("keydown", this.#onDocumentKeydown);
+    this.#stopScrollDismiss?.();
+    this.#stopScrollDismiss = null;
   }
 
   /** Shows the tooltip, after `showDelay` ms (or immediately at 0). Cancels a pending hide. */
@@ -110,20 +121,32 @@ export class TooltipController extends Controller<HTMLElement> {
     }
   }
 
-  /** Reveals the content and starts watching for a dismissing `Escape`. */
+  /** Reveals the content and starts watching for a dismissing `Escape`/scroll. */
   #reveal(): void {
     if (!this.hasContentTarget) return;
     this.contentTarget.hidden = false;
     this.contentTarget.setAttribute("data-state", "open");
     document.addEventListener("keydown", this.#onDocumentKeydown);
+    if (this.closeOnScrollValue && !this.#stopScrollDismiss) {
+      this.#stopScrollDismiss = observeScrollDismiss(this.element, () => {
+        this.#cancelShow();
+        this.#cancelHide();
+        this.#conceal();
+      });
+    }
   }
 
-  /** Hides the content and stops watching for `Escape`. */
+  /** Hides the content and stops watching for `Escape`/scroll. */
   #conceal(): void {
+    // Release listeners first, unconditionally: if the content target was removed
+    // from the DOM while shown, an early return would leak the document keydown
+    // and scroll-dismiss listeners.
+    document.removeEventListener("keydown", this.#onDocumentKeydown);
+    this.#stopScrollDismiss?.();
+    this.#stopScrollDismiss = null;
     if (!this.hasContentTarget) return;
     this.contentTarget.hidden = true;
     this.contentTarget.setAttribute("data-state", "closed");
-    document.removeEventListener("keydown", this.#onDocumentKeydown);
   }
 
   /** Document-level `Escape` watcher (active only while shown). */

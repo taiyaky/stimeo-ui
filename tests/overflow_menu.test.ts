@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverflowMenuController } from "../src/controllers/overflow_menu_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 
 /**
  * Behavioral tests for {@link OverflowMenuController}. happy-dom has no layout, so item
@@ -289,5 +290,22 @@ describe("OverflowMenuController", () => {
     application.register("stimeo--overflow-menu", OverflowMenuController);
     await new Promise((resolve) => setTimeout(resolve, 0)); // 0 width → all items in menu
     await expectNoA11yViolations(root());
+  });
+
+  // Layer ③ — speech-order regression: items banked into the overflow menu are
+  // announced as the menu's contents.
+  it("announces the banked items inside the overflow menu (layer ③)", async () => {
+    setup(MARKUP());
+    setGeom(150, { a: 100, b: 100, c: 100 }); // budget 100 → only A stays in the bar
+    await start();
+    expect(ids(menu())).toEqual(["b", "c"]);
+    // The virtual SR awaits real microtasks, so capture on the real clock.
+    vi.useRealTimers();
+    const speech = await captureSpeech({ container: menu(), steps: 2 });
+    expect(speech).toEqual([
+      "menu, orientated vertically",
+      "menuitem, B, position 1, set size 2",
+      "menuitem, C, position 2, set size 2",
+    ]);
   });
 });

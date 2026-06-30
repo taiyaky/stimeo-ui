@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SidebarController } from "../src/controllers/sidebar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { captureSpeech } from "./helpers/speech";
 
 /**
  * Behavioral tests for {@link SidebarController}: the inline rail (toggle +
@@ -269,5 +270,17 @@ describe("SidebarController", () => {
     await start();
     trigger().click();
     await expectNoA11yViolations(document.body);
+  });
+
+  // Layer ③ — speech-order regression: the trigger announces its expanded state,
+  // and toggling it flips the announcement to collapsed.
+  it("announces the trigger's expanded/collapsed state (layer ③)", async () => {
+    await start();
+    const expanded = await captureSpeech({ container: trigger(), steps: 0 });
+    expect(expanded).toEqual(["button, Menu, expanded"]);
+    trigger().click();
+    await tick();
+    const collapsed = await captureSpeech({ container: trigger(), steps: 0 });
+    expect(collapsed).toEqual(["button, Menu, not expanded"]);
   });
 });

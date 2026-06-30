@@ -12,15 +12,18 @@ Gem::Specification.new do |spec|
     "interaction, focus management and Turbo resilience as data-attribute-driven " \
     "Stimulus controllers, with no CSS. Ships the prebuilt stimeo-ui JS and a " \
     "`stimeo:install` generator that vendors it into an importmap-rails app."
-  spec.homepage = "https://github.com/taiyaky/stimeo-ui"
+  spec.homepage = "https://stimeo-labs.com"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.1"
 
-  # `homepage` already populates the Homepage link; only the distinct *_uri
-  # metadata keys are set here to avoid duplicate-URI warnings on `gem build`.
-  spec.metadata["source_code_uri"] = spec.homepage
-  spec.metadata["bug_tracker_uri"] = "#{spec.homepage}/issues"
-  spec.metadata["changelog_uri"] = "#{spec.homepage}/releases"
+  # `homepage` points at the demo/docs site (funnels RubyGems visitors there).
+  # The code/issue/changelog/docs links use distinct URIs so every metadata key
+  # stays unique — `gem build` warns on duplicate URIs.
+  repo = "https://github.com/taiyaky/stimeo-ui"
+  spec.metadata["source_code_uri"] = repo
+  spec.metadata["bug_tracker_uri"] = "#{repo}/issues"
+  spec.metadata["changelog_uri"] = "#{repo}/releases"
+  spec.metadata["documentation_uri"] = "#{spec.homepage}/components"
   spec.metadata["rubygems_mfa_required"] = "true"
 
   # The gem distributes the prebuilt browser JS only — no .d.ts/.map (those stay
@@ -35,7 +38,7 @@ Gem::Specification.new do |spec|
   end
 
   spec.files = Dir["lib/**/*"].select { |f| File.file?(f) } +
-               dist_files + ["LICENSE", "README.md"]
+               dist_files + ["LICENSE", "README.md", "CHANGELOG.md"]
   spec.require_paths = ["lib"]
 
   # Rails 7–8 (the generator API used here is stable across them); widen the

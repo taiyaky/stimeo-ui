@@ -43,6 +43,29 @@ describe("SubmitOnceController", () => {
     form().dispatchEvent(new SubmitEvent("submit", { submitter, bubbles: true, cancelable: true }));
   };
 
+  /** Mounts a form WITHOUT any `data-action`, to exercise the auto-subscription. */
+  const mountBare = async (inner: string) => {
+    document.body.innerHTML = `
+      <form data-controller="stimeo--submit-once" action="#"
+            data-stimeo--submit-once-busy-label-value="Submitting…">
+        ${inner}
+      </form>`;
+    application = Application.start();
+    application.register("stimeo--submit-once", SubmitOnceController);
+    form().addEventListener("submit", (event) => event.preventDefault());
+    await vi.advanceTimersByTimeAsync(0);
+  };
+
+  /** Dispatches Turbo's `turbo:submit-start`, optionally carrying a submitter. */
+  const turboStart = (submitter?: HTMLButtonElement) => {
+    form().dispatchEvent(
+      new CustomEvent("turbo:submit-start", {
+        bubbles: true,
+        detail: submitter ? { formSubmission: { submitter } } : {},
+      }),
+    );
+  };
+
   it("disables the button, marks busy, swaps the label, and fires start", async () => {
     await mount(
       'data-stimeo--submit-once-busy-label-value="Submitting…"',
@@ -132,6 +155,74 @@ describe("SubmitOnceController", () => {
     form().dispatchEvent(new CustomEvent("turbo:submit-end", { detail: { success: false } }));
 
     expect(document.activeElement).toBe(button("send"));
+  });
+
+  it("auto-enters busy on turbo:submit-start with no data-action", async () => {
+    await mountBare(
+      '<button type="submit" data-label="send" data-stimeo--submit-once-target="submit">Send</button>',
+    );
+    let started = false;
+    form().addEventListener("stimeo--submit-once:start", () => {
+      started = true;
+    });
+
+    turboStart(button("send"));
+
+    expect(button("send").disabled).toBe(true);
+    expect(button("send").textContent).toBe("Submitting…");
+    expect(form().getAttribute("data-submitting")).toBe("true");
+    expect(started).toBe(true);
+  });
+
+  it("swaps the busy label onto the submitter named in the turbo detail", async () => {
+    await mountBare(
+      `<button type="submit" data-label="send" data-stimeo--submit-once-target="submit">Send</button>
+       <button type="submit" data-label="draft" data-stimeo--submit-once-target="submit"
+               data-submit-once-busy-label="Saving draft…">Draft</button>`,
+    );
+
+    turboStart(button("draft"));
+
+    expect(button("draft").textContent).toBe("Saving draft…"); // the named submitter
+    expect(button("send").textContent).toBe("Send"); // not the trigger
+    expect(button("send").disabled).toBe(true); // but still disabled
+  });
+
+  it("does not double-fire when both a manual submit and turbo:submit-start arrive", async () => {
+    // A consumer that kept the old manual binding: native submit then turbo start.
+    await mount(
+      "",
+      '<button type="submit" data-label="send" data-stimeo--submit-once-target="submit">Send</button>',
+    );
+    let starts = 0;
+    form().addEventListener("stimeo--submit-once:start", () => {
+      starts += 1;
+    });
+
+    submit(button("send")); // manual data-action -> start
+    turboStart(button("send")); // auto subscription -> start (must no-op)
+
+    expect(starts).toBe(1);
+  });
+
+  it("stops auto-firing after disconnect", async () => {
+    await mountBare(
+      '<button type="submit" data-label="send" data-stimeo--submit-once-target="submit">Send</button>',
+    );
+    const root = form();
+    const send = button("send");
+    root.remove();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(() =>
+      root.dispatchEvent(
+        new CustomEvent("turbo:submit-start", {
+          bubbles: true,
+          detail: { formSubmission: { submitter: send } },
+        }),
+      ),
+    ).not.toThrow();
+    expect(send.disabled).toBe(false);
   });
 
   it("ignores a second submit while already busy", async () => {

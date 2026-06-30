@@ -84,6 +84,30 @@ describe("TagsInputController", () => {
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["Vue"]);
   });
 
+  it("does not commit on the Enter that confirms an IME composition", async () => {
+    await mount();
+    input().value = "ぎじゅつ";
+    // The Enter that confirms an IME candidate carries isComposing=true; it must
+    // only confirm the IME, never commit the tag.
+    input().dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }),
+    );
+    expect(tags()).toHaveLength(0);
+    expect(input().value).toBe("ぎじゅつ");
+    // A subsequent real Enter (composition finished) commits it.
+    type("ぎじゅつ", "Enter");
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["ぎじゅつ"]);
+  });
+
+  it("treats keyCode 229 (legacy IME signal) as composition", async () => {
+    await mount();
+    input().value = "やまだ";
+    input().dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true }),
+    );
+    expect(tags()).toHaveLength(0);
+  });
+
   it("mirrors tags into hidden fields with the configured name", async () => {
     await mount('data-stimeo--tags-input-name-value="frameworks[]"');
     type("React", "Enter");

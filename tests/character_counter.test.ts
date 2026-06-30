@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CharacterCounterController } from "../src/controllers/character_counter_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 
 /**
  * Behavioral tests for {@link CharacterCounterController}: count formatting per
@@ -186,6 +187,18 @@ describe("CharacterCounterController", () => {
     await vi.advanceTimersByTimeAsync(0); // let Stimulus process the removal
     expect(() => vi.advanceTimersByTime(ANNOUNCE_MS)).not.toThrow();
     expect(out.textContent).toBe("10"); // never written
+  });
+
+  // Layer ③ — speech-order regression: the remaining count is announced in the
+  // polite live region after the debounce.
+  it("announces the remaining count in its live region (layer ③)", async () => {
+    await start('data-stimeo--character-counter-max-value="10"');
+    type("hello");
+    await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
+    // The virtual SR awaits real microtasks, so capture on the real clock.
+    vi.useRealTimers();
+    const speech = await captureSpeech({ container: output(), steps: 0 });
+    expect(speech).toEqual(["5"]);
   });
 
   it("has no a11y violations", async () => {

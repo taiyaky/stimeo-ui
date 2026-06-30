@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ThemeController } from "../src/controllers/theme_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 
 /**
  * Behavioral tests for {@link ThemeController}: applying the resolved theme to the
@@ -271,5 +272,19 @@ describe("ThemeController", () => {
     await expectNoA11yViolations(document.body);
     // touch options() so the helper is exercised and lint stays clean
     expect(options().length).toBe(3);
+  });
+
+  // Layer ③ — speech-order regression: the radiogroup announces its label and the
+  // three radios, with the resolved mode (light) checked.
+  it("announces the radiogroup with the checked option (layer ③)", async () => {
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
+    const speech = await captureSpeech({ container: query("[role='radiogroup']"), steps: 4 });
+    expect(speech).toEqual([
+      "radiogroup, Theme",
+      "radio, Light, checked, position 1, set size 3",
+      "radio, Dark, not checked, position 2, set size 3",
+      "radio, System, not checked, position 3, set size 3",
+      "end of radiogroup, Theme",
+    ]);
   });
 });

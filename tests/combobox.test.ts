@@ -96,6 +96,33 @@ describe("ComboboxController", () => {
     expect(input().getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("ignores Enter fired during an IME composition", () => {
+    type("ap");
+    press("ArrowDown"); // active apple
+    // The Enter confirming an IME candidate carries isComposing=true: it must
+    // not commit the option or close the popup.
+    input().dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }),
+    );
+    expect(input().value).toBe("ap");
+    expect(list().hidden).toBe(false);
+    // A real Enter then commits.
+    press("Enter");
+    expect(input().value).toBe("apple");
+    expect(list().hidden).toBe(true);
+  });
+
+  it("ignores Enter with keyCode 229 (legacy IME signal)", () => {
+    type("ap");
+    press("ArrowDown"); // active apple
+    // Browsers that omit isComposing on the confirming keydown report keyCode 229.
+    input().dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true }),
+    );
+    expect(input().value).toBe("ap");
+    expect(list().hidden).toBe(false);
+  });
+
   it("selects an option on click", () => {
     type("b");
     option("opt-banana").click();

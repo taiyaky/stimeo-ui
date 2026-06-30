@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DirectUploadController } from "../src/controllers/direct_upload_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 
 /**
  * Behavioral tests for {@link DirectUploadController}: row creation from the
@@ -93,6 +94,18 @@ describe("DirectUploadController", () => {
 
     expect(firstRow().getAttribute("data-upload-state")).toBe("done");
     expect(status().textContent).toBe("a.png uploaded");
+  });
+
+  // Layer ③ — speech-order regression: completion is announced in the polite
+  // status live region.
+  it("announces upload completion in its live region (layer ③)", async () => {
+    await mount();
+    fire("direct-upload:initialize", { id: 1, file: { name: "a.png" } });
+    fire("direct-upload:end", { id: 1 });
+    // The virtual SR awaits real microtasks, so capture on the real clock.
+    vi.useRealTimers();
+    const speech = await captureSpeech({ container: status(), steps: 0 });
+    expect(speech).toEqual(["a.png uploaded"]);
   });
 
   it("records completion even when end arrives with no prior initialize/progress", async () => {

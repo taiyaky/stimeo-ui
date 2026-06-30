@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PasswordStrengthController } from "../src/controllers/password_strength_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 
 /**
  * Behavioral tests for {@link PasswordStrengthController}: the strength heuristic
@@ -196,6 +197,18 @@ describe("PasswordStrengthController", () => {
     await vi.advanceTimersByTimeAsync(0); // let Stimulus process the removal
     expect(() => vi.advanceTimersByTime(ANNOUNCE_MS)).not.toThrow();
     expect(out.textContent).toBe(""); // never written
+  });
+
+  // Layer ③ — speech-order regression: the strength label is announced in the
+  // polite live region after the debounce.
+  it("announces the strength label in its live region (layer ③)", async () => {
+    await start();
+    type("Sup3rStr0ng!");
+    await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
+    // The virtual SR awaits real microtasks, so capture on the real clock.
+    vi.useRealTimers();
+    const speech = await captureSpeech({ container: label(), steps: 0 });
+    expect(speech).toEqual(["good"]);
   });
 
   it("has no machine-detectable a11y violations", async () => {

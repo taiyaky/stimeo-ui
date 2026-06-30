@@ -115,6 +115,48 @@ describe("HoverCardController", () => {
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("does not dismiss on scroll unless closeOnScroll is set", () => {
+    fire(trigger(), "mouseenter");
+    vi.advanceTimersByTime(300);
+    expect(card().hidden).toBe(false);
+    window.dispatchEvent(new Event("scroll"));
+    expect(card().hidden).toBe(false);
+  });
+
+  it("dismisses on window scroll when closeOnScroll is set", async () => {
+    application.stop();
+    await start('data-stimeo--hover-card-close-on-scroll-value="true"');
+    fire(trigger(), "mouseenter");
+    vi.advanceTimersByTime(300);
+    expect(card().hidden).toBe(false);
+    window.dispatchEvent(new Event("scroll"));
+    expect(card().hidden).toBe(true);
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("dismisses on a scrollable ancestor's scroll when closeOnScroll is set", async () => {
+    application.stop();
+    document.body.innerHTML = `
+      <div id="timeline" style="overflow:auto; height:120px">
+        <span data-controller="stimeo--hover-card"
+              data-stimeo--hover-card-close-on-scroll-value="true">
+          <a href="/u" data-stimeo--hover-card-target="trigger" aria-expanded="false"
+             data-action="mouseenter->stimeo--hover-card#open">@x</a>
+          <div data-stimeo--hover-card-target="card" hidden>card</div>
+        </span>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--hover-card", HoverCardController);
+    await vi.advanceTimersByTimeAsync(0);
+    const pane = query("#timeline");
+    const inner = query<HTMLElement>("[data-stimeo--hover-card-target='card']");
+    fire(trigger(), "mouseenter");
+    vi.advanceTimersByTime(300);
+    expect(inner.hidden).toBe(false);
+    pane.dispatchEvent(new Event("scroll"));
+    expect(inner.hidden).toBe(true);
+  });
+
   it("clears timers and the Escape listener on disconnect", () => {
     fire(trigger(), "mouseenter");
     const instance = application.getControllerForElementAndIdentifier(
