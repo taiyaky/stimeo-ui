@@ -35,7 +35,7 @@ jobs:
       - run: npm install -g npm@11.5.1 # pinned: Trusted Publishing needs npm >= 11.5.1 (Node 22 ships npm 10)
       - run: bun install
       - run: bun run build # tsup → dist/ (DTS resolves: @floating-ui/dom is a devDep)
-      - run: npm publish --access public # → latest dist-tag (0.x has no stable yet, so the newest release is latest). OIDC Trusted Publishing → tokenless; provenance automatic
+      - run: npm publish --access public --tag beta # prerelease ⇒ npm requires an explicit --tag (it refuses a tagless prerelease publish; `latest` is reserved for non-prereleases). OIDC Trusted Publishing → tokenless; provenance automatic
 
   gem:
     runs-on: ubuntu-latest
@@ -51,7 +51,15 @@ jobs:
       - run: bun run build # gem packages the built dist/ (see gemspec `files`)
       - name: Configure RubyGems trusted publishing (OIDC)
         uses: rubygems/configure-rubygems-credentials@v2.1.0
-      - name: Build & push gem
+      - name: Build & push gem (skip if this exact version is already on RubyGems)
         run: |
           gem build stimeo-ui.gemspec
-          gem push stimeo-ui-*.gem
+          ver="$(ruby -Ilib -e 'require "stimeo/ui/version"; print Stimeo::UI::VERSION')"
+          # Exact-match the published list ("gem (a, b)") so 0.1.0.pre.beta.1 is
+          # not matched by a prefix collision like 0.1.0.pre.beta.10.
+          published="$(gem list -r -e -a --prerelease stimeo-ui | sed -n 's/.*(\(.*\)).*/\1/p')"
+          if printf '%s' "$published" | tr ',' '\n' | tr -d ' ' | grep -qxF "$ver"; then
+            echo "stimeo-ui $ver already on RubyGems — skipping push (idempotent re-run)."
+          else
+            gem push stimeo-ui-*.gem
+          fi

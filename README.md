@@ -7,7 +7,7 @@
 
 <p align="center"><a href="https://stimeo-labs.com"><strong>Live demo (beta) →</strong></a></p>
 
-[![CI](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/stimeo-ui)](https://www.npmjs.com/package/stimeo-ui) [![gem](https://img.shields.io/gem/v/stimeo-ui)](https://rubygems.org/gems/stimeo-ui) [![License: MIT](https://img.shields.io/github/license/taiyaky/stimeo-ui)](LICENSE)
+[![CI](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/taiyaky/stimeo-ui/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/stimeo-ui/beta)](https://www.npmjs.com/package/stimeo-ui) [![gem](https://img.shields.io/gem/v/stimeo-ui)](https://rubygems.org/gems/stimeo-ui) [![License: MIT](https://img.shields.io/github/license/taiyaky/stimeo-ui)](LICENSE)
 
 **Headless Stimulus UI framework for Ruby on Rails.** Stimeo UI ships *behavior*
 — ARIA state, keyboard interaction, focus management, Turbo resilience — as
@@ -50,7 +50,7 @@ Stimulus application. Then drive components from HTML alone:
 ### npm (jsbundling or any bundler)
 
 ```bash
-npm install stimeo-ui @hotwired/stimulus
+npm install stimeo-ui@beta @hotwired/stimulus
 ```
 
 ```js
