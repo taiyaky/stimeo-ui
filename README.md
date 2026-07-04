@@ -120,6 +120,13 @@ Bug reports and feature requests are very welcome — please open a GitHub issue
 For code changes, open an issue first to discuss direction; see
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-## License
+## License & Pro
 
-Released under the [MIT License](LICENSE) © Stimeo Labs.
+Free and open source under the [MIT License](LICENSE) © Stimeo Labs. Every
+component in this repository is Core, and the MIT grant is irrevocable.
+
+**Stimeo UI Pro** — advanced behavior components that are the most work to
+build yourself — is planned around 1.0 as a separately licensed commercial
+track, built alongside (never carved out of) Core. For release news and
+early access, join the waitlist at
+[stimeo-labs.com/waitlist](https://stimeo-labs.com/waitlist).

@@ -22,7 +22,7 @@ Gem::Specification.new do |spec|
   repo = "https://github.com/taiyaky/stimeo-ui"
   spec.metadata["source_code_uri"] = repo
   spec.metadata["bug_tracker_uri"] = "#{repo}/issues"
-  spec.metadata["changelog_uri"] = "#{repo}/releases"
+  spec.metadata["changelog_uri"] = "#{repo}/blob/main/CHANGELOG.md"
   spec.metadata["documentation_uri"] = "#{spec.homepage}/components"
   spec.metadata["rubygems_mfa_required"] = "true"
 

@@ -30,6 +30,21 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * focus between triggers without rewriting `tabindex` (they keep their natural Tab
  * order). Hover open/close is opt-in via `openOnHover`.
  *
+ * By default the hover region is each trigger and its panel. An optional
+ * `hoverArea` target widens it: mark a wrapper that contains a trigger (e.g. the
+ * `<li>` holding a top-level *link*, its disclosure button, and its panel — the
+ * APG "Disclosure Navigation with Top-Level Links" arrangement) and hovering
+ * anywhere over that wrapper opens the contained trigger's panel. A trigger or
+ * panel inside a `hoverArea` defers to the wrapper (its own edges stop scheduling
+ * open/close), so pointer movement within the area never flickers the panel.
+ * Keep a trigger's panel inside its `hoverArea`: a panel left outside simply
+ * falls back to the default two-region behavior — moving straight across a
+ * shared edge never schedules a close (the leave handler checks
+ * `relatedTarget`), and `hoverDelay` bridges the pointer's travel across an
+ * actual gap. Targets added or removed while connected (e.g. a Turbo Stream
+ * append) re-wire the hover listeners via Stimulus target callbacks.
+ * `hoverArea` has no effect unless `openOnHover` is enabled.
+ *
  * @remarks
  * Behavior only. Panel layout, mega-menu styling, and animation are the
  * consumer's CSS. Static placement is CSS; viewport-edge collision avoidance is
@@ -38,7 +53,7 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * `role="menu"`, use `stimeo--menubar` instead.
  */
 export class NavigationMenuController extends Controller<HTMLElement> {
-  static override targets = ["trigger", "panel"];
+  static override targets = ["trigger", "panel", "hoverArea"];
   static override values = {
     openOnHover: { type: Boolean, default: false },
     hoverDelay: { type: Number, default: 150 },
@@ -47,12 +62,20 @@ export class NavigationMenuController extends Controller<HTMLElement> {
 
   declare readonly triggerTargets: HTMLElement[];
   declare readonly panelTargets: HTMLElement[];
+  declare readonly hoverAreaTargets: HTMLElement[];
 
   declare openOnHoverValue: boolean;
   declare hoverDelayValue: number;
 
   /** Open/close delay timers for hover mode; cleared together on disconnect. */
   readonly #hoverTimers = new SafeTimeout();
+
+  /**
+   * Elements currently carrying hover listeners. Removal always mirrors this
+   * set (not a recomputed target snapshot), so add/remove stays symmetric even
+   * when targets churn between connect and disconnect.
+   */
+  readonly #hoverWired = new Set<HTMLElement>();
 
   /** Establishes the closed baseline and the dismissal listeners. */
   override connect(): void {
@@ -68,8 +91,38 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     document.removeEventListener("click", this.#onOutsideClick);
     document.removeEventListener("keydown", this.#onKeydown);
     this.element.removeEventListener("focusout", this.#onFocusOut);
-    if (this.openOnHoverValue) this.#removeHoverListeners();
+    this.#removeHoverListeners();
     this.#hoverTimers.clearAll();
+  }
+
+  /** Re-wires hover listeners when a target is added after connect (Turbo Streams etc.). */
+  triggerTargetConnected(): void {
+    this.#rewireHoverListeners();
+  }
+
+  /** Re-wires hover listeners when a target is removed while connected. */
+  triggerTargetDisconnected(): void {
+    this.#rewireHoverListeners();
+  }
+
+  /** See {@link NavigationMenuController.triggerTargetConnected}. */
+  panelTargetConnected(): void {
+    this.#rewireHoverListeners();
+  }
+
+  /** See {@link NavigationMenuController.triggerTargetDisconnected}. */
+  panelTargetDisconnected(): void {
+    this.#rewireHoverListeners();
+  }
+
+  /** See {@link NavigationMenuController.triggerTargetConnected}. */
+  hoverAreaTargetConnected(): void {
+    this.#rewireHoverListeners();
+  }
+
+  /** See {@link NavigationMenuController.triggerTargetDisconnected}. */
+  hoverAreaTargetDisconnected(): void {
+    this.#rewireHoverListeners();
   }
 
   /** Toggles a trigger's panel (single-open). Bound via `data-action` (click). */
@@ -156,40 +209,79 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     this.#hoverTimers.set(() => this.#openPanel(trigger), this.hoverDelayValue);
   };
 
-  /** Closes the open panel after the hover delay (hover mode). */
-  readonly #onPointerLeave = (): void => {
+  /**
+   * Closes the open panel after the hover delay (hover mode) — unless the
+   * pointer moved directly into another part of the hover region (an adjacent
+   * trigger, panel, or hoverArea): crossing a shared edge must not schedule a
+   * spurious close, e.g. a hoverArea whose panel sits outside it as a sibling.
+   */
+  readonly #onPointerLeave = (event: Event): void => {
+    const next = event instanceof MouseEvent ? event.relatedTarget : null;
+    if (next instanceof Node && this.#hoverElements.some((el) => el.contains(next))) return;
     this.#hoverTimers.clearAll();
     this.#hoverTimers.set(() => this.#closeAll(), this.hoverDelayValue);
   };
 
-  /** Wires hover open/close on each trigger and its panel (opt-in). */
+  /** Wires hover open/close on each hover element (opt-in), tracking what was wired. */
   #addHoverListeners(): void {
     for (const element of this.#hoverElements) {
       element.addEventListener("mouseenter", this.#onPointerEnter);
       element.addEventListener("mouseleave", this.#onPointerLeave);
+      this.#hoverWired.add(element);
     }
   }
 
-  /** Removes the hover listeners added by `#addHoverListeners`. */
+  /** Removes the hover listeners from exactly the elements that were wired. */
   #removeHoverListeners(): void {
-    for (const element of this.#hoverElements) {
+    for (const element of this.#hoverWired) {
       element.removeEventListener("mouseenter", this.#onPointerEnter);
       element.removeEventListener("mouseleave", this.#onPointerLeave);
     }
+    this.#hoverWired.clear();
   }
 
-  /** Elements that participate in hover (each trigger and its panel). */
+  /**
+   * Rebuilds the hover wiring from the current targets. Target callbacks call
+   * this so items added or removed after connect (e.g. a Turbo Stream append)
+   * participate in hover; the wired-set removal keeps the rebuild symmetric.
+   */
+  #rewireHoverListeners(): void {
+    if (!this.openOnHoverValue) return;
+    this.#removeHoverListeners();
+    this.#addHoverListeners();
+  }
+
+  /**
+   * Elements that participate in hover: each `hoverArea`, plus every trigger and
+   * panel **not** wrapped by one. A wrapped trigger/panel must defer to its
+   * wrapper — its own mouseleave would otherwise schedule a close while the
+   * pointer is still inside the area (mouseenter does not re-fire on the wrapper
+   * when moving among its descendants), flickering the panel shut.
+   */
   get #hoverElements(): HTMLElement[] {
-    return [...this.triggerTargets, ...this.panelTargets];
+    const areas = this.hoverAreaTargets;
+    const covered = (element: HTMLElement): boolean => areas.some((area) => area.contains(element));
+    return [
+      ...areas,
+      ...this.triggerTargets.filter((trigger) => !covered(trigger)),
+      ...this.panelTargets.filter((panel) => !covered(panel)),
+    ];
   }
 
-  /** Resolves the trigger for a hovered element (the trigger itself or a panel). */
+  /**
+   * Resolves the trigger for a hovered element: the trigger itself, the trigger
+   * controlling a hovered panel, or the first trigger contained in a hovered
+   * `hoverArea` wrapper.
+   */
   #triggerForHover(element: HTMLElement): HTMLElement | null {
-    const triggerIndex = this.triggerTargets.indexOf(element);
-    if (triggerIndex !== -1) return element;
-    const panelIndex = this.panelTargets.indexOf(element);
-    if (panelIndex === -1) return null;
-    return this.triggerTargets.find((trigger) => this.#panelFor(trigger) === element) ?? null;
+    if (this.triggerTargets.includes(element)) return element;
+    if (this.panelTargets.includes(element)) {
+      return this.triggerTargets.find((trigger) => this.#panelFor(trigger) === element) ?? null;
+    }
+    if (this.hoverAreaTargets.includes(element)) {
+      return this.triggerTargets.find((trigger) => element.contains(trigger)) ?? null;
+    }
+    return null;
   }
 
   /** The panel controlled by `trigger` (matched by `aria-controls`/`id`). */
