@@ -530,7 +530,7 @@ describe("checkSource", () => {
         </div>`;
 
       it("flags a vertical list whose roving leaves orientation on its horizontal default", () => {
-        // The defining case of #322: both sides on their defaults (sortable
+        // The defining composition case: both sides on their defaults (sortable
         // vertical, roving horizontal) — Tab reaches the handles, arrows die.
         const all = checkSource(sortable(), manifest);
         const mismatches = all.filter((x) => x.code === "composition-mismatch");

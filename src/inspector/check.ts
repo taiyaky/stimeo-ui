@@ -52,7 +52,8 @@ import {
  * split across separate Rails partials cannot be correlated, so stage-2 checks
  * assume self-contained markup (Stimeo's recommended demo/partial structure).
  * Server-rendered **fragments** — markup a controller fetches and appends at
- * runtime (Turbo Streams, `stimeo--feed` pages) — are the legitimate exception:
+ * runtime (Turbo Streams, incrementally loaded list pages) — are the
+ * legitimate exception:
  * declare the runtime host with {@link FRAGMENT_ATTR} on the fragment root and
  * `orphan-target` is suppressed for that identifier (names are still checked).
  * ERB is neutralized first, so dynamically-generated attributes are skipped.
@@ -734,7 +735,7 @@ function findOwner(node: ElementNode, identifier: string): ElementNode | null {
 /**
  * Declares a server-rendered **fragment**: markup a controller fetches and
  * appends at runtime inside its own scope (a Turbo Stream template, an
- * incremental page of `stimeo--feed` articles). Its value is the runtime host —
+ * incrementally fetched page of list items). Its value is the runtime host —
  * whitespace-separated `stimeo--*` identifiers. Targets inside the declaration
  * are exempt from `orphan-target` for exactly those identifiers; every name is
  * still spell-checked against the manifest, including the declaration itself.

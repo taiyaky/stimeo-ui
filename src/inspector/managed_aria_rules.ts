@@ -2,9 +2,9 @@ import type { ManagedAriaRules } from "./types";
 
 /**
  * Shared suggestion for the `aria-activedescendant` author-futile rule, reused
- * by every combobox-family controller (and the premium `multi-combobox`, which
- * imports this). The controller recomputes the attribute on open/navigation, so
- * the fix is always "remove it"; only the target name and the popup noun differ.
+ * by every combobox-family controller that imports this. The controller
+ * recomputes the attribute on open/navigation, so the fix is always
+ * "remove it"; only the target name and the popup noun differ.
  */
 export function removeActivedescendantSuggestion(target: string, popup = "listbox"): string {
   return `Remove aria-activedescendant from the ${target} target — the controller sets it while the ${popup} is open.`;

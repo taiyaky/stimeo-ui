@@ -51,8 +51,8 @@ export interface DemoSource {
 
 /**
  * Maps a demo directory basename to its controller identifier. Demo dirs use
- * snake_case (`inline_combobox`); controller identifiers are the `stimeo--`
- * prefix plus the kebab-case name (`stimeo--inline-combobox`). The demos tree
+ * snake_case (`date_range_picker`); controller identifiers are the `stimeo--`
+ * prefix plus the kebab-case name (`stimeo--date-range-picker`). The demos tree
  * and the manifest are 1:1 today; {@link buildExamplesIndex} fails the build
  * when either side drifts.
  */

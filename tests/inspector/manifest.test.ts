@@ -120,18 +120,6 @@ describe("buildManifest", () => {
     }
   });
 
-  it("merges premium a11y rules when the premium track is present", () => {
-    // The public mirror strips src/premium/ (open-core boundary), so guard on
-    // the identifier instead of importing the premium barrel — this spec must
-    // stay valid in both repos (same superset stance as the identifier test).
-    const feed = manifest.controllers["stimeo--feed"];
-    if (!feed) return;
-    expect(feed.a11y.map((req) => `${req.target}:${req.attrs.join("/")}`)).toEqual([
-      "feed:role",
-      "article:aria-labelledby/aria-label",
-    ]);
-  });
-
   it("merges hand-written keyboard rules, defaulting to [] when undeclared", () => {
     const slider = manifest.controllers["stimeo--slider"]?.keyboard ?? [];
     expect(slider.map((req) => `${req.target}:${req.reach}`)).toEqual(["thumb:tab"]);
@@ -215,13 +203,5 @@ describe("buildManifest", () => {
         expect(valueDefault(companion, rule.require.value)).toBe(rule.require.default);
       }
     }
-  });
-
-  it("merges premium managed-aria rules when the premium track is present", () => {
-    const feed = manifest.controllers["stimeo--feed"];
-    if (!feed) return;
-    expect(feed.managedAria.map((rule) => `${rule.target}:${rule.attrs.join("/")}`)).toEqual([
-      "article:aria-posinset/aria-setsize",
-    ]);
   });
 });

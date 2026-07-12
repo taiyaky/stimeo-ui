@@ -40,7 +40,7 @@ const cleanDemo: DemoSource = {
 describe("demoDirToControllerId", () => {
   it("maps snake_case demo dirs to kebab-case stimeo-- identifiers", () => {
     expect(demoDirToControllerId("menu")).toBe("stimeo--menu");
-    expect(demoDirToControllerId("inline_combobox")).toBe("stimeo--inline-combobox");
+    expect(demoDirToControllerId("radio_group")).toBe("stimeo--radio-group");
     expect(demoDirToControllerId("date_range_picker")).toBe("stimeo--date-range-picker");
   });
 });
@@ -113,8 +113,8 @@ describe("buildExamplesIndex (real demo sidecars)", () => {
     const manifest = buildManifest("0.0.0");
     const index = buildExamplesIndex(collectDemoSources(root), manifest);
     const ids = Object.keys(index.examples);
-    // The pending-demo allowlist (#266 server-bound set awaiting the cable
-    // infrastructure) is the one documented gap in the bijection.
+    // The pending-demo allowlist (the server-bound set awaiting the cable
+    // demo infrastructure) is the one documented gap in the bijection.
     const expected = Object.keys(manifest.controllers)
       .filter((id) => !PENDING_DEMO_CONTROLLERS.has(id))
       .sort();

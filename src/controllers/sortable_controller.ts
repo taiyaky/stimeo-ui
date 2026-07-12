@@ -63,8 +63,8 @@ interface SortSession {
  * no rewiring, and a Turbo cache restore reconnects idempotently (`connect()`
  * clears the transient root hook; a drag cannot survive a navigation). Only the
  * event listeners are held, and they are removed on `disconnect()`. Multi-list
- * / kanban, nested DnD, auto-scroll at the edges, and virtualized lists are the
- * premium tier — deliberately out of this free single-list scope.
+ * / kanban, nested DnD, auto-scroll at the edges, and virtualized lists are
+ * deliberately out of this single-list scope.
  */
 export class SortableController extends Controller<HTMLElement> {
   static override targets = ["list", "item", "status"];
@@ -215,7 +215,7 @@ export class SortableController extends Controller<HTMLElement> {
    * Mirrors a step into the `status` live region. Copy is localizable through
    * `data-grabbed` / `data-moved` / `data-dropped` / `data-canceled` templates on
    * the status element (`%{name}` / `%{position}` / `%{total}` placeholders);
-   * terse English is the fallback (same channel design as `stimeo--feed`).
+   * terse English is the fallback (the library's shared status-channel design).
    */
   #announce(key: "grabbed" | "moved" | "dropped" | "canceled", item: HTMLElement): void {
     if (!this.hasStatusTarget) return;
