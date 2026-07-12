@@ -1,0 +1,44 @@
+<%# sortable: markup-level composition — pointer-drag on each item emits the drag
+    signal (with its keyboard alternative), roving keeps the handles one Tab stop,
+    and sortable interprets the signal: it live-reorders the DOM, announces each
+    step through the status live region (localized via the data-* templates), and
+    dispatches reorder on a drop that changed the position. demo.js only mirrors
+    that reorder event into the "saved" line — the pattern a real app uses to POST
+    the new position. %>
+<div class="sortable-demo">
+  <p class="sortable-demo__hint"><%= t("components.sortable.demo.hint") %></p>
+  <div data-controller="stimeo--sortable">
+    <ul class="sortable-demo__list" data-stimeo--sortable-target="list"
+        data-controller="stimeo--roving"
+        data-stimeo--roving-orientation-value="vertical"
+        aria-label="<%= t('components.sortable.demo.list_label') %>">
+      <% t("components.sortable.demo.items").each do |label| %>
+        <li class="sortable-demo__item" data-stimeo--sortable-target="item"
+            data-stimeo--sortable-name="<%= label %>"
+            data-controller="stimeo--pointer-drag"
+            data-stimeo--pointer-drag-axis-value="y">
+          <button type="button" class="sortable-demo__handle"
+                  aria-label="<%= t('components.sortable.demo.handle_label', name: label) %>"
+                  data-stimeo--pointer-drag-target="handle"
+                  data-stimeo--roving-target="item">
+            <svg class="demo-icon" viewBox="0 0 24 24" fill="currentColor" stroke="none"
+                 aria-hidden="true">
+              <circle cx="9" cy="6" r="1.5"></circle><circle cx="15" cy="6" r="1.5"></circle>
+              <circle cx="9" cy="12" r="1.5"></circle><circle cx="15" cy="12" r="1.5"></circle>
+              <circle cx="9" cy="18" r="1.5"></circle><circle cx="15" cy="18" r="1.5"></circle>
+            </svg>
+          </button>
+          <span class="sortable-demo__label"><%= label %></span>
+        </li>
+      <% end %>
+    </ul>
+    <p class="sortable-demo__status" role="status"
+       data-stimeo--sortable-target="status"
+       data-grabbed="<%= t("components.sortable.demo.announce.grabbed") %>"
+       data-moved="<%= t("components.sortable.demo.announce.moved") %>"
+       data-dropped="<%= t("components.sortable.demo.announce.dropped") %>"
+       data-canceled="<%= t("components.sortable.demo.announce.canceled") %>"></p>
+  </div>
+  <p class="sortable-demo__saved" data-sortable-saved aria-live="polite"
+     data-saved-template="<%= t("components.sortable.demo.saved_template") %>"></p>
+</div>

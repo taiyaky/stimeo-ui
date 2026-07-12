@@ -4,6 +4,7 @@ import { ThemeController } from "../src/controllers/theme_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ThemeController}: applying the resolved theme to the
@@ -11,8 +12,6 @@ import { captureSpeech } from "./helpers/speech";
  * 2-value toggle (aria-pressed), localStorage persistence/restore, live `system`
  * following via matchMedia, the change event, and listener teardown.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 let mediaMatches = false;
 let mediaListeners: Array<() => void> = [];

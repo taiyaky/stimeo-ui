@@ -1,0 +1,19 @@
+<%# smart-sticky-header: the library only flips data-header-hidden from the scroll
+    direction (and reveals on focus); the slide-away is this demo's CSS transform.
+    Scroll down inside the frame to hide the bar, up (or Tab into it) to reveal. %>
+<div class="smart-sticky-demo">
+  <p class="smart-sticky-demo__hint"><%= t("components.smart_sticky_header.demo.hint") %></p>
+  <div id="smart-sticky-viewport" class="smart-sticky-demo__viewport" role="region" tabindex="0"
+       aria-label="<%= t('components.smart_sticky_header.demo.viewport_label') %>">
+    <header class="smart-sticky-demo__header" data-controller="stimeo--smart-sticky-header"
+            data-stimeo--smart-sticky-header-container-selector-value="#smart-sticky-viewport"
+            data-stimeo--smart-sticky-header-offset-value="40">
+      <a href="#smart-sticky-demo-content"><%= t("components.smart_sticky_header.demo.brand") %></a>
+    </header>
+    <div id="smart-sticky-demo-content" class="smart-sticky-demo__content">
+      <% 10.times do |i| %>
+        <p><%= t("components.smart_sticky_header.demo.paragraph", index: i + 1) %></p>
+      <% end %>
+    </div>
+  </div>
+</div>

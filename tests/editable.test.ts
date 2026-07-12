@@ -3,14 +3,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EditableController } from "../src/controllers/editable_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link EditableController}: the display ⇄ edit toggle —
  * entering edit mode (focus + select), `Enter` save / `Escape` cancel, blur
  * behavior under `submitOnBlur`, the `change`/`cancel` events, and `F2`.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (submitOnBlur = true) => `
   <div data-controller="stimeo--editable"

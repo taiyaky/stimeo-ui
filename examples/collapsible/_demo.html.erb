@@ -1,0 +1,24 @@
+<%# Markup for the collapsible (APG Disclosure) demo.
+    The trigger opens/closes a single region inline. The library syncs aria-expanded /
+    hidden / data-state and the content's measured-height variable; the look (the
+    height transition) lives in demo.css. %>
+<div class="collapsible" data-controller="stimeo--collapsible">
+  <button
+    class="collapsible__trigger"
+    type="button"
+    aria-expanded="false"
+    aria-controls="collapsible-demo-content"
+    data-stimeo--collapsible-target="trigger"
+    data-action="click->stimeo--collapsible#toggle">
+    <span class="collapsible__chevron" aria-hidden="true"></span>
+    <%= t("components.collapsible.demo.trigger") %>
+  </button>
+  <div
+    class="collapsible__content"
+    id="collapsible-demo-content"
+    data-state="closed"
+    hidden
+    data-stimeo--collapsible-target="content">
+    <p class="collapsible__body"><%= t("components.collapsible.demo.body") %></p>
+  </div>
+</div>

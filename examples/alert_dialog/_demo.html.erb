@@ -1,0 +1,66 @@
+<%# Markup for the alert-dialog demo.
+    role="alertdialog" conveys urgency and interrupts until an explicit confirm/cancel
+    response is given. Unlike a plain dialog it does not close on a backdrop click.
+    The library handles focus move, focus trap, Esc (cancel), background scroll lock,
+    background inert, returning focus to the trigger, and firing confirm / cancel
+    events. Styling lives in demo.css. %>
+<div class="alert-dialog" data-controller="stimeo--alert-dialog">
+  <button
+    type="button"
+    class="alert-dialog__trigger"
+    data-stimeo--alert-dialog-target="trigger"
+    data-action="click->stimeo--alert-dialog#open">
+    <%= t("components.alert_dialog.demo.open_button") %>
+  </button>
+
+  <%# A live region that announces the latest response; demo.js reflects confirm / cancel.
+      For bilingual support the copy is resolved with I18n server-side and passed via
+      data-* attributes, which demo.js only reads (never hardcoded in JS). %>
+  <p
+    class="alert-dialog__status"
+    role="status"
+    data-alert-dialog-status
+    data-confirm-message="<%= t("components.alert_dialog.demo.confirmed_message") %>"
+    data-cancel-message-user="<%= t(
+      "components.alert_dialog.demo.cancelled_message",
+      reason: t("components.alert_dialog.demo.cancel_reason_user")
+    ) %>"
+    data-cancel-message-escape="<%= t(
+      "components.alert_dialog.demo.cancelled_message",
+      reason: t("components.alert_dialog.demo.cancel_reason_escape")
+    ) %>"
+    hidden></p>
+
+  <%# The role="alertdialog" + aria-modal region. Starts hidden (closed).
+       aria-labelledby points to the title, aria-describedby to the body message. %>
+  <div
+    class="alert-dialog__backdrop"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="alert-dialog-title"
+    aria-describedby="alert-dialog-desc"
+    data-stimeo--alert-dialog-target="dialog"
+    hidden>
+    <div class="alert-dialog__panel">
+      <h3 id="alert-dialog-title" class="alert-dialog__title">
+        <%= t("components.alert_dialog.demo.confirm_title") %>
+      </h3>
+      <p id="alert-dialog-desc"><%= t("components.alert_dialog.demo.confirm_desc") %></p>
+      <div class="alert-dialog__actions">
+        <%# Default focus goes to the least-destructive action: Cancel. %>
+        <button
+          type="button"
+          data-stimeo--alert-dialog-target="initialFocus"
+          data-action="click->stimeo--alert-dialog#cancel">
+          <%= t("components.alert_dialog.demo.cancel") %>
+        </button>
+        <button
+          type="button"
+          class="alert-dialog__danger"
+          data-action="click->stimeo--alert-dialog#confirm">
+          <%= t("components.alert_dialog.demo.confirm") %>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>

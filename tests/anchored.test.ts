@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for the opt-in {@link AnchoredController}.
@@ -24,8 +25,6 @@ vi.mock("@floating-ui/dom", () => ({ computePosition, autoUpdate, offset, flip, 
 
 // Imported after the mock so the controller's positioning chain binds the mock.
 const { AnchoredController } = await import("../src/positioning/anchored_controller");
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 interface PositionDetail {
   placement: string;

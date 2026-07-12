@@ -1,0 +1,39 @@
+<%# Markup for the confirm-bridge demo.
+    The controller intercepts the danger button (request action), shows the accessible
+    alert dialog with the message, and only continues the form submit when confirmed.
+    The dialog reuses the shared FocusTrap (trap, restore, Escape=cancel). This
+    Playground has no backend, so demo.js cancels the real submit and reports the
+    outcome from the resolve event. %>
+<div class="confirm-demo" data-controller="stimeo--confirm"
+     data-stimeo--confirm-confirm-label-value="<%= t("components.confirm.demo.confirm_label") %>"
+     data-stimeo--confirm-cancel-label-value="<%= t("components.confirm.demo.cancel_label") %>">
+  <form class="confirm-demo__form" action="#" method="post" data-confirm-demo="form">
+    <button type="submit" class="demo-trigger demo-trigger--danger"
+            data-action="click->stimeo--confirm#request"
+            data-stimeo--confirm-message-param="<%= t("components.confirm.demo.message") %>">
+      <%= t("components.confirm.demo.trigger") %>
+    </button>
+  </form>
+
+  <p class="confirm-demo__result" data-confirm-demo="result" role="status" aria-live="polite"
+     data-confirmed="<%= t("components.confirm.demo.confirmed") %>"
+     data-cancelled="<%= t("components.confirm.demo.cancelled") %>"></p>
+
+  <div class="confirm-demo__backdrop" data-stimeo--confirm-target="dialog"
+       role="alertdialog" aria-modal="true" aria-labelledby="confirm-title"
+       aria-describedby="confirm-message" hidden>
+    <div class="confirm-demo__dialog">
+      <h2 id="confirm-title" data-stimeo--confirm-target="title">
+        <%= t("components.confirm.demo.title") %>
+      </h2>
+      <p id="confirm-message" data-stimeo--confirm-target="message"></p>
+      <div class="confirm-demo__actions">
+        <button type="button" class="demo-trigger" data-stimeo--confirm-target="cancel"
+                data-action="click->stimeo--confirm#cancel"></button>
+        <button type="button" class="demo-trigger demo-trigger--danger"
+                data-stimeo--confirm-target="confirm"
+                data-action="click->stimeo--confirm#confirm"></button>
+      </div>
+    </div>
+  </div>
+</div>

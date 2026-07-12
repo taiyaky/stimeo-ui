@@ -1,0 +1,51 @@
+<%# Markup for the accordion (APG Accordion) demo.
+    stimeo--accordion manages each header's aria-expanded and each panel's hidden,
+    and allows multiple panels open at once. Arrow keys move focus between headers.
+    Headers and panels are linked via aria-controls (= the panel's id), and each
+    panel (role="region") references its header button's id via aria-labelledby. %>
+<div class="accordion" data-controller="stimeo--accordion">
+  <h3 class="accordion__header">
+    <button type="button" id="acc-shipping-trigger" class="accordion__trigger"
+            aria-expanded="false" aria-controls="acc-shipping"
+            data-stimeo--accordion-target="trigger"
+            data-action="click->stimeo--accordion#toggle
+                         keydown->stimeo--accordion#onKeydown"><%= t(
+              "components.accordion.demo.shipping_title"
+            ) %></button>
+  </h3>
+  <div class="accordion__panel" id="acc-shipping" role="region"
+       aria-labelledby="acc-shipping-trigger"
+       data-stimeo--accordion-target="panel" hidden>
+    <p><%= t("components.accordion.demo.shipping_desc") %></p>
+  </div>
+
+  <h3 class="accordion__header">
+    <button type="button" id="acc-returns-trigger" class="accordion__trigger"
+            aria-expanded="false" aria-controls="acc-returns"
+            data-stimeo--accordion-target="trigger"
+            data-action="click->stimeo--accordion#toggle
+                         keydown->stimeo--accordion#onKeydown"><%= t(
+              "components.accordion.demo.returns_title"
+            ) %></button>
+  </h3>
+  <div class="accordion__panel" id="acc-returns" role="region"
+       aria-labelledby="acc-returns-trigger"
+       data-stimeo--accordion-target="panel" hidden>
+    <p><%= t("components.accordion.demo.returns_desc") %></p>
+  </div>
+
+  <h3 class="accordion__header">
+    <button type="button" id="acc-warranty-trigger" class="accordion__trigger"
+            aria-expanded="false" aria-controls="acc-warranty"
+            data-stimeo--accordion-target="trigger"
+            data-action="click->stimeo--accordion#toggle
+                         keydown->stimeo--accordion#onKeydown"><%= t(
+              "components.accordion.demo.warranty_title"
+            ) %></button>
+  </h3>
+  <div class="accordion__panel" id="acc-warranty" role="region"
+       aria-labelledby="acc-warranty-trigger"
+       data-stimeo--accordion-target="panel" hidden>
+    <p><%= t("components.accordion.demo.warranty_desc") %></p>
+  </div>
+</div>

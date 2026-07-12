@@ -1,0 +1,33 @@
+<%# Markup for the overflow-indicator (horizontal-scroll affordance) demo.
+    The library exposes the viewport's remaining scroll room via data-overflow-start /
+    data-overflow-end and syncs the prev/next buttons' disabled to that room. The
+    shadow/arrow look is drawn by demo.css. %>
+<div class="overflow-demo" data-controller="stimeo--overflow-indicator"
+     data-stimeo--overflow-indicator-orientation-value="horizontal">
+  <button
+    type="button"
+    class="overflow-demo__nav"
+    aria-label="<%= t("components.overflow_indicator.demo.prev") %>"
+    data-stimeo--overflow-indicator-direction-param="start"
+    data-action="click->stimeo--overflow-indicator#scrollByPage">‹</button>
+
+  <div class="overflow-demo__viewport"
+       data-stimeo--overflow-indicator-target="viewport"
+       data-action="scroll->stimeo--overflow-indicator#update"
+       tabindex="0"
+       role="region"
+       aria-label="<%= t("components.overflow_indicator.demo.label") %>">
+    <% 10.times do |i| %>
+      <div class="overflow-demo__card"><%= t(
+        "components.overflow_indicator.demo.card", number: i + 1
+      ) %></div>
+    <% end %>
+  </div>
+
+  <button
+    type="button"
+    class="overflow-demo__nav"
+    aria-label="<%= t("components.overflow_indicator.demo.next") %>"
+    data-stimeo--overflow-indicator-direction-param="end"
+    data-action="click->stimeo--overflow-indicator#scrollByPage">›</button>
+</div>

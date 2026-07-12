@@ -1,0 +1,27 @@
+<%# Flash-bridge demo: the buttons append flash messages into the region (standing in
+    for a Turbo Stream that renders server flash). The controller maps data-flash-type
+    to role=status/alert, auto-dismisses after the duration (paused on hover/focus), and
+    a close button wired to the dismiss action removes one. The library only sets roles
+    and data-flash-state; demo.css owns the look and the visible/leaving transition. The
+    message text and the dismiss label are owned here for i18n. %>
+<div class="flash-demo" data-dismiss-label="<%= t("components.flash.demo.dismiss") %>">
+  <div class="flash-demo__bar">
+    <button
+      type="button"
+      class="demo-trigger"
+      data-flash-demo="notice"
+      data-flash-text="<%= t("components.flash.demo.notice_text") %>">
+      <%= t("components.flash.demo.notice") %>
+    </button>
+    <button
+      type="button"
+      class="demo-trigger"
+      data-flash-demo="alert"
+      data-flash-text="<%= t("components.flash.demo.alert_text") %>">
+      <%= t("components.flash.demo.alert") %>
+    </button>
+  </div>
+  <div data-controller="stimeo--flash" data-stimeo--flash-duration-value="4000">
+    <div class="flash-demo__region" data-stimeo--flash-target="region"></div>
+  </div>
+</div>

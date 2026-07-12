@@ -3,14 +3,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { StepperController } from "../src/controllers/stepper_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link StepperController}: `next`/`prev`/`goto`
  * navigation, derived `data-state`/`aria-current`, out-of-range and `linear`
  * guards, and the `change` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (attrs = "") => `
   <ol data-controller="stimeo--stepper" ${attrs}>

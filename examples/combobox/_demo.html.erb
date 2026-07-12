@@ -1,0 +1,47 @@
+<%# Markup for the combobox (APG Combobox / list autocomplete) demo.
+    stimeo--combobox provides list filtering on input, Arrow/Enter/Esc, and
+    aria-activedescendant. Focus stays on the input and the active option is shown via
+    aria-selected. On selection, data-value (or the text, if absent) is placed in the input. %>
+<div class="combobox" data-controller="stimeo--combobox">
+  <label class="combobox__label" for="fruit-input"><%= t(
+    "components.combobox.demo.label"
+  ) %></label>
+  <input
+    id="fruit-input"
+    type="text"
+    class="combobox__input"
+    role="combobox"
+    aria-expanded="false"
+    aria-autocomplete="list"
+    aria-controls="fruit-list"
+    autocomplete="off"
+    data-stimeo--combobox-target="input"
+    data-action="input->stimeo--combobox#filter
+                 keydown->stimeo--combobox#onKeydown
+                 focus->stimeo--combobox#open
+                 click->stimeo--combobox#open">
+
+  <ul
+    id="fruit-list"
+    class="combobox__list"
+    role="listbox"
+    data-stimeo--combobox-target="list"
+    hidden>
+    <li role="option" id="fruit-apple" class="combobox__option" data-value="Apple"
+        data-stimeo--combobox-target="option"
+        data-action="click->stimeo--combobox#selectByClick">Apple</li>
+    <li role="option" id="fruit-apricot" class="combobox__option" data-value="Apricot"
+        data-stimeo--combobox-target="option"
+        data-action="click->stimeo--combobox#selectByClick">Apricot</li>
+    <li role="option" id="fruit-banana" class="combobox__option" data-value="Banana"
+        data-stimeo--combobox-target="option"
+        data-action="click->stimeo--combobox#selectByClick">Banana</li>
+    <li role="option" id="fruit-cherry" class="combobox__option" data-value="Cherry"
+        data-stimeo--combobox-target="option"
+        data-action="click->stimeo--combobox#selectByClick">Cherry</li>
+  </ul>
+
+  <%# Empty state shown when there are no matches. CSS reacts to
+      data-stimeo--combobox-empty (set on the root by the library) to reveal it. Copy via i18n. %>
+  <div class="combobox__empty"><%= t("components.combobox.empty") %></div>
+</div>

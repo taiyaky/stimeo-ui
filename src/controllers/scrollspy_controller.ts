@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { IntersectionWatcher } from "../utils/intersection_watcher";
 
 /**
  * Headless, accessible Scrollspy / Navigation catalog synchronizer.
@@ -40,7 +41,8 @@ export class ScrollspyController extends Controller<HTMLElement> {
   declare rootMarginValue: string;
   declare rootSelectorValue: string;
 
-  #observer: IntersectionObserver | null = null;
+  /** Shared IO plumbing (support guard, active guard, teardown). */
+  readonly #watcher = new IntersectionWatcher((entries) => this.#onIntersection(entries));
   #isConnected = false;
 
   /** Track active/intersecting status of each section element by ID. */
@@ -56,10 +58,7 @@ export class ScrollspyController extends Controller<HTMLElement> {
 
   override disconnect(): void {
     this.#isConnected = false;
-    if (this.#observer) {
-      this.#observer.disconnect();
-      this.#observer = null;
-    }
+    this.#watcher.stop();
     this.#intersectionStates.clear();
     this.#activeSectionId = "";
   }
@@ -124,10 +123,7 @@ export class ScrollspyController extends Controller<HTMLElement> {
   }
 
   #initializeObserver(): void {
-    if (this.#observer) {
-      this.#observer.disconnect();
-      this.#observer = null;
-    }
+    this.#watcher.stop();
     this.#intersectionStates.clear();
     this.#activeSectionId = "";
 
@@ -135,24 +131,21 @@ export class ScrollspyController extends Controller<HTMLElement> {
 
     // Build the dynamic rootMargin string based on offset value
     const margin = this.rootMarginValue || `-${this.offsetValue}px 0px -80% 0px`;
-    const rootEl = this.#getRootElement();
 
-    this.#observer = new IntersectionObserver(this.#onIntersection, {
-      root: rootEl,
-      rootMargin: margin,
-      threshold: [0, 0.2, 0.4, 0.6, 0.8, 1], // Multiple thresholds handle large sections safely
-    });
-
-    // Observe each target section mapped by the href anchors
+    // Observe each target section mapped by the href anchors.
+    const sections: Element[] = [];
     for (const link of this.linkTargets) {
       const id = this.#getAnchorId(link);
       if (!id) continue;
-
       const section = document.getElementById(id);
-      if (section) {
-        this.#observer.observe(section);
-      }
+      if (section) sections.push(section);
     }
+
+    this.#watcher.start(sections, {
+      root: this.#getRootElement(),
+      rootMargin: margin,
+      threshold: [0, 0.2, 0.4, 0.6, 0.8, 1], // Multiple thresholds handle large sections safely
+    });
   }
 
   readonly #onIntersection = (entries: IntersectionObserverEntry[]): void => {

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SidebarController } from "../src/controllers/sidebar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link SidebarController}: the inline rail (toggle +
@@ -16,8 +17,6 @@ import { captureSpeech } from "./helpers/speech";
  * happy-dom reports no transition duration, so the deferred overlay `hidden`
  * collapses to synchronous hiding here.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 let mqMatches = true;
 let mqListeners: Array<(event: MediaQueryListEvent) => void> = [];

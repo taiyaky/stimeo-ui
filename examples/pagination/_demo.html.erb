@@ -1,0 +1,43 @@
+<%# Markup for the pagination demo.
+    Built on nav + aria-label and aria-current="page", the library handles current-page
+    management, boundary control of the prev/next buttons, and firing the change event.
+    Data fetching and URL rewriting are the consumer's (here demo.js just updates the
+    results area). %>
+<nav
+  class="pagination"
+  data-controller="stimeo--pagination"
+  aria-label="<%= t("components.pagination.demo.label") %>"
+  data-stimeo--pagination-page-value="1"
+  data-stimeo--pagination-total-value="5">
+  <button
+    type="button"
+    class="pagination__button"
+    data-stimeo--pagination-target="prev"
+    data-action="click->stimeo--pagination#prev">
+    <%= t("components.pagination.demo.prev") %>
+  </button>
+  <% (1..5).each do |page| %>
+    <button
+      type="button"
+      class="pagination__button pagination__page"
+      data-page="<%= page %>"
+      <%= "aria-current=\"page\"".html_safe if page == 1 %>
+      data-stimeo--pagination-target="page"
+      data-action="click->stimeo--pagination#select"><%= page %></button>
+  <% end %>
+  <button
+    type="button"
+    class="pagination__button"
+    data-stimeo--pagination-target="next"
+    data-action="click->stimeo--pagination#next">
+    <%= t("components.pagination.demo.next") %>
+  </button>
+</nav>
+
+<p
+  class="pagination__status"
+  data-pagination-status
+  data-template="<%= t("components.pagination.demo.status_template") %>"
+  aria-live="polite">
+  <%= t("components.pagination.demo.status_template", page: 1, total: 5) %>
+</p>

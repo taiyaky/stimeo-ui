@@ -3,14 +3,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PaginationController } from "../src/controllers/pagination_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link PaginationController}: current-page state,
  * `aria-current` sync, boundary disabling of prev/next (without stranding
  * focus), and the `change` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (page = 1, total = 3) => `
   <nav data-controller="stimeo--pagination" aria-label="Pagination"

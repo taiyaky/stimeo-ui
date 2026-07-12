@@ -1,0 +1,22 @@
+<%# Highlight-on-insert demo: the list runs in container (observe) mode, so the
+    controller highlights each <li> added to it. This catalog has no Turbo Stream
+    backend, so demo.js appends rows on click — exactly the mutation a Turbo Stream
+    append would make. The library only toggles data-highlight; demo.css owns the
+    flash/fade transition keyed on that hook. %>
+<div class="highlight-demo">
+  <button
+    type="button"
+    class="demo-trigger"
+    data-highlight-add
+    data-item-label="<%= t("components.highlight.demo.item") %>">
+    <%= t("components.highlight.demo.add") %>
+  </button>
+  <ul
+    class="highlight-demo__list"
+    data-controller="stimeo--highlight"
+    data-stimeo--highlight-observe-value="true">
+    <li><%= t("components.highlight.demo.item") %> 1</li>
+    <li><%= t("components.highlight.demo.item") %> 2</li>
+  </ul>
+  <p class="highlight-demo__note"><%= t("components.highlight.demo.note") %></p>
+</div>

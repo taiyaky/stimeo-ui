@@ -1,0 +1,170 @@
+<%# Markup for the command_palette demo.
+    The single source used for both the live render and the copy-paste code.
+    stimeo--command-palette provides the global shortcut (Cmd+K) / arrow navigation /
+    focus trap. The controller registers the global keydown itself in connect(), so no
+    keydown wiring is needed here. %>
+<div
+  class="command-palette-demo"
+  data-controller="stimeo--command-palette">
+  
+  <button
+    type="button"
+    class="command-palette-demo__trigger"
+    data-action="click->stimeo--command-palette#open">
+    <%= t("components.command_palette.demo.open_button") %>
+  </button>
+  <p class="command-palette-demo__help">
+    <%= t("components.command_palette.demo.help_text_html") %>
+  </p>
+
+  <%# Overlay backdrop. Closes only on a click on the backdrop itself
+      (closeOnBackdrop ignores inner clicks). %>
+  <div
+    class="command-palette"
+    role="dialog"
+    aria-modal="true"
+    aria-label="<%= t("components.command_palette.demo.popular_title") %>"
+    data-stimeo--command-palette-target="dialog"
+    data-action="click->stimeo--command-palette#closeOnBackdrop"
+    hidden>
+    
+    <%# The palette body container. %>
+    <div class="command-palette__panel">
+      <%# Control area (Combobox structure). role/aria-* go on the real input
+          (the controller syncs them). %>
+      <div class="command-palette__search-wrapper">
+        
+        <svg class="command-palette__search-icon" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+
+        <input
+          type="text"
+          placeholder="<%= t("components.command_palette.demo.placeholder") %>"
+          class="command-palette__input"
+          data-stimeo--command-palette-target="input"
+          data-action="input->stimeo--command-palette#filter
+                       keydown->stimeo--command-palette#onKeydown"
+          role="combobox"
+          aria-expanded="false"
+          aria-haspopup="listbox"
+          aria-controls="playground-command-list"
+          aria-autocomplete="list" />
+
+        <button
+          type="button"
+          class="command-palette__close-btn"
+          data-action="click->stimeo--command-palette#close"
+          aria-label="<%= t("components.command_palette.demo.close_label") %>">
+          <kbd class="command-palette-demo__kbd font-normal text-xs">ESC</kbd>
+        </button>
+      </div>
+
+      <%# Listbox display area. %>
+      <ul
+        id="playground-command-list"
+        role="listbox"
+        aria-label="<%= t("components.command_palette.demo.popular_title") %>"
+        class="command-palette__listbox"
+        data-stimeo--command-palette-target="list">
+        
+        <%# Section heading (data-disabled="true" makes it non-selectable). %>
+        <li role="option" data-stimeo--command-palette-target="option"
+            data-disabled="true" class="command-palette__group-title">
+          <%= t("components.command_palette.demo.popular_title") %>
+        </li>
+
+        <li
+          id="cmd-profile"
+          role="option"
+          data-stimeo--command-palette-target="option"
+          data-action="click->stimeo--command-palette#selectByClick"
+          data-alert="<%= t("components.command_palette.demo.profile_alert") %>"
+          class="command-palette__option">
+          <svg class="command-palette__option-icon" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+            <circle cx="12" cy="7" r="4"/>
+          </svg>
+          <span class="command-palette__option-text"><%= t(
+            "components.command_palette.demo.profile_label"
+          ) %></span>
+          <span class="command-palette__option-shortcut">Go P</span>
+        </li>
+
+        <li
+          id="cmd-settings"
+          role="option"
+          data-stimeo--command-palette-target="option"
+          data-action="click->stimeo--command-palette#selectByClick"
+          data-alert="<%= t("components.command_palette.demo.settings_alert") %>"
+          class="command-palette__option">
+          <svg class="command-palette__option-icon" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65
+                     1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0
+                     0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65
+                     1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0
+                     4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0
+                     0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1
+                     1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0
+                     0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0
+                     0-1.51 1z"/>
+          </svg>
+          <span class="command-palette__option-text"><%= t(
+            "components.command_palette.demo.settings_label"
+          ) %></span>
+          <span class="command-palette__option-shortcut">Go S</span>
+        </li>
+
+        <li role="option" data-stimeo--command-palette-target="option"
+            data-disabled="true" class="command-palette__group-title">
+          <%= t("components.command_palette.demo.admin_title") %>
+        </li>
+
+        <li
+          id="cmd-theme-dark"
+          role="option"
+          data-stimeo--command-palette-target="option"
+          data-action="click->stimeo--command-palette#selectByClick"
+          data-alert="<%= t("components.command_palette.demo.dark_alert") %>"
+          class="command-palette__option">
+          <svg class="command-palette__option-icon" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+          <span class="command-palette__option-text"><%= t(
+            "components.command_palette.demo.dark_label"
+          ) %></span>
+        </li>
+
+        <li
+          id="cmd-theme-light"
+          role="option"
+          data-stimeo--command-palette-target="option"
+          data-action="click->stimeo--command-palette#selectByClick"
+          data-alert="<%= t("components.command_palette.demo.light_alert") %>"
+          class="command-palette__option">
+          <svg class="command-palette__option-icon" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="5"/>
+            <line x1="12" y1="1" x2="12" y2="3"/>
+            <line x1="12" y1="21" x2="12" y2="23"/>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+            <line x1="1" y1="12" x2="3" y2="12"/>
+            <line x1="21" y1="12" x2="23" y2="12"/>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+          </svg>
+          <span class="command-palette__option-text"><%= t(
+            "components.command_palette.demo.light_label"
+          ) %></span>
+        </li>
+      </ul>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,35 @@
+<%# Markup for the hover_card demo.
+    Hover/focus on the link opens a rich supplementary card after a delay. The card
+    has no role="dialog" (it's purely supplementary), and its contents are assumed to
+    be reachable from the trigger's target too. The open/close delay, the hoverable
+    bridge, and Escape-to-dismiss are the library's. %>
+<span class="hover-card" data-controller="stimeo--hover-card">
+  <a
+    class="hover-card__trigger"
+    href="#jane"
+    data-stimeo--hover-card-target="trigger"
+    aria-expanded="false"
+    aria-controls="hover-card-panel"
+    data-action="
+      mouseenter->stimeo--hover-card#open
+      mouseleave->stimeo--hover-card#close
+      focusin->stimeo--hover-card#open
+      focusout->stimeo--hover-card#close
+      keydown->stimeo--hover-card#onKeydown">
+    <%= t("components.hover_card.demo.trigger") %>
+  </a>
+
+  <%# The card has no role="dialog" (supplementary display, not an interrupting dialog). %>
+  <div
+    class="hover-card__panel"
+    id="hover-card-panel"
+    data-stimeo--hover-card-target="card"
+    data-action="
+      mouseenter->stimeo--hover-card#open
+      mouseleave->stimeo--hover-card#close"
+    hidden>
+    <p class="hover-card__name"><%= t("components.hover_card.demo.name") %></p>
+    <p class="hover-card__role"><%= t("components.hover_card.demo.role") %></p>
+    <a class="hover-card__link" href="#follow"><%= t("components.hover_card.demo.follow") %></a>
+  </div>
+</span>

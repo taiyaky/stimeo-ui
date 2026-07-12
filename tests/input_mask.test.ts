@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { applyMask, InputMaskController } from "../src/controllers/input_mask_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link InputMaskController} and the pure {@link applyMask}:
@@ -11,8 +12,6 @@ import { query } from "./helpers/dom";
  * masks in one form), caret position, custom token merge, the change event, and
  * idempotent connect.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /** Builds a token map like the controller compiles internally. */
 const tokenMap = (entries: Record<string, string>) =>

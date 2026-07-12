@@ -1,0 +1,24 @@
+<%# Persist demo: type into the fields and the draft is saved to localStorage
+    (debounced). Reload or navigate away and back — the values are restored and the
+    "draft restored" note appears (data-persist-restored). "Clear draft" calls the
+    clear() action. The library owns the storage and the data hook; this demo only
+    styles the restored note. %>
+<div class="persist-demo">
+  <form
+    class="persist"
+    data-controller="stimeo--persist"
+    data-stimeo--persist-key-value="stimeo-demo-contact">
+    <p class="persist__restored"><%= t("components.persist.demo.restored") %></p>
+    <label class="persist__field">
+      <span><%= t("components.persist.demo.name") %></span>
+      <input type="text" name="name">
+    </label>
+    <label class="persist__field">
+      <span><%= t("components.persist.demo.message") %></span>
+      <textarea name="message" rows="3"></textarea>
+    </label>
+    <button type="button" class="demo-trigger" data-action="stimeo--persist#clear">
+      <%= t("components.persist.demo.clear") %>
+    </button>
+  </form>
+</div>

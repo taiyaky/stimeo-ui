@@ -1,0 +1,37 @@
+<%# Markup for the step-indicator (read-only progress) demo.
+    The library holds the current step number, sets data-state on each li, sets
+    aria-current="step" on the current li, and updates the progress CSS variable
+    (--stimeo-step-indicator-ratio). The steps themselves aren't interactive, so the
+    current step is updated via the external step:set event (fired by demo.js from the
+    prev/next buttons). %>
+<div class="step-indicator-demo">
+  <ol
+    class="step-indicator"
+    data-controller="stimeo--step-indicator"
+    aria-label="<%= t("components.step_indicator.demo.label") %>"
+    data-stimeo--step-indicator-current-value="1"
+    data-action="step:set->stimeo--step-indicator#setCurrent">
+    <% %w[cart shipping payment confirm].each_with_index do |step, index| %>
+      <li
+        class="step-indicator__step"
+        data-stimeo--step-indicator-target="step"
+        <%= "data-state=\"complete\"".html_safe if index < 1 %>
+        <%= "data-state=\"current\" aria-current=\"step\"".html_safe if index == 1 %>
+        <%= "data-state=\"upcoming\"".html_safe if index > 1 %>>
+        <span class="step-indicator__dot"></span>
+        <span class="step-indicator__label"><%= t(
+          "components.step_indicator.demo.steps.#{step}"
+        ) %></span>
+      </li>
+    <% end %>
+  </ol>
+
+  <div class="step-indicator__controls">
+    <button type="button" class="demo-trigger" data-step-indicator-prev>
+      <%= t("components.step_indicator.demo.back") %>
+    </button>
+    <button type="button" class="demo-trigger" data-step-indicator-next>
+      <%= t("components.step_indicator.demo.advance") %>
+    </button>
+  </div>
+</div>

@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DirtyFormController } from "../src/controllers/dirty_form_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link DirtyFormController}: dirty detection vs the connect
  * baseline, the data-dirty hook + dirty event, the cancelable guard / native
  * confirm on a Turbo visit, beforeunload wiring, and markClean.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("DirtyFormController", () => {
   let application: Application;

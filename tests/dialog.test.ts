@@ -3,13 +3,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DialogController } from "../src/controllers/dialog_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link DialogController}: the APG modal contract — focus
  * moves into the dialog, scroll locks, Escape closes and restores focus.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("DialogController", () => {
   let application: Application;
@@ -76,6 +75,19 @@ describe("DialogController", () => {
     expect(dialog().hidden).toBe(true);
   });
 
+  it("stays open when content inside the dialog is clicked", () => {
+    // A click on a descendant bubbles up to the dialog target, but closeOnBackdrop
+    // closes only when the event target IS the backdrop element itself — clicking
+    // content (here the title) must leave the dialog open (the negative branch).
+    // Resolve the title non-optionally: if the fixture ever loses it, `.click()`
+    // throws instead of silently no-opping into a false-positive pass.
+    trigger().click();
+    expect(dialog().hidden).toBe(false);
+    const title = document.getElementById("title") as HTMLElement;
+    title.click();
+    expect(dialog().hidden).toBe(false);
+  });
+
   it("traps Tab focus from the last focusable back to the first", () => {
     trigger().click();
     const cancel = document.getElementById("cancel") as HTMLButtonElement;
@@ -90,19 +102,6 @@ describe("DialogController", () => {
     trigger().click();
     expect(background.inert).toBe(true);
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    expect(background.inert).toBe(false);
-  });
-
-  it("restores scroll and background when disconnected while open", () => {
-    const background = document.getElementById("background") as HTMLElement;
-    const root = document.querySelector("[data-controller='stimeo--dialog']") as HTMLElement;
-    trigger().click();
-    expect(document.body.style.overflow).toBe("hidden");
-    expect(background.inert).toBe(true);
-    const controller = application.getControllerForElementAndIdentifier(root, "stimeo--dialog");
-    if (!controller) throw new Error("dialog controller not found");
-    controller.disconnect();
-    expect(document.body.style.overflow).toBe("");
     expect(background.inert).toBe(false);
   });
 
@@ -140,7 +139,9 @@ describe("DialogController", () => {
   // even though it leaves the markup as-is. A surviving listener would still act
   // on the detached controller, so Escape closing the dialog would surface the
   // leak. Invoked directly to avoid happy-dom's flaky async MutationObserver
-  // lifecycle (see scrollspy/resizable suites).
+  // lifecycle (see scrollspy/resizable suites). This single test covers the whole
+  // disconnect contract — both the side-effect restoration (scroll/inert) and the
+  // listener removal — so there is no separate "restore on disconnect" test.
   it("releases the global keydown listener and modal side effects on disconnect", () => {
     const background = document.getElementById("background") as HTMLElement;
     const root = document.querySelector("[data-controller='stimeo--dialog']") as HTMLElement;

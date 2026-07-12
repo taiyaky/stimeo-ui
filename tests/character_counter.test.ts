@@ -4,6 +4,7 @@ import { CharacterCounterController } from "../src/controllers/character_counter
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link CharacterCounterController}: count formatting per
@@ -215,7 +216,7 @@ describe("CharacterCounterController", () => {
       </div>`;
     application = Application.start();
     application.register("stimeo--character-counter", CharacterCounterController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     await expectNoA11yViolations(root());
   });
 });

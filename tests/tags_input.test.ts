@@ -3,14 +3,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { TagsInputController } from "../src/controllers/tags_input_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link TagsInputController}: commit on Enter/delimiter,
  * empty/duplicate/max rejection, Backspace deletion, chip roving navigation,
  * hidden-field mirroring, focus hand-off, and the `change`/`reject` events.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (attrs = "") => `
   <div data-controller="stimeo--tags-input" ${attrs}>

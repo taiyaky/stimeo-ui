@@ -1,4 +1,5 @@
-# CI for the published library: lint, typecheck, unit tests, and build (bun).
+# CI for the published library: lint, typecheck, unit tests, build, and an
+# MCP smoke session against the built bin (bun).
 name: CI
 
 on:
@@ -19,3 +20,6 @@ jobs:
       - run: bun run typecheck
       - run: bun run test
       - run: bun run build
+      # One real MCP session against the built bin: the bundled manifest AND
+      # examples index must load from dist/, or `stimeo mcp` is dead on arrival.
+      - run: bun run smoke:mcp

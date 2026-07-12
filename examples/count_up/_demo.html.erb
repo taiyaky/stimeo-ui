@@ -1,0 +1,26 @@
+<%# count-up: the final numbers stay authored in the markup (SEO / no-JS / SR read
+    the real values); each stat composes intersection ("start when visible") with
+    count-up via data-action. Scroll the stats into view to run the animation. %>
+<div class="count-up-demo">
+  <p class="count-up-demo__hint"><%= t("components.count_up.demo.hint") %></p>
+  <dl class="count-up-demo__stats">
+    <div class="count-up-demo__stat">
+      <dt><%= t("components.count_up.demo.stats.users") %></dt>
+      <dd data-controller="stimeo--intersection stimeo--count-up"
+          data-stimeo--intersection-once-value="true"
+          data-action="stimeo--intersection:enter->stimeo--count-up#start">12,480</dd>
+    </div>
+    <div class="count-up-demo__stat">
+      <dt><%= t("components.count_up.demo.stats.stars") %></dt>
+      <dd data-controller="stimeo--intersection stimeo--count-up"
+          data-stimeo--intersection-once-value="true"
+          data-action="stimeo--intersection:enter->stimeo--count-up#start">3,200</dd>
+    </div>
+    <div class="count-up-demo__stat">
+      <dt><%= t("components.count_up.demo.stats.uptime") %></dt>
+      <dd data-controller="stimeo--intersection stimeo--count-up"
+          data-stimeo--intersection-once-value="true"
+          data-action="stimeo--intersection:enter->stimeo--count-up#start">99</dd>
+    </div>
+  </dl>
+</div>

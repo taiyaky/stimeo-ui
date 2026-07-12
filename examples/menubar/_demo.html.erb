@@ -1,0 +1,80 @@
+<%# Markup for the menubar demo.
+    Top-level items directly under role="menubar" each open a role="menu". The library
+    handles roving between top items (left/right keys), opening a menu with
+    ArrowDown/Enter, up/down movement and typeahead within a menu, moving sideways to
+    an adjacent menu, returning on Escape, and closing on outside click / Tab. Top
+    items ↔ menus are linked via aria-controls / id. The look is in demo.css. %>
+<div
+  class="menubar"
+  data-controller="stimeo--menubar"
+  role="menubar"
+  aria-label="<%= t("components.menubar.demo.label") %>"
+>
+  <button
+    type="button"
+    class="menubar__top"
+    role="menuitem"
+    aria-haspopup="menu"
+    aria-expanded="false"
+    aria-controls="menubar-file"
+    data-stimeo--menubar-target="top"
+    data-action="click->stimeo--menubar#toggle keydown->stimeo--menubar#onTopKeydown">
+    <%= t("components.menubar.demo.menus.file.label") %>
+  </button>
+  <ul
+    id="menubar-file"
+    class="menubar__menu"
+    role="menu"
+    aria-label="<%= t("components.menubar.demo.menus.file.label") %>"
+    hidden
+    data-stimeo--menubar-target="menu"
+  >
+    <% %w[new open save].each do |action| %>
+      <li role="none">
+        <button
+          type="button"
+          class="menubar__item"
+          role="menuitem"
+          tabindex="-1"
+          data-stimeo--menubar-target="item"
+          data-action="click->stimeo--menubar#activate keydown->stimeo--menubar#onItemKeydown">
+          <%= t("components.menubar.demo.menus.file.items.#{action}") %>
+        </button>
+      </li>
+    <% end %>
+  </ul>
+
+  <button
+    type="button"
+    class="menubar__top"
+    role="menuitem"
+    aria-haspopup="menu"
+    aria-expanded="false"
+    aria-controls="menubar-edit"
+    data-stimeo--menubar-target="top"
+    data-action="click->stimeo--menubar#toggle keydown->stimeo--menubar#onTopKeydown">
+    <%= t("components.menubar.demo.menus.edit.label") %>
+  </button>
+  <ul
+    id="menubar-edit"
+    class="menubar__menu"
+    role="menu"
+    aria-label="<%= t("components.menubar.demo.menus.edit.label") %>"
+    hidden
+    data-stimeo--menubar-target="menu"
+  >
+    <% %w[cut copy paste].each do |action| %>
+      <li role="none">
+        <button
+          type="button"
+          class="menubar__item"
+          role="menuitem"
+          tabindex="-1"
+          data-stimeo--menubar-target="item"
+          data-action="click->stimeo--menubar#activate keydown->stimeo--menubar#onItemKeydown">
+          <%= t("components.menubar.demo.menus.edit.items.#{action}") %>
+        </button>
+      </li>
+    <% end %>
+  </ul>
+</div>

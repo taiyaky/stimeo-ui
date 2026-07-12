@@ -1,0 +1,55 @@
+<%# Markup for the context_menu demo.
+    A right-click on the region (or the ContextMenu key / Shift+F10) opens a
+    role="menu" at the pointer position. The interaction model is the same as a Menu
+    Button. The click coordinate is reflected on the menu as
+    --stimeo-context-menu-x / -y, and the Playground CSS uses it for top/left
+    placement (works even without the positioning module). %>
+<div class="context-menu" data-controller="stimeo--context-menu">
+  <div
+    class="context-menu__region"
+    data-stimeo--context-menu-target="region"
+    tabindex="0"
+    aria-haspopup="menu"
+    aria-controls="context-menu-list"
+    data-action="
+      contextmenu->stimeo--context-menu#open
+      keydown->stimeo--context-menu#onRegionKeydown">
+    <%= t("components.context_menu.demo.region") %>
+  </div>
+
+  <ul
+    class="context-menu__list"
+    id="context-menu-list"
+    role="menu"
+    aria-label="<%= t("components.context_menu.demo.label") %>"
+    data-stimeo--context-menu-target="menu"
+    hidden>
+    <li role="none">
+      <button type="button" class="context-menu__item" role="menuitem" tabindex="-1"
+              data-stimeo--context-menu-target="item"
+              data-action="
+                click->stimeo--context-menu#activate
+                keydown->stimeo--context-menu#onItemKeydown">
+        <%= t("components.context_menu.demo.copy") %>
+      </button>
+    </li>
+    <li role="none">
+      <button type="button" class="context-menu__item" role="menuitem" tabindex="-1"
+              data-stimeo--context-menu-target="item"
+              data-action="
+                click->stimeo--context-menu#activate
+                keydown->stimeo--context-menu#onItemKeydown">
+        <%= t("components.context_menu.demo.paste") %>
+      </button>
+    </li>
+    <li role="none">
+      <button type="button" class="context-menu__item" role="menuitem" tabindex="-1"
+              data-stimeo--context-menu-target="item"
+              data-action="
+                click->stimeo--context-menu#activate
+                keydown->stimeo--context-menu#onItemKeydown">
+        <%= t("components.context_menu.demo.delete") %>
+      </button>
+    </li>
+  </ul>
+</div>

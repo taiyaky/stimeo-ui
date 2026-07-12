@@ -1,0 +1,24 @@
+<%# pointer-drag: the primitive normalizes the drag lifecycle (threshold, axis
+    lock, pointer capture, touch-action, cancel) and adds a keyboard alternative.
+    With the opt-in follow value it also moves the card itself — translate on
+    move, committed on drop, restored on cancel — so the consumer JS below only
+    mirrors the signal into the status line. %>
+<div class="pointer-drag-demo">
+  <p class="pointer-drag-demo__hint"><%= t("components.pointer_drag.demo.hint") %></p>
+  <div class="pointer-drag-demo__area">
+    <button type="button" class="pointer-drag-demo__card" id="pointer-drag-card"
+            data-controller="stimeo--pointer-drag"
+            data-stimeo--pointer-drag-follow-value="true">
+      <svg class="demo-icon" viewBox="0 0 24 24" fill="currentColor" stroke="none"
+           aria-hidden="true">
+        <circle cx="9" cy="6" r="1.5"></circle><circle cx="15" cy="6" r="1.5"></circle>
+        <circle cx="9" cy="12" r="1.5"></circle><circle cx="15" cy="12" r="1.5"></circle>
+        <circle cx="9" cy="18" r="1.5"></circle><circle cx="15" cy="18" r="1.5"></circle>
+      </svg>
+      <%= t("components.pointer_drag.demo.card_label") %>
+    </button>
+  </div>
+  <p class="pointer-drag-demo__status" data-pointer-drag-status aria-live="polite"
+     data-moved-template="<%= t("components.pointer_drag.demo.moved_template") %>"
+     data-idle-text="<%= t("components.pointer_drag.demo.idle_text") %>"></p>
+</div>

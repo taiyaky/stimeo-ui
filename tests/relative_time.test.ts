@@ -4,6 +4,7 @@ import { RelativeTimeController } from "../src/controllers/relative_time_control
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link RelativeTimeController}, driven by a mocked clock:
@@ -123,7 +124,6 @@ describe("RelativeTimeController", () => {
 /** Layer ① (axe) runs under real timers, independent of the polling behavior. */
 describe("RelativeTimeController accessibility", () => {
   let application: Application;
-  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   afterEach(() => {
     application.stop();

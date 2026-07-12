@@ -1,0 +1,46 @@
+<%# Markup for the form-field demo.
+    Associates label / description / error with the control via aria-describedby /
+    aria-invalid / aria-errormessage. Showing/clearing the error uses the action
+    parameter (message) and #clearError. The look (e.g. the invalid border) switches
+    on data-stimeo--form-field-invalid and aria-invalid. %>
+<div class="form-field-demo" data-controller="stimeo--form-field"
+     data-stimeo--form-field-focus-on-error-value="true">
+  <label class="form-field-demo__label" for="ff-email">
+    <%= t("components.form_field.demo.label") %>
+  </label>
+
+  <input class="form-field-demo__control" id="ff-email" type="email" aria-invalid="false"
+         placeholder="<%= t('components.form_field.demo.placeholder') %>"
+         data-stimeo--form-field-target="control" />
+
+  <%# Helper description. On connect it's assigned an id and linked into the
+      control's aria-describedby. %>
+  <p class="form-field-demo__description" data-stimeo--form-field-target="description">
+    <%= t("components.form_field.demo.hint") %>
+  </p>
+
+  <%# Note clarifying the demo's intent (this part only wires up the error state;
+      it doesn't validate or clear the value). %>
+  <p class="form-field-demo__note"><%= t("components.form_field.demo.note") %></p>
+
+  <%# Error region. role="alert" so it's announced without moving focus. Starts hidden. %>
+  <p class="form-field-demo__error" role="alert" hidden
+     data-stimeo--form-field-target="error"></p>
+
+  <div class="form-field-demo__actions">
+    <%# setError reads the message from the action parameter (no consumer JS needed). %>
+    <button type="button" class="demo-trigger"
+            data-stimeo--form-field-message-param="<%= t('components.form_field.demo.error') %>"
+            data-action="click->stimeo--form-field#setError">
+      <%= t("components.form_field.demo.validate") %>
+    </button>
+    <button type="button" class="demo-trigger"
+            data-action="click->stimeo--form-field#clearError">
+      <%= t("components.form_field.demo.clear") %>
+    </button>
+  </div>
+
+  <%# Helper region that subscribes to the validate event to show status (updated by demo.js). %>
+  <p class="form-field-demo__status" id="ff-status" aria-live="polite"
+     data-valid-text="<%= t('components.form_field.demo.valid') %>"></p>
+</div>

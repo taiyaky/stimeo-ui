@@ -4,6 +4,7 @@ import { OverflowMenuController } from "../src/controllers/overflow_menu_control
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link OverflowMenuController}. happy-dom has no layout, so item
@@ -288,7 +289,7 @@ describe("OverflowMenuController", () => {
     document.body.innerHTML = MARKUP();
     application = Application.start();
     application.register("stimeo--overflow-menu", OverflowMenuController);
-    await new Promise((resolve) => setTimeout(resolve, 0)); // 0 width → all items in menu
+    await tick(); // 0 width → all items in menu
     await expectNoA11yViolations(root());
   });
 

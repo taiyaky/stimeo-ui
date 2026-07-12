@@ -1,0 +1,32 @@
+<%# Markup for the scroll-visibility (scroll-driven visibility toggle / GoToTop) demo.
+    The library toggles the target via hidden / data-state once the scroll source passes a
+    threshold, and toTop scrolls that source back to the top. Here the scroll source is the
+    demo's own scroll box (root points at it), so the demo is self-contained and works even
+    when the page itself does not scroll on the window. The look and transition are demo.css's.
+    Scroll inside the box and a "Back to top" button appears at the bottom-right. %>
+<div
+  class="scroll-visibility-demo"
+  data-controller="stimeo--scroll-visibility"
+  data-stimeo--scroll-visibility-root-value="#scroll-visibility-demo-scroller"
+  data-stimeo--scroll-visibility-offset-value="120"
+  data-stimeo--scroll-visibility-mode-value="offset">
+  <div id="scroll-visibility-demo-scroller" class="scroll-visibility-demo__scroller"
+       tabindex="0" role="region" aria-labelledby="scroll-visibility-demo-hint">
+    <p id="scroll-visibility-demo-hint" class="scroll-visibility-demo__hint"><%= t(
+      "components.scroll_visibility.demo.hint"
+    ) %></p>
+    <% 12.times do |i| %>
+      <p class="scroll-visibility-demo__line"><%= t(
+        "components.scroll_visibility.demo.line", number: i + 1
+      ) %></p>
+    <% end %>
+  </div>
+  <button
+    type="button"
+    class="go-to-top"
+    hidden
+    data-stimeo--scroll-visibility-target="element"
+    data-action="click->stimeo--scroll-visibility#toTop">
+    <%= t("components.scroll_visibility.demo.to_top") %>
+  </button>
+</div>

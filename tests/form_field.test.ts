@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FormFieldController } from "../src/controllers/form_field_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link FormFieldController}: the accessible association
  * substrate — `aria-describedby` composition, `aria-invalid`/`aria-errormessage`
  * toggling, the server-rendered-error reflection, and the `validate` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("FormFieldController", () => {
   let application: Application;

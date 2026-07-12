@@ -1,0 +1,23 @@
+<%# Portal demo: the card is a content target, so on connect the controller teleports it
+    out of the dashed (overflow:hidden) source box and into <body>, where demo.css floats
+    it at the viewport corner — visibly escaping the clipping ancestor. demo.js reflects
+    the mount destination into the status line. On disconnect (e.g. Turbo navigation) the
+    card is restored, leaving no orphan. The library only moves the node and sets
+    data-portaled; demo.css owns the look. %>
+<div class="portal-demo">
+  <div
+    class="portal-demo__source"
+    data-controller="stimeo--portal"
+    data-stimeo--portal-to-value="body">
+    <p class="portal-demo__hint"><%= t("components.portal.demo.hint") %></p>
+    <div class="portal-demo__card" data-stimeo--portal-target="content">
+      <%= t("components.portal.demo.card") %>
+    </div>
+  </div>
+  <p
+    class="portal-demo__status"
+    role="status"
+    data-portal-status
+    data-mounted-label="<%= t("components.portal.demo.mounted") %>"></p>
+  <p class="portal-demo__note"><%= t("components.portal.demo.note") %></p>
+</div>

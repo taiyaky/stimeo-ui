@@ -55,6 +55,11 @@ export class ConfirmController extends Controller<HTMLElement> {
   static events = ["open", "resolve"] as const;
 
   declare readonly dialogTarget: HTMLElement;
+  /**
+   * Static heading slot naming the dialog (via `aria-labelledby`). Never written
+   * by the controller — the accessible name is author-owned; only `message` and
+   * the button labels are injected per prompt.
+   */
   declare readonly titleTarget: HTMLElement;
   declare readonly messageTarget: HTMLElement;
   declare readonly confirmTarget: HTMLElement;

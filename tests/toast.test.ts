@@ -3,14 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cssTimeToMs, ToastController } from "../src/controllers/toast_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { delay, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ToastController}: verifying notifications list limits,
  * live-region status roles, timing pause/resume on hover/focus (WCAG 2.2.1), and Escape closure.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("ToastController", () => {
   let application: Application;

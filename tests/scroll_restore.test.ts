@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ScrollRestoreController } from "../src/controllers/scroll_restore_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ScrollRestoreController}: restore on connect,
@@ -12,7 +13,6 @@ import { expectNoA11yViolations } from "./helpers/a11y";
  * `sessionStorage`, element `scrollTop`/`scrollLeft`, and `requestAnimationFrame`.
  */
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 // The controller persists inside a requestAnimationFrame; waiting one frame is
 // deterministic (the persist callback was queued first, so it runs before this one)
 // and avoids a fixed timeout that could be slow or race the rAF.

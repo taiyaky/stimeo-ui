@@ -4,15 +4,13 @@ import { PasswordRevealController } from "../src/controllers/password_reveal_con
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { delay, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link PasswordRevealController}: `type` toggling,
  * `aria-pressed` sync, focus/caret preservation, optional auto re-mask, and the
  * `toggle` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("PasswordRevealController", () => {
   let application: Application;

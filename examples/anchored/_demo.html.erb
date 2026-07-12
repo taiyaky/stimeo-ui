@@ -1,0 +1,36 @@
+<%# Anchored positioning demo: the panel is positioned against the anchor button by the
+    opt-in stimeo--anchored controller (it writes only position/left/top). Choose a side
+    with the buttons — demo.js sets the placement value — and the panel mirrors the
+    resolved side via data-anchored-placement (shown through demo.css). The controller is
+    registered from the opt-in stimeo-ui/positioning subpath in demo.js; demo.css owns the
+    look. %>
+<div class="anchored-demo">
+  <p class="anchored-demo__hint"><%= t("components.anchored.demo.hint") %></p>
+  <div class="anchored-demo__controls" role="group"
+    aria-label="<%= t('components.anchored.demo.placement_label') %>">
+    <button type="button" class="demo-trigger" data-placement="top" aria-pressed="false">
+      <%= t("components.anchored.demo.placements.top") %>
+    </button>
+    <button type="button" class="demo-trigger" data-placement="right" aria-pressed="false">
+      <%= t("components.anchored.demo.placements.right") %>
+    </button>
+    <button type="button" class="demo-trigger" data-placement="bottom" aria-pressed="true">
+      <%= t("components.anchored.demo.placements.bottom") %>
+    </button>
+    <button type="button" class="demo-trigger" data-placement="left" aria-pressed="false">
+      <%= t("components.anchored.demo.placements.left") %>
+    </button>
+  </div>
+  <div class="anchored-demo__viewport">
+    <div class="anchored-demo__scope" data-controller="stimeo--anchored"
+      data-stimeo--anchored-placement-value="bottom"
+      data-stimeo--anchored-offset-value="8"
+      data-stimeo--anchored-padding-value="8">
+      <button type="button" class="demo-trigger anchored-demo__anchor"
+        data-stimeo--anchored-target="anchor">
+        <%= t("components.anchored.demo.anchor") %>
+      </button>
+      <div class="anchored-demo__floating" data-stimeo--anchored-target="floating"></div>
+    </div>
+  </div>
+</div>

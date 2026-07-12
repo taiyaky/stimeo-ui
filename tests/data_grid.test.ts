@@ -3,14 +3,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DataGridController } from "../src/controllers/data_grid_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link DataGridController}: the APG Grid contract —
  * `aria-sort` cycling with the `sort` event, single/multiple row selection with
  * `aria-selected` and `selectionchange`, and roving keyboard cell navigation.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (selection = "none") => `
   <table data-controller="stimeo--data-grid" role="grid" aria-label="Users"

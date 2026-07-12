@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HighlightController } from "../src/controllers/highlight_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link HighlightController}, driven by a mocked clock: the
@@ -166,7 +167,7 @@ describe("HighlightController", () => {
       '<ul data-controller="stimeo--highlight" data-stimeo--highlight-observe-value="true"><li>a</li></ul>';
     application = Application.start();
     application.register("stimeo--highlight", HighlightController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     await expectNoA11yViolations(root());
   });
 });

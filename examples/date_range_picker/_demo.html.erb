@@ -1,0 +1,62 @@
+<%# Markup for the date-range-picker (range-selection calendar) demo.
+    stimeo--date-range-picker derives from calendar and handles two-point start/end
+    selection, a provisional range preview mid-selection, marking in-range cells,
+    auto-swapping when start > end, applying presets, and grid keyboard movement
+    (roving). Range ends are shown with aria-selected and the inside with data-in-range;
+    placement and styling live in demo.css. %>
+<div class="drp demo-card" data-controller="stimeo--date-range-picker">
+  <div class="drp__header">
+    <button class="drp__nav" type="button"
+            data-action="click->stimeo--date-range-picker#prev"
+            aria-label="<%= t("components.date_range_picker.demo.prev_month") %>">‹</button>
+    <span class="drp__label" id="drp-month" aria-live="polite"
+          data-stimeo--date-range-picker-target="monthLabel"></span>
+    <button class="drp__nav" type="button"
+            data-action="click->stimeo--date-range-picker#next"
+            aria-label="<%= t("components.date_range_picker.demo.next_month") %>">›</button>
+  </div>
+
+  <div class="drp__weekdays" aria-hidden="true">
+    <% t("components.date_range_picker.demo.weekdays").each do |day| %>
+      <span class="drp__weekday"><%= day %></span>
+    <% end %>
+  </div>
+
+  <div class="drp__grid" role="grid" aria-labelledby="drp-month"
+       data-stimeo--date-range-picker-target="grid">
+    <% 6.times do %>
+      <div class="drp__row" role="row">
+        <% 7.times do %>
+          <button class="drp__cell" type="button" role="gridcell" tabindex="-1"
+                  data-stimeo--date-range-picker-target="cell"
+                  data-action="click->stimeo--date-range-picker#selectDate
+                               mouseenter->stimeo--date-range-picker#previewTo
+                               focus->stimeo--date-range-picker#previewTo
+                               keydown->stimeo--date-range-picker#onKeydown"></button>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+
+  <div class="drp__presets" role="group"
+       aria-label="<%= t("components.date_range_picker.demo.presets_label") %>">
+    <button class="drp__preset" type="button" data-range="today"
+            data-action="click->stimeo--date-range-picker#applyPreset">
+      <%= t("components.date_range_picker.demo.preset_today") %>
+    </button>
+    <button class="drp__preset" type="button" data-range="last7"
+            data-action="click->stimeo--date-range-picker#applyPreset">
+      <%= t("components.date_range_picker.demo.preset_last7") %>
+    </button>
+    <button class="drp__preset" type="button" data-range="thisMonth"
+            data-action="click->stimeo--date-range-picker#applyPreset">
+      <%= t("components.date_range_picker.demo.preset_this_month") %>
+    </button>
+  </div>
+
+  <span class="drp__status" role="status" aria-live="polite"
+        data-stimeo--date-range-picker-target="status"></span>
+
+  <input type="hidden" name="start_date" data-stimeo--date-range-picker-target="startField" />
+  <input type="hidden" name="end_date" data-stimeo--date-range-picker-target="endField" />
+</div>

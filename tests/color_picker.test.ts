@@ -3,14 +3,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ColorPickerController } from "../src/controllers/color_picker_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ColorPickerController}: per-channel APG Slider
  * values, HSL↔hex two-way sync, the `--stimeo-color` custom property, the hidden
  * field mirror, `aria-valuetext`, and the `change` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (attrs = "", { alpha = false } = {}) => `
   <div data-controller="stimeo--color-picker" ${attrs}>
@@ -182,18 +181,7 @@ describe("ColorPickerController", () => {
   it("sets a channel from a pointer press on the slider", async () => {
     await start('data-stimeo--color-picker-value-value="#000000"');
     const hue = slider("hue");
-    hue.getBoundingClientRect = () =>
-      ({
-        left: 0,
-        width: 360,
-        top: 0,
-        height: 10,
-        right: 360,
-        bottom: 10,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    hue.getBoundingClientRect = () => new DOMRect(0, 0, 360, 10);
     hue.dispatchEvent(new PointerEvent("pointerdown", { clientX: 180, bubbles: true }));
     expect(slider("hue").getAttribute("aria-valuenow")).toBe("180");
   });
@@ -205,18 +193,7 @@ describe("ColorPickerController", () => {
       "stimeo--color-picker",
     ) as ColorPickerController;
     const hue = slider("hue");
-    hue.getBoundingClientRect = () =>
-      ({
-        left: 0,
-        width: 360,
-        top: 0,
-        height: 10,
-        right: 360,
-        bottom: 10,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    hue.getBoundingClientRect = () => new DOMRect(0, 0, 360, 10);
     hue.dispatchEvent(new PointerEvent("pointerdown", { clientX: 180, bubbles: true }));
     expect(slider("hue").getAttribute("aria-valuenow")).toBe("180");
 

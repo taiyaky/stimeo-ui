@@ -1,0 +1,40 @@
+<%# Markup for the breadcrumb demo.
+    The APG structure (nav + ol + aria-current="page") lives in the markup; the
+    library only handles the responsive behavior of collapsing middle items into a
+    "…" disclosure button when width runs short. Separators are drawn by demo.css's
+    ::after. %>
+<nav
+  class="breadcrumb"
+  data-controller="stimeo--breadcrumb"
+  aria-label="<%= t("components.breadcrumb.demo.label") %>">
+  <ol class="breadcrumb__list" data-stimeo--breadcrumb-target="list">
+    <li class="breadcrumb__item">
+      <a href="#"><%= t("components.breadcrumb.demo.home") %></a>
+    </li>
+    <li class="breadcrumb__item" data-stimeo--breadcrumb-target="ellipsis" hidden>
+      <button
+        type="button"
+        class="breadcrumb__ellipsis"
+        aria-expanded="false"
+        aria-controls="breadcrumb-collapsed"
+        aria-label="<%= t("components.breadcrumb.demo.expand") %>"
+        data-stimeo--breadcrumb-target="trigger"
+        data-action="click->stimeo--breadcrumb#toggle">…</button>
+    </li>
+    <li
+      class="breadcrumb__item"
+      id="breadcrumb-collapsed"
+      data-stimeo--breadcrumb-target="collapsible">
+      <a href="#"><%= t("components.breadcrumb.demo.section") %></a>
+    </li>
+    <li class="breadcrumb__item" data-stimeo--breadcrumb-target="collapsible">
+      <a href="#"><%= t("components.breadcrumb.demo.subsection") %></a>
+    </li>
+    <li class="breadcrumb__item" data-stimeo--breadcrumb-target="collapsible">
+      <a href="#"><%= t("components.breadcrumb.demo.category") %></a>
+    </li>
+    <li class="breadcrumb__item">
+      <a href="#" aria-current="page"><%= t("components.breadcrumb.demo.current") %></a>
+    </li>
+  </ol>
+</nav>

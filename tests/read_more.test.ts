@@ -4,6 +4,7 @@ import { ReadMoreController } from "../src/controllers/read_more_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { byId, query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ReadMoreController}: the borrowed Disclosure
@@ -13,8 +14,6 @@ import { captureSpeech } from "./helpers/speech";
  * happy-dom returns 0 for `scrollHeight` / `clientHeight`, so overflow is
  * simulated by stubbing those getters on the content element.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /** Stubs the content box so `scrollHeight > clientHeight` reflects `overflowing`. */
 function stubOverflow(element: HTMLElement, overflowing: boolean): void {

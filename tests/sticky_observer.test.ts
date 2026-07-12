@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StickyObserverController } from "../src/controllers/sticky_observer_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { delay, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link StickyObserverController}: the sentinel
@@ -12,9 +13,6 @@ import { captureSpeech } from "./helpers/speech";
  * `IntersectionObserver` is mocked so sentinel intersection can be driven
  * synchronously (happy-dom has no layout/scroll).
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("StickyObserverController", () => {
   let application: Application;

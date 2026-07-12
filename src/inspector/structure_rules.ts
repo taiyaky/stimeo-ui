@@ -84,9 +84,14 @@ export const structureRules: StructureRules = {
   "stimeo--idle": {},
   // No required targets: the hidden `unmask` field is optional.
   "stimeo--input-mask": {},
+  // No required targets: the controller observes its own element.
+  "stimeo--intersection": {},
   // No targets: the controller element is the <turbo-frame> it lazy-loads.
   "stimeo--lazy-frame": {},
   "stimeo--listbox": { requiredTargets: ["trigger", "list", "option"] },
+  // Opt-in cable controller. No required targets: without `value` the element
+  // itself displays the count.
+  "stimeo--live-counter": {},
   // No targets: formats the controller element (the <time>) itself from `datetime`.
   "stimeo--local-time": {},
   "stimeo--masonry": { requiredTargets: ["item"] },
@@ -96,6 +101,9 @@ export const structureRules: StructureRules = {
   "stimeo--navigation-menu": { requiredTargets: ["trigger", "panel"] },
   "stimeo--nested-form": { requiredTargets: ["list", "template"] },
   "stimeo--number-input": { requiredTargets: ["input"] },
+  // No required targets: show/hide are both optional (the data-optimistic hook
+  // and commit/rollback events work alone).
+  "stimeo--optimistic": {},
   "stimeo--otp": { requiredTargets: ["field"] },
   "stimeo--overflow-indicator": { requiredTargets: ["viewport"] },
   "stimeo--overflow-menu": { requiredTargets: ["items", "more"] },
@@ -105,9 +113,15 @@ export const structureRules: StructureRules = {
   "stimeo--password-strength": { requiredTargets: ["input", "meter"] },
   // No required targets: `field` is optional (defaults to the form's named controls).
   "stimeo--persist": {},
+  // No required targets: without a `handle`, the element itself is the drag handle.
+  "stimeo--pointer-drag": {},
   "stimeo--popover": { requiredTargets: ["trigger", "panel"] },
   // No required targets: `content` is optional (defaults to the controller element).
   "stimeo--portal": {},
+  // Opt-in cable controller. No required targets: the data-present hooks and the
+  // join/leave/change events work without any roster rendering (count/list/template
+  // are all optional presentation channels).
+  "stimeo--presence": {},
   // No targets: guards the controller element itself based on the global preview state.
   "stimeo--preview-guard": {},
   "stimeo--radio-group": { requiredTargets: ["radio"] },
@@ -123,6 +137,11 @@ export const structureRules: StructureRules = {
   "stimeo--scrollspy": { requiredTargets: ["link"] },
   "stimeo--separator": {},
   "stimeo--slider": { requiredTargets: ["track", "thumb"] },
+  // No required targets: the controller element is the header itself.
+  "stimeo--smart-sticky-header": {},
+  // `list` and `status` are optional (element fallback / silent mode); the items are
+  // what a reorderable list genuinely cannot exist without.
+  "stimeo--sortable": { requiredTargets: ["item"] },
   "stimeo--step-indicator": { requiredTargets: ["step"] },
   "stimeo--stepper": { requiredTargets: ["step"] },
   // No required targets: `content` is optional (defaults to the scroll container).
@@ -145,4 +164,7 @@ export const structureRules: StructureRules = {
   // No targets: stages enter/leave classes on the controller element itself.
   "stimeo--transition": {},
   "stimeo--tree-view": { requiredTargets: ["item"] },
+  // Opt-in cable controller. No required targets: the input listener is delegated
+  // on the element (any descendant input works) and the status live region is optional.
+  "stimeo--typing-indicator": {},
 };

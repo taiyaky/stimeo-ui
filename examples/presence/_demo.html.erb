@@ -1,0 +1,38 @@
+<%# presence: a who's-here roster with zero server state. Each client beacons
+    { id, name } through PresenceChannel on a heartbeat; every client expires
+    silent peers locally and re-announces itself to newcomers, so the roster
+    converges in one round trip. Your own beacons are ignored (echo
+    suppression), so open this page in a second tab to see a peer appear — then
+    close it or navigate it away for the leave notice (sent best-effort on
+    disconnect and pagehide); a lost notice is caught by the timeout expiry. The id/name
+    pair is randomized per render, which is fine for a demo; a real app renders
+    current_user.id / current_user.name. The count templates (data-zero/-one/
+    -other) keep the text localizable; %{count} is substituted by the
+    controller. Heartbeat/timeout are shortened so leaving is quick to observe. %>
+<% token = SecureRandom.hex(4) %>
+<% guest = t("components.presence.demo.guest_name", token: token.first(4)) %>
+<div class="presence-demo"
+     data-controller="stimeo--presence"
+     data-stimeo--presence-channel-value="PresenceChannel"
+     data-stimeo--presence-params-value='{"room":"<%= PresenceChannel::ROOM %>"}'
+     data-stimeo--presence-id-value="<%= token %>"
+     data-stimeo--presence-name-value="<%= guest %>"
+     data-stimeo--presence-heartbeat-value="5000"
+     data-stimeo--presence-timeout-value="12000">
+  <p class="presence-demo__hint"><%= t("components.presence.demo.hint") %></p>
+  <p class="presence-demo__you"><%= t("components.presence.demo.you_are", name: guest) %></p>
+  <p class="presence-demo__count"
+     data-stimeo--presence-target="count"
+     data-zero="<%= t("components.presence.demo.count_zero") %>"
+     data-one="<%= t("components.presence.demo.count_one") %>"
+     data-other="<%= t("components.presence.demo.count_other") %>"></p>
+  <ul class="presence-demo__list"
+      aria-label="<%= t("components.presence.demo.list_label") %>"
+      data-stimeo--presence-target="list"></ul>
+  <template data-stimeo--presence-target="template">
+    <li class="presence-demo__peer">
+      <span class="presence-demo__dot" aria-hidden="true"></span>
+      <span data-presence-name></span>
+    </li>
+  </template>
+</div>

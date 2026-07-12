@@ -4,15 +4,13 @@ import { ClipboardController } from "../src/controllers/clipboard_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { delay, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ClipboardController}: copy execution against a
  * mocked Clipboard API, success/failure `data-state`, the live-region notice,
  * its auto-clear, and the `copy` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("ClipboardController", () => {
   let application: Application;

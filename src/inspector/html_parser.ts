@@ -22,6 +22,15 @@ export interface ParsedAttr {
   readonly line: number;
   /** 1-based column of the attribute name. */
   readonly column: number;
+  /**
+   * Absolute source offset where the value text begins (inside the quotes);
+   * absent for boolean attributes. ERB neutralization preserves offsets, so a
+   * consumer can map the range back onto the *raw* source — this is how the
+   * checker tells an authored value from a dynamically-generated one.
+   */
+  readonly valueStart?: number;
+  /** Absolute source offset just past the value text; see {@link valueStart}. */
+  readonly valueEnd?: number;
 }
 
 /** An element node in the lenient tree. */
@@ -182,6 +191,8 @@ export function parseHtml(source: string): ElementNode {
       }
 
       let attrValue = "";
+      let valueStart: number | undefined;
+      let valueEnd: number | undefined;
       // Optional value.
       let k = j;
       while (k < len && WHITESPACE.has(ch(k))) k++;
@@ -194,11 +205,15 @@ export function parseHtml(source: string): ElementNode {
           const valStart = k;
           while (k < len && ch(k) !== quote) k++;
           attrValue = source.slice(valStart, k);
+          valueStart = valStart;
+          valueEnd = k;
           k++; // skip closing quote
         } else {
           const valStart = k;
           while (k < len && !WHITESPACE.has(ch(k)) && ch(k) !== ">") k++;
           attrValue = source.slice(valStart, k);
+          valueStart = valStart;
+          valueEnd = k;
         }
         j = k;
       }
@@ -210,6 +225,8 @@ export function parseHtml(source: string): ElementNode {
           value: attrValue,
           line: p.line,
           column: p.column,
+          valueStart,
+          valueEnd,
         });
       }
     }

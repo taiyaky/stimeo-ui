@@ -4,6 +4,7 @@ import { CollapsibleController } from "../src/controllers/collapsible_controller
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link CollapsibleController}: the APG Disclosure contract
@@ -14,8 +15,6 @@ import { captureSpeech } from "./helpers/speech";
  * `hidden` synchronously (the transition branch is exercised separately by the
  * real-browser layer).
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("CollapsibleController", () => {
   let application: Application;

@@ -4,6 +4,7 @@ import { ContextMenuController } from "../src/controllers/context_menu_controlle
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ContextMenuController}: contextmenu/keyboard
@@ -40,7 +41,7 @@ describe("ContextMenuController", () => {
       </main>`;
     application = Application.start();
     application.register("stimeo--context-menu", ContextMenuController);
-    await Promise.resolve();
+    await tick();
   };
 
   beforeEach(() => start());
@@ -190,7 +191,7 @@ describe("ContextMenuController disabled items", () => {
       </main>`;
     application = Application.start();
     application.register("stimeo--context-menu", ContextMenuController);
-    await Promise.resolve();
+    await tick();
   });
 
   afterEach(() => {
@@ -255,7 +256,7 @@ describe("ContextMenuController accessibility", () => {
       </main>`;
     application = Application.start();
     application.register("stimeo--context-menu", ContextMenuController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
   };
 
   afterEach(() => {

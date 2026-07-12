@@ -4,6 +4,7 @@ import { FlashController } from "../src/controllers/flash_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link FlashController}, driven by a mocked clock: type → role
@@ -224,7 +225,7 @@ describe("FlashController", () => {
     );
     application = Application.start();
     application.register("stimeo--flash", FlashController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     await expectNoA11yViolations(root());
   });
 
@@ -238,7 +239,7 @@ describe("FlashController", () => {
     );
     application = Application.start();
     application.register("stimeo--flash", FlashController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     const live = regionEl().firstElementChild as HTMLElement;
     expect(await captureSpeech({ container: live, steps: 1 })).toEqual(["status", "Saved"]);
   });

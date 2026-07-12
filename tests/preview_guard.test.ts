@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PreviewGuardController } from "../src/controllers/preview_guard_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link PreviewGuardController}: hide/show driven by the
@@ -10,7 +11,6 @@ import { query } from "./helpers/dom";
  * mode, connecting mid-preview, and observer/restore teardown.
  */
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const startPreview = () => document.documentElement.setAttribute("data-turbo-preview", "");
 const endPreview = () => document.documentElement.removeAttribute("data-turbo-preview");
 

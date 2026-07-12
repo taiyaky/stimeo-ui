@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { DetachGate } from "../utils/detach_gate";
 
 /**
  * Teleport bookkeeping keyed by the controller element (stable across the
@@ -34,7 +35,11 @@ const portalState = new WeakMap<Element, { node: HTMLElement; placeholder: Comme
  * in-place source, so its `disconnect()` fires when the original container is replaced
  * and the teleported node is restored/removed rather than orphaned under `body`. The
  * move is idempotent (guarded by the placeholder) and reversed on `disconnect()` (Turbo
- * navigation included).
+ * navigation included). The "in-page move vs real detach" split on `disconnect()` is
+ * `DetachGate` (`src/utils/detach_gate.ts`); in the `content` form the source element
+ * may even leave a scoped application's observed root and the content is still
+ * restored, while the no-`content` form teleporting itself out of the observed root is
+ * fire-and-forget by design (see `disconnect()`).
  */
 export class PortalController extends Controller<HTMLElement> {
   static override targets = ["content"];
@@ -52,7 +57,13 @@ export class PortalController extends Controller<HTMLElement> {
   declare positionValue: string;
   declare restoreValue: boolean;
 
+  /** Decides whether a `disconnect()` is an in-page move or a real detach. */
+  readonly #gate = new DetachGate();
+
   override connect(): void {
+    // A reconnect proves an in-page move of the source element: disarm the
+    // probe the mid-move disconnect() deferred (see disconnect).
+    this.#gate.cancel();
     if (portalState.has(this.element)) return; // already portaled here (idempotent)
     const node = this.hasContentTarget ? this.contentTarget : this.element;
     const destination = this.#destination();
@@ -72,14 +83,35 @@ export class PortalController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
-    // Moving the controller element (the no-`content` form) makes some runtimes re-emit
-    // disconnect/connect. That spurious churn is recognisable: the element is still in the
-    // document AND still carries this identifier (Stimulus will reconnect immediately), so
-    // ignore it. A genuine teardown — the element left the DOM, or `data-controller` no
-    // longer lists us (e.g. a Turbo 8 morph) — must still restore/remove the teleport.
-    if (this.element.isConnected && this.#stillControlled()) return;
     const state = portalState.get(this.element);
     if (!state) return;
+    if (state.node === this.element) {
+      // No-`content` form: the teleported node IS the controller element, so the
+      // teleport itself may exit a scoped application's observed root — the controller
+      // doing its job, not a detach. A probe-driven restore would re-enter the root,
+      // reconnect, re-teleport and disconnect again, forever. So an ambiguous
+      // disconnect (in the document, identifier still listed — also the churn a
+      // self-move emits in some runtimes) KEEPS the teleport, and only a definite
+      // detach — the element left the DOM, or `data-controller` no longer lists us
+      // (a Turbo 8 morph) — restores. The cost, by design: a teleport that left the
+      // observed root is fire-and-forget (Stimulus never fires for it again).
+      if (!DetachGate.isDetached(this)) return;
+      this.#restore(state);
+      return;
+    }
+    // `content` form: the controller element stays put, so its own teleport emits no
+    // churn — an ambiguous disconnect means the SOURCE element moved. In-page, the
+    // same-batch reconnect cancels the probe and the teleport survives; out of the
+    // observed root, no reconnect comes and the probe restores, so the content is
+    // never stranded at the destination with a dead owner.
+    this.#gate.disconnected(this, () => {
+      const current = portalState.get(this.element);
+      if (current) this.#restore(current);
+    });
+  }
+
+  /** Returns the node to its placeholder (or removes it) and clears the bookkeeping. */
+  #restore(state: { node: HTMLElement; placeholder: Comment }): void {
     portalState.delete(this.element);
     const { node, placeholder } = state;
 
@@ -91,12 +123,6 @@ export class PortalController extends Controller<HTMLElement> {
     }
     placeholder.remove();
     this.dispatch("unmount", { detail: {} });
-  }
-
-  /** True while `data-controller` still lists this identifier (spurious-churn signal). */
-  #stillControlled(): boolean {
-    const tokens = (this.element.getAttribute("data-controller") ?? "").split(/\s+/);
-    return tokens.includes(this.identifier);
   }
 
   /** Resolves the destination for `to`, tolerating an invalid selector. */

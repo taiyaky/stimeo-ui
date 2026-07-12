@@ -3,15 +3,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PortalController } from "../src/controllers/portal_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link PortalController}: the teleport on connect with a comment
  * placeholder, append / prepend positioning, custom destinations, restore-on-disconnect
- * (and removal when restore is off), invalid-destination tolerance, and the
- * mount / unmount events.
+ * (and removal when restore is off), invalid-destination tolerance, the mount / unmount
+ * events, and the "in-page move vs real detach" discrimination (DetachGate) — including
+ * the scoped-application observed-root cases on both markup forms.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("PortalController", () => {
   let application: Application;
@@ -139,6 +139,88 @@ describe("PortalController", () => {
     await tick();
     expect(content().parentElement?.id).toBe("src"); // restored to its placeholder
     expect(content().hasAttribute("data-portaled")).toBe(false);
+  });
+
+  it("keeps the teleport when the source element moves within the page", async () => {
+    setup(
+      `<div id="dest"></div>
+       <div id="elsewhere"></div>
+       <div id="src" data-controller="stimeo--portal" data-stimeo--portal-to-value="#dest">
+         <div data-stimeo--portal-target="content" id="c">hi</div>
+       </div>`,
+    );
+    await start();
+    const source = src();
+    const node = content();
+    expect(node.parentElement?.id).toBe("dest");
+
+    // An in-page move disconnects and reconnects the SAME instance in one mutation
+    // batch: the reconnect cancels the teardown probe and the teleport survives.
+    query("#elsewhere").appendChild(source);
+    await tick();
+    expect(node.parentElement?.id).toBe("dest"); // still teleported
+    expect(hasComment(source)).toBe(true); // placeholder still marks the original spot
+
+    source.remove(); // and a later real detach still restores
+    await tick();
+    expect(node.parentElement).toBe(source);
+    expect(node.hasAttribute("data-portaled")).toBe(false);
+  });
+
+  it("restores the content when the source leaves a scoped application's observed root", async () => {
+    // A scoped Application.start(root) stops observing an element that moves out of
+    // `root`: `data-controller` stays but no reconnect ever comes, so the synchronous
+    // token check cannot see this detach. The DetachGate probe must fire and restore,
+    // or the content is stranded at the destination with a dead owner.
+    setup(
+      `<div id="scope">
+         <div id="dest"></div>
+         <div id="src" data-controller="stimeo--portal" data-stimeo--portal-to-value="#dest">
+           <div data-stimeo--portal-target="content" id="c">hi</div>
+         </div>
+       </div>
+       <div id="outside"></div>`,
+    );
+    application = Application.start(query("#scope"));
+    application.register("stimeo--portal", PortalController);
+    await tick();
+    const source = src();
+    const node = content();
+    expect(node.parentElement?.id).toBe("dest");
+    const unmounts: number[] = [];
+    source.addEventListener("stimeo--portal:unmount", () => unmounts.push(1));
+
+    query("#outside").appendChild(source); // exits the observed root: no reconnect
+    await tick();
+    expect(node.parentElement).toBe(source); // restored, not stranded in #dest
+    expect(node.hasAttribute("data-portaled")).toBe(false);
+    expect(query("#dest").children.length).toBe(0);
+    expect(unmounts).toEqual([1]);
+  });
+
+  it("keeps a no-content teleport that exits a scoped application's observed root", async () => {
+    // The no-`content` form teleports the controller element ITSELF, so a destination
+    // outside the scoped root makes the teleport exit observation as its normal job.
+    // Restoring on that ambiguous disconnect would re-enter the root, reconnect,
+    // re-teleport, and disconnect again — forever — so the teleport is deliberately
+    // kept (fire-and-forget; see the controller's disconnect()).
+    setup(
+      `<div id="dest"></div>
+       <div id="scope">
+         <div id="wrap">
+           <div id="src" data-controller="stimeo--portal" data-stimeo--portal-to-value="#dest">x</div>
+         </div>
+       </div>`,
+    );
+    application = Application.start(query("#scope"));
+    application.register("stimeo--portal", PortalController);
+    await tick();
+    expect(src().parentElement?.id).toBe("dest"); // teleport done
+
+    await tick(); // any (wrongly) armed probe has long settled: the teleport must hold
+    expect(src().parentElement?.id).toBe("dest");
+    expect(src().getAttribute("data-portaled")).toBe("true");
+    expect(hasComment(query("#wrap"))).toBe(true); // bookkeeping persists by design
   });
 
   it("removes the node instead of restoring when restore is false", async () => {

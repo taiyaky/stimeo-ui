@@ -4,6 +4,7 @@ import { SkeletonController } from "../src/controllers/skeleton_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link SkeletonController}: the initial loading state,
@@ -124,7 +125,6 @@ describe("SkeletonController", () => {
 /** Layer ① (axe) runs under real timers, independent of the timing behavior. */
 describe("SkeletonController accessibility", () => {
   let application: Application;
-  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   afterEach(() => {
     application.stop();

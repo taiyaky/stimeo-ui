@@ -1,0 +1,47 @@
+<%# Markup for the skeleton (skeleton toggle control) demo.
+    Initially the skeleton is shown, the real content hidden, and aria-busy="true". On
+    ready it swaps and sets aria-busy="false". The skeleton is decorative
+    (aria-hidden="true"). A minimum display time prevents flicker.
+    The Load / Reset buttons sit outside the busy card (so aria-busy stays scoped to the
+    loading region, not the controls), so they drive it through events the controller
+    listens for (see demo.js): Load fires content:ready — the same signal a consumer
+    dispatches when their real content arrives — and Reset returns it to loading. A
+    Stimulus data-action on the buttons would not bind, since actions only wire up
+    within the controller's own element. %>
+<div class="skeleton-demo">
+  <div class="skeleton-demo__controls">
+    <button
+      class="demo-trigger"
+      type="button"
+      data-skeleton-load>
+      <%= t("components.skeleton.demo.load") %>
+    </button>
+    <button
+      class="demo-trigger"
+      type="button"
+      data-skeleton-reset>
+      <%= t("components.skeleton.demo.reset") %>
+    </button>
+  </div>
+
+  <div
+    class="skeleton-card"
+    data-controller="stimeo--skeleton"
+    aria-busy="true"
+    data-stimeo--skeleton-min-duration-value="400"
+    data-action="content:ready->stimeo--skeleton#ready skeleton:reset->stimeo--skeleton#reset">
+    <div
+      class="skeleton"
+      aria-hidden="true"
+      data-stimeo--skeleton-target="placeholder">
+      <span class="skeleton__line skeleton__line--title"></span>
+      <span class="skeleton__line"></span>
+      <span class="skeleton__line skeleton__line--short"></span>
+    </div>
+
+    <div class="skeleton-content" hidden data-stimeo--skeleton-target="content">
+      <h3 class="skeleton-content__title"><%= t("components.skeleton.demo.title") %></h3>
+      <p><%= t("components.skeleton.demo.body") %></p>
+    </div>
+  </div>
+</div>

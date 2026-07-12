@@ -1,0 +1,41 @@
+<%# Markup for the tabs (APG Tabs / automatic activation) demo.
+    stimeo--tabs provides aria-selected, roving tabindex, arrow-key switching, and panel
+    visibility control. The initially selected tab has aria-selected="true" and
+    non-selected panels carry hidden (to prevent SSR flicker). %>
+<div class="tabs" data-controller="stimeo--tabs">
+  <div class="tabs__list" role="tablist" aria-label="<%= t("components.tabs.demo.label") %>"
+       data-stimeo--tabs-target="list">
+    <button class="tabs__tab" role="tab" id="tab-overview" aria-controls="panel-overview"
+            aria-selected="true"
+            data-stimeo--tabs-target="tab"
+            data-action="click->stimeo--tabs#select
+                         keydown->stimeo--tabs#onKeydown"><%= t(
+              "components.tabs.demo.overview"
+            ) %></button>
+    <button class="tabs__tab" role="tab" id="tab-profile" aria-controls="panel-profile"
+            aria-selected="false" tabindex="-1"
+            data-stimeo--tabs-target="tab"
+            data-action="click->stimeo--tabs#select
+                         keydown->stimeo--tabs#onKeydown"><%= t(
+              "components.tabs.demo.profile"
+            ) %></button>
+    <button class="tabs__tab" role="tab" id="tab-billing" aria-controls="panel-billing"
+            aria-selected="false" tabindex="-1"
+            data-stimeo--tabs-target="tab"
+            data-action="click->stimeo--tabs#select
+                         keydown->stimeo--tabs#onKeydown"><%= t(
+              "components.tabs.demo.billing"
+            ) %></button>
+  </div>
+
+  <div class="tabs__panel" role="tabpanel" id="panel-overview" aria-labelledby="tab-overview"
+       data-stimeo--tabs-target="panel"><%= t("components.tabs.demo.overview_content") %></div>
+  <div class="tabs__panel" role="tabpanel" id="panel-profile" aria-labelledby="tab-profile"
+       data-stimeo--tabs-target="panel" hidden><%= t(
+         "components.tabs.demo.profile_content"
+       ) %></div>
+  <div class="tabs__panel" role="tabpanel" id="panel-billing" aria-labelledby="tab-billing"
+       data-stimeo--tabs-target="panel" hidden><%= t(
+         "components.tabs.demo.billing_content"
+       ) %></div>
+</div>

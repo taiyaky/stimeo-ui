@@ -4,6 +4,7 @@ import { BulkSelectController } from "../src/controllers/bulk_select_controller"
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link BulkSelectController}: item/select-all linkage,
@@ -11,8 +12,6 @@ import { captureSpeech } from "./helpers/speech";
  * mode, delegation for dynamically-added rows, Turbo-idempotent connect, the
  * announce hook, focus preservation, and teardown.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("BulkSelectController", () => {
   let application: Application;

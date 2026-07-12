@@ -1,0 +1,30 @@
+<%# Markup for the clipboard (copy & completion feedback) demo.
+    Copies via navigator.clipboard and announces completion in a role="status" live
+    region. For localization the completion messages are passed via the copied-label /
+    error-label Values. The look per data-state (idle / copied / error) lives in demo.css. %>
+<div
+  class="clipboard"
+  data-controller="stimeo--clipboard"
+  data-stimeo--clipboard-feedback-duration-value="2000"
+  data-stimeo--clipboard-copied-label-value="<%= t('components.clipboard.demo.copied') %>"
+  data-stimeo--clipboard-error-label-value="<%= t('components.clipboard.demo.error') %>">
+  <input
+    class="clipboard__source"
+    type="text"
+    readonly
+    aria-label="<%= t('components.clipboard.demo.source_label') %>"
+    value="https://stimeo.example/share/abc123"
+    data-stimeo--clipboard-target="source">
+  <button
+    class="clipboard__button"
+    type="button"
+    data-stimeo--clipboard-target="button"
+    data-action="click->stimeo--clipboard#copy">
+    <%= t("components.clipboard.demo.button") %>
+  </button>
+  <span
+    class="clipboard__feedback"
+    role="status"
+    aria-live="polite"
+    data-stimeo--clipboard-target="feedback"></span>
+</div>

@@ -1,0 +1,32 @@
+<%# Stick-to-bottom demo: the scrollable log follows new messages while you're at the
+    bottom, but holds and shows the "new messages" jump button if you've scrolled up. This
+    catalog has no Action Cable / Turbo Stream, so the Add button appends a <li> — exactly
+    the mutation a Turbo Stream broadcast would make — and the controller reacts. The jump
+    button lives inside the log (a descendant, wired with a plain data-action) and CSS
+    reveals it only while data-has-new. demo.js starts the log scrolled to the bottom. The
+    library only follows/flags and reflects data-pinned / data-has-new; demo.css owns the look. %>
+<div class="stb-demo">
+  <div
+    class="stb-demo__log"
+    data-controller="stimeo--stick-to-bottom"
+    data-stimeo--stick-to-bottom-behavior-value="smooth">
+    <ul class="stb-demo__messages" data-stimeo--stick-to-bottom-target="content">
+      <% (1..8).each do |i| %>
+        <li><%= t("components.stick_to_bottom.demo.message") %> <%= i %></li>
+      <% end %>
+    </ul>
+    <button
+      type="button"
+      class="stb-demo__jump"
+      data-action="click->stimeo--stick-to-bottom#scrollToBottom">
+      <%= t("components.stick_to_bottom.demo.jump") %>
+    </button>
+  </div>
+  <button
+    type="button"
+    class="demo-trigger"
+    data-stb-demo-add
+    data-message-label="<%= t("components.stick_to_bottom.demo.message") %>">
+    <%= t("components.stick_to_bottom.demo.add") %>
+  </button>
+</div>

@@ -1,0 +1,29 @@
+<%# Roving tabindex demo: the toolbar is a single Tab stop. Tab in once, then the
+    arrow keys move focus (and the tab stop) between buttons; Home/End jump to the ends
+    and movement wraps (the defaults). role="toolbar" + the accessible name are the
+    consumer's — the library owns only tabindex + focus movement, so this is "build your
+    own toolbar with the roving primitive". The buttons are plain actions; demo.css owns
+    the look. %>
+<div class="roving-demo">
+  <p class="roving-demo__hint"><%= t("components.roving.demo.hint") %></p>
+  <div class="roving-demo__group" role="toolbar"
+    aria-label="<%= t('components.roving.demo.group_label') %>"
+    data-controller="stimeo--roving"
+    data-stimeo--roving-orientation-value="both">
+    <button type="button" class="demo-trigger" data-stimeo--roving-target="item">
+      <%= t("components.roving.demo.items.previous") %>
+    </button>
+    <button type="button" class="demo-trigger" data-stimeo--roving-target="item">
+      <%= t("components.roving.demo.items.play") %>
+    </button>
+    <button type="button" class="demo-trigger" data-stimeo--roving-target="item">
+      <%= t("components.roving.demo.items.next") %>
+    </button>
+    <button type="button" class="demo-trigger" data-stimeo--roving-target="item">
+      <%= t("components.roving.demo.items.shuffle") %>
+    </button>
+    <button type="button" class="demo-trigger" data-stimeo--roving-target="item">
+      <%= t("components.roving.demo.items.repeat") %>
+    </button>
+  </div>
+</div>

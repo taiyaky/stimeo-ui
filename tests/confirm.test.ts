@@ -4,15 +4,14 @@ import { ConfirmController } from "../src/controllers/confirm_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ConfirmController}: the Turbo confirm-hook swap and
  * restore, Promise resolution on confirm/cancel/Escape, message + label injection,
- * the open/resolve events, the click-interception `request` mode, and the
- * no-dialog native fallback.
+ * the open/resolve events, the click-interception `request` mode, the single-dialog
+ * re-prompt rule, and the no-dialog native fallback.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 interface TurboStub {
   config: { forms: { confirm?: (message: string, element?: HTMLElement) => unknown } };
@@ -105,6 +104,26 @@ describe("ConfirmController", () => {
     expect(document.activeElement).not.toBe(opener);
   });
 
+  it("releases the global keydown listener on disconnect", async () => {
+    await start(DIALOG);
+    document.body.insertAdjacentHTML("afterbegin", `<button id="opener">Open</button>`);
+    const opener = query<HTMLButtonElement>("#opener");
+    turboConfirm()("Delete?");
+
+    const controller = application.getControllerForElementAndIdentifier(
+      query("[data-controller='stimeo--confirm']"),
+      "stimeo--confirm",
+    ) as ConfirmController;
+    controller.disconnect();
+
+    // Escape cannot probe the leak here: disconnect already settled the pending
+    // confirmation, so a leaked handler would no-op on Escape anyway. A leaked trap
+    // WOULD still yank outside focus back into the dialog on Tab — assert it doesn't.
+    opener.focus();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    expect(document.activeElement).toBe(opener);
+  });
+
   it("opens the dialog with the message and resolves true on confirm", async () => {
     await start(DIALOG);
     const promise = turboConfirm()("Delete this item?");
@@ -130,6 +149,12 @@ describe("ConfirmController", () => {
     await expect(promise).resolves.toBe(false);
   });
 
+  it("places initial focus on the cancel button by default (least destructive)", async () => {
+    await start(DIALOG);
+    turboConfirm()("Sure?");
+    expect(document.activeElement).toBe(cancelBtn());
+  });
+
   it("places initial focus on the confirm button when initialFocus is confirm", async () => {
     await start(`
       <div data-controller="stimeo--confirm" data-stimeo--confirm-initial-focus-value="confirm">
@@ -143,6 +168,14 @@ describe("ConfirmController", () => {
       </div>`);
     turboConfirm()("Sure?");
     expect(document.activeElement).toBe(confirmBtn());
+  });
+
+  it("traps Tab focus from the last focusable back to the first", async () => {
+    await start(DIALOG);
+    turboConfirm()("Sure?");
+    confirmBtn().focus();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    expect(document.activeElement).toBe(cancelBtn());
   });
 
   it("injects the configured confirm/cancel labels", async () => {
@@ -176,6 +209,32 @@ describe("ConfirmController", () => {
     turboConfirm()("Hi");
     confirmBtn().click();
     expect(events).toEqual(["open:Hi", "resolve:true"]);
+  });
+
+  it("dispatches resolve with confirmed:false on cancel and on Escape", async () => {
+    await start(DIALOG);
+    const outcomes: boolean[] = [];
+    const root = query("[data-controller='stimeo--confirm']");
+    root.addEventListener("stimeo--confirm:resolve", (e) => {
+      outcomes.push((e as CustomEvent<{ confirmed: boolean }>).detail.confirmed);
+    });
+    turboConfirm()("First?");
+    cancelBtn().click();
+    turboConfirm()("Second?");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(outcomes).toEqual([false, false]);
+  });
+
+  it("a second prompt cancels the first and keeps a single dialog", async () => {
+    await start(DIALOG);
+    const first = turboConfirm()("First?");
+    const second = turboConfirm()("Second?");
+    // The first confirmation settles as cancelled; the dialog stays open on the second.
+    await expect(first).resolves.toBe(false);
+    expect(dialog().hidden).toBe(false);
+    expect(message().textContent).toBe("Second?");
+    confirmBtn().click();
+    await expect(second).resolves.toBe(true);
   });
 
   it("intercepts a form submit via request and continues only when confirmed", async () => {

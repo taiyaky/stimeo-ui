@@ -4,6 +4,7 @@ import { CountdownController } from "../src/controllers/countdown_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link CountdownController}, driven by a mocked clock:
@@ -264,7 +265,6 @@ describe("CountdownController", () => {
  */
 describe("CountdownController accessibility", () => {
   let application: Application;
-  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   const startReal = async () => {
     const deadline = new Date(Date.now() + 3_600_000).toISOString();

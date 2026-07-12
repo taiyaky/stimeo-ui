@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { IntersectionWatcher } from "../utils/intersection_watcher";
 
 /**
  * Headless **Sticky State Observer**: detects whether a `position: sticky`
@@ -43,42 +44,30 @@ export class StickyObserverController extends Controller<HTMLElement> {
   declare rootSelectorValue: string;
   declare offsetValue: number;
 
-  #observer: IntersectionObserver | null = null;
-  /** Guards against a queued callback mutating state after teardown. */
-  #active = false;
+  /** Shared IO plumbing (support guard, root resolution, active guard). */
+  readonly #watcher = new IntersectionWatcher((entries) => this.#onIntersect(entries));
   /** Last reported stuck state, so `change` fires only on transitions. */
   #stuck: boolean | null = null;
 
-  readonly #onIntersect = (entries: IntersectionObserverEntry[]): void => {
-    if (!this.#active) return;
+  #onIntersect(entries: IntersectionObserverEntry[]): void {
     const entry = entries[entries.length - 1];
     if (!entry) return;
     // The sentinel sits above the sticky element; once it is no longer
     // intersecting the (top-inset) root, the sticky element has stuck.
     this.#setStuck(!entry.isIntersecting);
-  };
+  }
 
   override connect(): void {
     if (!this.hasSentinelTarget) return;
-    this.#active = true;
-
-    if (typeof IntersectionObserver === "undefined") return;
-    const root = this.rootSelectorValue
-      ? document.querySelector<HTMLElement>(this.rootSelectorValue)
-      : null;
-
-    this.#observer = new IntersectionObserver(this.#onIntersect, {
-      root,
+    this.#watcher.start(this.sentinelTarget, {
+      rootSelector: this.rootSelectorValue,
       rootMargin: `-${this.offsetValue}px 0px 0px 0px`,
       threshold: [0],
     });
-    this.#observer.observe(this.sentinelTarget);
   }
 
   override disconnect(): void {
-    this.#active = false;
-    this.#observer?.disconnect();
-    this.#observer = null;
+    this.#watcher.stop();
     this.#stuck = null;
   }
 

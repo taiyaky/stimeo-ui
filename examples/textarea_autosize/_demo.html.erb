@@ -1,0 +1,16 @@
+<%# Textarea autosize demo: type and the field grows to fit, up to maxRows (then it
+    scrolls). The controller sets the element's inline height from scrollHeight and
+    toggles data-at-max-rows at the cap; it listens for input itself, so no consumer
+    JS is needed. This demo only sets the textarea's base look. %>
+<div class="textarea-autosize-demo">
+  <label class="textarea-autosize-demo__label" for="ta-autosize">
+    <%= t("components.textarea_autosize.demo.label") %>
+  </label>
+  <textarea
+    id="ta-autosize"
+    class="textarea-autosize-demo__field"
+    rows="2"
+    placeholder="<%= t('components.textarea_autosize.demo.placeholder') %>"
+    data-controller="stimeo--textarea-autosize"
+    data-stimeo--textarea-autosize-max-rows-value="8"></textarea>
+</div>

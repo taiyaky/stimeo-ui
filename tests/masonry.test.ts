@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MasonryController } from "../src/controllers/masonry_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link MasonryController}: responsive column count derived
@@ -11,22 +12,9 @@ import { captureSpeech } from "./helpers/speech";
  * — that DOM (reading/focus) order is never reordered (WCAG 1.3.2).
  */
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-
 /** Stubs an element's box so column math runs without a real layout engine. */
 const stubWidth = (element: HTMLElement, width: number) => {
-  element.getBoundingClientRect = () =>
-    ({
-      width,
-      height: 0,
-      left: 0,
-      top: 0,
-      right: width,
-      bottom: 0,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    }) as DOMRect;
+  element.getBoundingClientRect = () => new DOMRect(0, 0, width, 0);
 };
 
 const markup = (count: number, attrs = "") => `
@@ -90,18 +78,7 @@ describe("MasonryController", () => {
     // dispatched on the item reaches the root's capture listener without mutating
     // the DOM (so the MutationObserver is not what re-packs here).
     const tall = items()[0] as HTMLElement;
-    tall.getBoundingClientRect = () =>
-      ({
-        width: 0,
-        height: 200,
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 200,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    tall.getBoundingClientRect = () => new DOMRect(0, 0, 0, 200);
     tall.dispatchEvent(new Event("load"));
 
     expect(items().map((item) => item.getAttribute("data-column"))).toEqual(["0", "1", "1"]);

@@ -1,0 +1,28 @@
+<%# intersection: the primitive turns viewport visibility into events and hooks.
+    No consumer JS here — everything visible is pure CSS reacting to the hooks the
+    controller flips: data-intersecting (in/out), data-passed (scrolled past the
+    top), and the --stimeo--intersection-ratio custom property (the fill bar).
+    ratioSteps makes the ratio update smoothly while scrolling. %>
+<div class="intersection-demo">
+  <p class="intersection-demo__hint"><%= t("components.intersection.demo.hint") %></p>
+  <div class="intersection-demo__viewport" id="intersection-viewport" role="region" tabindex="0"
+       aria-label="<%= t('components.intersection.demo.viewport_label') %>">
+    <p class="intersection-demo__filler"><%= t("components.intersection.demo.before") %></p>
+    <div class="intersection-demo__box"
+         data-controller="stimeo--intersection"
+         data-stimeo--intersection-root-selector-value="#intersection-viewport"
+         data-stimeo--intersection-ratio-steps-value="20">
+      <span class="intersection-demo__state intersection-demo__state--in">
+        <%= t("components.intersection.demo.state_visible") %>
+      </span>
+      <span class="intersection-demo__state intersection-demo__state--out">
+        <%= t("components.intersection.demo.state_hidden") %>
+      </span>
+      <span class="intersection-demo__state intersection-demo__state--passed">
+        <%= t("components.intersection.demo.state_passed") %>
+      </span>
+      <span class="intersection-demo__ratio" aria-hidden="true"></span>
+    </div>
+    <p class="intersection-demo__filler"><%= t("components.intersection.demo.after") %></p>
+  </div>
+</div>

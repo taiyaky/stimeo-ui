@@ -3,13 +3,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AccordionController } from "../src/controllers/accordion_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link AccordionController}: per-header `aria-expanded`
  * toggling, independent (multiple-open) panels, and header focus navigation.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("AccordionController", () => {
   let application: Application;

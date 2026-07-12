@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NumberInputController } from "../src/controllers/number_input_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link NumberInputController}: the APG Spinbutton contract
  * — step increment/decrement, range clamping and step snapping, PageUp/PageDown,
  * Home/End, bound-disabled buttons, focus retention, and the `change` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("NumberInputController", () => {
   let application: Application;

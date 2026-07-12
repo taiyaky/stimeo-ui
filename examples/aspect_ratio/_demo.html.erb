@@ -1,0 +1,29 @@
+<%# Markup for the aspect-ratio demo.
+    The library only supplies the ratio Value as the --stimeo-aspect-ratio custom
+    property; demo.css does the actual ratio rendering
+    (aspect-ratio: var(--stimeo-aspect-ratio)). %>
+<div class="aspect-ratio-demo">
+  <figure class="aspect-ratio-demo__item">
+    <div class="ratio-box" data-controller="stimeo--aspect-ratio"
+         data-stimeo--aspect-ratio-ratio-value="16/9">
+      <div class="ratio-box__content" data-stimeo--aspect-ratio-target="content">16 / 9</div>
+    </div>
+    <figcaption><%= t("components.aspect_ratio.demo.wide") %></figcaption>
+  </figure>
+
+  <figure class="aspect-ratio-demo__item">
+    <div class="ratio-box" data-controller="stimeo--aspect-ratio"
+         data-stimeo--aspect-ratio-ratio-value="1/1">
+      <div class="ratio-box__content" data-stimeo--aspect-ratio-target="content">1 / 1</div>
+    </div>
+    <figcaption><%= t("components.aspect_ratio.demo.square") %></figcaption>
+  </figure>
+
+  <figure class="aspect-ratio-demo__item">
+    <div class="ratio-box" data-controller="stimeo--aspect-ratio"
+         data-stimeo--aspect-ratio-ratio-value="3/4">
+      <div class="ratio-box__content" data-stimeo--aspect-ratio-target="content">3 / 4</div>
+    </div>
+    <figcaption><%= t("components.aspect_ratio.demo.portrait") %></figcaption>
+  </figure>
+</div>

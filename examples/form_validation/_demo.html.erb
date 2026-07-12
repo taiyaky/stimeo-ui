@@ -1,0 +1,77 @@
+<%# Markup for the form-validation demo.
+    stimeo--form-validation orchestrates WHEN native constraint validation runs
+    (submit / blur / change / input) and routes each control's validationMessage
+    into its stimeo--form-field error region — the ARIA wiring stays in form-field.
+    Rules are plain markup attributes (required, type="email"); message text comes
+    from the browser. The plan listbox joins through a validatable mirror:
+    <input type="text" hidden required> — the hidden ATTRIBUTE, not type="hidden",
+    which is barred from constraint validation. The authored novalidate keeps the
+    no-JS fallback graceful (the controller preserves it). Valid submissions are
+    kept on the page by demo.js so the catalog can show a success status. %>
+<form class="form-validation-demo" action="#" method="get" novalidate
+      data-controller="stimeo--form-validation"
+      data-stimeo--form-validation-stimeo--form-field-outlet=".form-validation-demo__field">
+
+  <div class="form-validation-demo__field" data-controller="stimeo--form-field">
+    <label class="form-validation-demo__label" for="fv-email">
+      <%= t("components.form_validation.demo.email_label") %>
+    </label>
+    <input class="form-validation-demo__control" id="fv-email" name="email" type="email"
+           required placeholder="<%= t('components.form_validation.demo.email_placeholder') %>"
+           data-stimeo--form-field-target="control" />
+    <p class="form-validation-demo__error" role="alert" hidden
+       data-stimeo--form-field-target="error"></p>
+  </div>
+
+  <%# The listbox keeps its committed value in the mirror below. The form-field
+      control is the visible trigger, so aria-invalid and invalid focus land there. %>
+  <div class="form-validation-demo__field listbox"
+       data-controller="stimeo--form-field stimeo--listbox">
+    <span id="fv-plan-label" class="form-validation-demo__label">
+      <%= t("components.form_validation.demo.plan_label") %>
+    </span>
+    <button
+      type="button"
+      class="listbox__trigger"
+      role="combobox"
+      aria-haspopup="listbox"
+      aria-expanded="false"
+      aria-controls="fv-plan-options"
+      aria-labelledby="fv-plan-label fv-plan-value"
+      data-stimeo--listbox-target="trigger"
+      data-stimeo--form-field-target="control"
+      data-action="click->stimeo--listbox#toggle keydown->stimeo--listbox#onTriggerKeydown">
+      <span id="fv-plan-value" data-stimeo--listbox-target="value">
+        <%= t("components.form_validation.demo.plan_placeholder") %>
+      </span>
+      <span class="listbox__chevron" aria-hidden="true">▾</span>
+    </button>
+    <ul id="fv-plan-options" class="listbox__list" role="listbox"
+        aria-labelledby="fv-plan-label" hidden data-stimeo--listbox-target="list">
+      <% %w[free pro team].each_with_index do |plan, index| %>
+        <li id="fv-plan-opt-<%= index %>" class="listbox__option" role="option"
+            aria-selected="false" data-value="<%= plan %>"
+            data-stimeo--listbox-target="option"
+            data-action="click->stimeo--listbox#select">
+          <%= t("components.form_validation.demo.plans.#{plan}") %>
+        </li>
+      <% end %>
+    </ul>
+    <%# Validatable mirror: the hidden attribute participates in constraint
+        validation and submits with the form — type="hidden" would do neither. %>
+    <input type="text" hidden required name="plan" data-stimeo--listbox-target="field" />
+    <p class="form-validation-demo__error" role="alert" hidden
+       data-stimeo--form-field-target="error"></p>
+  </div>
+
+  <p class="form-validation-demo__note"><%= t("components.form_validation.demo.note") %></p>
+
+  <button type="submit" class="demo-trigger">
+    <%= t("components.form_validation.demo.submit") %>
+  </button>
+
+  <%# Status line updated by demo.js; templates ride data-* so the copy stays bilingual. %>
+  <p class="form-validation-demo__status" id="fv-status" aria-live="polite"
+     data-valid-text="<%= t('components.form_validation.demo.valid_status') %>"
+     data-invalid-template="<%= t('components.form_validation.demo.invalid_template') %>"></p>
+</form>

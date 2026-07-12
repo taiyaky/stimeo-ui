@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CarouselController } from "../src/controllers/carousel_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link CarouselController}: the APG tabbed Carousel — slide
@@ -63,7 +64,7 @@ describe("CarouselController", () => {
     document.body.innerHTML = markup(attrs);
     application = Application.start();
     application.register("stimeo--carousel", CarouselController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
   };
 
   beforeEach(() => {

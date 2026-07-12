@@ -1,0 +1,53 @@
+<%# Markup for the color-picker demo.
+    The library manages each channel's (hue / saturation / lightness) role="slider"
+    value, composes them into a color two-way-synced with the hex input, and updates
+    --stimeo-color for the preview. The 2D palette is decomposed into independent 1D
+    sliders for accessibility. Thumb position and look are the consumer's CSS. %>
+<div
+  class="color-picker"
+  data-controller="stimeo--color-picker"
+  data-stimeo--color-picker-value-value="#3366cc">
+  <div
+    class="color-picker__preview"
+    data-stimeo--color-picker-target="preview"
+    aria-hidden="true"></div>
+
+  <div class="color-picker__channels">
+    <% { hue: [t("components.color_picker.demo.hue"), 360, 210],
+         saturation: [t("components.color_picker.demo.saturation"), 100, 60],
+         lightness: [t("components.color_picker.demo.lightness"), 100, 50] }
+       .each do |channel, (label, max, now)| %>
+      <div class="color-picker__channel">
+        <span class="color-picker__channel-label"><%= label %></span>
+        <div
+          class="color-picker__track color-picker__track--<%= channel %>"
+          role="slider"
+          aria-label="<%= label %>"
+          data-channel="<%= channel %>"
+          tabindex="0"
+          aria-valuemin="0"
+          aria-valuemax="<%= max %>"
+          aria-valuenow="<%= now %>"
+          data-stimeo--color-picker-target="slider"
+          data-action="
+            keydown->stimeo--color-picker#onKeydown
+            pointerdown->stimeo--color-picker#onPointerDown">
+          <span class="color-picker__thumb" aria-hidden="true"></span>
+        </div>
+      </div>
+    <% end %>
+  </div>
+
+  <label class="color-picker__hex">
+    <span><%= t("components.color_picker.demo.hex") %></span>
+    <input
+      type="text"
+      inputmode="text"
+      aria-label="<%= t("components.color_picker.demo.hex") %>"
+      value="#3366cc"
+      data-stimeo--color-picker-target="hex"
+      data-action="change->stimeo--color-picker#onHexInput" />
+  </label>
+
+  <input type="hidden" name="brand_color" data-stimeo--color-picker-target="field" />
+</div>

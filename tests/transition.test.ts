@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TransitionController } from "../src/controllers/transition_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link TransitionController}: the enter/leave class staging,
@@ -193,7 +194,7 @@ describe("TransitionController", () => {
     document.body.innerHTML = `<div data-controller="stimeo--transition" ${ATTRS}>content</div>`;
     application = Application.start();
     application.register("stimeo--transition", TransitionController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     await expectNoA11yViolations(el());
   });
 });

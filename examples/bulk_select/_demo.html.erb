@@ -1,0 +1,65 @@
+<%# Markup for the bulk-select / batch action bar demo.
+    The controller links the select-all box to the rows (with indeterminate), reveals
+    the sticky bar once one or more rows are selected, keeps the count, and announces
+    it through the bar's own aria-live region. Row changes are handled by delegation,
+    so the "Add row" button (demo.js) works without per-row wiring. %>
+<%# Sample rows come from the locale file so the table reads in the page language. %>
+<%
+  rows = t("components.bulk_select.demo.rows")
+%>
+<div class="bulk-demo" data-controller="stimeo--bulk-select"
+     data-stimeo--bulk-select-total-count-value="42">
+  <table class="bulk-demo__table">
+    <thead>
+      <tr>
+        <th scope="col">
+          <input type="checkbox" data-stimeo--bulk-select-target="all"
+                 aria-label="<%= t("components.bulk_select.demo.select_all") %>">
+        </th>
+        <th scope="col"><%= t("components.bulk_select.demo.col_name") %></th>
+        <th scope="col"><%= t("components.bulk_select.demo.col_role") %></th>
+      </tr>
+    </thead>
+    <tbody data-bulk-demo="rows">
+      <% rows.each do |row| %>
+        <% row_label = t("components.bulk_select.demo.select_row", name: row[:name]) %>
+        <tr>
+          <td>
+            <input type="checkbox" data-stimeo--bulk-select-target="item"
+                   aria-label="<%= row_label %>">
+          </td>
+          <td><%= row[:name] %></td>
+          <td><%= row[:role] %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+
+  <%# Localized templates for demo.js's appended rows ({n} = row number, {name} = the
+      generated name), so dynamically-added rows match the page locale too. %>
+  <button class="demo-trigger" type="button" data-bulk-demo="add"
+          data-bulk-add-name="<%= t("components.bulk_select.demo.add_name_template") %>"
+          data-bulk-add-role="<%= t("components.bulk_select.demo.add_role") %>"
+          data-bulk-add-label="<%= t("components.bulk_select.demo.add_row_label") %>">
+    <%= t("components.bulk_select.demo.add_row") %>
+  </button>
+
+  <%# Sticky batch action bar: its aria-live region announces the count. %>
+  <div class="bulk-demo__bar" data-stimeo--bulk-select-target="bar" hidden
+       role="toolbar" aria-live="polite"
+       aria-label="<%= t("components.bulk_select.demo.bar_label") %>">
+    <span class="bulk-demo__count">
+      <span data-stimeo--bulk-select-target="count">0</span>
+      <%= t("components.bulk_select.demo.selected_suffix") %>
+    </span>
+    <button class="demo-trigger" type="button"
+            data-stimeo--bulk-select-target="selectAllPages"
+            data-action="click->stimeo--bulk-select#selectAllPages">
+      <%= t("components.bulk_select.demo.select_all_pages") %>
+    </button>
+    <button class="demo-trigger" type="button"
+            data-action="click->stimeo--bulk-select#clear">
+      <%= t("components.bulk_select.demo.clear") %>
+    </button>
+  </div>
+</div>

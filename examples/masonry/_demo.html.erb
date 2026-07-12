@@ -1,0 +1,41 @@
+<%# Markup for the masonry (tiled grid) demo.
+    The library computes the column count from the container width and min-column-width,
+    and updates --stimeo-masonry-columns and each item's data-column. The look (CSS
+    multi-column) is the consumer's CSS; reading/focus order stays in DOM order. %>
+<div
+  class="masonry-demo"
+  data-controller="stimeo--masonry"
+  data-stimeo--masonry-min-column-width-value="180"
+  data-stimeo--masonry-gap-value="12">
+  <div class="masonry-demo__item" data-stimeo--masonry-target="item">
+    <h3 class="masonry-demo__title"><%= t("components.masonry.demo.cards.short.title") %></h3>
+    <p><%= t("components.masonry.demo.cards.short.body") %></p>
+  </div>
+  <div class="masonry-demo__item" data-stimeo--masonry-target="item">
+    <h3 class="masonry-demo__title"><%= t("components.masonry.demo.cards.tall.title") %></h3>
+    <p><%= t("components.masonry.demo.cards.tall.body") %></p>
+    <p><%= t("components.masonry.demo.cards.tall.body") %></p>
+  </div>
+  <div class="masonry-demo__item" data-stimeo--masonry-target="item">
+    <h3 class="masonry-demo__title"><%= t("components.masonry.demo.cards.medium.title") %></h3>
+    <p><%= t("components.masonry.demo.cards.medium.body") %></p>
+  </div>
+  <div class="masonry-demo__item" data-stimeo--masonry-target="item">
+    <h3 class="masonry-demo__title"><%= t("components.masonry.demo.cards.short.title") %></h3>
+    <p><%= t("components.masonry.demo.cards.short.body") %></p>
+  </div>
+  <div class="masonry-demo__item" data-stimeo--masonry-target="item">
+    <h3 class="masonry-demo__title"><%= t("components.masonry.demo.cards.tall.title") %></h3>
+    <p><%= t("components.masonry.demo.cards.tall.body") %></p>
+    <p><%= t("components.masonry.demo.cards.medium.body") %></p>
+  </div>
+  <div class="masonry-demo__item" data-stimeo--masonry-target="item">
+    <h3 class="masonry-demo__title"><%= t("components.masonry.demo.cards.medium.title") %></h3>
+    <p><%= t("components.masonry.demo.cards.medium.body") %></p>
+  </div>
+</div>
+<p
+  class="masonry-demo__status"
+  data-masonry-status
+  data-template="<%= t("components.masonry.demo.status_template") %>"
+  aria-live="polite"></p>

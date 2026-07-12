@@ -1,0 +1,47 @@
+<%# Overflow-menu demo: drag the width slider to shrink the toolbar — the controller
+    measures the items and banks the lowest-priority ones into the More menu (delegated
+    to stimeo--menu), moving them back as space returns. Items carry the Menu item
+    data-action up front; it stays inert in the bar (no stimeo--menu ancestor there) and
+    activates once an item is banked into the More menu. The library moves items and sets
+    data-overflowing / data-overflow-count; demo.css owns the look. %>
+<div class="overflow-demo">
+  <label class="overflow-demo__width">
+    <span><%= t("components.overflow_menu.demo.width") %></span>
+    <input type="range" min="220" max="640" value="640" data-overflow-demo-width>
+  </label>
+
+  <div
+    class="overflow-demo__bar"
+    data-controller="stimeo--overflow-menu"
+    role="toolbar"
+    aria-label="<%= t("components.overflow_menu.name") %>">
+    <div class="overflow-demo__items" data-stimeo--overflow-menu-target="items">
+      <% %w[save edit share archive delete].each_with_index do |id, i| %>
+        <button
+          type="button"
+          class="overflow-demo__item"
+          <%= "data-priority=\"#{i + 1}\"".html_safe if i < 3 %>
+          data-action="click->stimeo--menu#activate keydown->stimeo--menu#onItemKeydown">
+          <%= t("components.overflow_menu.demo.#{id}") %>
+        </button>
+      <% end %>
+    </div>
+
+    <div
+      class="overflow-demo__more"
+      data-controller="stimeo--menu"
+      data-stimeo--overflow-menu-target="more"
+      hidden>
+      <button
+        type="button"
+        class="overflow-demo__trigger"
+        aria-haspopup="menu"
+        aria-expanded="false"
+        data-stimeo--menu-target="trigger"
+        data-action="click->stimeo--menu#toggle keydown->stimeo--menu#onTriggerKeydown">
+        <%= t("components.overflow_menu.demo.more") %>
+      </button>
+      <ul class="overflow-demo__menu" role="menu" data-stimeo--menu-target="menu" hidden></ul>
+    </div>
+  </div>
+</div>

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RovingController } from "../src/controllers/roving_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link RovingController}: the single tab stop and its
@@ -10,8 +11,6 @@ import { query } from "./helpers/dom";
  * orientation, wrap/clamp, Home/End, the `focusin` sync for click/programmatic
  * focus, the `change` event, dynamic items, and listener teardown.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("RovingController", () => {
   let application: Application;
@@ -147,6 +146,20 @@ describe("RovingController", () => {
     arrow("#a", "End"); // last is now D
     expect(document.activeElement).toBe(query("#d"));
     expect(query("#d").tabIndex).toBe(0);
+  });
+
+  it("yields arrows a descendant widget already claimed (defaultPrevented)", async () => {
+    // Composition contract: a grabbed stimeo--pointer-drag handle consumes the
+    // arrows (preventDefault) to move an item; roving must not also move focus.
+    await mount();
+    const claimed = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    claimed.preventDefault();
+    query("#a").dispatchEvent(claimed);
+    expect(tabindexes()).toEqual([0, -1, -1]); // tab stop did not move
   });
 
   it("removes its listeners on disconnect", async () => {

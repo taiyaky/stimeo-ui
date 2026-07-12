@@ -4,14 +4,13 @@ import { ProgressController } from "../src/controllers/progress_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ProgressController}: ARIA value-attribute sync,
  * `--stimeo-progress-ratio`, the indeterminate state, and the change/complete
  * events.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("ProgressController", () => {
   let application: Application;

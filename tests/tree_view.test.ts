@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TreeViewController } from "../src/controllers/tree_view_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link TreeViewController}: visible-item navigation,
  * expand/collapse and parent/child movement, Home/End, typeahead, single
  * selection, roving tabindex, and the `select`/`toggle` events.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const item = (label: string, attrs: string, children = "") => `
   <li role="treeitem" ${attrs}

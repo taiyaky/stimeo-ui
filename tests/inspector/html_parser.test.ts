@@ -39,6 +39,15 @@ describe("parseHtml", () => {
     expect(attrs[1]?.value).toBe("text");
   });
 
+  it("records absolute value offsets (and none for boolean attributes)", () => {
+    const source = `<div id="x" hidden data=y>`;
+    const attrs = parseHtml(source).children[0]?.attrs ?? [];
+    const [id, hidden, data] = attrs;
+    expect(source.slice(id?.valueStart, id?.valueEnd)).toBe("x");
+    expect(hidden?.valueStart).toBeUndefined();
+    expect(source.slice(data?.valueStart, data?.valueEnd)).toBe("y");
+  });
+
   it("treats void elements as childless", () => {
     const root = parseHtml("<ul><br><li></li></ul>");
     const ul = root.children[0];

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { cableControllers } from "../../src/cable";
 import { stimeoControllers } from "../../src/index";
 import { a11yRules } from "../../src/inspector/a11y_rules";
+import { compositionRules } from "../../src/inspector/composition_rules";
+import { keyboardRules } from "../../src/inspector/keyboard_rules";
+import { managedAriaRules } from "../../src/inspector/managed_aria_rules";
 import { buildManifest, SCHEMA_VERSION } from "../../src/inspector/manifest";
 import { structureRules } from "../../src/inspector/structure_rules";
 import { positioningControllers } from "../../src/positioning";
@@ -8,17 +12,29 @@ import { positioningControllers } from "../../src/positioning";
 /** Tests for the reflection-based manifest generator. */
 describe("buildManifest", () => {
   const manifest = buildManifest("1.2.3");
-  // The manifest reflects both the zero-dep core and the opt-in positioning
-  // controllers (so `stimeo check` recognizes e.g. stimeo--anchored).
-  const allControllers = { ...stimeoControllers, ...positioningControllers };
+  // The manifest reflects the zero-dep core plus the opt-in positioning and
+  // cable (server-bound) controllers (so `stimeo check` recognizes e.g.
+  // stimeo--anchored and stimeo--typing-indicator).
+  const allControllers = { ...stimeoControllers, ...positioningControllers, ...cableControllers };
 
   it("stamps schema and package versions", () => {
     expect(manifest.schemaVersion).toBe(SCHEMA_VERSION);
     expect(manifest.packageVersion).toBe("1.2.3");
   });
 
-  it("includes every official controller identifier (core + opt-in positioning)", () => {
-    expect(Object.keys(manifest.controllers).sort()).toEqual(Object.keys(allControllers).sort());
+  it("includes every official core + opt-in positioning controller identifier", () => {
+    // The private build may reflect additional opt-in controllers that the public npm
+    // mirror strips, so assert the manifest is a *superset* of core + positioning here
+    // rather than an exact match.
+    expect(Object.keys(manifest.controllers)).toEqual(
+      expect.arrayContaining(Object.keys(allControllers)),
+    );
+  });
+
+  it("reflects the opt-in cable controllers (e.g. stimeo--typing-indicator)", () => {
+    const typing = manifest.controllers["stimeo--typing-indicator"];
+    expect(typing?.targets).toEqual(["input", "status"]);
+    expect(typing?.events).toEqual(["change"]);
   });
 
   it("reflects the opt-in positioning controllers (e.g. stimeo--anchored)", () => {
@@ -86,8 +102,10 @@ describe("buildManifest", () => {
   });
 
   it("only writes a11y rules for known controllers", () => {
+    // Cable controllers carry a11y rules too (e.g. typing-indicator's status
+    // live region), so the domain is core + opt-ins, not the core alone.
     for (const id of Object.keys(a11yRules)) {
-      expect(stimeoControllers).toHaveProperty(id);
+      expect(allControllers).toHaveProperty(id);
     }
   });
 
@@ -100,5 +118,110 @@ describe("buildManifest", () => {
         expect(req.suggestion.length).toBeGreaterThan(0);
       }
     }
+  });
+
+  it("merges premium a11y rules when the premium track is present", () => {
+    // The public mirror strips src/premium/ (open-core boundary), so guard on
+    // the identifier instead of importing the premium barrel — this spec must
+    // stay valid in both repos (same superset stance as the identifier test).
+    const feed = manifest.controllers["stimeo--feed"];
+    if (!feed) return;
+    expect(feed.a11y.map((req) => `${req.target}:${req.attrs.join("/")}`)).toEqual([
+      "feed:role",
+      "article:aria-labelledby/aria-label",
+    ]);
+  });
+
+  it("merges hand-written keyboard rules, defaulting to [] when undeclared", () => {
+    const slider = manifest.controllers["stimeo--slider"]?.keyboard ?? [];
+    expect(slider.map((req) => `${req.target}:${req.reach}`)).toEqual(["thumb:tab"]);
+    // Roving menu items are reached via programmatic focus (reach:"focus").
+    const menu = manifest.controllers["stimeo--menu"]?.keyboard ?? [];
+    expect(menu.map((req) => `${req.target}:${req.reach}`)).toEqual(["item:focus"]);
+    // Roving composites initialize tabindex on connect, so they carry no rule.
+    expect(manifest.controllers["stimeo--tabs"]?.keyboard).toEqual([]);
+  });
+
+  it("merges hand-written managed-aria rules, defaulting to [] when undeclared", () => {
+    const combobox = manifest.controllers["stimeo--combobox"]?.managedAria ?? [];
+    expect(combobox.map((rule) => `${rule.target}:${rule.attrs.join("/")}`)).toEqual([
+      "input:aria-activedescendant",
+    ]);
+    expect(manifest.controllers["stimeo--switch"]?.managedAria).toEqual([]);
+  });
+
+  it("declares keyboard / managed-aria rules on targets the controller understands", () => {
+    for (const entry of Object.values(manifest.controllers)) {
+      for (const req of entry.keyboard) {
+        expect(entry.targets).toContain(req.target);
+        expect(req.suggestion.length).toBeGreaterThan(0);
+      }
+      for (const rule of entry.managedAria) {
+        if (rule.target !== "") expect(entry.targets).toContain(rule.target);
+        expect(rule.attrs.length).toBeGreaterThan(0);
+        expect(rule.suggestion.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("only writes keyboard / managed-aria / composition rules for known controllers", () => {
+    for (const id of [
+      ...Object.keys(keyboardRules),
+      ...Object.keys(managedAriaRules),
+      ...Object.keys(compositionRules),
+    ]) {
+      expect(stimeoControllers).toHaveProperty(id);
+    }
+  });
+
+  it("merges hand-written composition rules, defaulting to [] when undeclared", () => {
+    const sortable = manifest.controllers["stimeo--sortable"]?.compositions ?? [];
+    expect(sortable.map((r) => `${r.target}:${r.coController}:${r.require.value}`)).toEqual([
+      "list:stimeo--roving:orientation",
+      "list:stimeo--roving:orientation",
+      "item:stimeo--pointer-drag:axis",
+      "item:stimeo--pointer-drag:axis",
+    ]);
+    expect(manifest.controllers["stimeo--switch"]?.compositions).toEqual([]);
+  });
+
+  it("declares composition rules both sides actually understand", () => {
+    for (const entry of Object.values(manifest.controllers)) {
+      for (const rule of entry.compositions) {
+        if (rule.target !== "") expect(entry.targets).toContain(rule.target);
+        expect(manifest.controllers).toHaveProperty(rule.coController);
+        if (rule.when) expect(entry.values).toContain(rule.when.value);
+        expect(manifest.controllers[rule.coController]?.values).toContain(rule.require.value);
+        expect(rule.require.oneOf.length).toBeGreaterThan(0);
+        expect(rule.suggestion.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("keeps composition-rule defaults in sync with the controllers' static values", () => {
+    // Composition rules duplicate each side's `static values` default (the
+    // engine needs them to judge *absent* attributes); this pins them to the
+    // implementation so a changed controller default cannot silently rot the
+    // rule — the drift the rules exist to prevent.
+    const valueDefault = (ctor: unknown, name: string): unknown =>
+      (ctor as { values?: Record<string, { default?: unknown }> }).values?.[name]?.default;
+    for (const [hostId, rules] of Object.entries(compositionRules)) {
+      const host = allControllers[hostId as keyof typeof allControllers];
+      expect(host, `unknown host ${hostId}`).toBeDefined();
+      for (const rule of rules) {
+        const companion = allControllers[rule.coController as keyof typeof allControllers];
+        expect(companion, `unknown companion ${rule.coController}`).toBeDefined();
+        if (rule.when) expect(valueDefault(host, rule.when.value)).toBe(rule.when.default);
+        expect(valueDefault(companion, rule.require.value)).toBe(rule.require.default);
+      }
+    }
+  });
+
+  it("merges premium managed-aria rules when the premium track is present", () => {
+    const feed = manifest.controllers["stimeo--feed"];
+    if (!feed) return;
+    expect(feed.managedAria.map((rule) => `${rule.target}:${rule.attrs.join("/")}`)).toEqual([
+      "article:aria-posinset/aria-setsize",
+    ]);
   });
 });

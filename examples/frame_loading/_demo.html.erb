@@ -1,0 +1,32 @@
+<%# Frame-loading demo: the controller subscribes to a turbo-frame's fetch lifecycle
+    and toggles aria-busy / data-frame-loading, the skeleton, content inert, and focus.
+    This catalog has no Turbo backend, so demo.js fires the turbo:before-fetch-request →
+    turbo:frame-load pair to reproduce a frame fetch. The library only toggles state and
+    hidden; demo.css owns the skeleton bars and the dimmed content. %>
+<div class="frame-demo">
+  <button type="button" class="demo-trigger" data-frame-demo-reload>
+    <%= t("components.frame_loading.demo.reload") %>
+  </button>
+  <div
+    class="frame-demo__frame"
+    data-controller="stimeo--frame-loading"
+    data-stimeo--frame-loading-min-duration-value="600">
+    <div class="frame-demo__skeleton" data-stimeo--frame-loading-target="skeleton" hidden>
+      <span class="visually-hidden"><%= t("components.frame_loading.demo.loading") %></span>
+      <span class="frame-demo__bar"></span>
+      <span class="frame-demo__bar"></span>
+      <span class="frame-demo__bar"></span>
+    </div>
+    <div class="frame-demo__content" data-stimeo--frame-loading-target="content">
+      <p><%= t("components.frame_loading.demo.content") %></p>
+      <button
+        type="button"
+        class="demo-trigger"
+        data-frame-demo-action
+        data-result-template="<%= t("components.frame_loading.demo.action_result") %>">
+        <%= t("components.frame_loading.demo.action") %>
+      </button>
+      <span class="frame-demo__result" data-frame-demo-result role="status"></span>
+    </div>
+  </div>
+</div>

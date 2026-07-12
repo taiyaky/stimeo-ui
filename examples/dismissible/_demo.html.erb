@@ -1,0 +1,28 @@
+<%# Markup for the dismissible (element dismissed via a close button) demo.
+    The close button (or Escape) removes the element, and if focus was inside before
+    removal it is moved to a safe place (fallback → next/previous focusable → body).
+    Here it uses hide mode (adds hidden) and allows closing with Escape too.
+    Semantics like role="status" are the consumer markup's responsibility. %>
+<div
+  class="dismissible"
+  data-controller="stimeo--dismissible"
+  data-stimeo--dismissible-mode-value="hide"
+  data-stimeo--dismissible-close-on-escape-value="true">
+  <div
+    class="dismissible__banner"
+    role="status"
+    data-stimeo--dismissible-target="root">
+    <span class="dismissible__icon" aria-hidden="true">✓</span>
+    <p class="dismissible__message"><%= t("components.dismissible.demo.message") %></p>
+    <button
+      class="dismissible__close"
+      type="button"
+      aria-label="<%= t('components.dismissible.demo.close') %>"
+      data-action="click->stimeo--dismissible#dismiss">
+      <span aria-hidden="true">×</span>
+    </button>
+  </div>
+  <a class="dismissible__after" href="#" data-stimeo--dismissible-target="fallback">
+    <%= t("components.dismissible.demo.fallback") %>
+  </a>
+</div>

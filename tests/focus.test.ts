@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FocusController } from "../src/controllers/focus_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link FocusController}: trap activation and the state hook,
  * Tab / Shift+Tab cycling, initial focus, restore-on-release, Escape, the optional
  * background `inert`, the no-scroll-lock and no-auto-focus options, and teardown.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("FocusController", () => {
   let application: Application;

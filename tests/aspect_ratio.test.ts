@@ -3,14 +3,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AspectRatioController } from "../src/controllers/aspect_ratio_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link AspectRatioController}: ratio parsing into the
  * `--stimeo-aspect-ratio` custom property, the default, dynamic re-reflection,
  * and rejection of unparseable values.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (ratio = "16/9") => `
   <div data-controller="stimeo--aspect-ratio"

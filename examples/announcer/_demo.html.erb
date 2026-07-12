@@ -1,0 +1,38 @@
+<%# Markup for the live-region announcer demo.
+    The library owns one pair of polite/assertive live regions; triggers announce a
+    message into the matching region via the announce action param (attribute-only).
+    The regions are visually hidden (screen-reader only), so demo.js mirrors each
+    announcement into a visible transcript for sighted viewers. %>
+<%
+  polite_msg = t("components.announcer.demo.polite_message")
+  alert_msg = t("components.announcer.demo.assertive_message")
+%>
+<%# The controller wraps the whole demo so the attribute-only trigger buttons sit
+    within its scope — a Stimulus action binds to a controller on the element or an
+    ancestor, so triggers placed outside the controller element never fire. %>
+<div class="announcer-demo" data-controller="stimeo--announcer">
+  <div class="announcer-demo__controls">
+    <button class="demo-trigger" type="button"
+            data-action="click->stimeo--announcer#announce"
+            data-stimeo--announcer-message-param="<%= polite_msg %>">
+      <%= t("components.announcer.demo.announce_polite") %>
+    </button>
+    <button class="demo-trigger" type="button"
+            data-action="click->stimeo--announcer#announce"
+            data-stimeo--announcer-message-param="<%= alert_msg %>"
+            data-stimeo--announcer-assertive-param="true">
+      <%= t("components.announcer.demo.announce_assertive") %>
+    </button>
+  </div>
+
+  <%# Place once per page. The consumer (this Playground) owns the visually-hidden
+      styling via .visually-hidden; the library only writes the message text. %>
+  <div class="visually-hidden" data-label="<%= t('components.announcer.demo.label_polite') %>"
+       data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
+  <div class="visually-hidden" data-label="<%= t('components.announcer.demo.label_assertive') %>"
+       data-stimeo--announcer-target="assertive" aria-live="assertive" aria-atomic="true"></div>
+
+  <p class="announcer-demo__note"><%= t("components.announcer.demo.note") %></p>
+  <%# Visible echo of what was announced (the live regions themselves are hidden). %>
+  <ul class="announcer-log" data-announcer-log aria-hidden="true"></ul>
+</div>

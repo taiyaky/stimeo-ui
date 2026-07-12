@@ -1,0 +1,82 @@
+<%# Markup for the toast demo.
+    The single source used for both the live render and the copy-paste code.
+    stimeo--toast provides max-count management, WAI-ARIA live region support, and
+    pausing the auto-dismiss timer on hover or keyboard focus.
+
+    Showing a toast is done with attributes alone (no hand-written JS):
+    put data-action="click->stimeo--toast#show" plus
+    data-stimeo--toast-body-param / data-stimeo--toast-type-param on the trigger button.
+    For advanced cases where you want to trigger it remotely from JS, the controller
+    element keeps show->stimeo--toast#show, so CustomEvent('show', { detail }) works too. %>
+<div
+  class="toast-demo"
+  data-controller="stimeo--toast"
+  data-stimeo--toast-duration-value="5000"
+  data-stimeo--toast-max-value="3"
+  data-action="show->stimeo--toast#show">
+
+  <div class="toast-demo__triggers">
+    <button
+      type="button"
+      class="toast-demo__btn toast-demo__btn--status"
+      data-action="click->stimeo--toast#show"
+      data-stimeo--toast-body-param="<%= t("components.toast.demo.status_body") %>"
+      data-stimeo--toast-type-param="status">
+      <%= t("components.toast.demo.show_status") %>
+    </button>
+
+    <button
+      type="button"
+      class="toast-demo__btn toast-demo__btn--alert"
+      data-action="click->stimeo--toast#show"
+      data-stimeo--toast-body-param="<%= t("components.toast.demo.alert_body") %>"
+      data-stimeo--toast-type-param="alert">
+      <%= t("components.toast.demo.show_alert") %>
+    </button>
+  </div>
+
+  <%# The live region is a descendant of the controller. The controller element only
+      needs to contain the trigger and the list/template; role="region" goes on this
+      inner container. %>
+  <div
+    id="playground-toast"
+    role="region"
+    aria-label="<%= t("components.toast.demo.dismiss_label") %>"
+    class="toast-container">
+    
+    <%# The element where notifications are placed. %>
+    <ol class="toast-list" data-stimeo--toast-target="list"></ol>
+
+    <%# Template used to create new toasts. %>
+    <template data-stimeo--toast-target="template">
+      <li
+        role="status"
+        class="toast-item"
+        data-stimeo--toast-target="item"
+        data-action="mouseenter->stimeo--toast#pause
+                     mouseleave->stimeo--toast#resume
+                     focusin->stimeo--toast#pause
+                     focusout->stimeo--toast#resume
+                     keydown->stimeo--toast#onKeydown"
+        tabindex="0">
+        <div class="toast-item__content">
+          <span data-toast-slot="body" class="toast-item__body"></span>
+          <button
+            type="button"
+            class="toast-item__dismiss"
+            data-action="click->stimeo--toast#dismiss"
+            aria-label="<%= t("components.toast.demo.dismiss_label") %>">
+            <svg
+              class="toast-item__icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2">
+              <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+      </li>
+    </template>
+  </div>
+</div>

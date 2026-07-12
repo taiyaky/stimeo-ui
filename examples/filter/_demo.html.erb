@@ -1,0 +1,65 @@
+<%# Markup for the filter (faceted list) demo. Behavior only — no consumer JS.
+    The toggle-group owns the chips' pressed state + roving focus; stimeo--filter
+    reads the pressed tokens (data-value) and shows/hides items by their
+    data-stimeo--filter-tokens. match="all" means an item must carry every active
+    token. The empty element appears when nothing matches; Clear resets the chips. %>
+<div class="filter-demo" data-controller="stimeo--filter"
+     data-stimeo--filter-match-value="all"
+     data-action="stimeo--toggle-group:change->stimeo--filter#apply">
+  <div class="filter-demo__bar">
+    <div class="filter-demo__chips" role="group"
+         aria-label="<%= t('components.filter.demo.legend') %>"
+         data-controller="stimeo--toggle-group">
+      <button type="button" class="filter-demo__chip" aria-pressed="false" tabindex="0"
+              data-value="veg"
+              data-stimeo--filter-target="control"
+              data-stimeo--toggle-group-target="item"
+              data-action="click->stimeo--toggle-group#toggle
+                           keydown->stimeo--toggle-group#onKeydown">
+        <%= t("components.filter.demo.vegetarian") %>
+      </button>
+      <button type="button" class="filter-demo__chip" aria-pressed="false" tabindex="-1"
+              data-value="spicy"
+              data-stimeo--filter-target="control"
+              data-stimeo--toggle-group-target="item"
+              data-action="click->stimeo--toggle-group#toggle
+                           keydown->stimeo--toggle-group#onKeydown">
+        <%= t("components.filter.demo.spicy") %>
+      </button>
+    </div>
+    <button type="button" class="filter-demo__clear" data-action="stimeo--filter#clear">
+      <%= t("components.filter.demo.clear") %>
+    </button>
+  </div>
+
+  <%# Each item shows its facet tokens as tags so it is clear why a chip filters it in/out. %>
+  <%
+    token_labels = {
+      "veg" => t("components.filter.demo.vegetarian"),
+      "spicy" => t("components.filter.demo.spicy"),
+    }
+    dishes = [
+      { key: "margherita", tokens: "veg" },
+      { key: "pepperoni", tokens: "" },
+      { key: "curry", tokens: "veg spicy" },
+      { key: "wings", tokens: "spicy" },
+    ]
+  %>
+  <ul class="filter-demo__list">
+    <% dishes.each do |dish| %>
+      <li class="filter-demo__item" data-stimeo--filter-target="item"
+          data-stimeo--filter-tokens="<%= dish[:tokens] %>">
+        <span class="filter-demo__name"><%= t("components.filter.demo.#{dish[:key]}") %></span>
+        <span class="filter-demo__tags">
+          <% dish[:tokens].split.each do |tok| %>
+            <span class="filter-demo__tag"><%= token_labels[tok] %></span>
+          <% end %>
+        </span>
+      </li>
+    <% end %>
+  </ul>
+
+  <p class="filter-demo__empty" role="status" data-stimeo--filter-target="empty" hidden>
+    <%= t("components.filter.demo.empty") %>
+  </p>
+</div>

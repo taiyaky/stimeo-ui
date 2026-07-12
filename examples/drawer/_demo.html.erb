@@ -1,0 +1,44 @@
+<%# Markup for the drawer (side panel) demo.
+    A modal panel that slides in from the right edge. In addition to focus move/trap,
+    Esc, background scroll lock, background inert, and returning focus to the trigger,
+    the library syncs data-state (open/closed) and applies hidden once the transition
+    finishes. Which edge it moves from and how (the slide) and the interpretation of
+    placement are expressed by the consumer's CSS (demo.css) reading data-placement /
+    data-state. %>
+<div
+  class="drawer"
+  data-controller="stimeo--drawer"
+  data-stimeo--drawer-placement-value="right">
+  <button
+    type="button"
+    class="drawer__trigger"
+    data-stimeo--drawer-target="trigger"
+    data-action="click->stimeo--drawer#open">
+    <%= t("components.drawer.demo.open_button") %>
+  </button>
+
+  <%# Overlay (backdrop). Click to close. data-state stays in sync with the panel. %>
+  <div
+    class="drawer__overlay"
+    data-stimeo--drawer-target="overlay"
+    data-action="click->stimeo--drawer#closeOnBackdrop"
+    hidden>
+    <%# The role="dialog" + aria-modal panel. Starts closed / hidden. %>
+    <div
+      class="drawer__panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="drawer-title"
+      data-stimeo--drawer-target="panel"
+      data-state="closed"
+      hidden>
+      <h3 id="drawer-title" class="drawer__title">
+        <%= t("components.drawer.demo.title") %>
+      </h3>
+      <p><%= t("components.drawer.demo.body") %></p>
+      <button type="button" class="drawer__close" data-action="click->stimeo--drawer#close">
+        <%= t("components.drawer.demo.close") %>
+      </button>
+    </div>
+  </div>
+</div>

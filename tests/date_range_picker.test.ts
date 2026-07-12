@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DateRangePickerController } from "../src/controllers/date_range_picker_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link DateRangePickerController}: two-point range
@@ -13,8 +14,6 @@ import { captureSpeech } from "./helpers/speech";
  * deterministic (no dependence on the current date), except where a preset is
  * exercised explicitly.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /** Builds a six-row grid of 7 cell targets each (42 total). */
 function gridRows(): string {

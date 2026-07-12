@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { ensureId } from "../utils/aria_ids";
+import { scrollOptionIntoView } from "../utils/option_scroll";
 import { RovingTabindex } from "../utils/roving_tabindex";
 
 /**
@@ -218,10 +219,18 @@ export class MultiSelectController extends Controller<HTMLElement> {
     }
   }
 
-  /** Toggles the clicked option's selection. Bound via `data-action`. */
+  /**
+   * Toggles the clicked option's selection. Bound via `data-action`. Focus is
+   * re-homed to the input afterwards: options are non-focusable, so the click blurs
+   * the input to `body` — and with the list deliberately staying open, every
+   * keyboard affordance (Escape, arrows, typing) is bound to the input and would
+   * otherwise go dead until the user clicks back in ("focus stays on the input").
+   */
   toggleOption(event: Event): void {
     const option = (event.currentTarget as HTMLElement).closest<HTMLElement>('[role="option"]');
-    if (option) this.#toggleSelection(option);
+    if (!option) return;
+    this.#toggleSelection(option);
+    this.inputTarget.focus();
   }
 
   /**
@@ -352,6 +361,9 @@ export class MultiSelectController extends Controller<HTMLElement> {
     }
     if (option) {
       this.inputTarget.setAttribute("aria-activedescendant", ensureId(option, "stimeo-ms-opt"));
+      // Virtual focus never triggers the browser's native focus-scrolling, so a
+      // scrollable list must follow the active option itself (list-only scroll).
+      if (this.hasListTarget) scrollOptionIntoView(this.listTarget, option);
     } else {
       this.inputTarget.removeAttribute("aria-activedescendant");
     }

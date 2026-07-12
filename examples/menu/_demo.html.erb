@@ -1,0 +1,44 @@
+<%# Markup for the menu (APG Menu Button) demo.
+    stimeo--menu is a full role="menu"/"menuitem" menu providing arrow-key roving
+    focus, Esc, and outside click (distinct from the disclosure dropdown).
+    Positioning (static placement) is the Playground's CSS. %>
+<div class="menu" data-controller="stimeo--menu">
+  <button
+    type="button"
+    class="menu__trigger"
+    aria-haspopup="menu"
+    aria-expanded="false"
+    aria-controls="menu-list"
+    data-stimeo--menu-target="trigger"
+    data-action="click->stimeo--menu#toggle keydown->stimeo--menu#onTriggerKeydown">
+    <%= t("components.menu.demo.trigger") %>
+  </button>
+
+  <%# role="menu". Each item is a role="menuitem" button (tabindex=-1). %>
+  <ul id="menu-list" class="menu__list" role="menu" data-stimeo--menu-target="menu" hidden>
+    <li role="none">
+      <button type="button" role="menuitem" class="menu__item" tabindex="-1"
+              data-stimeo--menu-target="item"
+              data-action="click->stimeo--menu#activate
+                           keydown->stimeo--menu#onItemKeydown"><%= t(
+                "components.menu.demo.edit"
+              ) %></button>
+    </li>
+    <li role="none">
+      <button type="button" role="menuitem" class="menu__item" tabindex="-1"
+              data-stimeo--menu-target="item"
+              data-action="click->stimeo--menu#activate
+                           keydown->stimeo--menu#onItemKeydown"><%= t(
+                "components.menu.demo.duplicate"
+              ) %></button>
+    </li>
+    <li role="none">
+      <button type="button" role="menuitem" class="menu__item" tabindex="-1"
+              data-stimeo--menu-target="item"
+              data-action="click->stimeo--menu#activate
+                           keydown->stimeo--menu#onItemKeydown"><%= t(
+                "components.menu.demo.delete"
+              ) %></button>
+    </li>
+  </ul>
+</div>

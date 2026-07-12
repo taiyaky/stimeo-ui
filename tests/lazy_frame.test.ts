@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LazyFrameController } from "../src/controllers/lazy_frame_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link LazyFrameController}, with a mocked IntersectionObserver:
@@ -40,8 +41,6 @@ class MockIntersectionObserver {
     return last;
   }
 }
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("LazyFrameController", () => {
   let application: Application;

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { LocalTimeController } from "../src/controllers/local_time_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link LocalTimeController}: UTC→locale/zone formatting,
@@ -13,8 +14,6 @@ import { query } from "./helpers/dom";
  * the same options, so the tests verify the controller wires the options through
  * without pinning brittle, ICU-version-specific strings.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /** The fixed UTC instant under test (12:30 UTC on 2026-06-08). */
 const ISO = "2026-06-08T12:30:00Z";

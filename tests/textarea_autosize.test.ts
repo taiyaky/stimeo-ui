@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TextareaAutosizeController } from "../src/controllers/textarea_autosize_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link TextareaAutosizeController}. happy-dom does not lay
@@ -12,8 +13,6 @@ import { query } from "./helpers/dom";
  */
 
 const LINE = 20; // mocked line-height in px
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("TextareaAutosizeController", () => {
   let application: Application;

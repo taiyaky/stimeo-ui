@@ -3,14 +3,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CurrencyInputController } from "../src/controllers/currency_input_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link CurrencyInputController}: digit grouping on input,
  * fixed-precision rounding on blur, stripping of invalid characters, the
  * display ↔ hidden-field ↔ screen-reader-span sync, and the `change` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("CurrencyInputController", () => {
   let application: Application;

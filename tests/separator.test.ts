@@ -4,14 +4,13 @@ import { SeparatorController } from "../src/controllers/separator_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link SeparatorController}: the APG Separator semantics
  * for a decorative divider, plus the optional focusable/value-bearing variant's
  * `aria-valuenow` sync and arrow-key adjustment.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("SeparatorController", () => {
   let application: Application;

@@ -19,6 +19,7 @@ import { CommandPaletteController } from "./controllers/command_palette_controll
 import { ConditionalFieldsController } from "./controllers/conditional_fields_controller";
 import { ConfirmController } from "./controllers/confirm_controller";
 import { ContextMenuController } from "./controllers/context_menu_controller";
+import { CountUpController } from "./controllers/count_up_controller";
 import { CountdownController } from "./controllers/countdown_controller";
 import { CurrencyInputController } from "./controllers/currency_input_controller";
 import { DataGridController } from "./controllers/data_grid_controller";
@@ -42,6 +43,7 @@ import { HighlightController } from "./controllers/highlight_controller";
 import { HoverCardController } from "./controllers/hover_card_controller";
 import { IdleController } from "./controllers/idle_controller";
 import { InputMaskController } from "./controllers/input_mask_controller";
+import { IntersectionController } from "./controllers/intersection_controller";
 import { LazyFrameController } from "./controllers/lazy_frame_controller";
 import { ListboxController } from "./controllers/listbox_controller";
 import { LocalTimeController } from "./controllers/local_time_controller";
@@ -54,6 +56,7 @@ import { NavigationMenuController } from "./controllers/navigation_menu_controll
 import { NestedFormController } from "./controllers/nested_form_controller";
 import { NetworkStatusController } from "./controllers/network_status_controller";
 import { NumberInputController } from "./controllers/number_input_controller";
+import { OptimisticController } from "./controllers/optimistic_controller";
 import { OtpController } from "./controllers/otp_controller";
 import { OverflowIndicatorController } from "./controllers/overflow_indicator_controller";
 import { OverflowMenuController } from "./controllers/overflow_menu_controller";
@@ -61,6 +64,7 @@ import { PaginationController } from "./controllers/pagination_controller";
 import { PasswordRevealController } from "./controllers/password_reveal_controller";
 import { PasswordStrengthController } from "./controllers/password_strength_controller";
 import { PersistController } from "./controllers/persist_controller";
+import { PointerDragController } from "./controllers/pointer_drag_controller";
 import { PopoverController } from "./controllers/popover_controller";
 import { PortalController } from "./controllers/portal_controller";
 import { PreviewGuardController } from "./controllers/preview_guard_controller";
@@ -69,6 +73,7 @@ import { RadioGroupController } from "./controllers/radio_group_controller";
 import { RangeSliderController } from "./controllers/range_slider_controller";
 import { RatingController } from "./controllers/rating_controller";
 import { ReadMoreController } from "./controllers/read_more_controller";
+import { ReadingProgressController } from "./controllers/reading_progress_controller";
 import { RelativeTimeController } from "./controllers/relative_time_controller";
 import { ResetBeforeCacheController } from "./controllers/reset_before_cache_controller";
 import { ResizableController } from "./controllers/resizable_controller";
@@ -81,6 +86,8 @@ import { SeparatorController } from "./controllers/separator_controller";
 import { SidebarController } from "./controllers/sidebar_controller";
 import { SkeletonController } from "./controllers/skeleton_controller";
 import { SliderController } from "./controllers/slider_controller";
+import { SmartStickyHeaderController } from "./controllers/smart_sticky_header_controller";
+import { SortableController } from "./controllers/sortable_controller";
 import { SpinnerController } from "./controllers/spinner_controller";
 import { StepIndicatorController } from "./controllers/step_indicator_controller";
 import { StepperController } from "./controllers/stepper_controller";
@@ -122,6 +129,7 @@ export {
   ConfirmController,
   ContextMenuController,
   CountdownController,
+  CountUpController,
   CurrencyInputController,
   DataGridController,
   DateRangePickerController,
@@ -144,6 +152,7 @@ export {
   HoverCardController,
   IdleController,
   InputMaskController,
+  IntersectionController,
   LazyFrameController,
   ListboxController,
   LocalTimeController,
@@ -156,6 +165,7 @@ export {
   NestedFormController,
   NetworkStatusController,
   NumberInputController,
+  OptimisticController,
   OtpController,
   OverflowIndicatorController,
   OverflowMenuController,
@@ -163,6 +173,7 @@ export {
   PasswordRevealController,
   PasswordStrengthController,
   PersistController,
+  PointerDragController,
   PopoverController,
   PortalController,
   PreviewGuardController,
@@ -170,6 +181,7 @@ export {
   RadioGroupController,
   RangeSliderController,
   RatingController,
+  ReadingProgressController,
   ReadMoreController,
   RelativeTimeController,
   ResetBeforeCacheController,
@@ -183,6 +195,8 @@ export {
   SidebarController,
   SkeletonController,
   SliderController,
+  SmartStickyHeaderController,
+  SortableController,
   SpinnerController,
   StepIndicatorController,
   StepperController,
@@ -228,6 +242,7 @@ export const stimeoControllers = {
   "stimeo--conditional-fields": ConditionalFieldsController,
   "stimeo--confirm": ConfirmController,
   "stimeo--context-menu": ContextMenuController,
+  "stimeo--count-up": CountUpController,
   "stimeo--countdown": CountdownController,
   "stimeo--currency-input": CurrencyInputController,
   "stimeo--data-grid": DataGridController,
@@ -251,6 +266,7 @@ export const stimeoControllers = {
   "stimeo--hover-card": HoverCardController,
   "stimeo--idle": IdleController,
   "stimeo--input-mask": InputMaskController,
+  "stimeo--intersection": IntersectionController,
   "stimeo--lazy-frame": LazyFrameController,
   "stimeo--listbox": ListboxController,
   "stimeo--local-time": LocalTimeController,
@@ -263,6 +279,7 @@ export const stimeoControllers = {
   "stimeo--nested-form": NestedFormController,
   "stimeo--network-status": NetworkStatusController,
   "stimeo--number-input": NumberInputController,
+  "stimeo--optimistic": OptimisticController,
   "stimeo--otp": OtpController,
   "stimeo--overflow-indicator": OverflowIndicatorController,
   "stimeo--overflow-menu": OverflowMenuController,
@@ -270,6 +287,7 @@ export const stimeoControllers = {
   "stimeo--password-reveal": PasswordRevealController,
   "stimeo--password-strength": PasswordStrengthController,
   "stimeo--persist": PersistController,
+  "stimeo--pointer-drag": PointerDragController,
   "stimeo--popover": PopoverController,
   "stimeo--portal": PortalController,
   "stimeo--preview-guard": PreviewGuardController,
@@ -278,6 +296,7 @@ export const stimeoControllers = {
   "stimeo--range-slider": RangeSliderController,
   "stimeo--rating": RatingController,
   "stimeo--read-more": ReadMoreController,
+  "stimeo--reading-progress": ReadingProgressController,
   "stimeo--relative-time": RelativeTimeController,
   "stimeo--reset-before-cache": ResetBeforeCacheController,
   "stimeo--resizable": ResizableController,
@@ -290,6 +309,8 @@ export const stimeoControllers = {
   "stimeo--sidebar": SidebarController,
   "stimeo--skeleton": SkeletonController,
   "stimeo--slider": SliderController,
+  "stimeo--smart-sticky-header": SmartStickyHeaderController,
+  "stimeo--sortable": SortableController,
   "stimeo--spinner": SpinnerController,
   "stimeo--step-indicator": StepIndicatorController,
   "stimeo--stepper": StepperController,

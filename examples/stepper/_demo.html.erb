@@ -1,0 +1,35 @@
+<%# Markup for the stepper (steps / wizard) demo.
+    The steps (ol + button) and the prev/next buttons are grouped under one controller
+    element. The library manages the current step number, sets data-state (complete /
+    current / upcoming) on each li, sets aria-current="step" on the current step's button,
+    enforces out-of-range / linear constraints, and fires the change event. The circle /
+    line / number look is in demo.css. %>
+<div
+  class="stepper"
+  data-controller="stimeo--stepper"
+  data-stimeo--stepper-index-value="0">
+  <ol class="stepper__list">
+    <% %w[account profile review].each_with_index do |step, index| %>
+      <li class="stepper__step" data-stimeo--stepper-target="step">
+        <button
+          type="button"
+          class="stepper__button"
+          <%= "aria-current=\"step\"".html_safe if index.zero? %>
+          data-stimeo--stepper-index-param="<%= index %>"
+          data-action="click->stimeo--stepper#goto">
+          <span class="stepper__marker"><%= index + 1 %></span>
+          <span class="stepper__label"><%= t("components.stepper.demo.steps.#{step}") %></span>
+        </button>
+      </li>
+    <% end %>
+  </ol>
+
+  <div class="stepper__controls">
+    <button type="button" class="demo-trigger" data-action="click->stimeo--stepper#prev">
+      <%= t("components.stepper.demo.back") %>
+    </button>
+    <button type="button" class="demo-trigger" data-action="click->stimeo--stepper#next">
+      <%= t("components.stepper.demo.continue") %>
+    </button>
+  </div>
+</div>

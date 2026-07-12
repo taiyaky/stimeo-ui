@@ -1,8 +1,9 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MultiSelectController } from "../src/controllers/multi_select_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link MultiSelectController}: substring filtering with
@@ -10,8 +11,6 @@ import { captureSpeech } from "./helpers/speech";
  * cap, chip removal/Backspace, focus management, dismissal, and the
  * `change`/`filter` events.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const option = (value: string, label: string) => `
   <li id="ms-${value}" role="option" aria-selected="false" data-value="${value}"
@@ -131,6 +130,24 @@ describe("MultiSelectController", () => {
     input().dispatchEvent(new Event("input", { bubbles: true }));
   };
 
+  it("follows the active option by scrolling the LIST only", async () => {
+    await mount();
+    key("ArrowDown"); // open + first option active
+    // happy-dom has no layout: the rect/size INPUTS of the scroll math are
+    // modeled (an 80px viewport over the options); real geometry is e2e-lane.
+    Object.defineProperties(list(), {
+      scrollHeight: { value: 200, configurable: true },
+      clientHeight: { value: 80, configurable: true },
+    });
+    vi.spyOn(list(), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 100, 80));
+    const third = options()[2] as HTMLElement;
+    vi.spyOn(third, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 100, 100, 40));
+    key("ArrowDown"); // second (zero-rect mock -> visible, no scroll)
+    expect(list().scrollTop).toBe(0);
+    key("ArrowDown"); // third: bottom 140 > list bottom 80 -> +60
+    expect(list().scrollTop).toBe(60);
+  });
+
   it("starts closed", async () => {
     await mount();
     expect(list().hidden).toBe(true);
@@ -218,6 +235,14 @@ describe("MultiSelectController", () => {
     options()[2]?.click(); // Cherry
     expect(selected()).toEqual(["false", "true", "true"]);
     expect(tags().map((t) => t.dataset.value)).toEqual(["banana", "cherry"]);
+  });
+
+  it("re-homes focus to the input after selecting an option by click", async () => {
+    await mount();
+    input().focus();
+    options()[0]?.click(); // the non-focusable option blurs the input to body
+    expect(list().hidden).toBe(false); // the list deliberately stays open…
+    expect(document.activeElement).toBe(input()); // …so the keyboard must stay live
   });
 
   it("mirrors the selection into named hidden fields", async () => {

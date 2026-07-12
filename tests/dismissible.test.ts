@@ -4,14 +4,13 @@ import { DismissibleController } from "../src/controllers/dismissible_controller
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { byId, query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link DismissibleController}: removal vs. hide modes,
  * the `dismiss` event, Escape handling, and — its core a11y job — moving focus
  * to a safe place before the close button is removed (WCAG 2.4.3).
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("DismissibleController", () => {
   let application: Application;

@@ -1,0 +1,35 @@
+<%# Markup for the popover demo.
+    A non-modal floating panel toggled by a trigger click. The panel is role="dialog"
+    with no aria-modal (the background stays interactive). Static placement lives in
+    this Playground's CSS; the library only handles open/close, focus, and dismiss. %>
+<div class="popover" data-controller="stimeo--popover">
+  <button
+    class="demo-trigger"
+    type="button"
+    data-stimeo--popover-target="trigger"
+    aria-haspopup="dialog"
+    aria-expanded="false"
+    aria-controls="popover-panel"
+    data-action="click->stimeo--popover#toggle">
+    <%= t("components.popover.demo.trigger") %>
+  </button>
+
+  <div
+    class="popover__panel"
+    id="popover-panel"
+    role="dialog"
+    aria-label="<%= t("components.popover.demo.title") %>"
+    data-stimeo--popover-target="panel"
+    hidden>
+    <label class="popover__field">
+      <%= t("components.popover.demo.name_label") %>
+      <input type="text" name="display_name" />
+    </label>
+    <button
+      class="demo-trigger"
+      type="button"
+      data-action="click->stimeo--popover#close">
+      <%= t("components.popover.demo.done") %>
+    </button>
+  </div>
+</div>

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MenubarController } from "../src/controllers/menubar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link MenubarController}: the APG menubar — roving across
@@ -10,8 +11,6 @@ import { captureSpeech } from "./helpers/speech";
  * jumping to adjacent menus, and Escape/Tab/outside-click/activation closing with
  * focus returned to the owning top item.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const item = (id: string, label: string) => `
   <li role="none">

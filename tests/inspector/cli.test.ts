@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildCheckReport, runCli } from "../../src/inspector/cli";
+import { buildCheckReport, formatGithubAnnotation, runCli } from "../../src/inspector/cli";
 import type { FileReport, Manifest } from "../../src/inspector/types";
 
 /** Collects CLI output for assertions, optionally with an injected manifest. */
@@ -14,7 +14,7 @@ function capture(argv: string[], load?: () => Manifest): { code: number; output:
 
 /** A minimal manifest for commands that read it without the post-build bundle. */
 const fakeManifest: Manifest = {
-  schemaVersion: 2,
+  schemaVersion: 5,
   packageVersion: "9.9.9",
   controllers: {
     "stimeo--demo": {
@@ -24,6 +24,9 @@ const fakeManifest: Manifest = {
       events: ["changed"],
       requiredTargets: ["panel"],
       a11y: [],
+      keyboard: [],
+      managedAria: [],
+      compositions: [],
     },
   },
 };
@@ -77,7 +80,7 @@ describe("runCli", () => {
     expect(code).toBe(0);
     expect(output).toContain("stimeo--demo");
     expect(output).toContain("actions:  toggle");
-    expect(output).toContain("schema v2");
+    expect(output).toContain("schema v5");
   });
 
   it("catalog --json prints the raw manifest as parseable JSON", () => {
@@ -97,6 +100,20 @@ describe("runCli", () => {
       const { code, output } = capture(["check", file], () => fakeManifest);
       expect(code).toBe(1);
       expect(output).toContain("unknown-target");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("collects extension-matching files case-insensitively (parity with the editor)", () => {
+    // The VS Code extension and the CLI share `isCheckableFile`; a file the
+    // editor diagnoses must never slip past CI because of extension casing.
+    const dir = mkdtempSync(join(tmpdir(), "stimeo-cli-"));
+    writeFileSync(join(dir, "LEGACY.HTM"), `<div data-controller="stimeo--nope"></div>`);
+    try {
+      const { code, output } = capture(["check", dir], () => fakeManifest);
+      expect(code).toBe(1);
+      expect(output).toContain("unknown-controller");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -134,6 +151,57 @@ describe("runCli", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("check --github emits workflow-command annotations", () => {
+    const dir = mkdtempSync(join(tmpdir(), "stimeo-cli-"));
+    const file = join(dir, "bad.html");
+    writeFileSync(
+      file,
+      `<div data-controller="stimeo--demo"><span data-stimeo--demo-target="bogus"></span></div>`,
+    );
+    try {
+      const { code, output } = capture(["check", "--github", file], () => fakeManifest);
+      expect(code).toBe(1);
+      expect(output).toContain("::error file=");
+      expect(output).toContain("title=Stimeo Inspector [unknown-target]");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects --json combined with --github", () => {
+    const { code, output } = capture(["check", "--json", "--github", "whatever.html"]);
+    expect(code).toBe(2);
+    expect(output).toContain("mutually exclusive");
+  });
+});
+
+describe("formatGithubAnnotation", () => {
+  it("escapes message data and property values per the workflow-command rules", () => {
+    const line = formatGithubAnnotation("a,b:c.erb", {
+      code: "missing-aria",
+      severity: "error",
+      message: "50% broken\nnext",
+      line: 3,
+      column: 4,
+    });
+    expect(line).toBe(
+      "::error file=a%2Cb%3Ac.erb,line=3,col=4,title=Stimeo Inspector [missing-aria]::50%25 broken%0Anext",
+    );
+  });
+
+  it("maps warnings to ::warning and appends the suggestion", () => {
+    const line = formatGithubAnnotation("x.erb", {
+      code: "unresolved-idref",
+      severity: "warning",
+      message: "m",
+      line: 1,
+      column: 1,
+      suggestion: 'Did you mean "t"?',
+    });
+    expect(line).toContain("::warning ");
+    expect(line).toContain('m → Did you mean "t"?');
   });
 });
 

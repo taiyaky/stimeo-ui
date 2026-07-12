@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ScrollVisibilityController } from "../src/controllers/scroll_visibility_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { delay, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ScrollVisibilityController}: offset-threshold and
@@ -13,8 +14,7 @@ import { captureSpeech } from "./helpers/speech";
  * measurement; `window.scrollTo` is mocked since happy-dom has no real scrolling.
  */
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+const settle = () => delay(30);
 
 describe("ScrollVisibilityController", () => {
   let application: Application;

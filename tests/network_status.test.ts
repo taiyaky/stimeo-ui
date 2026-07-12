@@ -4,14 +4,13 @@ import { NetworkStatusController } from "../src/controllers/network_status_contr
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link NetworkStatusController}: the initial
  * `navigator.onLine` read, online/offline event handling, banner toggling, the
  * duplicate-state guard, auto-hide, and listener teardown on disconnect.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /** Overrides `navigator.onLine` for the duration of a test. */
 const setOnline = (online: boolean) => {

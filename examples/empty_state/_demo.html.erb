@@ -1,0 +1,29 @@
+<%# Empty-state demo: add/remove items and the empty placeholder toggles itself. The
+    controller observes the list with a MutationObserver, toggles hidden on the
+    list / empty targets at the 0 <-> 1+ boundary, and reflects data-empty / data-count.
+    demo.js adds/removes <li> (standing in for Turbo Stream rows). This demo only styles
+    it; the empty placeholder's copy is owned here. %>
+<div
+  class="empty-state-demo"
+  data-controller="stimeo--empty-state"
+  data-stimeo--empty-state-announce-value="true">
+  <div class="empty-state-demo__bar">
+    <button
+      type="button"
+      class="demo-trigger"
+      data-empty-state-add
+      data-item-label="<%= t("components.empty_state.demo.item") %>">
+      <%= t("components.empty_state.demo.add") %>
+    </button>
+    <button type="button" class="demo-trigger" data-empty-state-clear>
+      <%= t("components.empty_state.demo.clear") %>
+    </button>
+  </div>
+  <ul class="empty-state-demo__list" data-stimeo--empty-state-target="list">
+    <li><%= t("components.empty_state.demo.item") %> 1</li>
+    <li><%= t("components.empty_state.demo.item") %> 2</li>
+  </ul>
+  <p class="empty-state-demo__empty" data-stimeo--empty-state-target="empty" hidden>
+    <%= t("components.empty_state.demo.empty") %>
+  </p>
+</div>

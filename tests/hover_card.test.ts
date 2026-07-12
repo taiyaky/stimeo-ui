@@ -4,6 +4,7 @@ import { HoverCardController } from "../src/controllers/hover_card_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link HoverCardController}: delayed open/close on
@@ -188,7 +189,7 @@ describe("HoverCardController accessibility", () => {
       </main>`;
     application = Application.start();
     application.register("stimeo--hover-card", HoverCardController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
   };
 
   afterEach(() => {

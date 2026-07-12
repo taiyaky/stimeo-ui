@@ -4,14 +4,13 @@ import { FilterController } from "../src/controllers/filter_controller";
 import { ToggleGroupController } from "../src/controllers/toggle_group_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link FilterController}: initial all-visible state, AND/ANY
  * token matching, native-change reactivity, the apply/clear actions, group + empty
  * syncing, the change event payload, machine a11y, and disconnect teardown.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("FilterController", () => {
   let application: Application;

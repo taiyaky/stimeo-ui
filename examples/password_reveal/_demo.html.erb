@@ -1,0 +1,27 @@
+<%# Markup for the password-reveal demo.
+    The toggle switches the input's type between password ↔ text and syncs aria-pressed /
+    data-state. If the input was focused, focus and caret position are preserved. The eye
+    icon rendering switches on aria-pressed in demo.css. %>
+<div class="password-reveal" data-controller="stimeo--password-reveal">
+  <label class="password-reveal__label" for="password-reveal-demo-input">
+    <%= t("components.password_reveal.demo.label") %>
+  </label>
+  <div class="password-reveal__field">
+    <input
+      class="password-reveal__input"
+      id="password-reveal-demo-input"
+      type="password"
+      value="hunter2"
+      autocomplete="current-password"
+      data-stimeo--password-reveal-target="input">
+    <button
+      class="password-reveal__toggle"
+      type="button"
+      aria-pressed="false"
+      aria-label="<%= t('components.password_reveal.demo.show') %>"
+      data-stimeo--password-reveal-target="toggle"
+      data-action="click->stimeo--password-reveal#toggle">
+      <span class="password-reveal__icon" aria-hidden="true"></span>
+    </button>
+  </div>
+</div>

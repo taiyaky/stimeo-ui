@@ -1,0 +1,23 @@
+<%# Markup for the read-more demo.
+    The body is visually truncated with a CSS line clamp, and a toggle switches to the
+    full text. The library syncs aria-expanded / data-state and hides the toggle when
+    there is no overflow (so no needless button appears). The clamp itself lives in demo.css. %>
+<div class="read-more" data-controller="stimeo--read-more">
+  <p
+    class="read-more__content"
+    id="read-more-demo-content"
+    data-state="collapsed"
+    data-stimeo--read-more-target="content">
+    <%= t("components.read_more.demo.body") %>
+  </p>
+  <button
+    class="read-more__trigger"
+    type="button"
+    aria-expanded="false"
+    aria-controls="read-more-demo-content"
+    hidden
+    data-stimeo--read-more-target="trigger"
+    data-action="click->stimeo--read-more#toggle">
+    <%= t("components.read_more.demo.trigger") %>
+  </button>
+</div>

@@ -4,14 +4,13 @@ import { EmptyStateController } from "../src/controllers/empty_state_controller"
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link EmptyStateController}: initial sync, the 0 ↔ 1+
  * toggle driven by a MutationObserver, itemSelector counting, the boundary-only
  * change event, announce wiring, and observer teardown.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("EmptyStateController", () => {
   let application: Application;

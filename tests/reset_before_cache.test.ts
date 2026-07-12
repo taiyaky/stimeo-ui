@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ResetBeforeCacheController } from "../src/controllers/reset_before_cache_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ResetBeforeCacheController}: the turbo:before-cache
@@ -10,8 +11,6 @@ import { query } from "./helpers/dom";
  * reset/request events, the dispatchReset toggle, scope narrowing, idempotency,
  * the manual reset action, and listener teardown.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("ResetBeforeCacheController", () => {
   let application: Application;

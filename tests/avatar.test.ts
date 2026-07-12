@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AvatarController } from "../src/controllers/avatar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link AvatarController}: the load/error → image/fallback
@@ -12,8 +13,6 @@ import { captureSpeech } from "./helpers/speech";
  * happy-dom does not actually fetch images, so `load`/`error` are dispatched on
  * the `<img>` to drive the state transitions deterministically.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (src = "/u/123.jpg") => `
   <span data-controller="stimeo--avatar" role="img" aria-label="Jane Doe"

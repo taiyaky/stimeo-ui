@@ -1,0 +1,28 @@
+<%# Transition demo: the panel is the controller element; enter/leave class values point
+    at the demo.css classes that define the timing and start/end states. The toggle button
+    lives outside the (hideable) panel, so it invokes the controller's toggle action through
+    the playground's exposed Stimulus app (window.Stimulus) in demo.js. The library only
+    stages the classes and reflects data-transition-state / hidden; demo.css owns the look. %>
+<div class="transition-demo">
+  <button
+    type="button"
+    class="demo-trigger"
+    data-transition-demo-toggle
+    aria-expanded="false"
+    aria-controls="transition-demo-panel">
+    <%= t("components.transition.demo.toggle") %>
+  </button>
+  <div
+    id="transition-demo-panel"
+    class="transition-demo__panel"
+    data-controller="stimeo--transition"
+    data-stimeo--transition-enter-value="te-enter"
+    data-stimeo--transition-enter-from-value="te-from"
+    data-stimeo--transition-enter-to-value="te-to"
+    data-stimeo--transition-leave-value="te-leave"
+    data-stimeo--transition-leave-from-value="te-to"
+    data-stimeo--transition-leave-to-value="te-from"
+    hidden>
+    <%= t("components.transition.demo.panel") %>
+  </div>
+</div>

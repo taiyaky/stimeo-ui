@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CommandPaletteController } from "../src/controllers/command_palette_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link CommandPaletteController}: modal key interception,
  * focus trapping, Combobox-style filtering, virtual focus tracking via
  * aria-activedescendant, and keyboard/mouse selection.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("CommandPaletteController", () => {
   let application: Application;
@@ -445,7 +444,7 @@ describe("CommandPaletteController restore-on-reconnect", () => {
     document.body.innerHTML = markup(attrs, dialogAttrs);
     application = Application.start();
     application.register("stimeo--command-palette", CommandPaletteController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
   };
 
   afterEach(() => {

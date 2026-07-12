@@ -1,0 +1,33 @@
+<%# Markup for the tooltip demo.
+    Hover/focus on the trigger shows the supplementary description. The content is
+    role="tooltip", referenced from the trigger via aria-describedby. The show/hide delay
+    and the hoverable bridge between trigger and tooltip are the library's. Placement is
+    the consumer's CSS. %>
+<span class="tooltip" data-controller="stimeo--tooltip"
+      data-stimeo--tooltip-show-delay-value="150"
+      data-stimeo--tooltip-hide-delay-value="200">
+  <button
+    class="demo-trigger"
+    type="button"
+    data-stimeo--tooltip-target="trigger"
+    aria-describedby="tooltip-content"
+    data-action="
+      mouseenter->stimeo--tooltip#show
+      mouseleave->stimeo--tooltip#hide
+      focusin->stimeo--tooltip#show
+      focusout->stimeo--tooltip#hide
+      keydown->stimeo--tooltip#onKeydown">
+    <%= t("components.tooltip.demo.trigger") %>
+  </button>
+  <span
+    class="tooltip__content"
+    id="tooltip-content"
+    role="tooltip"
+    data-stimeo--tooltip-target="content"
+    data-action="
+      mouseenter->stimeo--tooltip#show
+      mouseleave->stimeo--tooltip#hide"
+    hidden>
+    <%= t("components.tooltip.demo.body") %>
+  </span>
+</span>

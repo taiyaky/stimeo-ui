@@ -1,0 +1,27 @@
+<%# Conditional fields demo: check the box to reveal the address fieldset. The
+    controller toggles hidden / aria-hidden and disables the hidden inputs (so they
+    drop out of submission); it listens for the change itself, so no consumer JS is
+    needed. This demo only styles the layout. %>
+<div class="conditional-fields-demo">
+  <form data-controller="stimeo--conditional-fields">
+    <label class="conditional-fields-demo__toggle">
+      <input type="checkbox" data-stimeo--conditional-fields-target="trigger">
+      <%= t("components.conditional_fields.demo.toggle") %>
+    </label>
+    <fieldset
+      class="conditional-fields-demo__region"
+      data-stimeo--conditional-fields-target="region"
+      data-when-checked
+      hidden>
+      <legend><%= t("components.conditional_fields.demo.legend") %></legend>
+      <label class="conditional-fields-demo__field">
+        <span><%= t("components.conditional_fields.demo.street") %></span>
+        <input type="text" name="street">
+      </label>
+      <label class="conditional-fields-demo__field">
+        <span><%= t("components.conditional_fields.demo.city") %></span>
+        <input type="text" name="city">
+      </label>
+    </fieldset>
+  </form>
+</div>

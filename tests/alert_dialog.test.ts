@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AlertDialogController } from "../src/controllers/alert_dialog_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link AlertDialogController}: the APG alert-dialog
  * contract — initial focus on the least-destructive action, focus trap, no
  * backdrop close, and confirm/cancel events (cancel tagged user vs. escape).
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("AlertDialogController", () => {
   let application: Application;
@@ -177,5 +176,30 @@ describe("AlertDialogController", () => {
     controller().confirm();
     controller().cancel();
     expect(events).toEqual([]);
+  });
+
+  it("releases the global keydown listener on disconnect (Escape becomes a no-op)", () => {
+    const reasons: string[] = [];
+    root().addEventListener("stimeo--alert-dialog:cancel", (e) => {
+      reasons.push((e as CustomEvent).detail.reason);
+    });
+    trigger().click();
+    controller().disconnect();
+    // The document-level keydown listener must be gone after teardown: Escape now
+    // dispatches nothing (directly detects a listener leak, complementing the
+    // scroll/inert restoration asserted above).
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(reasons).toEqual([]);
+  });
+
+  it("confirm dispatches with an empty detail (no reason, unlike cancel)", () => {
+    let detail: unknown = "unset";
+    root().addEventListener("stimeo--alert-dialog:confirm", (e) => {
+      detail = (e as CustomEvent).detail;
+    });
+    trigger().click();
+    document.getElementById("confirm")?.click();
+    // confirm carries no payload — pins the contract against cancel's { reason }.
+    expect(detail).toEqual({});
   });
 });

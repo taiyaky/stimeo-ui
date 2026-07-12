@@ -1,0 +1,21 @@
+<%# Markup for the slider (APG Slider / single thumb) demo.
+    stimeo--slider provides aria-valuemin/max/now plus keyboard and drag operation, and
+    exposes the thumb position fraction (0..1) as the root CSS variable
+    --stimeo--slider-fraction. The thumb's actual placement is the Playground's CSS
+    using that variable. %>
+<div
+  class="slider"
+  data-controller="stimeo--slider"
+  data-stimeo--slider-min-value="0"
+  data-stimeo--slider-max-value="100"
+  data-stimeo--slider-step-value="1"
+  data-stimeo--slider-value-value="40">
+  <div class="slider__track" data-stimeo--slider-target="track"
+       data-action="pointerdown->stimeo--slider#onPointerDown">
+    <div class="slider__range" aria-hidden="true"></div>
+    <div class="slider__thumb" role="slider" tabindex="0"
+         aria-label="<%= t("components.slider.demo.label") %>"
+         data-stimeo--slider-target="thumb"
+         data-action="keydown->stimeo--slider#onKeydown"></div>
+  </div>
+</div>

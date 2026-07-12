@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RadioGroupController } from "../src/controllers/radio_group_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link RadioGroupController}: the APG Radio Group contract
  * for custom radios — single selection via `aria-checked`, roving `tabindex`,
  * arrow navigation with selection-follows-focus, and the hidden-field mirror.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("RadioGroupController", () => {
   let application: Application;

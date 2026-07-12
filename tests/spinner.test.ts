@@ -4,6 +4,7 @@ import { SpinnerController } from "../src/controllers/spinner_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link SpinnerController}: show-delay suppression, the
@@ -157,7 +158,6 @@ describe("SpinnerController", () => {
  */
 describe("SpinnerController accessibility", () => {
   let application: Application;
-  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   const start = async () => {
     document.body.innerHTML = `

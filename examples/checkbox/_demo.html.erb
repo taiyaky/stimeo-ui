@@ -1,0 +1,39 @@
+<%# Markup for the checkbox (APG Checkbox / 3-state) demo.
+    The parent ("select all") derives checked / indeterminate from the children's
+    state, and a parent toggle sets all children at once. The aggregate state is
+    reflected on the root's data-state (all/partial/none); the look is the consumer's CSS. %>
+<div class="checkbox-demo" role="group" aria-labelledby="cb-group-label"
+     data-controller="stimeo--checkbox">
+  <span class="checkbox-demo__legend" id="cb-group-label">
+    <%= t("components.checkbox.demo.group") %>
+  </span>
+
+  <label class="checkbox-demo__row checkbox-demo__row--parent">
+    <input type="checkbox" data-stimeo--checkbox-target="parent"
+           data-action="change->stimeo--checkbox#onParentChange" />
+    <span><%= t("components.checkbox.demo.all") %></span>
+  </label>
+
+  <div class="checkbox-demo__children">
+    <label class="checkbox-demo__row">
+      <input type="checkbox" checked data-stimeo--checkbox-target="child"
+             data-action="change->stimeo--checkbox#onChildChange" />
+      <span><%= t("components.checkbox.demo.item_a") %></span>
+    </label>
+    <label class="checkbox-demo__row">
+      <input type="checkbox" data-stimeo--checkbox-target="child"
+             data-action="change->stimeo--checkbox#onChildChange" />
+      <span><%= t("components.checkbox.demo.item_b") %></span>
+    </label>
+    <label class="checkbox-demo__row">
+      <input type="checkbox" data-stimeo--checkbox-target="child"
+             data-action="change->stimeo--checkbox#onChildChange" />
+      <span><%= t("components.checkbox.demo.item_c") %></span>
+    </label>
+  </div>
+
+  <%# Subscribe to the change event and show the selected count (updated by demo.js). %>
+  <p class="checkbox-demo__status" aria-live="polite">
+    <span data-checkbox-count>1</span> <%= t("components.checkbox.demo.selected") %>
+  </p>
+</div>

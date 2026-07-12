@@ -1,0 +1,32 @@
+<%# Markup for the before-cache reset demo.
+    On turbo:before-cache the controller returns transient UI to its initial state so a
+    Back-button restore is not frozen mid-interaction. This Playground has no real Turbo
+    navigation, so demo.js fakes the turbo:before-cache event. Open the details, type in
+    the field, and show the toast — then "Simulate before-cache" resets them all. %>
+<div class="reset-demo" data-controller="stimeo--reset-before-cache">
+  <p class="reset-demo__note"><%= t("components.reset_before_cache.demo.note") %></p>
+
+  <details class="reset-demo__details" data-reset-attr="open">
+    <summary><%= t("components.reset_before_cache.demo.details_summary") %></summary>
+    <p><%= t("components.reset_before_cache.demo.details_body") %></p>
+  </details>
+
+  <label class="reset-demo__field">
+    <span><%= t("components.reset_before_cache.demo.input_label") %></span>
+    <input type="text" class="demo-input" data-reset-value
+           placeholder="<%= t("components.reset_before_cache.demo.input_placeholder") %>">
+  </label>
+
+  <div class="reset-demo__toast" data-reset-demo="toast" data-reset-hidden hidden role="status">
+    <%= t("components.reset_before_cache.demo.toast_text") %>
+  </div>
+
+  <div class="reset-demo__controls">
+    <button type="button" class="demo-trigger" data-reset-demo="show-toast">
+      <%= t("components.reset_before_cache.demo.show_toast") %>
+    </button>
+    <button type="button" class="demo-trigger" data-reset-demo="simulate">
+      <%= t("components.reset_before_cache.demo.simulate") %>
+    </button>
+  </div>
+</div>

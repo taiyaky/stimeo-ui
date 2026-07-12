@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverflowIndicatorController } from "../src/controllers/overflow_indicator_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link OverflowIndicatorController}: the
@@ -13,8 +14,6 @@ import { captureSpeech } from "./helpers/speech";
  * happy-dom has no layout, so `scrollLeft`/`scrollWidth`/`clientWidth` are stubbed
  * and a viewport resize drives the controller; `scrollBy` is mocked.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = `
   <div data-controller="stimeo--overflow-indicator"

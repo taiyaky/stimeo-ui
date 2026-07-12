@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { IntersectionWatcher } from "../utils/intersection_watcher";
 
 /**
  * Headless **lazy frame**: defers a `<turbo-frame>`'s load until it nears the viewport
@@ -38,7 +39,8 @@ export class LazyFrameController extends Controller<HTMLElement> {
   declare rootMarginValue: string;
   declare onceValue: boolean;
 
-  #observer: IntersectionObserver | null = null;
+  /** Shared IO plumbing (support guard, active guard, teardown). */
+  readonly #watcher = new IntersectionWatcher((entries) => this.#onIntersect(entries));
   #loaded = false;
 
   /** Focus reaching the frame triggers the load before it intersects (keyboard / AT). */
@@ -53,12 +55,7 @@ export class LazyFrameController extends Controller<HTMLElement> {
     if (!this.urlValue) return;
 
     this.element.addEventListener("focusin", this.#onFocus);
-    if (typeof IntersectionObserver !== "undefined") {
-      this.#observer = new IntersectionObserver((entries) => this.#onIntersect(entries), {
-        rootMargin: this.rootMarginValue,
-      });
-      this.#observer.observe(this.element);
-    }
+    this.#watcher.start(this.element, { rootMargin: this.rootMarginValue });
   }
 
   override disconnect(): void {
@@ -99,8 +96,7 @@ export class LazyFrameController extends Controller<HTMLElement> {
   }
 
   #stopObserving(): void {
-    this.#observer?.disconnect();
-    this.#observer = null;
+    this.#watcher.stop();
     this.element.removeEventListener("focusin", this.#onFocus);
   }
 }

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FrameLoadingController } from "../src/controllers/frame_loading_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link FrameLoadingController}, driven by simulated Turbo
@@ -208,7 +209,7 @@ describe("FrameLoadingController", () => {
       '<div data-controller="stimeo--frame-loading"><div data-stimeo--frame-loading-target="content">content</div></div>';
     application = Application.start();
     application.register("stimeo--frame-loading", FrameLoadingController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     await expectNoA11yViolations(frame());
   });
 });

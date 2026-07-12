@@ -1,0 +1,50 @@
+<%# Markup for the navigation-menu demo.
+    A global nav where each top item opens/closes a sub-panel (a set of links). The
+    contents are links and don't use role="menu" (APG Disclosure navigation). The
+    library handles syncing aria-expanded, single-open behavior, closing on Escape /
+    outside click / focus leaving, and moving between top items with the left/right
+    keys. Panel placement and styling are the consumer's CSS (demo.css). %>
+<nav class="nav-menu" data-controller="stimeo--navigation-menu"
+     aria-label="<%= t("components.navigation_menu.demo.label") %>">
+  <ul class="nav-menu__list">
+    <li class="nav-menu__item">
+      <button
+        type="button"
+        class="nav-menu__trigger"
+        aria-expanded="false"
+        aria-controls="nav-menu-products"
+        data-stimeo--navigation-menu-target="trigger"
+        data-action="click->stimeo--navigation-menu#toggle
+                     keydown->stimeo--navigation-menu#onTriggerKeydown">
+        <%= t("components.navigation_menu.demo.products.label") %>
+      </button>
+      <div id="nav-menu-products" class="nav-menu__panel"
+           data-stimeo--navigation-menu-target="panel" hidden>
+        <a href="#analytics"><%= t(
+          "components.navigation_menu.demo.products.links.analytics"
+        ) %></a>
+        <a href="#automation"><%= t(
+          "components.navigation_menu.demo.products.links.automation"
+        ) %></a>
+        <a href="#reports"><%= t("components.navigation_menu.demo.products.links.reports") %></a>
+      </div>
+    </li>
+    <li class="nav-menu__item">
+      <button
+        type="button"
+        class="nav-menu__trigger"
+        aria-expanded="false"
+        aria-controls="nav-menu-company"
+        data-stimeo--navigation-menu-target="trigger"
+        data-action="click->stimeo--navigation-menu#toggle
+                     keydown->stimeo--navigation-menu#onTriggerKeydown">
+        <%= t("components.navigation_menu.demo.company.label") %>
+      </button>
+      <div id="nav-menu-company" class="nav-menu__panel"
+           data-stimeo--navigation-menu-target="panel" hidden>
+        <a href="#about"><%= t("components.navigation_menu.demo.company.links.about") %></a>
+        <a href="#careers"><%= t("components.navigation_menu.demo.company.links.careers") %></a>
+      </div>
+    </li>
+  </ul>
+</nav>

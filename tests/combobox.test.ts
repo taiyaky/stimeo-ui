@@ -1,15 +1,14 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComboboxController } from "../src/controllers/combobox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ComboboxController}: list-autocomplete filtering,
  * `aria-expanded`/`aria-activedescendant`, and arrow/Enter/Escape interaction.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("ComboboxController", () => {
   let application: Application;
@@ -69,6 +68,30 @@ describe("ComboboxController", () => {
     expect(option("opt-apple").hidden).toBe(false);
     expect(option("opt-apricot").hidden).toBe(false);
     expect(option("opt-banana").hidden).toBe(true);
+  });
+
+  it("follows the active option by scrolling the LIST only", () => {
+    // happy-dom has no layout: the rect/size INPUTS of the scroll math are
+    // modeled (an 80px viewport over the options); real geometry is e2e-lane.
+    type("a"); // all three options match and the list opens
+    Object.defineProperties(list(), {
+      scrollHeight: { value: 200, configurable: true },
+      clientHeight: { value: 80, configurable: true },
+    });
+    vi.spyOn(list(), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 100, 80));
+    vi.spyOn(option("opt-banana"), "getBoundingClientRect").mockReturnValue(
+      new DOMRect(0, 100, 100, 40),
+    );
+    press("ArrowDown"); // Apple (zero-rect mock -> visible, no scroll)
+    press("ArrowDown"); // Apricot
+    expect(list().scrollTop).toBe(0);
+    press("ArrowDown"); // Banana: bottom 140 > list bottom 80 -> +60
+    expect(list().scrollTop).toBe(60);
+    vi.spyOn(option("opt-apple"), "getBoundingClientRect").mockReturnValue(
+      new DOMRect(0, -40, 100, 40),
+    );
+    press("ArrowDown"); // wraps to Apple: top -40 < 0 -> back up by 40
+    expect(list().scrollTop).toBe(20);
   });
 
   it("tracks the active option via aria-activedescendant on ArrowDown", () => {

@@ -1,0 +1,58 @@
+<%# Markup for the tree-view (tree view / single selection) demo.
+    Nested role="tree" / "treeitem" / "group" express the hierarchy. Arrows move between
+    visible items; ArrowRight / ArrowLeft expand/collapse and move between parent/child;
+    Home/End, typeahead, and Enter/Space select a single item. The library handles roving,
+    aria-expanded / aria-selected sync, and toggling each group's hidden. Across the whole
+    tree only one treeitem is tabindex=0. %>
+<ul class="tree-view" data-controller="stimeo--tree-view" role="tree"
+    aria-label="<%= t('components.tree_view.demo.label') %>">
+  <li
+    class="tree-view__item"
+    role="treeitem"
+    aria-expanded="true"
+    aria-selected="false"
+    tabindex="0"
+    data-stimeo--tree-view-target="item"
+    data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+    <span class="tree-view__label">app</span>
+    <ul class="tree-view__group" role="group" data-stimeo--tree-view-target="group">
+      <li
+        class="tree-view__item"
+        role="treeitem"
+        aria-expanded="false"
+        aria-selected="false"
+        tabindex="-1"
+        data-stimeo--tree-view-target="item"
+        data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+        <span class="tree-view__label">controllers</span>
+        <ul class="tree-view__group" role="group" data-stimeo--tree-view-target="group" hidden>
+          <li class="tree-view__item" role="treeitem" aria-selected="false" tabindex="-1"
+              data-stimeo--tree-view-target="item"
+              data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+            <span class="tree-view__label">application_controller.rb</span>
+          </li>
+          <li class="tree-view__item" role="treeitem" aria-selected="false" tabindex="-1"
+              data-stimeo--tree-view-target="item"
+              data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+            <span class="tree-view__label">components_controller.rb</span>
+          </li>
+        </ul>
+      </li>
+      <li class="tree-view__item" role="treeitem" aria-selected="false" tabindex="-1"
+          data-stimeo--tree-view-target="item"
+          data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+        <span class="tree-view__label">application.rb</span>
+      </li>
+    </ul>
+  </li>
+  <li class="tree-view__item" role="treeitem" aria-selected="false" tabindex="-1"
+      data-stimeo--tree-view-target="item"
+      data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+    <span class="tree-view__label">README.md</span>
+  </li>
+  <li class="tree-view__item" role="treeitem" aria-selected="false" tabindex="-1"
+      data-stimeo--tree-view-target="item"
+      data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+    <span class="tree-view__label">Gemfile</span>
+  </li>
+</ul>

@@ -1,0 +1,22 @@
+<%# Markup for the sticky-observer (stuck-state detection) demo.
+    The library watches a sentinel's intersection with IntersectionObserver and syncs
+    data-stuck="true" once the sticky element actually sticks. position: sticky and the
+    shadow rendering are owned by demo.css. rootSelector specifies the scroll parent
+    (this demo frame). %>
+<div class="sticky-demo" data-controller="stimeo--sticky-observer"
+     data-stimeo--sticky-observer-root-selector-value=".sticky-demo__scroll">
+  <div class="sticky-demo__scroll">
+    <%# Place the sentinel right before the sticky element. A 1px non-zero height keeps
+        intersection detection stable. %>
+    <div class="sticky-demo__sentinel" aria-hidden="true"
+         data-stimeo--sticky-observer-target="sentinel"></div>
+    <header class="sticky-demo__header" data-stimeo--sticky-observer-target="element">
+      <%= t("components.sticky_observer.demo.header") %>
+    </header>
+    <div class="sticky-demo__body">
+      <% 8.times do |i| %>
+        <p><%= t("components.sticky_observer.demo.paragraph", number: i + 1) %></p>
+      <% end %>
+    </div>
+  </div>
+</div>

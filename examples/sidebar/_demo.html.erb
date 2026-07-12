@@ -1,0 +1,45 @@
+<%# Markup for the sidebar (collapsible sidebar) demo.
+    This demo focuses on the INLINE rail: the toggle collapses / expands it and the
+    preference persists in localStorage across reloads. (The same sidebar can also
+    switch to a modal off-canvas panel below a breakpoint — that document-level modal
+    mode is described in the text and is the same off-canvas pattern the Drawer demo
+    shows; it is not staged here because a page-level modal inside a catalog card reads
+    as taking over the page.) breakpoint=0 keeps this demo always inline. The library
+    syncs aria-expanded, data-mode, and data-state; the rail width / animation are
+    demo.css's. role="dialog" is intentionally not applied — the panel stays a nav. %>
+<div
+  class="sidebar-demo"
+  data-controller="stimeo--sidebar"
+  data-stimeo--sidebar-breakpoint-value="0"
+  data-stimeo--sidebar-key-value="catalog-demo">
+  <div class="sidebar-demo__bar">
+    <button
+      type="button"
+      class="sidebar-demo__toggle"
+      data-stimeo--sidebar-target="trigger"
+      data-action="click->stimeo--sidebar#toggle"
+      aria-expanded="true"
+      aria-controls="sidebar-demo-panel">
+      <%= t("components.sidebar.demo.toggle") %>
+    </button>
+    <span class="sidebar-demo__brand"><%= t("components.sidebar.demo.brand") %></span>
+  </div>
+
+  <div class="sidebar-demo__body">
+    <nav
+      id="sidebar-demo-panel"
+      class="sidebar-demo__panel"
+      data-stimeo--sidebar-target="panel"
+      aria-label="<%= t('components.sidebar.demo.nav_label') %>"
+      data-mode="inline"
+      data-state="expanded">
+      <% t("components.sidebar.demo.items").each do |label| %>
+        <a class="sidebar-demo__link" href="#"><%= label %></a>
+      <% end %>
+    </nav>
+
+    <main class="sidebar-demo__content">
+      <p><%= t("components.sidebar.demo.hint") %></p>
+    </main>
+  </div>
+</div>

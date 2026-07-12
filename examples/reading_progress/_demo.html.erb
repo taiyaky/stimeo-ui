@@ -1,0 +1,12 @@
+<%# reading-progress: the article publishes its progress as a CSS custom property
+    on itself AND on :root; the bar here consumes it with pure CSS (no consumer
+    JS). Scroll the page to move the bar. %>
+<div class="reading-progress-demo">
+  <p class="reading-progress-demo__hint"><%= t("components.reading_progress.demo.hint") %></p>
+  <div class="reading-progress-demo__bar" aria-hidden="true"></div>
+  <article class="reading-progress-demo__article" data-controller="stimeo--reading-progress">
+    <% 14.times do |i| %>
+      <p><%= t("components.reading_progress.demo.paragraph", index: i + 1) %></p>
+    <% end %>
+  </article>
+</div>

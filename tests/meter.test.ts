@@ -4,14 +4,13 @@ import { MeterController } from "../src/controllers/meter_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link MeterController}: ARIA value-attribute sync, the
  * `--stimeo-meter-ratio`, threshold-based `data-state` segmentation, the
  * `aria-valuetext` template, and the change event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("MeterController", () => {
   let application: Application;

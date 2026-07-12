@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SliderController } from "../src/controllers/slider_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link SliderController}: the APG Slider contract —
  * `aria-valuenow` bounds/stepping, keyboard control, and the
  * `--stimeo--slider-fraction` custom property exposed to the consumer's CSS.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("SliderController", () => {
   let application: Application;
@@ -110,18 +109,7 @@ describe("SliderController", () => {
   it("ignores a pointer press when the track has zero width", () => {
     const track = document.querySelector<HTMLElement>("[data-stimeo--slider-target='track']");
     if (!track) throw new Error("track not found");
-    track.getBoundingClientRect = () =>
-      ({
-        left: 0,
-        width: 0,
-        top: 0,
-        height: 0,
-        right: 0,
-        bottom: 0,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    track.getBoundingClientRect = () => new DOMRect();
     track.dispatchEvent(new PointerEvent("pointerdown", { clientX: 150, bubbles: true }));
     expect(thumb().getAttribute("aria-valuenow")).toBe("40"); // unchanged
   });
@@ -130,18 +118,7 @@ describe("SliderController", () => {
     const track = document.querySelector<HTMLElement>("[data-stimeo--slider-target='track']");
     if (!track) throw new Error("track not found");
     // happy-dom returns a zero-size rect; stub geometry so the math is exercised.
-    track.getBoundingClientRect = () =>
-      ({
-        left: 0,
-        width: 200,
-        top: 0,
-        height: 10,
-        right: 200,
-        bottom: 10,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    track.getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
     track.dispatchEvent(new PointerEvent("pointerdown", { clientX: 150, bubbles: true }));
     expect(thumb().getAttribute("aria-valuenow")).toBe("80");
   });
@@ -179,18 +156,7 @@ describe("SliderController", () => {
     ) as SliderController;
     const track = document.querySelector<HTMLElement>("[data-stimeo--slider-target='track']");
     if (!track) throw new Error("track not found");
-    track.getBoundingClientRect = () =>
-      ({
-        left: 0,
-        width: 200,
-        top: 0,
-        height: 10,
-        right: 200,
-        bottom: 10,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    track.getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
 
     track.dispatchEvent(new PointerEvent("pointerdown", { clientX: 150, bubbles: true }));
     expect(thumb().getAttribute("aria-valuenow")).toBe("80");

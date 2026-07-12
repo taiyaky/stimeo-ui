@@ -1,0 +1,59 @@
+<%# Markup for the countdown (timer) demo.
+    Fills the days/hours/minutes/seconds slots with the time remaining until the
+    deadline, updating every interval (default 1000ms). role="timer" + aria-live="off"
+    avoids per-second announcements; completion is announced by writing text into
+    status (aria-live="polite"). The deadline is computed in ERB to always be in the future.
+    The pause/resume/reset buttons sit outside the timer (a role="timer" live region
+    should not wrap unrelated controls), so they drive it through the countdown:* events
+    the controller listens for (see demo.js) instead of a Stimulus data-action, which
+    only binds within the controller's own element.
+    This demo behaves as a *duration* timer (a fixed length counted from "now"): the
+    deadline is now + the duration below, and Reset re-anchors it to now + the same
+    duration so the clock returns to the full time. The library only counts down to
+    whatever deadline it is given; demo.js owns that duration→deadline policy and exposes
+    the length via data-countdown-duration-ms. %>
+<% countdown_duration = 1.hour %>
+<div class="countdown-demo" data-countdown-duration-ms="<%= countdown_duration.to_i * 1000 %>">
+  <div
+    class="countdown"
+    data-controller="stimeo--countdown"
+    role="timer"
+    aria-live="off"
+    data-stimeo--countdown-deadline-value="<%= countdown_duration.from_now.iso8601 %>"
+    data-stimeo--countdown-complete-label-value="<%= t('components.countdown.demo.complete') %>"
+    data-action="
+      countdown:pause->stimeo--countdown#pause
+      countdown:resume->stimeo--countdown#resume
+      countdown:reset->stimeo--countdown#reset">
+    <span class="countdown__unit">
+      <span class="countdown__value" data-stimeo--countdown-target="days">0</span>
+      <span class="countdown__label"><%= t("components.countdown.demo.days") %></span>
+    </span>
+    <span class="countdown__unit">
+      <span class="countdown__value" data-stimeo--countdown-target="hours">00</span>
+      <span class="countdown__label"><%= t("components.countdown.demo.hours") %></span>
+    </span>
+    <span class="countdown__unit">
+      <span class="countdown__value" data-stimeo--countdown-target="minutes">00</span>
+      <span class="countdown__label"><%= t("components.countdown.demo.minutes") %></span>
+    </span>
+    <span class="countdown__unit">
+      <span class="countdown__value" data-stimeo--countdown-target="seconds">00</span>
+      <span class="countdown__label"><%= t("components.countdown.demo.seconds") %></span>
+    </span>
+    <span class="countdown__status" role="status" aria-live="polite"
+          data-stimeo--countdown-target="status"></span>
+  </div>
+
+  <div class="countdown-demo__controls">
+    <button class="demo-trigger" type="button" data-countdown-pause>
+      <%= t("components.countdown.demo.pause") %>
+    </button>
+    <button class="demo-trigger" type="button" data-countdown-resume>
+      <%= t("components.countdown.demo.resume") %>
+    </button>
+    <button class="demo-trigger" type="button" data-countdown-reset>
+      <%= t("components.countdown.demo.reset") %>
+    </button>
+  </div>
+</div>

@@ -3,8 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OtpController } from "../src/controllers/otp_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-
-const tick = () => new Promise((r) => setTimeout(r, 0));
+import { tick } from "./helpers/timing";
 
 describe("OtpController", () => {
   let application: Application;

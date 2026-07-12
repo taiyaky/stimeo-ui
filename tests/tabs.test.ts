@@ -3,13 +3,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TabsController } from "../src/controllers/tabs_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link TabsController}: `aria-selected`, roving
  * `tabindex`, panel visibility, and automatic-activation arrow navigation.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("TabsController", () => {
   let application: Application;

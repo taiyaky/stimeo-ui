@@ -1,0 +1,47 @@
+<%# Markup for the nested / dynamic fields demo (cocoon-style line items).
+    The controller clones the <template> row (renumbering __INDEX__), removes rows by
+    dropping unsaved ones / flagging _destroy on persisted ones, enforces min/max, and
+    announces the count through a shared stimeo--announcer. Remove buttons are handled
+    by delegation, so cloned rows need no per-row wiring. %>
+<%
+  item_label = t("components.nested_form.demo.item_label")
+  remove_label = t("components.nested_form.demo.remove")
+  count_message = t("components.nested_form.demo.count_message")
+%>
+<div class="nested-demo" data-controller="stimeo--nested-form"
+     data-stimeo--nested-form-min-value="1"
+     data-stimeo--nested-form-max-value="5"
+     data-stimeo--nested-form-count-message-value="<%= count_message %>">
+  <div class="nested-demo__list" data-stimeo--nested-form-target="list">
+    <fieldset class="nested-demo__row">
+      <label class="nested-demo__field">
+        <span><%= item_label %></span>
+        <input type="text" class="demo-input" name="order[items_attributes][0][name]">
+      </label>
+      <button type="button" class="demo-trigger"
+              data-stimeo--nested-form-target="remove"><%= remove_label %></button>
+    </fieldset>
+  </div>
+
+  <template data-stimeo--nested-form-target="template">
+    <fieldset class="nested-demo__row">
+      <label class="nested-demo__field">
+        <span><%= item_label %></span>
+        <input type="text" class="demo-input" name="order[items_attributes][__INDEX__][name]">
+      </label>
+      <button type="button" class="demo-trigger"
+              data-stimeo--nested-form-target="remove"><%= remove_label %></button>
+    </fieldset>
+  </template>
+
+  <button type="button" class="demo-trigger" data-stimeo--nested-form-target="add"
+          data-action="click->stimeo--nested-form#add">
+    <%= t("components.nested_form.demo.add") %>
+  </button>
+
+  <%# Shared announcer: row count changes are read out without moving focus away. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden" data-stimeo--announcer-target="polite"
+         aria-live="polite" aria-atomic="true"></div>
+  </div>
+</div>

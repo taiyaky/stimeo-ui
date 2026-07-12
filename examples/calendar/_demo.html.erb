@@ -1,0 +1,128 @@
+<%# Markup for the calendar (APG Date Picker Dialog) demo.
+    stimeo--calendar provides the displayed month label via Intl.DateTimeFormat,
+    date navigation via roving focus, month transitions, 42-cell sync, and min/max
+    boundary limits. %>
+<div
+  class="calendar-demo demo-card"
+  data-controller="stimeo--calendar"
+  data-stimeo--calendar-month-value="<%= Time.current.strftime("%Y-%m") %>"
+  data-stimeo--calendar-selected-value="<%= Time.current.strftime("%Y-%m-%d") %>"
+  data-stimeo--calendar-min-value="<%= (Time.current - 1.month).beginning_of_month.strftime(
+    "%Y-%m-%d"
+  ) %>"
+  data-stimeo--calendar-max-value="<%= (Time.current + 2.months).end_of_month.strftime(
+    "%Y-%m-%d"
+  ) %>"
+  data-stimeo--calendar-week-start-value="0"
+>
+  
+  <div class="calendar-demo__header">
+    <button
+      class="calendar-demo__btn"
+      type="button"
+      data-action="click->stimeo--calendar#prev"
+      aria-label="<%= t("components.calendar.demo.prev_month") %>"
+    >
+      <svg
+        class="calendar-demo__icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <polyline points="15 18 9 12 15 6"></polyline>
+      </svg>
+    </button>
+    <span
+      class="calendar-demo__label"
+      data-stimeo--calendar-target="label"
+    ></span>
+    <button
+      class="calendar-demo__btn"
+      type="button"
+      data-action="click->stimeo--calendar#next"
+      aria-label="<%= t("components.calendar.demo.next_month") %>"
+    >
+      <svg
+        class="calendar-demo__icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <polyline points="9 18 15 12 9 6"></polyline>
+      </svg>
+    </button>
+  </div>
+
+  <table class="calendar-demo__table" role="grid">
+    <thead>
+      <tr role="row">
+        <th
+          scope="col"
+          aria-label="<%= t("components.calendar.demo.sunday") %>"
+        >
+          <%= t("components.calendar.demo.sunday")[0] %>
+        </th>
+        <th
+          scope="col"
+          aria-label="<%= t("components.calendar.demo.monday") %>"
+        >
+          <%= t("components.calendar.demo.monday")[0] %>
+        </th>
+        <th
+          scope="col"
+          aria-label="<%= t("components.calendar.demo.tuesday") %>"
+        >
+          <%= t("components.calendar.demo.tuesday")[0] %>
+        </th>
+        <th
+          scope="col"
+          aria-label="<%= t("components.calendar.demo.wednesday") %>"
+        >
+          <%= t("components.calendar.demo.wednesday")[0] %>
+        </th>
+        <th
+          scope="col"
+          aria-label="<%= t("components.calendar.demo.thursday") %>"
+        >
+          <%= t("components.calendar.demo.thursday")[0] %>
+        </th>
+        <th
+          scope="col"
+          aria-label="<%= t("components.calendar.demo.friday") %>"
+        >
+          <%= t("components.calendar.demo.friday")[0] %>
+        </th>
+        <th
+          scope="col"
+          aria-label="<%= t("components.calendar.demo.saturday") %>"
+        >
+          <%= t("components.calendar.demo.saturday")[0] %>
+        </th>
+      </tr>
+    </thead>
+    <tbody
+      data-stimeo--calendar-target="grid"
+      data-action="
+        keydown->stimeo--calendar#onKeydown
+        click->stimeo--calendar#selectByClick
+      "
+    >
+      <% 6.times do %>
+        <tr role="row">
+          <% 7.times do %>
+            <td
+              role="gridcell"
+              class="calendar-demo__cell"
+              data-stimeo--calendar-target="day"
+              tabindex="-1"
+            ></td>
+          <% end %>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

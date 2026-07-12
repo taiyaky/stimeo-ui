@@ -3,14 +3,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ToolbarController } from "../src/controllers/toolbar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ToolbarController}: the APG Toolbar — single Tab
  * stop (roving tabindex), arrow/Home/End navigation honoring orientation and
  * wrap, and focus restoration to the most recently active control.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (attrs = "", tabindexes: [string, string, string] = ["0", "-1", "-1"]) => `
   <div data-controller="stimeo--toolbar" role="toolbar" aria-label="Text formatting" ${attrs}>

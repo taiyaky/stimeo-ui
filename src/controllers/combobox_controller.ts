@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { scrollOptionIntoView } from "../utils/option_scroll";
 
 /**
  * Headless, accessible combobox behavior (list autocomplete).
@@ -257,6 +258,9 @@ export class ComboboxController extends Controller<HTMLElement> {
     } else {
       this.inputTarget.removeAttribute("aria-activedescendant");
     }
+    // Virtual focus never triggers the browser's native focus-scrolling, so a
+    // scrollable list must follow the active option itself (list-only scroll).
+    if (active && this.hasListTarget) scrollOptionIntoView(this.listTarget, active);
   }
 
   /** The options currently shown (not filtered out). */

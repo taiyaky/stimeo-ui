@@ -1,0 +1,41 @@
+<%# Markup for the currency-input demo.
+    stimeo--currency-input formats thousands separators (while typing / on blur) and
+    rounds decimals, keeping the normalized number in a submit hidden input. It
+    separates the formatted display from the machine-readable value, and has assistive
+    tech announce the normalized actual value (srValue) via aria-describedby. %>
+<div
+  class="currency-input"
+  data-controller="stimeo--currency-input"
+  data-stimeo--currency-input-locale-value="<%= t("components.currency_input.demo.locale") %>"
+  data-stimeo--currency-input-currency-value="<%= t("components.currency_input.demo.currency") %>"
+  data-stimeo--currency-input-precision-value="<%= t(
+    "components.currency_input.demo.precision"
+  ) %>">
+  <label class="currency-input__label" for="currency-amount">
+    <%= t("components.currency_input.demo.label") %>
+  </label>
+  <div class="currency-input__field">
+    <span class="currency-input__symbol" aria-hidden="true">
+      <%= t("components.currency_input.demo.symbol") %>
+    </span>
+    <input
+      id="currency-amount"
+      class="currency-input__input"
+      type="text"
+      inputmode="decimal"
+      value="1234.5"
+      aria-describedby="currency-amount-unit currency-amount-sr"
+      data-stimeo--currency-input-target="display"
+      data-action="input->stimeo--currency-input#onInput
+                   blur->stimeo--currency-input#format" />
+    <span id="currency-amount-unit" class="currency-input__unit">
+      <%= t("components.currency_input.demo.unit") %>
+    </span>
+  </div>
+
+  <%# Channel that conveys the normalized actual value to assistive tech (visually hidden). %>
+  <span id="currency-amount-sr" class="visually-hidden"
+        data-stimeo--currency-input-target="srValue"></span>
+
+  <input type="hidden" name="amount" data-stimeo--currency-input-target="field" />
+</div>

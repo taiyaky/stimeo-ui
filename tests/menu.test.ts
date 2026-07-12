@@ -3,13 +3,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MenuController } from "../src/controllers/menu_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link MenuController}: the APG Menu Button contract —
  * `aria-expanded`, roving focus across `role="menuitem"`, Escape/outside-click.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("MenuController", () => {
   let application: Application;

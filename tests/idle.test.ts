@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IdleController } from "../src/controllers/idle_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link IdleController}, driven by a mocked clock: the idle
@@ -177,7 +178,7 @@ describe("IdleController", () => {
       data-stimeo--idle-timeout-value="1000"></div>`;
     application = Application.start();
     application.register("stimeo--idle", IdleController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     await expectNoA11yViolations(root());
   });
 });

@@ -1,0 +1,50 @@
+<%# Markup for the progress (progress bar) demo.
+    The library syncs role="progressbar" and aria-value*, and exposes the ratio as
+    --stimeo-progress-ratio (0–1). The bar's width and color live in demo.css.
+    The control buttons sit outside the progressbar (a progressbar must not contain
+    interactive children), so they can't drive it through a Stimulus data-action —
+    that only binds inside the controller's own element. Instead they dispatch the
+    progress:set CustomEvent the controller listens for (see demo.js), the same
+    contract a consumer would use to update progress from elsewhere. %>
+<div class="progress-demo">
+  <div
+    class="progress"
+    data-controller="stimeo--progress"
+    role="progressbar"
+    aria-label="<%= t('components.progress.demo.label') %>"
+    aria-valuemin="0"
+    aria-valuemax="100"
+    aria-valuenow="40"
+    data-stimeo--progress-value-value="40"
+    data-stimeo--progress-value-text-value="<%= t('components.progress.demo.value_text') %>"
+    data-action="progress:set->stimeo--progress#setValue">
+    <div class="progress__bar" data-stimeo--progress-target="bar"></div>
+  </div>
+
+  <div
+    class="progress-demo__controls"
+    role="group"
+    aria-label="<%= t('components.progress.demo.controls_label') %>">
+    <% [0, 25, 50, 75, 100].each do |amount| %>
+      <button
+        class="demo-trigger"
+        type="button"
+        data-progress-amount="<%= amount %>">
+        <%= amount %>%
+      </button>
+    <% end %>
+  </div>
+
+  <%# Indeterminate example: drop aria-valuenow and let the consumer apply a looping
+      animation via data-state="indeterminate". %>
+  <div
+    class="progress progress--indeterminate"
+    data-controller="stimeo--progress"
+    role="progressbar"
+    aria-label="<%= t('components.progress.demo.indeterminate_label') %>"
+    aria-valuemin="0"
+    aria-valuemax="100"
+    data-stimeo--progress-indeterminate-value="true">
+    <div class="progress__bar" data-stimeo--progress-target="bar"></div>
+  </div>
+</div>

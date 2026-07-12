@@ -4,6 +4,7 @@ import { DirectUploadController } from "../src/controllers/direct_upload_control
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link DirectUploadController}: row creation from the
@@ -204,6 +205,6 @@ describe("DirectUploadController", () => {
     document.body.innerHTML = MARKUP.replace("ATTRS", "");
     application = Application.start();
     application.register("stimeo--direct-upload", DirectUploadController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
   };
 });

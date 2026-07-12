@@ -3,14 +3,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { StepIndicatorController } from "../src/controllers/step_indicator_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link StepIndicatorController}: the read-only progress
  * indicator — derived `data-state`/`aria-current`, the progress-ratio custom
  * property, `setCurrent` updates, and the `change` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (current = 1) => `
   <ol data-controller="stimeo--step-indicator" aria-label="Checkout progress"

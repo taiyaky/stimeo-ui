@@ -1,0 +1,63 @@
+<%# Markup for the otp (OTP PIN passcode) demo.
+    Provides auto-advance on entry in each field, Backspace to go back, paste
+    distribution, and value sync. %>
+<div
+  class="otp-demo"
+  id="otp-passcode"
+  data-controller="stimeo--otp"
+  data-stimeo--otp-length-value="6"
+  data-stimeo--otp-pattern-value="[0-9]"
+  role="group"
+  aria-label="<%= t("components.otp.demo.label") %>"
+>
+  
+  <div class="otp-demo__label"><%= t("components.otp.demo.label") %></div>
+  
+  <div class="otp-demo__fields">
+    <% 6.times do |i| %>
+      <input
+        class="otp-demo__field"
+        type="text"
+        inputmode="numeric"
+        maxlength="1"
+        data-stimeo--otp-target="field"
+        data-action="
+          input->stimeo--otp#onInput
+          keydown->stimeo--otp#onKeydown
+          paste->stimeo--otp#onPaste
+        "
+        aria-label="<%= t("components.otp.demo.digit_label", position: i + 1) %>"
+      />
+    <% end %>
+  </div>
+
+  <input
+    type="hidden"
+    data-stimeo--otp-target="value"
+    name="otp"
+  />
+
+  <%# Region for invalid-input / full-width-character warning messages. %>
+  <div
+    data-stimeo--otp-target="error"
+    id="otp-error-message"
+    class="otp-demo__error"
+    role="alert"
+    aria-live="polite"
+    hidden
+  >
+    <span class="otp-demo__error-badge">!</span>
+    <span class="otp-demo__error-text">
+      <%= t("components.otp.demo.invalid_msg") %>
+    </span>
+  </div>
+
+  <%# Placeholder for the completion celebration message. %>
+  <div id="otp-complete-message" class="otp-demo__message" style="display: none;">
+    <span class="otp-demo__success-badge">✓</span>
+    <span class="otp-demo__success-text">
+      <%= t("components.otp.demo.complete_msg") %>
+      <strong id="otp-success-code"></strong>
+    </span>
+  </div>
+</div>

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SubmitOnceController } from "../src/controllers/submit_once_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link SubmitOnceController}: disabling + `aria-busy` on
@@ -301,7 +302,7 @@ describe("SubmitOnceController", () => {
     application = Application.start();
     application.register("stimeo--submit-once", SubmitOnceController);
     form().addEventListener("submit", (event) => event.preventDefault());
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     submit(button("send"));
     await expectNoA11yViolations(form());
   });

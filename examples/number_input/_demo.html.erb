@@ -1,0 +1,35 @@
+<%# Markup for the number-input (APG Spinbutton) demo.
+    Increment/decrement buttons and the arrow keys step by `step`, clamped to min/max.
+    The input is the only tab stop (buttons are tabindex="-1"); a button is disabled at
+    its boundary. %>
+<div class="number-input-demo" data-controller="stimeo--number-input"
+     data-stimeo--number-input-min-value="0"
+     data-stimeo--number-input-max-value="10"
+     data-stimeo--number-input-step-value="1">
+  <button type="button" class="number-input-demo__btn"
+          aria-label="<%= t('components.number_input.demo.decrease') %>" tabindex="-1"
+          data-stimeo--number-input-target="decrement"
+          data-action="click->stimeo--number-input#decrement">
+    <svg class="demo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <line x1="5" y1="12" x2="19" y2="12"></line>
+    </svg>
+  </button>
+
+  <input type="number" class="number-input-demo__input" min="0" max="10" step="1" value="1"
+         aria-label="<%= t('components.number_input.demo.quantity') %>"
+         data-stimeo--number-input-target="input"
+         data-action="change->stimeo--number-input#onInput
+                      keydown->stimeo--number-input#onKeydown" />
+
+  <button type="button" class="number-input-demo__btn"
+          aria-label="<%= t('components.number_input.demo.increase') %>" tabindex="-1"
+          data-stimeo--number-input-target="increment"
+          data-action="click->stimeo--number-input#increment">
+    <svg class="demo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <line x1="12" y1="5" x2="12" y2="19"></line>
+      <line x1="5" y1="12" x2="19" y2="12"></line>
+    </svg>
+  </button>
+</div>

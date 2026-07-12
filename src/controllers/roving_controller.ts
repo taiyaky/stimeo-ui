@@ -68,6 +68,10 @@ export class RovingController extends Controller<HTMLElement> {
 
   /** Arrow keys move focus + the tab stop; Home/End jump to the ends. */
   readonly #onKeydown = (event: KeyboardEvent): void => {
+    // A descendant widget that already claimed the key (e.g. a grabbed
+    // `stimeo--pointer-drag` handle consuming arrows to move an item) must not
+    // ALSO move the roving focus — composition depends on this yield.
+    if (event.defaultPrevented) return;
     const items = this.itemTargets;
     const current = this.#indexOf(event.target);
     if (current === -1) return;

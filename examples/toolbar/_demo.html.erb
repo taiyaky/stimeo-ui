@@ -1,0 +1,68 @@
+<%# Markup for the toolbar demo.
+    Two toolbars share the same roving-tabindex behavior; only orientation-value differs,
+    so the arrow axis follows it: Left/Right for horizontal, Up/Down for vertical (Home/End
+    jump to the ends in both). Each caption is the toolbar's accessible name via
+    aria-labelledby. Pressing/toggling each button is each element's responsibility. %>
+<div class="toolbar-demo">
+  <%# Horizontal: arrows Left/Right. %>
+  <div class="toolbar-demo__group">
+    <span class="toolbar-demo__caption" id="toolbar-demo-horizontal">
+      <%= t("components.toolbar.demo.horizontal") %>
+    </span>
+    <div
+      class="toolbar"
+      data-controller="stimeo--toolbar"
+      role="toolbar"
+      aria-labelledby="toolbar-demo-horizontal"
+      data-stimeo--toolbar-orientation-value="horizontal">
+      <button type="button" class="toolbar__button" aria-pressed="false" tabindex="0"
+        data-stimeo--toolbar-target="control" data-action="keydown->stimeo--toolbar#onKeydown">
+        <%= t("components.toolbar.demo.bold") %>
+      </button>
+      <button type="button" class="toolbar__button" aria-pressed="false" tabindex="-1"
+        data-stimeo--toolbar-target="control" data-action="keydown->stimeo--toolbar#onKeydown">
+        <%= t("components.toolbar.demo.italic") %>
+      </button>
+      <button type="button" class="toolbar__button" aria-pressed="false" tabindex="-1"
+        data-stimeo--toolbar-target="control" data-action="keydown->stimeo--toolbar#onKeydown">
+        <%= t("components.toolbar.demo.underline") %>
+      </button>
+      <span class="toolbar__separator" role="separator" aria-orientation="vertical"></span>
+      <button type="button" class="toolbar__button" tabindex="-1"
+        data-stimeo--toolbar-target="control" data-action="keydown->stimeo--toolbar#onKeydown">
+        <%= t("components.toolbar.demo.link") %>
+      </button>
+    </div>
+  </div>
+
+  <%# Vertical: same controls, arrows Up/Down. The separator is horizontal here. %>
+  <div class="toolbar-demo__group">
+    <span class="toolbar-demo__caption" id="toolbar-demo-vertical">
+      <%= t("components.toolbar.demo.vertical") %>
+    </span>
+    <div
+      class="toolbar toolbar--vertical"
+      data-controller="stimeo--toolbar"
+      role="toolbar"
+      aria-labelledby="toolbar-demo-vertical"
+      data-stimeo--toolbar-orientation-value="vertical">
+      <button type="button" class="toolbar__button" aria-pressed="false" tabindex="0"
+        data-stimeo--toolbar-target="control" data-action="keydown->stimeo--toolbar#onKeydown">
+        <%= t("components.toolbar.demo.bold") %>
+      </button>
+      <button type="button" class="toolbar__button" aria-pressed="false" tabindex="-1"
+        data-stimeo--toolbar-target="control" data-action="keydown->stimeo--toolbar#onKeydown">
+        <%= t("components.toolbar.demo.italic") %>
+      </button>
+      <button type="button" class="toolbar__button" aria-pressed="false" tabindex="-1"
+        data-stimeo--toolbar-target="control" data-action="keydown->stimeo--toolbar#onKeydown">
+        <%= t("components.toolbar.demo.underline") %>
+      </button>
+      <span class="toolbar__separator" role="separator" aria-orientation="horizontal"></span>
+      <button type="button" class="toolbar__button" tabindex="-1"
+        data-stimeo--toolbar-target="control" data-action="keydown->stimeo--toolbar#onKeydown">
+        <%= t("components.toolbar.demo.link") %>
+      </button>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,36 @@
+<%# Markup for the local-time demo.
+    Each <time> carries a machine-readable UTC datetime; the controller reformats the
+    visible text into the viewer's locale and timezone via Intl.DateTimeFormat, leaving
+    the datetime attribute (the screen-reader / SEO value) intact. The locale follows the
+    page language and the timezone follows the browser, so the server can emit plain UTC
+    and stay cacheable. The last row clears the time style to show a date-only format. %>
+<% rows = [
+     { at: Time.utc(2026, 6, 8, 12, 30), key: "published", date: "medium", time: "short" },
+     { at: Time.utc(2026, 1, 1, 9, 0), key: "released", date: "full", time: "short" },
+     { at: Time.utc(2026, 12, 24, 21, 0), key: "starts", date: "long", time: "" },
+     { at: Time.now.utc, key: "now", date: "medium", time: "medium" }
+   ] %>
+<ul class="local-time-demo">
+  <% rows.each do |row| %>
+    <li class="local-time-demo__row">
+      <span class="local-time-demo__label">
+        <%= t("components.local_time.demo.#{row[:key]}") %>
+      </span>
+      <span class="local-time-demo__convert">
+        <span class="local-time-demo__source">UTC <%= row[:at].strftime("%Y-%m-%d %H:%M") %></span>
+        <span class="local-time-demo__arrow" aria-hidden="true">→</span>
+        <time
+          class="local-time"
+          data-controller="stimeo--local-time"
+          datetime="<%= row[:at].iso8601 %>"
+          data-stimeo--local-time-locale-value="<%= I18n.locale %>"
+          data-stimeo--local-time-date-style-value="<%= row[:date] %>"
+          data-stimeo--local-time-time-style-value="<%= row[:time] %>"
+          data-stimeo--local-time-title-format-value="long">
+          <%= row[:at].strftime("%Y-%m-%d %H:%M UTC") %>
+        </time>
+      </span>
+    </li>
+  <% end %>
+</ul>
+<p class="local-time-demo__hint"><%= t("components.local_time.demo.hint") %></p>

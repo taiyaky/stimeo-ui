@@ -5,7 +5,7 @@ import { Controller } from "@hotwired/stimulus";
  *
  * Markup contract (identifier: `stimeo--tabs`):
  *   <div data-controller="stimeo--tabs">
- *     <div role="tablist" aria-label="…">
+ *     <div role="tablist" aria-label="…" data-stimeo--tabs-target="list">
  *       <button role="tab" id="tab-1" aria-controls="panel-1"
  *               data-stimeo--tabs-target="tab"
  *               data-action="stimeo--tabs#select
@@ -24,7 +24,10 @@ import { Controller } from "@hotwired/stimulus";
  * @remarks
  * Behavior only. State is exposed through `aria-selected`, roving `tabindex`
  * (`0` for the active tab, `-1` for the rest), and the panel `hidden` attribute;
- * the consumer owns all styling.
+ * the consumer owns all styling. The optional `list` target marks the tablist
+ * container as part of the semantic contract — the Inspector requires its
+ * `role="tablist"` and future orientation support has an anchor; the controller
+ * performs no runtime work on it.
  *
  * Behavior provided:
  * - Click a tab to select it.
@@ -32,7 +35,7 @@ import { Controller } from "@hotwired/stimulus";
  *   `Home`/`End` select the first/last tab.
  */
 export class TabsController extends Controller<HTMLElement> {
-  static override targets = ["tab", "panel"];
+  static override targets = ["tab", "panel", "list"];
   static actions = ["onKeydown", "select"] as const;
 
   declare readonly tabTargets: HTMLButtonElement[];

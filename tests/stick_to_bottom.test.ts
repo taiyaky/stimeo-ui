@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StickToBottomController } from "../src/controllers/stick_to_bottom_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link StickToBottomController}. happy-dom has no layout, so the
@@ -25,8 +26,6 @@ const setReducedMotion = (reduce: boolean) => {
     onchange: null,
   })) as unknown as typeof window.matchMedia;
 };
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("StickToBottomController", () => {
   let application: Application;

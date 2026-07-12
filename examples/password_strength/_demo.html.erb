@@ -1,0 +1,40 @@
+<%# Markup for the password-strength demo.
+    The controller scores the field with a lightweight zero-dependency heuristic and
+    drives the meter (aria-valuenow), the data-strength token, and the 0–1 fill on the
+    --stimeo-password-strength custom property. The input sits inside the controller so
+    its data-action input->...#evaluate binds directly. Level labels are localized via
+    the levels value; demo.css colors the bar by the locale-independent data-strength band,
+    so the look never depends on the (translated) label text. The library writes no CSS. %>
+<% levels = t("components.password_strength.demo.levels").to_json %>
+<div
+  class="password-strength"
+  data-controller="stimeo--password-strength"
+  data-stimeo--password-strength-levels-value="<%= levels %>">
+  <label class="password-strength__label" for="password-strength-demo-input">
+    <%= t("components.password_strength.demo.label") %>
+  </label>
+  <input
+    class="password-strength__input"
+    id="password-strength-demo-input"
+    type="password"
+    autocomplete="new-password"
+    aria-describedby="password-strength-demo-readout"
+    data-stimeo--password-strength-target="input"
+    data-action="input->stimeo--password-strength#evaluate">
+  <div
+    class="password-strength__meter"
+    role="meter"
+    aria-valuemin="0"
+    aria-valuemax="4"
+    aria-valuenow="0"
+    aria-label="<%= t('components.password_strength.demo.meter_label') %>"
+    data-stimeo--password-strength-target="meter">
+    <span class="password-strength__bar"></span>
+  </div>
+  <span
+    class="password-strength__readout"
+    id="password-strength-demo-readout"
+    aria-live="polite"
+    data-stimeo--password-strength-target="label"></span>
+</div>
+<p class="password-strength__hint"><%= t("components.password_strength.demo.hint") %></p>

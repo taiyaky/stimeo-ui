@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { BreadcrumbController } from "../src/controllers/breadcrumb_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link BreadcrumbController}: overflow-driven collapsing
@@ -12,8 +13,6 @@ import { captureSpeech } from "./helpers/speech";
  * happy-dom has no layout engine, so `scrollWidth`/`clientWidth` are stubbed to
  * drive the overflow condition deterministically.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = `
   <nav data-controller="stimeo--breadcrumb" aria-label="Breadcrumb">

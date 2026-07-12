@@ -1,0 +1,19 @@
+<%# Lazy-frame demo: in production the controller goes on a <turbo-frame> and writes its
+    held url to src to start the Turbo load. The catalog runs Turbo, so to avoid a real
+    fetch this demo puts the controller on a plain <div> (writing src to a div is inert)
+    and demo.js swaps the placeholder on the load event — demonstrating the lazy *trigger*
+    (it fires only once the frame scrolls into view, thanks to the spacer above it). The
+    library only writes src and reflects data-lazy-loaded. %>
+<div class="lazy-frame-demo">
+  <p class="lazy-frame-demo__hint"><%= t("components.lazy_frame.demo.hint") %></p>
+  <div class="lazy-frame-demo__spacer" aria-hidden="true"></div>
+  <div
+    class="lazy-frame-demo__frame"
+    data-controller="stimeo--lazy-frame"
+    data-stimeo--lazy-frame-url-value="/posts/1/comments"
+    data-stimeo--lazy-frame-root-margin-value="0px"
+    data-loaded-label="<%= t("components.lazy_frame.demo.loaded") %>"
+    data-loading-label="<%= t("components.lazy_frame.demo.loading") %>">
+    <%= t("components.lazy_frame.demo.placeholder") %>
+  </div>
+</div>

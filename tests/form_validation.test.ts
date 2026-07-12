@@ -5,6 +5,7 @@ import { FormValidationController } from "../src/controllers/form_validation_con
 import { ListboxController } from "../src/controllers/listbox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link FormValidationController}: the timing layer that
@@ -22,8 +23,6 @@ import { captureSpeech } from "./helpers/speech";
  * focus, events), and the *message rendering* path is exercised with
  * `setCustomValidity()`, whose text is engine-independent.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const OUTLET = "[data-controller~='stimeo--form-field']";
 

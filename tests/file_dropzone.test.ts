@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileDropzoneController } from "../src/controllers/file_dropzone_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link FileDropzoneController}: dialog/keyboard selection,
@@ -10,8 +11,6 @@ import { captureSpeech } from "./helpers/speech";
  * with objectURL release, focus hand-off on removal, and the `change`/`reject`
  * events.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (attrs = "", inputAttrs = 'accept="image/*" multiple aria-label="Upload files"') => `
   <div data-controller="stimeo--file-dropzone" ${attrs}>

@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CheckboxController } from "../src/controllers/checkbox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link CheckboxController}: the tri-state parent/child
  * "select all" contract — `indeterminate` derivation, the parent→children
  * cascade, the `data-state` aggregate, and the `change` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("CheckboxController", () => {
   let application: Application;

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SwitchController } from "../src/controllers/switch_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link SwitchController}: the APG Switch contract
@@ -12,8 +13,6 @@ import { captureSpeech } from "./helpers/speech";
  * because a real `<button>` synthesizes a click for Space/Enter — the controller
  * deliberately skips its own keydown toggle there to avoid a double toggle.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("SwitchController", () => {
   let application: Application;

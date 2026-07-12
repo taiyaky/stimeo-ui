@@ -1,0 +1,36 @@
+<%# Markup for the debounced auto-submit demo.
+    The controller debounces input and then calls form.requestSubmit(). This
+    Playground has no search backend, so demo.js cancels the native submit, filters
+    the list in the browser, completes the Turbo lifecycle with a synthetic
+    turbo:submit-end (so the controller clears aria-busy and emits done), and
+    announces the result count through a shared stimeo--announcer. %>
+<%
+  items = t("components.auto_submit.demo.items")
+  count_template = t("components.auto_submit.demo.count_template")
+%>
+<div class="auto-submit-demo">
+  <form class="auto-submit-demo__form" role="search" action="#"
+        data-controller="stimeo--auto-submit"
+        data-stimeo--auto-submit-debounce-value="400"
+        data-action="input->stimeo--auto-submit#submit"
+        data-auto-submit-count="<%= count_template %>">
+    <label class="auto-submit-demo__label" for="auto-submit-q">
+      <%= t("components.auto_submit.demo.label") %>
+    </label>
+    <input class="demo-input" id="auto-submit-q" type="search" name="q"
+           autocomplete="off" data-auto-submit-demo="input"
+           placeholder="<%= t("components.auto_submit.demo.placeholder") %>">
+  </form>
+
+  <ul class="auto-submit-demo__list" data-auto-submit-demo="list">
+    <% items.each do |item| %>
+      <li data-auto-submit-value="<%= item.downcase %>"><%= item %></li>
+    <% end %>
+  </ul>
+
+  <%# Shared announcer: the result count is read out without moving focus. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
+  </div>
+</div>

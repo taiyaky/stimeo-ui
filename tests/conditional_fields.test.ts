@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConditionalFieldsController } from "../src/controllers/conditional_fields_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ConditionalFieldsController}: initial sync, show/hide
  * on trigger change, disabled syncing (preserving authored-disabled), data-when-value
  * and match="all", and focus retreat out of a hidden region.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("ConditionalFieldsController", () => {
   let application: Application;

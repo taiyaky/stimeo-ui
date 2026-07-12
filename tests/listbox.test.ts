@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ListboxController } from "../src/controllers/listbox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ListboxController}: the APG select-only listbox —
@@ -10,8 +11,6 @@ import { captureSpeech } from "./helpers/speech";
  * typeahead, single selection (`aria-selected` + trigger label + hidden field),
  * focus restoration, outside-click/Escape/Tab dismissal, and the `change` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = `
   <div data-controller="stimeo--listbox">
@@ -84,6 +83,24 @@ describe("ListboxController", () => {
     trigger().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
     expect(listEl().hidden).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("follows the active option by scrolling the LIST only", () => {
+    // happy-dom has no layout: the rect/size INPUTS of the scroll math are
+    // modeled (an 80px viewport over the options); real geometry is e2e-lane.
+    trigger().focus();
+    triggerKey("ArrowDown"); // open, active opt-1
+    Object.defineProperties(listEl(), {
+      scrollHeight: { value: 200, configurable: true },
+      clientHeight: { value: 80, configurable: true },
+    });
+    vi.spyOn(listEl(), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 100, 80));
+    const cherry = options()[2] as HTMLElement;
+    vi.spyOn(cherry, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 100, 100, 40));
+    triggerKey("ArrowDown"); // opt-2 (zero-rect mock -> visible, no scroll)
+    expect(listEl().scrollTop).toBe(0);
+    triggerKey("ArrowDown"); // opt-3: bottom 140 > list bottom 80 -> +60
+    expect(listEl().scrollTop).toBe(60);
   });
 
   it("opens with ArrowDown and activates the first option (focus stays on trigger)", () => {

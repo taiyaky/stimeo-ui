@@ -1,0 +1,28 @@
+<%# Markup for the range-slider (APG Slider, multi-thumb) demo.
+    stimeo--range-slider handles the two thumbs' (start / end) mutual constraint
+    (lower ≤ upper), keyboard / drag operation, and dynamic updates of each thumb's
+    aria-valuemin/max/now, and exposes the range as the root CSS variables
+    --stimeo-range-start / --stimeo-range-end (0..1). The thumb and range placement
+    is the Playground's CSS using those variables. %>
+<div
+  class="range-slider"
+  data-controller="stimeo--range-slider"
+  data-stimeo--range-slider-min-value="0"
+  data-stimeo--range-slider-max-value="100"
+  data-stimeo--range-slider-step-value="1"
+  data-stimeo--range-slider-start-value="20"
+  data-stimeo--range-slider-end-value="80">
+  <div class="range-slider__track" data-stimeo--range-slider-target="track"
+       data-action="pointerdown->stimeo--range-slider#onPointerDown">
+    <div class="range-slider__range" aria-hidden="true"></div>
+    <div class="range-slider__thumb" role="slider" tabindex="0"
+         aria-label="<%= t("components.range_slider.demo.min_label") %>"
+         data-stimeo--range-slider-target="startThumb"
+         data-action="keydown->stimeo--range-slider#onKeydown"></div>
+    <div class="range-slider__thumb" role="slider" tabindex="0"
+         aria-label="<%= t("components.range_slider.demo.max_label") %>"
+         data-stimeo--range-slider-target="endThumb"
+         data-action="keydown->stimeo--range-slider#onKeydown"></div>
+  </div>
+  <output class="range-slider__output" data-range-slider-output aria-live="polite">20 – 80</output>
+</div>

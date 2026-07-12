@@ -1,0 +1,31 @@
+<%# Markup for the time-picker (time selection) demo.
+    stimeo--time-picker treats each segment (hour / minute / AM·PM) as an APG Spinbutton,
+    handling arrow-key increment/decrement, edge wrap and carry (minute→hour), left/right
+    segment movement, and direct numeric entry, and reflects the composed 24-hour value
+    (HH:MM) into a hidden input. Each segment is an independent tab stop. %>
+<div
+  class="time-picker"
+  data-controller="stimeo--time-picker"
+  data-stimeo--time-picker-hour-cycle-value="12"
+  data-stimeo--time-picker-step-value="5"
+  role="group"
+  aria-label="<%= t("components.time_picker.demo.group_label") %>">
+  <span class="time-picker__segment" role="spinbutton"
+        aria-label="<%= t("components.time_picker.demo.hours") %>"
+        tabindex="0" aria-valuenow="9" aria-valuemin="1" aria-valuemax="12" aria-valuetext="09"
+        data-segment="hour" data-stimeo--time-picker-target="segment"
+        data-action="keydown->stimeo--time-picker#onKeydown">09</span>
+  <span class="time-picker__colon" aria-hidden="true">:</span>
+  <span class="time-picker__segment" role="spinbutton"
+        aria-label="<%= t("components.time_picker.demo.minutes") %>"
+        tabindex="0" aria-valuenow="30" aria-valuemin="0" aria-valuemax="59" aria-valuetext="30"
+        data-segment="minute" data-stimeo--time-picker-target="segment"
+        data-action="keydown->stimeo--time-picker#onKeydown">30</span>
+  <span class="time-picker__segment time-picker__segment--meridiem" role="spinbutton"
+        aria-label="<%= t("components.time_picker.demo.meridiem") %>"
+        tabindex="0" aria-valuenow="0" aria-valuemin="0" aria-valuemax="1" aria-valuetext="AM"
+        data-segment="meridiem" data-stimeo--time-picker-target="segment"
+        data-action="keydown->stimeo--time-picker#onKeydown">AM</span>
+
+  <input type="hidden" name="time" data-stimeo--time-picker-target="field" />
+</div>

@@ -1,0 +1,36 @@
+<%# Markup for the network-status (offline-detection banner) demo.
+    The library checks navigator.onLine initially and subscribes to the window's
+    online/offline events, toggling the corresponding banner's hidden. Offline uses
+    role="alert" (assertive); coming back online uses role="status" (polite). Since real
+    online/offline is environment-dependent, the demo's demo.js fakes the window events
+    to reproduce the behavior. %>
+<div class="network-demo">
+  <div class="network-demo__controls">
+    <button class="demo-trigger" type="button" data-network-demo="offline">
+      <%= t("components.network_status.demo.go_offline") %>
+    </button>
+    <button class="demo-trigger" type="button" data-network-demo="online">
+      <%= t("components.network_status.demo.go_online") %>
+    </button>
+  </div>
+
+  <div data-controller="stimeo--network-status"
+       data-stimeo--network-status-online-auto-hide-value="3000">
+    <div
+      class="network-banner network-banner--offline"
+      role="alert"
+      hidden
+      data-stimeo--network-status-target="offline">
+      <%= t("components.network_status.demo.offline_message") %>
+    </div>
+    <div
+      class="network-banner network-banner--online"
+      role="status"
+      hidden
+      data-stimeo--network-status-target="online">
+      <%= t("components.network_status.demo.online_message") %>
+    </div>
+  </div>
+
+  <p class="network-demo__note"><%= t("components.network_status.demo.note") %></p>
+</div>

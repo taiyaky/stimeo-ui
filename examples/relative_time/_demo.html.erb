@@ -1,0 +1,43 @@
+<%# Markup for the relative-time demo.
+    Formats the absolute time in <time datetime> into "3 minutes ago" etc. via
+    Intl.RelativeTimeFormat, updating at an interval that grows with elapsed time. The
+    machine-readable datetime stays fixed and only the display text updates; it's not a
+    live region, to avoid interrupting screen readers. The locale follows the page
+    language. The last example, past the threshold, falls back to an absolute format. %>
+<ul class="relative-time-demo">
+  <% [
+       { at: 3.minutes.ago, label: t("components.relative_time.demo.posted") },
+       { at: 2.hours.ago, label: t("components.relative_time.demo.updated") },
+       { at: 3.days.from_now, label: t("components.relative_time.demo.due") }
+     ].each do |row| %>
+    <li class="relative-time-demo__row">
+      <span class="relative-time-demo__label"><%= row[:label] %></span>
+      <time
+        class="relative-time"
+        data-controller="stimeo--relative-time"
+        datetime="<%= row[:at].iso8601 %>"
+        title="<%= row[:at].strftime("%Y-%m-%d %H:%M") %>"
+        data-stimeo--relative-time-locale-value="<%= I18n.locale %>">
+        <%= row[:at].strftime("%Y-%m-%d %H:%M") %>
+      </time>
+    </li>
+  <% end %>
+
+  <li class="relative-time-demo__row">
+    <span class="relative-time-demo__label"><%= t(
+      "components.relative_time.demo.archived"
+    ) %></span>
+    <%# Example that falls back to an absolute format past the threshold
+        (30 days = 2592000 seconds). %>
+    <time
+      class="relative-time"
+      data-controller="stimeo--relative-time"
+      datetime="<%= 90.days.ago.iso8601 %>"
+      data-stimeo--relative-time-locale-value="<%= I18n.locale %>"
+      data-stimeo--relative-time-threshold-value="2592000">
+      <%= 90.days.ago.strftime("%Y-%m-%d %H:%M") %>
+    </time>
+  </li>
+</ul>
+
+<p class="relative-time-demo__hint"><%= t("components.relative_time.demo.hint") %></p>

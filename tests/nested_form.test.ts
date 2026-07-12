@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { NestedFormController } from "../src/controllers/nested_form_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link NestedFormController}: template cloning with index
@@ -10,8 +11,6 @@ import { query } from "./helpers/dom";
  * focus movement, the add/remove events, delegation for dynamic rows, the
  * announce bridge, and teardown.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("NestedFormController", () => {
   let application: Application;

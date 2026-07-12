@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ToggleGroupController } from "../src/controllers/toggle_group_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ToggleGroupController}: the APG toggle-button group
  * — `aria-pressed`, single/multiple selection, Toolbar-style roving where arrows
  * move focus only, and the `change` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (mode?: string) => `
   <div data-controller="stimeo--toggle-group" role="group" aria-label="Text style"

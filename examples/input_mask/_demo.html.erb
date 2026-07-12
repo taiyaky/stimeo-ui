@@ -1,0 +1,28 @@
+<%# Markup for the input mask demo.
+    The controller formats the field in place against the pattern (9=digit), inserts
+    the separators, rejects non-digits, preserves the caret, and syncs the raw value
+    to the hidden field. demo.js mirrors that hidden raw value (and the complete flag)
+    into the visible readout below, since the unmask field is hidden. %>
+<div class="mask-demo">
+  <form class="mask-demo__form">
+    <label class="mask-demo__field">
+      <span><%= t("components.input_mask.demo.label") %></span>
+      <input type="text" class="demo-input" inputmode="numeric"
+             data-controller="stimeo--input-mask"
+             data-stimeo--input-mask-pattern-value="(999) 999-9999"
+             data-action="input->stimeo--input-mask#format"
+             aria-describedby="mask-hint"
+             placeholder="<%= t("components.input_mask.demo.placeholder") %>">
+      <input type="hidden" name="phone" data-stimeo--input-mask-unmask>
+    </label>
+    <p id="mask-hint" class="mask-demo__hint"><%= t("components.input_mask.demo.hint") %></p>
+  </form>
+
+  <p class="mask-demo__raw"
+     data-empty="<%= t("components.input_mask.demo.empty") %>"
+     data-complete="<%= t("components.input_mask.demo.complete") %>">
+    <%= t("components.input_mask.demo.raw_label") %>
+    <code data-mask-demo="raw"><%= t("components.input_mask.demo.empty") %></code>
+    <span data-mask-demo="status"></span>
+  </p>
+</div>

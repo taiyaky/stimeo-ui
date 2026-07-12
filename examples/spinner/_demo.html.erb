@@ -1,0 +1,44 @@
+<%# Markup for the spinner (loading indicator) demo.
+    The indicator holds text in a role="status" live region, with the visual spinner
+    placed alongside as aria-hidden="true". The region reflects aria-busy. A show delay
+    and a minimum display time suppress flicker. The Start/Stop buttons call the
+    controller's methods directly. %>
+<div
+  class="spinner-demo"
+  data-controller="stimeo--spinner"
+  data-stimeo--spinner-delay-value="150"
+  data-stimeo--spinner-min-duration-value="600">
+  <div class="spinner-demo__controls">
+    <button
+      class="demo-trigger"
+      type="button"
+      data-action="click->stimeo--spinner#start">
+      <%= t("components.spinner.demo.start") %>
+    </button>
+    <button
+      class="demo-trigger"
+      type="button"
+      data-action="click->stimeo--spinner#stop">
+      <%= t("components.spinner.demo.stop") %>
+    </button>
+  </div>
+
+  <p class="spinner-demo__hint"><%= t("components.spinner.demo.hint") %></p>
+
+  <div
+    class="spinner"
+    role="status"
+    aria-live="polite"
+    hidden
+    data-stimeo--spinner-target="indicator">
+    <span class="spinner__icon" aria-hidden="true"></span>
+    <span data-stimeo--spinner-target="message"><%= t("components.spinner.demo.loading") %></span>
+  </div>
+
+  <div
+    class="spinner-demo__region"
+    aria-busy="false"
+    data-stimeo--spinner-target="region">
+    <%= t("components.spinner.demo.content") %>
+  </div>
+</div>

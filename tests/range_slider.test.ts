@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RangeSliderController } from "../src/controllers/range_slider_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link RangeSliderController}: the APG multi-thumb Slider
@@ -10,8 +11,6 @@ import { captureSpeech } from "./helpers/speech";
  * each thumb's `aria-valuemin`/`aria-valuemax`, pointer selection of the nearest
  * thumb, and the `--stimeo-range-start`/`--stimeo-range-end` custom properties.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("RangeSliderController", () => {
   let application: Application;
@@ -178,15 +177,5 @@ describe("RangeSliderController", () => {
 
 /** A non-zero DOMRect so happy-dom's zero-size geometry doesn't short-circuit. */
 function stubRect(width: number): DOMRect {
-  return {
-    left: 0,
-    width,
-    top: 0,
-    height: 10,
-    right: width,
-    bottom: 10,
-    x: 0,
-    y: 0,
-    toJSON: () => ({}),
-  } as DOMRect;
+  return new DOMRect(0, 0, width, 10);
 }

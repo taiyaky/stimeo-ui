@@ -1,0 +1,54 @@
+<%# Markup for the editable (inline editing) demo.
+    Click / Enter / F2 on the display element (a button) enters edit mode, focusing the
+    input and selecting all. The library handles mode switching (data-mode), focus /
+    select-all, and the commit event; the look lives in demo.css.
+    Two variants are shown:
+      1. Single-line <input>: Enter saves, Escape cancels.
+      2. Multiline <textarea>: Enter inserts a newline, Ctrl+Enter saves, Escape cancels.
+    submitOnBlur=true also saves on blur for both. %>
+<div class="editable-demo">
+  <%# 1. Single-line inline edit. %>
+  <div class="editable" data-controller="stimeo--editable"
+       data-stimeo--editable-submit-on-blur-value="true">
+    <span class="editable__hint"><%= t("components.editable.demo.hint") %></span>
+    <button
+      type="button"
+      class="editable__display"
+      aria-label="<%= t("components.editable.demo.aria_label") %>"
+      data-stimeo--editable-target="display"
+      data-action="click->stimeo--editable#edit keydown->stimeo--editable#onDisplayKeydown">
+      <%= t("components.editable.demo.value") %>
+    </button>
+    <input
+      type="text"
+      class="editable__input"
+      hidden
+      aria-label="<%= t("components.editable.demo.aria_label") %>"
+      data-stimeo--editable-target="input"
+      data-action="keydown->stimeo--editable#onKeydown blur->stimeo--editable#onBlur" />
+  </div>
+
+  <%# 2. Multiline inline edit. The controller detects the <textarea> and treats Enter as a
+      newline, so saving is Ctrl+Enter (or blur). The display uses white-space: pre-line so
+      saved line breaks render. %>
+  <div class="editable" data-controller="stimeo--editable"
+       data-stimeo--editable-submit-on-blur-value="true">
+    <span class="editable__hint"><%= t("components.editable.demo.multiline.hint") %></span>
+    <button
+      type="button"
+      class="editable__display editable__display--multiline"
+      aria-label="<%= t("components.editable.demo.multiline.aria_label") %>"
+      data-stimeo--editable-target="display"
+      data-action="click->stimeo--editable#edit
+                   keydown->stimeo--editable#onDisplayKeydown"><%= t(
+        "components.editable.demo.multiline.value"
+      ) %></button>
+    <textarea
+      class="editable__input editable__input--multiline"
+      hidden
+      rows="3"
+      aria-label="<%= t("components.editable.demo.multiline.aria_label") %>"
+      data-stimeo--editable-target="input"
+      data-action="keydown->stimeo--editable#onKeydown blur->stimeo--editable#onBlur"></textarea>
+  </div>
+</div>

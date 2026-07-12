@@ -1,0 +1,30 @@
+<%# Markup for the dropdown demo.
+    The single source used for both the live render and the copy-paste code.
+    Connect to stimeo--dropdown via data-controller / data-*-target / data-action.
+    The behavior is the library's; the look (classes) is the Playground's CSS. %>
+<div class="dropdown" data-controller="stimeo--dropdown">
+  <button
+    type="button"
+    class="dropdown__trigger"
+    aria-expanded="false"
+    data-stimeo--dropdown-target="trigger"
+    data-action="click->stimeo--dropdown#toggle">
+    <%= t("components.dropdown.demo.trigger") %>
+  </button>
+
+  <%# The toggled menu. Starts hidden (closed).
+      Each link uses click->stimeo--dropdown#close to close the menu on selection.
+      (The links are inside the controller element, so an outside click won't close
+      it — wire it explicitly.) %>
+  <ul class="dropdown__menu" data-stimeo--dropdown-target="menu" hidden>
+    <li><a href="#profile" data-action="click->stimeo--dropdown#close"><%= t(
+      "components.dropdown.demo.profile"
+    ) %></a></li>
+    <li><a href="#settings" data-action="click->stimeo--dropdown#close"><%= t(
+      "components.dropdown.demo.settings"
+    ) %></a></li>
+    <li><a href="#sign-out" data-action="click->stimeo--dropdown#close"><%= t(
+      "components.dropdown.demo.sign_out"
+    ) %></a></li>
+  </ul>
+</div>

@@ -1,0 +1,47 @@
+<%# Markup for the listbox demo.
+    Pressing the role="combobox" trigger opens a role="listbox"; arrows / typeahead
+    navigate the options to pick one. Focus stays on the trigger and the active option
+    is shown via aria-activedescendant. The library handles open/close, option
+    movement, single selection, reflecting into the trigger label and hidden input, and
+    closing on Escape / outside click. Static placement is in demo.css. %>
+<div class="listbox" data-controller="stimeo--listbox">
+  <span id="listbox-label" class="listbox__label"><%= t("components.listbox.demo.label") %></span>
+  <button
+    type="button"
+    class="listbox__trigger"
+    role="combobox"
+    aria-haspopup="listbox"
+    aria-expanded="false"
+    aria-controls="listbox-options"
+    aria-labelledby="listbox-label listbox-value"
+    data-stimeo--listbox-target="trigger"
+    data-action="click->stimeo--listbox#toggle keydown->stimeo--listbox#onTriggerKeydown">
+    <span id="listbox-value" data-stimeo--listbox-target="value">
+      <%= t("components.listbox.demo.placeholder") %>
+    </span>
+    <span class="listbox__chevron" aria-hidden="true">▾</span>
+  </button>
+
+  <ul
+    id="listbox-options"
+    class="listbox__list"
+    role="listbox"
+    aria-label="<%= t("components.listbox.demo.label") %>"
+    hidden
+    data-stimeo--listbox-target="list">
+    <% %w[apple banana cherry grape orange].each_with_index do |fruit, index| %>
+      <li
+        id="listbox-opt-<%= index %>"
+        class="listbox__option"
+        role="option"
+        aria-selected="false"
+        data-value="<%= fruit %>"
+        data-stimeo--listbox-target="option"
+        data-action="click->stimeo--listbox#select">
+        <%= t("components.listbox.demo.options.#{fruit}") %>
+      </li>
+    <% end %>
+  </ul>
+
+  <input type="hidden" name="fruit" data-stimeo--listbox-target="field" />
+</div>

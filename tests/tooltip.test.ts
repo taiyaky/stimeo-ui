@@ -4,6 +4,7 @@ import { TooltipController } from "../src/controllers/tooltip_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link TooltipController}: hover/focus show-hide with
@@ -156,7 +157,7 @@ describe("TooltipController accessibility", () => {
       </main>`;
     application = Application.start();
     application.register("stimeo--tooltip", TooltipController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
   };
 
   afterEach(() => {

@@ -4,6 +4,7 @@ import { PopoverController } from "../src/controllers/popover_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link PopoverController}: the modeless dialog contract —
@@ -27,7 +28,7 @@ describe("PopoverController", () => {
       </main>`;
     application = Application.start();
     application.register("stimeo--popover", PopoverController);
-    await Promise.resolve();
+    await tick();
   };
 
   beforeEach(() => start());
@@ -154,7 +155,7 @@ describe("PopoverController", () => {
       </main>`;
     application = Application.start();
     application.register("stimeo--popover", PopoverController);
-    await Promise.resolve();
+    await tick();
 
     trigger().click();
     expect(panel().hidden).toBe(false);
@@ -184,7 +185,7 @@ describe("PopoverController accessibility", () => {
       </main>`;
     application = Application.start();
     application.register("stimeo--popover", PopoverController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
   };
 
   afterEach(() => {

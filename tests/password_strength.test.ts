@@ -4,6 +4,7 @@ import { PasswordStrengthController } from "../src/controllers/password_strength
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link PasswordStrengthController}: the strength heuristic
@@ -229,7 +230,7 @@ describe("PasswordStrengthController", () => {
       </main>`;
     application = Application.start();
     application.register("stimeo--password-strength", PasswordStrengthController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     await expectNoA11yViolations(document.body);
   });
 });

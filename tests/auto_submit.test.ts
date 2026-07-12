@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AutoSubmitController } from "../src/controllers/auto_submit_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link AutoSubmitController}: debounced submission, rapid
  * coalescing, the `on` allowlist, the pending/busy state hooks, the submit/done
  * events, the optional Announcer bridge, the `form` target, and teardown.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("AutoSubmitController", () => {
   let application: Application;

@@ -3,15 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DropdownController } from "../src/controllers/dropdown_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link DropdownController}, run in happy-dom (browserless).
  * They assert the disclosure contract: ARIA state, open/close toggling, and the
  * keyboard/outside-click affordances — not any visual styling.
  */
-
-/** Flushes the microtask/timer queue so Stimulus can connect controllers. */
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("DropdownController", () => {
   let application: Application;

@@ -31,7 +31,7 @@ owns the look entirely.
 ### Rails with importmap (recommended)
 
 ```bash
-bundle add stimeo-ui --version "0.1.0.pre.beta.1"
+bundle add stimeo-ui --version "0.1.0.pre.beta.2"
 bin/rails generate stimeo:install
 ```
 
@@ -113,6 +113,59 @@ The `eslint-plugin-jsx-a11y` equivalents are
 `prefer-tag-over-role`, `interactive-supports-focus`, and
 `no-noninteractive-tabindex`. These components' real accessibility is exercised
 with axe-core and real screen readers in this project's own test suite.
+
+## Inspector CLI & MCP server
+
+Stimeo UI bundles a zero-dependency static checker for its own markup contract
+— spelling of controllers/targets/values, required structure, and the ARIA
+attributes you (the author) must supply:
+
+```bash
+npx stimeo-ui check app/views    # check your templates (exit 1 on errors)
+npx stimeo-ui catalog            # list every controller's public API
+```
+
+Both commands accept `--json` for machine-readable output, so `check` drops
+straight into CI.
+
+The same engine runs as a **Model Context Protocol** server, so AI coding
+agents (Claude Code, Cursor, …) can discover the catalog, fetch verified
+reference markup, and validate generated HTML/ERB before presenting it:
+
+```bash
+claude mcp add stimeo -- npx -y stimeo-ui mcp
+```
+
+or in `.mcp.json` (Claude Code) / `.cursor/mcp.json` (Cursor):
+
+```json
+{
+  "mcpServers": {
+    "stimeo": {
+      "command": "npx",
+      "args": ["-y", "stimeo-ui", "mcp"]
+    }
+  }
+}
+```
+
+It exposes four read-only tools — `stimeo_check` (validate a source string),
+`stimeo_catalog`, `stimeo_controller` (one controller's full contract,
+accessibility requirements included), and `stimeo_example` (verified example
+markup: the official catalog demo under [`examples/`](examples/), bundled at
+build time and guaranteed to pass the checker) — plus MCP resources
+(`stimeo://manifest`, `stimeo://examples/<id>`) for preloading context without
+a tool round-trip. The server reads only its bundled manifest and example
+index; there are no write-capable tools.
+
+The same checks also run **live in your editor**: the **Stimeo UI Inspector**
+extension on the
+[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=stimeo-labs.stimeo-ui)
+and [Open VSX](https://open-vsx.org/extension/stimeo-labs/stimeo-ui) (for Cursor /
+VSCodium / Windsurf) gives as-you-type diagnostics, quick fixes, completions,
+and contract hovers. No setup: the engine and a manifest snapshot are bundled,
+and when your workspace installs `stimeo-ui`, the nearest installed version
+wins — so diagnostics always match what you run.
 
 ## Contributing
 

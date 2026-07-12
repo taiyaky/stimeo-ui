@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { scrollOptionIntoView } from "../utils/option_scroll";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /** How long (ms) typed characters accumulate into one typeahead query. */
@@ -250,6 +251,9 @@ export class ListboxController extends Controller<HTMLElement> {
     } else {
       this.triggerTarget.removeAttribute("aria-activedescendant");
     }
+    // Virtual focus never triggers the browser's native focus-scrolling, so a
+    // scrollable list must follow the active option itself (list-only scroll).
+    if (active && this.hasListTarget) scrollOptionIntoView(this.listTarget, active);
   }
 
   /** Appends a character to the typeahead query and activates the first match. */

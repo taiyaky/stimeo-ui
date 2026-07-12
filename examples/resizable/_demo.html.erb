@@ -1,0 +1,61 @@
+<%# Markup for the resizable (splitter / pane-split) demo.
+    stimeo--resizable provides PointerCapture dragging, a double-click collapse
+    toggle, and keyboard adjustment, and exposes the ratio (0..1) on the root element
+    as the CSS variable --stimeo--resizable-fraction. %>
+<div class="resizable-demo-container">
+  <div
+    class="resizable-demo"
+    id="resizable-splitter"
+    data-controller="stimeo--resizable"
+    data-stimeo--resizable-min-value="20"
+    data-stimeo--resizable-max-value="80"
+    data-stimeo--resizable-value-value="50"
+    data-stimeo--resizable-step-value="5"
+    style="--stimeo--resizable-fraction: 0.5;"
+  >
+    
+    <div
+      class="resizable-demo__pane resizable-demo__pane--left"
+      data-stimeo--resizable-target="primary"
+    >
+      <div class="resizable-demo__pane-content">
+        <h3><%= t("components.resizable.demo.pane_left") %></h3>
+        <p><%= t("components.resizable.demo.pane_left_body") %></p>
+      </div>
+    </div>
+    
+    <div
+      class="resizable-demo__handle"
+      role="separator"
+      tabindex="0"
+      aria-label="<%= t("components.resizable.demo.splitter_label") %>"
+      aria-orientation="vertical"
+      data-stimeo--resizable-target="separator"
+      data-action="
+        pointerdown->stimeo--resizable#onPointerDown
+        keydown->stimeo--resizable#onKeydown
+        dblclick->stimeo--resizable#toggle
+      "
+    >
+      <div class="resizable-demo__handle-bar" aria-hidden="true"></div>
+    </div>
+    
+    <div
+      class="resizable-demo__pane resizable-demo__pane--right"
+      data-stimeo--resizable-target="secondary"
+    >
+      <div class="resizable-demo__pane-content">
+        <h3><%= t("components.resizable.demo.pane_right") %></h3>
+        <p><%= t("components.resizable.demo.pane_right_body") %></p>
+      </div>
+    </div>
+  </div>
+
+  <div class="resizable-demo__controls">
+    <%# demo.js (a module) wires this up with addEventListener. Inline on*
+        attributes can't reference a module-scoped function, so they aren't used. %>
+    <button class="resizable-demo__control-btn" type="button" data-resizable-toggle-direction>
+      <%= t("components.resizable.demo.toggle_direction") %>
+    </button>
+  </div>
+</div>

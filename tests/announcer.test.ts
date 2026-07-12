@@ -4,6 +4,7 @@ import { AnnouncerController, visuallyHide } from "../src/controllers/announcer_
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link AnnouncerController}: routing to the polite vs
@@ -11,8 +12,6 @@ import { captureSpeech } from "./helpers/speech";
  * dedupe re-announce of identical text, auto-clear, fallback-region generation,
  * focus preservation, and listener/timer teardown on disconnect.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("AnnouncerController", () => {
   let application: Application;

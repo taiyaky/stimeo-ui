@@ -1,0 +1,14 @@
+<%# Markup for the switch (APG Switch) demo.
+    The controller element itself is a role="switch" button, with state expressed only via
+    aria-checked. Space/Enter and click toggle it. The look switches on aria-checked in
+    the Playground's CSS. %>
+<button
+  type="button"
+  class="switch"
+  role="switch"
+  aria-checked="false"
+  data-controller="stimeo--switch"
+  data-action="click->stimeo--switch#toggle keydown->stimeo--switch#onKeydown">
+  <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+  <span class="switch__label"><%= t("components.switch.demo.label") %></span>
+</button>

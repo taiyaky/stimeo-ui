@@ -1,0 +1,40 @@
+<%# live-counter: the count's single source of truth is the DOM text
+    (server-rendered below from the channel's demo counter) plus the
+    LikesChannel stream. Clicking Like bumps the number optimistically and
+    performs increment; the server adds it to its counter and broadcasts the
+    absolute { count }, so every subscribed tab converges — open a second tab
+    and click in either. The trigger target keeps the button disabled while an
+    increment would be dropped (before the subscription confirms, during an
+    outage, after a rejection). The client id is randomized per render purely
+    for the demo (a real app passes current_user.id). The room comes from the
+    channel's allowlisted constant so the subscription params and the
+    server-rendered initial value below can never drift (a real app passes its
+    record id, e.g. post.id). %>
+<% room = LikesChannel::ROOM %>
+<div class="live-counter-demo"
+     data-controller="stimeo--live-counter"
+     data-stimeo--live-counter-channel-value="LikesChannel"
+     data-stimeo--live-counter-params-value='{"room":"<%= room %>"}'
+     data-stimeo--live-counter-id-value="<%= SecureRandom.hex(4) %>">
+  <p class="live-counter-demo__hint"><%= t("components.live_counter.demo.hint") %></p>
+  <div class="live-counter-demo__row">
+    <button type="button" class="demo-trigger live-counter-demo__button"
+            data-stimeo--live-counter-target="trigger"
+            data-action="stimeo--live-counter#increment">
+      <svg class="demo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M19 14c1.5-1.5 3-3.2 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.8 0-3 .5-4.5 2
+                 -1.5-1.5-2.7-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4 3 5.5l7 7Z"/>
+      </svg>
+      <%= t("components.live_counter.demo.like") %>
+    </button>
+    <p class="live-counter-demo__count">
+      <%# Server-rendered initial value: reading the channel's in-memory demo
+          counter keeps the DOM truth aligned with the server (a real app
+          renders the persisted count, e.g. post.likes_count). %>
+      <span class="live-counter-demo__value" data-stimeo--live-counter-target="value"><%=
+        LikesChannel.count(room) %></span>
+      <span class="live-counter-demo__unit"><%= t("components.live_counter.demo.unit") %></span>
+    </p>
+  </div>
+</div>

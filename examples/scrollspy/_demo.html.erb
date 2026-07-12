@@ -1,0 +1,59 @@
+<%# Markup for the scrollspy (table-of-contents scroll tracking) demo.
+    stimeo--scrollspy provides intersection monitoring via IntersectionObserver and
+    nearest-to-top-trigger detection, and automatically sets and manages
+    aria-current="location" on the active link. %>
+<div class="scrollspy-demo">
+  <nav
+    class="scrollspy-demo__nav"
+    data-controller="stimeo--scrollspy"
+    data-stimeo--scrollspy-offset-value="20"
+    data-stimeo--scrollspy-root-selector-value=".scrollspy-demo__content"
+    aria-label="<%= t("components.scrollspy.demo.title") %>"
+  >
+    <div class="scrollspy-demo__nav-title"><%= t("components.scrollspy.demo.title") %></div>
+    <a
+      class="scrollspy-demo__link"
+      href="#toc-intro"
+      data-stimeo--scrollspy-target="link"
+      data-action="click->stimeo--scrollspy#scrollTo"
+    >
+      <%= t("components.scrollspy.demo.intro_title") %>
+    </a>
+    <a
+      class="scrollspy-demo__link"
+      href="#toc-usage"
+      data-stimeo--scrollspy-target="link"
+      data-action="click->stimeo--scrollspy#scrollTo"
+    >
+      <%= t("components.scrollspy.demo.usage_title") %>
+    </a>
+    <a
+      class="scrollspy-demo__link"
+      href="#toc-api"
+      data-stimeo--scrollspy-target="link"
+      data-action="click->stimeo--scrollspy#scrollTo"
+    >
+      <%= t("components.scrollspy.demo.api_title") %>
+    </a>
+  </nav>
+
+  <div class="scrollspy-demo__content">
+    <section id="toc-intro" class="scrollspy-demo__section">
+      <h2><%= t("components.scrollspy.demo.intro_title") %></h2>
+      <p><%= t("components.scrollspy.demo.intro_body") %></p>
+      <div class="scrollspy-demo__spacer"></div>
+    </section>
+
+    <section id="toc-usage" class="scrollspy-demo__section">
+      <h2><%= t("components.scrollspy.demo.usage_title") %></h2>
+      <p><%= t("components.scrollspy.demo.usage_body") %></p>
+      <div class="scrollspy-demo__spacer"></div>
+    </section>
+
+    <section id="toc-api" class="scrollspy-demo__section">
+      <h2><%= t("components.scrollspy.demo.api_title") %></h2>
+      <p><%= t("components.scrollspy.demo.api_body") %></p>
+      <div class="scrollspy-demo__spacer"></div>
+    </section>
+  </div>
+</div>

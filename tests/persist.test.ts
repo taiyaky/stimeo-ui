@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PersistController } from "../src/controllers/persist_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link PersistController}: debounced save to localStorage,
@@ -211,7 +212,7 @@ describe("PersistController", () => {
       </form>`;
     application = Application.start();
     application.register("stimeo--persist", PersistController);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     await expectNoA11yViolations(form());
   });
 

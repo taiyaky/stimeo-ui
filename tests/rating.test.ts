@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RatingController } from "../src/controllers/rating_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link RatingController}: the APG Radio Group contract for
@@ -13,8 +14,6 @@ import { captureSpeech } from "./helpers/speech";
  * Symbols carry their accessible name via `aria-label`; the visible glyph is the
  * consumer's CSS, so the markup leaves them empty (no double announcement).
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (attrs = "") => `
   <div data-controller="stimeo--rating" role="radiogroup" aria-label="Rating"

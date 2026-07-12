@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NavigationMenuController } from "../src/controllers/navigation_menu_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link NavigationMenuController}: the APG disclosure
@@ -11,8 +12,6 @@ import { captureSpeech } from "./helpers/speech";
  * the optional `hoverArea` wrapper that widens the hover region (top-level
  * links arrangement).
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (extra = "") => `
   <button id="outside">Outside</button>

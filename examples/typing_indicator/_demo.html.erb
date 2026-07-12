@@ -1,0 +1,28 @@
+<%# typing-indicator: the state lives on the server stream, not in client memory.
+    Typing in the composer broadcasts a throttled signal through TypingChannel;
+    every OTHER client shows "X is typing…" in the status live region and clears
+    it automatically after silence. Own echoes are suppressed by design, so open
+    this page in a second tab to see the indicator. The guest name is randomized
+    per render so each tab is a distinct "user" (a real app passes
+    current_user.name). The data-one/data-many templates keep the announcement
+    localizable; %{name}/%{names} are substituted by the controller. %>
+<% guest = t("components.typing_indicator.demo.guest_name", token: SecureRandom.hex(2)) %>
+<div class="typing-demo"
+     data-controller="stimeo--typing-indicator"
+     data-stimeo--typing-indicator-channel-value="TypingChannel"
+     data-stimeo--typing-indicator-params-value='{"room":"<%= TypingChannel::ROOM %>"}'
+     data-stimeo--typing-indicator-name-value="<%= guest %>"
+     data-stimeo--typing-indicator-timeout-value="3000"
+     data-stimeo--typing-indicator-throttle-value="1000">
+  <p class="typing-demo__hint"><%= t("components.typing_indicator.demo.hint") %></p>
+  <p class="typing-demo__you"><%= t("components.typing_indicator.demo.you_are", name: guest) %></p>
+  <label class="typing-demo__label" for="typing-demo-input">
+    <%= t("components.typing_indicator.demo.input_label") %>
+  </label>
+  <textarea id="typing-demo-input" class="demo-input typing-demo__input" rows="3"
+            data-stimeo--typing-indicator-target="input"></textarea>
+  <p class="typing-demo__status" role="status"
+     data-stimeo--typing-indicator-target="status"
+     data-one="<%= t("components.typing_indicator.demo.one") %>"
+     data-many="<%= t("components.typing_indicator.demo.many") %>"></p>
+</div>

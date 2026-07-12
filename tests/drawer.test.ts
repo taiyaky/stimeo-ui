@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DrawerController } from "../src/controllers/drawer_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link DrawerController}: the APG modal contract plus the
@@ -12,8 +13,6 @@ import { captureSpeech } from "./helpers/speech";
  * happy-dom reports no transition duration, so the deferred `hidden` collapses to
  * synchronous hiding here; the real exit transition is exercised by the e2e layer.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const markup = (placement = "right") => `
   <p id="background">Background</p>

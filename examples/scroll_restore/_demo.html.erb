@@ -1,0 +1,54 @@
+<%# Markup for the scroll-restore (scroll position persistence) demo.
+    The behavior shines when the DOM is torn down and rebuilt — exactly what Turbo
+    does on navigation. To make that observable without leaving the page, the
+    "rebuild" button removes the two scroll regions and re-inserts them (demo.js).
+    The left region uses stimeo--scroll-restore (its offset is saved to
+    sessionStorage and restored on reconnect); the right one has no controller and
+    snaps back to the top, so the difference is obvious. It is behavior only — the
+    library sets no ARIA/CSS and never moves focus; the box look is demo.css's. %>
+<div class="scroll-restore-demo" data-scroll-restore-demo>
+  <p><%= t("components.scroll_restore.demo.hint") %></p>
+
+  <div class="scroll-restore-demo__toolbar">
+    <button type="button" class="scroll-restore-demo__rebuild" data-scroll-restore-remount>
+      <%= t("components.scroll_restore.demo.rebuild") %>
+    </button>
+  </div>
+
+  <%# demo.js captures this slot's HTML and swaps it out/in to fire the controller's
+      disconnect (save) → connect (restore) cycle, mirroring a Turbo navigation. %>
+  <div class="scroll-restore-demo__cols" data-scroll-restore-slot>
+    <div class="scroll-restore-demo__col">
+      <p class="scroll-restore-demo__label"><%= t(
+        "components.scroll_restore.demo.with_label"
+      ) %></p>
+      <div
+        class="scroll-restore-demo__box"
+        data-controller="stimeo--scroll-restore"
+        data-stimeo--scroll-restore-key-value="catalog-demo">
+        <ol class="scroll-restore-demo__list">
+          <% (1..20).each do |n| %>
+            <li class="scroll-restore-demo__row"><%= t(
+              "components.scroll_restore.demo.row", number: n
+            ) %></li>
+          <% end %>
+        </ol>
+      </div>
+    </div>
+
+    <div class="scroll-restore-demo__col">
+      <p class="scroll-restore-demo__label"><%= t(
+        "components.scroll_restore.demo.without_label"
+      ) %></p>
+      <div class="scroll-restore-demo__box">
+        <ol class="scroll-restore-demo__list">
+          <% (1..20).each do |n| %>
+            <li class="scroll-restore-demo__row"><%= t(
+              "components.scroll_restore.demo.row", number: n
+            ) %></li>
+          <% end %>
+        </ol>
+      </div>
+    </div>
+  </div>
+</div>

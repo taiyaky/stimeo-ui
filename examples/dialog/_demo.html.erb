@@ -1,0 +1,39 @@
+<%# Markup for the dialog demo.
+    The single source used for both the live render and the copy-paste code.
+    stimeo--dialog provides the focus trap, Esc, and background scroll lock.
+    The behavior is the library's; the look (classes) is the Playground's CSS. %>
+<div class="dialog" data-controller="stimeo--dialog">
+  <button
+    type="button"
+    class="dialog__trigger"
+    data-stimeo--dialog-target="trigger"
+    data-action="click->stimeo--dialog#open">
+    <%= t("components.dialog.demo.open_button") %>
+  </button>
+
+  <%# The role="dialog" + aria-modal region. Starts hidden (closed).
+       Clicking this element itself (the backdrop) also closes it. %>
+  <div
+    class="dialog__backdrop"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="dialog-title"
+    data-stimeo--dialog-target="dialog"
+    data-action="click->stimeo--dialog#closeOnBackdrop"
+    hidden>
+    <div class="dialog__panel">
+      <h3 id="dialog-title" class="dialog__title"><%= t(
+        "components.dialog.demo.confirm_title"
+      ) %></h3>
+      <p><%= t("components.dialog.demo.confirm_desc") %></p>
+      <div class="dialog__actions">
+        <button type="button" data-action="click->stimeo--dialog#close"><%= t(
+          "components.dialog.demo.cancel"
+        ) %></button>
+        <button type="button" data-action="click->stimeo--dialog#close"><%= t(
+          "components.dialog.demo.ok"
+        ) %></button>
+      </div>
+    </div>
+  </div>
+</div>

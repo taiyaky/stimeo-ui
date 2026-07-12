@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { TimePickerController } from "../src/controllers/time_picker_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link TimePickerController}: per-segment spinbutton
@@ -10,8 +11,6 @@ import { captureSpeech } from "./helpers/speech";
  * entry, 12-hour meridiem handling, the composed `HH:MM[:SS]` field, and the
  * `change` event.
  */
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("TimePickerController", () => {
   let application: Application;

@@ -1,0 +1,48 @@
+<%# Markup for the data-grid (basic data grid) demo.
+    The library cycles column headers' aria-sort and fires sort events, syncs rows'
+    aria-selected, and moves between cells with the arrow keys via roving. Actually
+    sorting/rendering the data is the consumer's job (here demo.js), in response to
+    stimeo--data-grid:sort. %>
+<table
+  class="data-grid"
+  data-controller="stimeo--data-grid"
+  role="grid"
+  aria-label="<%= t("components.data_grid.demo.label") %>"
+  data-stimeo--data-grid-selection-value="single">
+  <thead>
+    <tr role="row">
+      <% t("components.data_grid.demo.columns").each do |column| %>
+        <th
+          role="columnheader"
+          aria-sort="none"
+          tabindex="-1"
+          scope="col"
+          data-stimeo--data-grid-target="columnHeader"
+          data-action="click->stimeo--data-grid#sort keydown->stimeo--data-grid#onKeydown">
+          <%= column %>
+        </th>
+      <% end %>
+    </tr>
+  </thead>
+  <tbody>
+    <% t("components.data_grid.demo.rows").each do |cells| %>
+      <tr role="row" aria-selected="false" data-stimeo--data-grid-target="row">
+        <% cells.each_with_index do |cell, i| %>
+          <td
+            role="gridcell"
+            tabindex="<%= i.zero? ? 0 : -1 %>"
+            data-stimeo--data-grid-target="cell"
+            data-action="keydown->stimeo--data-grid#onKeydown">
+            <%= cell %>
+          </td>
+        <% end %>
+      </tr>
+    <% end %>
+  </tbody>
+</table>
+<p
+  class="data-grid__status"
+  data-data-grid-status
+  data-selected-template="<%= t("components.data_grid.demo.selected_template") %>"
+  data-empty-text="<%= t("components.data_grid.demo.selected_empty") %>"
+  aria-live="polite"></p>

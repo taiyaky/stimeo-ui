@@ -3,9 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CalendarController } from "../src/controllers/calendar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-
-const tick = () => new Promise((r) => setTimeout(r, 0));
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+import { delay, tick } from "./helpers/timing";
 
 describe("CalendarController", () => {
   let application: Application;

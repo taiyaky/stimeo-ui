@@ -1,0 +1,32 @@
+<%# Focus-scope demo: the Activate button sits outside the scope, so it invokes the
+    controller's activate action through the playground's exposed Stimulus app
+    (window.Stimulus) in demo.js. Once active, Tab cycles within the box, focus lands on
+    the initial target, and Escape or the Release button (a descendant, wired with a plain
+    data-action) ends it and restores focus. inert is left off so the soft boundary does
+    not isolate the rest of the catalog page. The library only manages focus and reflects
+    data-focus-trapped; demo.css owns the look. %>
+<div class="focus-demo">
+  <button
+    type="button"
+    class="demo-trigger"
+    data-focus-demo-activate
+    aria-pressed="false"
+    data-activate-label="<%= t('components.focus.demo.activate') %>"
+    data-deactivate-label="<%= t('components.focus.demo.deactivate') %>">
+    <%= t("components.focus.demo.activate") %>
+  </button>
+
+  <div class="focus-demo__scope" data-controller="stimeo--focus">
+    <p class="focus-demo__hint"><%= t("components.focus.demo.hint") %></p>
+    <label class="focus-demo__field">
+      <span><%= t("components.focus.demo.field") %></span>
+      <input type="text" class="demo-input" data-stimeo--focus-target="initial" />
+    </label>
+    <div class="focus-demo__bar">
+      <button type="button" class="demo-trigger"><%= t("components.focus.demo.inner") %></button>
+      <button type="button" class="demo-trigger" data-action="click->stimeo--focus#deactivate">
+        <%= t("components.focus.demo.release") %>
+      </button>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,33 @@
+<%# Markup for the theme / color-scheme toggle demo.
+    The controller persists the light/dark/system choice, follows the OS while in
+    system, and writes data-theme + color-scheme onto the target. To avoid theming the
+    whole Playground, this demo targets a local preview element instead of <html>, so
+    the preview box below reacts to the resolved theme while the page is unaffected. %>
+<div class="theme-demo">
+  <div class="theme-demo__switcher" data-controller="stimeo--theme"
+       data-stimeo--theme-target-value="#theme-demo-preview"
+       data-stimeo--theme-storage-key-value="stimeo-theme-demo"
+       data-stimeo--theme-mode-value="system"
+       role="radiogroup" aria-label="<%= t("components.theme.demo.aria_label") %>">
+    <button type="button" class="theme-demo__option"
+            data-stimeo--theme-target="option" role="radio"
+            data-action="click->stimeo--theme#set" data-stimeo--theme-mode-param="light">
+      <%= t("components.theme.demo.light") %>
+    </button>
+    <button type="button" class="theme-demo__option"
+            data-stimeo--theme-target="option" role="radio"
+            data-action="click->stimeo--theme#set" data-stimeo--theme-mode-param="dark">
+      <%= t("components.theme.demo.dark") %>
+    </button>
+    <button type="button" class="theme-demo__option"
+            data-stimeo--theme-target="option" role="radio"
+            data-action="click->stimeo--theme#set" data-stimeo--theme-mode-param="system">
+      <%= t("components.theme.demo.system") %>
+    </button>
+  </div>
+
+  <div id="theme-demo-preview" class="theme-demo__preview">
+    <h3 class="theme-demo__preview-title"><%= t("components.theme.demo.preview_title") %></h3>
+    <p><%= t("components.theme.demo.preview_text") %></p>
+  </div>
+</div>
