@@ -141,4 +141,32 @@ describe("FocusTrap", () => {
     expect(overflowAfterFirst).toBe("hidden");
     expect(document.body.style.overflow).toBe("");
   });
+
+  it("reverts the side effects on turbo:before-cache without restoring focus (snapshot hygiene)", () => {
+    // Leaving the page with the trap active must not bake the scroll lock /
+    // inert into the snapshot Turbo caches; focus is left alone mid-navigation.
+    byId("opener").focus();
+    let escapes = 0;
+    const t = trap({ onEscape: () => escapes++ });
+    t.activate();
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(t.active).toBe(false);
+    expect(document.body.style.overflow).toBe("");
+    expect(byId("background").inert).toBe(false);
+    expect(document.activeElement).not.toBe(byId("opener")); // no focus yank
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(escapes).toBe(0); // keydown listener dropped with the rest
+  });
+
+  it("re-activates against a clean baseline after a before-cache deactivation", () => {
+    // The restore cycle regression: without the before-cache hook the cached
+    // body[style] feeds "hidden" back into activate() as the baseline, and
+    // deactivate() then "restores" the lock forever.
+    const t = trap();
+    t.activate();
+    document.dispatchEvent(new Event("turbo:before-cache")); // navigate away
+    t.activate(); // reopened after a history restore
+    t.deactivate();
+    expect(document.body.style.overflow).toBe(""); // unlocked, not stuck
+  });
 });

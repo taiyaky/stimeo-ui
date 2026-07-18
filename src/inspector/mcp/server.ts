@@ -20,7 +20,7 @@ import {
  * `prompts/get` (newline-delimited messages, one per line). Hand-written on
  * purpose: the repo's constitution allows no runtime dependency beyond
  * `@hotwired/stimulus`, and this subset is small enough to conform to
- * directly (see the launch-kit/MCP plan §2.5, decision A).
+ * directly.
  *
  * stdout carries protocol messages only; anything diagnostic must go to the
  * caller-provided error log (stderr in production).

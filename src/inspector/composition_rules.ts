@@ -16,8 +16,7 @@ import type { CompositionRules } from "./types";
  * drift-guarded by `tests/inspector/manifest.test.ts`.
  */
 export const compositionRules: CompositionRules = {
-  // Sortable's keyboard contract (the composition contract in
-  // docs/specs/basic/sortable.md) hangs on two axis alignments. Both
+  // Sortable's keyboard contract hangs on two axis alignments. Both
   // companions default to a value that does NOT match sortable's default
   // `vertical` axis (roving) or can be authored off axis (pointer-drag), and a
   // mismatch is a *silent* failure: Tab still lands on the handles, but the

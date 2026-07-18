@@ -1,13 +1,15 @@
 /**
  * Modal focus-trap primitive shared by the modal-overlay controllers
- * (dialog / alert-dialog / drawer).
+ * (dialog / alert-dialog / confirm / drawer / command-palette / sidebar); the
+ * non-modal focus scope (focus) reuses it with the modal side effects opted out.
  *
  * The WAI-ARIA APG modal pattern is more than "cycle Tab inside a box": a modal
  * also locks background scroll, makes the rest of the page `inert` (so assistive
  * technology and pointer/Tab cannot reach it, honoring `aria-modal="true"`),
  * sends focus inside on open, and restores it to the opener on close — and every
  * one of those side effects must be reverted if the element is torn down while
- * open (a Turbo navigation mid-dialog). {@link FocusTrap} owns that whole modal
+ * open (a Turbo navigation mid-dialog) and kept out of the snapshot Turbo
+ * caches (`turbo:before-cache`). {@link FocusTrap} owns that whole modal
  * lifecycle so each controller only decides *when* to open/close and *what*
  * "close" means.
  *
@@ -126,6 +128,7 @@ export class FocusTrap {
     }
     if (this.#flag(this.#options.isolate, true)) this.#isolateBackground();
     document.addEventListener("keydown", this.#onKeydown);
+    document.addEventListener("turbo:before-cache", this.#onBeforeCache);
     if (this.#flag(this.#options.autoFocus, true)) this.#focusInitial();
   }
 
@@ -140,6 +143,7 @@ export class FocusTrap {
     if (!this.#activeState) return;
     this.#activeState = false;
     document.removeEventListener("keydown", this.#onKeydown);
+    document.removeEventListener("turbo:before-cache", this.#onBeforeCache);
     if (this.#scrollLocked) {
       document.body.style.overflow = this.#previousBodyOverflow;
       this.#scrollLocked = false;
@@ -156,6 +160,18 @@ export class FocusTrap {
     if (option === undefined) return fallback;
     return typeof option === "function" ? option() : option;
   }
+
+  /**
+   * Reverts the side effects just before Turbo caches the page snapshot, so an
+   * overlay left open does not bake the scroll lock into `body[style]` — a
+   * restored page would feed that locked value back into {@link activate} as the
+   * baseline, and closing would then never unlock the page. Markup state stays
+   * untouched (restore-open designs reopen against a clean baseline), and focus
+   * is left alone mid-navigation. The listener lives only while active.
+   */
+  readonly #onBeforeCache = (): void => {
+    this.deactivate({ restoreFocus: false });
+  };
 
   /** Handles `Escape` (delegated) and `Tab` (focus trap) while active. */
   readonly #onKeydown = (event: KeyboardEvent): void => {

@@ -512,7 +512,7 @@ describe("checkSource", () => {
     });
 
     describe("cross-controller composition values", () => {
-      // The spec composition for sortable (docs/specs/basic/sortable.md):
+      // Sortable's documented composition:
       // roving on the list keeps the handles one Tab stop, pointer-drag on
       // each item supplies the drag/keyboard signal — and both carry an
       // axis-alignment contract with sortable's `orientation`.

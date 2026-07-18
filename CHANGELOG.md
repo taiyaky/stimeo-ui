@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.1.0-beta.3] - 2026-07-18
+
+Maintenance release: one bug fix in the focus-trap primitive shared by the
+modal overlay controllers.
+
+### Fixed
+
+- dialog, alert-dialog, confirm, drawer, command-palette, sidebar: navigating
+  away while the overlay is open no longer bakes the background scroll lock
+  into Turbo's page cache. A restored page previously treated the locked
+  `<body>` as its baseline, so closing the overlay could leave the page
+  unscrollable; the shared focus trap now reverts its side effects on
+  `turbo:before-cache`.
+- drawer: the usage example in the API reference now shows the backdrop
+  overlay `hidden` at rest and a neutral `<div>` as the panel element.
+
 ## [0.1.0-beta.2] - 2026-07-12
 
 The Inspector grows two new faces: an MCP server for AI coding agents and a
@@ -70,6 +86,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.1.0-beta.3]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.1.0-beta.1
 [0.1.0-alpha.1]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.1.0-alpha.1

@@ -23,12 +23,12 @@ function maxTransitionMs(value: string): number {
  *     <button data-stimeo--drawer-target="trigger"
  *             data-action="click->stimeo--drawer#open">Open panel</button>
  *     <div data-stimeo--drawer-target="overlay"
- *          data-action="click->stimeo--drawer#closeOnBackdrop">
- *       <aside data-stimeo--drawer-target="panel" role="dialog" aria-modal="true"
- *              aria-labelledby="t" data-state="closed" hidden>
+ *          data-action="click->stimeo--drawer#closeOnBackdrop" hidden>
+ *       <div data-stimeo--drawer-target="panel" role="dialog" aria-modal="true"
+ *            aria-labelledby="t" data-state="closed" hidden>
  *         <h2 id="t">…</h2>
  *         <button data-action="click->stimeo--drawer#close">Close</button>
- *       </aside>
+ *       </div>
  *     </div>
  *   </div>
  *

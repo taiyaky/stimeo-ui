@@ -1,6 +1,5 @@
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import process from "node:process";
 import { buildExamplesIndex } from "../src/inspector/examples";
 import { buildManifest } from "../src/inspector/manifest";
 import { collectDemoSources } from "./demo_sources";
@@ -23,7 +22,9 @@ import { collectDemoSources } from "./demo_sources";
  * source directly.
  */
 
-const root = process.cwd();
+// Script-relative, not cwd-relative, so the step also works when invoked from
+// outside the repo root (same convention as the other scripts/*.ts).
+const root = join(import.meta.dirname, "..");
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
 
 const manifest = buildManifest(pkg.version);

@@ -1,6 +1,6 @@
 /**
- * Post-build smoke gate for the `stimeo mcp` stdio server (see the
- * `ci-quality-gates` skill and `docs/specs/common/inspector.md` §9).
+ * Post-build smoke gate for the `stimeo mcp` stdio server, run by CI after
+ * every build.
  *
  * Unit tests drive `McpSession` and the pure tool handlers in-process; this
  * script covers the layer they cannot reach — the **built bin**
@@ -18,12 +18,10 @@
  */
 
 import { spawn } from "node:child_process";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
 
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const BIN = join(SCRIPT_DIR, "..", "dist", "inspector", "cli_bin.js");
+const BIN = join(import.meta.dirname, "..", "dist", "inspector", "cli_bin.js");
 
 /** Hard cap so a hung server fails CI instead of stalling the job. */
 const TIMEOUT_MS = 30_000;
@@ -52,6 +50,10 @@ function runBin(args: readonly string[], stdinLines: readonly string[]): Promise
       stdio: ["pipe", "pipe", "inherit"],
     });
     let stdout = "";
+    // If the bin dies before consuming stdin, the pending writes surface as
+    // EPIPE here; swallow it — the exit-code assertion below is the real
+    // failure signal, and an unhandled stream error would mask it.
+    child.stdin.on("error", () => {});
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
       rejectPromise(new Error(`timed out after ${TIMEOUT_MS}ms (server never exited)`));

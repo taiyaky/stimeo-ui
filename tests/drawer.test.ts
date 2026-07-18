@@ -62,6 +62,20 @@ describe("DrawerController", () => {
     expect(panel().getAttribute("data-placement")).toBe("right");
   });
 
+  it("re-reflects data-placement when the placement value changes at runtime", () => {
+    const root = document.querySelector("[data-controller='stimeo--drawer']") as HTMLElement;
+    const controller = application.getControllerForElementAndIdentifier(
+      root,
+      "stimeo--drawer",
+    ) as DrawerController;
+    root.setAttribute("data-stimeo--drawer-placement-value", "bottom");
+    // Drive the reflect directly: Stimulus's value-change observer is
+    // MutationObserver-based and intermittently misses the change under parallel
+    // load in happy-dom (same workaround as aspect_ratio's re-reflect test).
+    controller.placementValueChanged();
+    expect(panel().getAttribute("data-placement")).toBe("bottom");
+  });
+
   it("opens: reveals the panel, syncs data-state, and locks scroll", () => {
     trigger().focus();
     trigger().click();
@@ -132,6 +146,18 @@ describe("DrawerController", () => {
     expect(background.inert).toBe(false);
   });
 
+  it("releases the global keydown listener on disconnect (Escape no longer closes)", () => {
+    // Direct probe that the document-level keydown goes away with the teardown:
+    // a leaked trap listener would still run onEscape -> close() and flip
+    // data-state to "closed" (disconnect leaves the open markup untouched).
+    const root = document.querySelector("[data-controller='stimeo--drawer']") as HTMLElement;
+    trigger().click();
+    const controller = application.getControllerForElementAndIdentifier(root, "stimeo--drawer");
+    controller?.disconnect();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(panel().getAttribute("data-state")).toBe("open");
+  });
+
   it("keeps the background inert and scroll locked until the close transition ends", () => {
     // Force a non-zero transition so hidden + modal teardown defer to transitionend.
     const spy = vi
@@ -158,6 +184,67 @@ describe("DrawerController", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it("reopening during the close transition cancels the pending hide", () => {
+    // open -> close (transition pending) -> reopen: the stale transitionend
+    // listener must be dropped, or the old close would hide the freshly reopened
+    // panel (and tear the modal down) when the exit transition finally ends.
+    const spy = vi
+      .spyOn(window, "getComputedStyle")
+      .mockReturnValue({ transitionDuration: "0.2s" } as CSSStyleDeclaration);
+    try {
+      trigger().focus();
+      trigger().click();
+      document.getElementById("close")?.click(); // close -> pending hide
+      expect(panel().hidden).toBe(false); // mid-transition
+      trigger().click(); // reopen cancels the pending hide
+      expect(panel().getAttribute("data-state")).toBe("open");
+      panel().dispatchEvent(new Event("transitionend")); // old close's transition ends
+      expect(panel().hidden).toBe(false); // still open, not hidden by the stale close
+      expect(document.body.style.overflow).toBe("hidden"); // trap stayed active
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("disconnecting during the close transition drops the pending hide and reverts the side effects", () => {
+    // Turbo can tear the controller down while the exit transition is running:
+    // the side effects must revert immediately, and the pending transitionend
+    // listener must go with it (markup is left to Turbo, so no late mutation).
+    const spy = vi
+      .spyOn(window, "getComputedStyle")
+      .mockReturnValue({ transitionDuration: "0.2s" } as CSSStyleDeclaration);
+    try {
+      const background = document.getElementById("background") as HTMLElement;
+      const root = document.querySelector("[data-controller='stimeo--drawer']") as HTMLElement;
+      trigger().click();
+      document.getElementById("close")?.click(); // close -> pending hide
+      expect(background.inert).toBe(true); // modal contract still holds mid-transition
+      const controller = application.getControllerForElementAndIdentifier(root, "stimeo--drawer");
+      controller?.disconnect();
+      expect(document.body.style.overflow).toBe("");
+      expect(background.inert).toBe(false);
+      panel().dispatchEvent(new Event("transitionend")); // stale listener must be gone
+      expect(panel().hidden).toBe(false); // no late hide after teardown
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("neutralizes the modal side effects on turbo:before-cache while keeping the drawer open", () => {
+    // Snapshot hygiene (shared FocusTrap): navigating away with the drawer open
+    // must not bake the scroll lock / inert into the Turbo cache. The open markup
+    // is preserved on purpose — a restored snapshot reopens (DOM wins on
+    // reconnect) and re-activates the trap against a clean baseline.
+    const background = document.getElementById("background") as HTMLElement;
+    trigger().click();
+    expect(background.inert).toBe(true);
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(document.body.style.overflow).toBe("");
+    expect(background.inert).toBe(false);
+    expect(panel().getAttribute("data-state")).toBe("open"); // markup untouched
+    expect(panel().hidden).toBe(false);
   });
 
   it("has no machine-detectable a11y violations while open", async () => {
@@ -256,5 +343,49 @@ describe("DrawerController initial open and placement value", () => {
     expect(panel.getAttribute("data-state")).toBe("closed");
     expect(panel.hidden).toBe(true);
     expect(document.body.style.overflow).toBe("");
+  });
+
+  it("defaults data-placement to right when no placement value is set", async () => {
+    // Pins the spec default (placement: "right") for markup that omits the value.
+    document.body.innerHTML = `
+      <div data-controller="stimeo--drawer">
+        <div data-stimeo--drawer-target="overlay">
+          <div data-stimeo--drawer-target="panel" role="dialog" aria-modal="true"
+               aria-label="Menu" data-state="closed" hidden>
+            <button id="x">Item</button>
+          </div>
+        </div>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--drawer", DrawerController);
+    await tick();
+
+    const panel = document.querySelector<HTMLElement>(
+      "[data-stimeo--drawer-target='panel']",
+    ) as HTMLElement;
+    expect(panel.getAttribute("data-placement")).toBe("right");
+  });
+
+  it("falls back to right when the placement value is not a known edge", async () => {
+    // The reflected hook only ever carries left/right/top/bottom; anything else
+    // (a typo like "diagonal") normalizes to the default so consumer CSS keyed
+    // on data-placement always has a valid edge to match.
+    document.body.innerHTML = `
+      <div data-controller="stimeo--drawer" data-stimeo--drawer-placement-value="diagonal">
+        <div data-stimeo--drawer-target="overlay">
+          <div data-stimeo--drawer-target="panel" role="dialog" aria-modal="true"
+               aria-label="Menu" data-state="closed" hidden>
+            <button id="x">Item</button>
+          </div>
+        </div>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--drawer", DrawerController);
+    await tick();
+
+    const panel = document.querySelector<HTMLElement>(
+      "[data-stimeo--drawer-target='panel']",
+    ) as HTMLElement;
+    expect(panel.getAttribute("data-placement")).toBe("right");
   });
 });

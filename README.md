@@ -31,7 +31,7 @@ owns the look entirely.
 ### Rails with importmap (recommended)
 
 ```bash
-bundle add stimeo-ui --version "0.1.0.pre.beta.2"
+bundle add stimeo-ui --version "0.1.0.pre.beta.3"
 bin/rails generate stimeo:install
 ```
 
