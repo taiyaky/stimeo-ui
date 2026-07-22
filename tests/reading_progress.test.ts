@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReadingProgressController } from "../src/controllers/reading_progress_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -52,8 +53,7 @@ describe("ReadingProgressController", () => {
   };
 
   afterEach(async () => {
-    controller()?.disconnect();
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     vi.unstubAllGlobals();
     vi.restoreAllMocks();

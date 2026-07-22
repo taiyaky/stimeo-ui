@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { CompositionTracker } from "../utils/composition_tracker";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /** Parks the field's original `aria-invalid` while we override it for over-limit. */
@@ -59,22 +60,13 @@ export class CharacterCounterController extends Controller<HTMLElement> {
   readonly #timeouts = new SafeTimeout();
   #announceId: number | null = null;
 
-  /** True while an IME composition is active; intermediate input is skipped. */
-  #composing = false;
+  /** Owns IME lifecycle state and applies the confirmed count once. */
+  readonly #composition = new CompositionTracker({ onEnd: () => this.#update() });
 
   readonly #onInput = (event: Event): void => {
     // During IME composition the field holds unconverted text; defer the count to
     // `compositionend` so it reflects the confirmed characters, not each keystroke.
-    if (this.#composing || (event as InputEvent).isComposing) return;
-    this.#update();
-  };
-
-  readonly #onCompositionStart = (): void => {
-    this.#composing = true;
-  };
-
-  readonly #onCompositionEnd = (): void => {
-    this.#composing = false;
+    if (this.#composition.isComposing(event as InputEvent)) return;
     this.#update();
   };
 
@@ -82,8 +74,7 @@ export class CharacterCounterController extends Controller<HTMLElement> {
     const field = this.#field;
     if (!field) return;
     field.addEventListener("input", this.#onInput);
-    field.addEventListener("compositionstart", this.#onCompositionStart);
-    field.addEventListener("compositionend", this.#onCompositionEnd);
+    this.#composition.observe(field);
     // Initial render is synchronous (no announce debounce): reflect the current
     // value on connect/cache-restore without queueing a screen-reader message.
     this.#update({ announce: false });
@@ -92,13 +83,9 @@ export class CharacterCounterController extends Controller<HTMLElement> {
   override disconnect(): void {
     const field = this.#field;
     field?.removeEventListener("input", this.#onInput);
-    field?.removeEventListener("compositionstart", this.#onCompositionStart);
-    field?.removeEventListener("compositionend", this.#onCompositionEnd);
+    this.#composition.disconnect();
     this.#timeouts.clearAll();
     this.#announceId = null;
-    // Reset so a same-instance reconnect (e.g. Turbo cache restore mid-composition)
-    // never starts with input suppressed.
-    this.#composing = false;
   }
 
   /**

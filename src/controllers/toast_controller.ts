@@ -1,6 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
 import { SafeTimeout } from "../utils/safe_timeout";
 
+const DELEGATED_EVENTS = ["click", "focusin", "focusout", "keydown", "mouseover", "mouseout"];
+
 /**
  * Headless, highly accessible toast notification behavior.
  *
@@ -17,15 +19,9 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *     <div role="region" aria-label="Notifications">
  *       <ol data-stimeo--toast-target="list"></ol>
  *       <template data-stimeo--toast-target="template">
- *         <li role="status" data-stimeo--toast-target="item"
- *             data-action="mouseenter->stimeo--toast#pause
- *                          mouseleave->stimeo--toast#resume
- *                          focusin->stimeo--toast#pause
- *                          focusout->stimeo--toast#resume
- *                          keydown->stimeo--toast#onKeydown"
- *             tabindex="0">
- *           <span data-toast-slot="body"></span>
- *           <button type="button" data-action="stimeo--toast#dismiss">Dismiss</button>
+ *         <li data-stimeo--toast-target="item" tabindex="0">
+ *           <span role="status" data-toast-slot="body"></span>
+ *           <button type="button" data-toast-dismiss>Dismiss</button>
  *         </li>
  *       </template>
  *     </div>
@@ -69,7 +65,7 @@ export class ToastController extends Controller<HTMLElement> {
    * Tracked so {@link disconnect} can cancel any that have not fired, preventing a
    * detached element from being mutated after it leaves the DOM (Turbo).
    */
-  #rafHandles = new Set<number>();
+  #rafHandles = new Map<HTMLElement, number>();
 
   /** Track active timeouts mapped by each toast element for safe cancellation. */
   #activeTimeouts = new Map<HTMLElement, { id: number; startedAt: number; remaining: number }>();
@@ -77,10 +73,14 @@ export class ToastController extends Controller<HTMLElement> {
   /** Track active pause reasons (hover/focus) per toast for WCAG 2.2.1 pause/resume. */
   #pauseReasons = new Map<HTMLElement, Set<string>>();
 
+  /** The stable list that owns delegated listeners for dynamically added items. */
+  #delegatedList: HTMLElement | null = null;
+
   override connect(): void {
+    this.#connectDelegatedEvents();
     this.enforceMaxLimit();
     for (const item of this.itemTargets) {
-      if (!this.#activeTimeouts.has(item)) {
+      if (!this.#activeTimeouts.has(item) && item.dataset.state !== "leaving") {
         this.#startTimer(item);
       }
     }
@@ -89,8 +89,9 @@ export class ToastController extends Controller<HTMLElement> {
   override disconnect(): void {
     // SafeTimeout owns every auto-dismiss + finalize timer; one call tears them
     // all down so none fires against the detached controller.
+    this.#disconnectDelegatedEvents();
     this.#timers.clearAll();
-    for (const handle of this.#rafHandles) {
+    for (const handle of this.#rafHandles.values()) {
       window.cancelAnimationFrame(handle);
     }
     this.#rafHandles.clear();
@@ -98,12 +99,34 @@ export class ToastController extends Controller<HTMLElement> {
     this.#pauseReasons.clear();
   }
 
+  /** Rebinds delegated interaction when Turbo replaces the list target in place. */
+  listTargetConnected(element: HTMLElement): void {
+    if (this.#delegatedList !== element) this.#connectDelegatedEvents(element);
+  }
+
+  /** Releases delegation only when the removed target is its current owner. */
+  listTargetDisconnected(element: HTMLElement): void {
+    if (this.#delegatedList === element) this.#disconnectDelegatedEvents();
+  }
+
   durationValueChanged(): void {
-    if (this.durationValue > 0) {
-      for (const item of this.itemTargets) {
-        if (!this.#activeTimeouts.has(item)) {
-          this.#startTimer(item);
-        }
+    for (const item of this.itemTargets) {
+      if (item.dataset.state === "leaving") continue;
+
+      const pauseReasons = this.#pauseReasons.get(item);
+      this.#clearTimer(item);
+      if (this.durationValue <= 0) {
+        item.removeAttribute("data-paused");
+      } else if (pauseReasons && pauseReasons.size > 0) {
+        this.#pauseReasons.set(item, pauseReasons);
+        this.#activeTimeouts.set(item, {
+          id: 0,
+          startedAt: 0,
+          remaining: this.durationValue,
+        });
+        item.setAttribute("data-paused", "true");
+      } else {
+        this.#startTimer(item);
       }
     }
   }
@@ -119,18 +142,23 @@ export class ToastController extends Controller<HTMLElement> {
    */
   itemTargetConnected(element: HTMLElement): void {
     this.enforceMaxLimit();
+    if (element.dataset.state === "leaving" || element.parentNode !== this.listTarget) return;
+
     this.#startTimer(element);
     element.setAttribute("data-state", "entering");
+    this.#cancelAnimation(element);
     const handle = window.requestAnimationFrame(() => {
-      this.#rafHandles.delete(handle);
+      this.#rafHandles.delete(element);
+      if (element.parentNode !== this.listTarget || element.dataset.state === "leaving") return;
       element.setAttribute("data-state", "visible");
     });
-    this.#rafHandles.add(handle);
+    this.#rafHandles.set(element, handle);
   }
 
   /** Clears any active timer when a toast is removed from the DOM. */
   itemTargetDisconnected(element: HTMLElement): void {
     this.#clearTimer(element);
+    this.#cancelAnimation(element);
   }
 
   /**
@@ -156,14 +184,13 @@ export class ToastController extends Controller<HTMLElement> {
     const item = clone.querySelector("[data-stimeo--toast-target='item']") as HTMLElement | null;
     if (!item) return;
 
-    const bodySlot = item.querySelector("[data-toast-slot='body']");
-    if (bodySlot) {
-      bodySlot.textContent = body;
-    }
+    const bodySlot = item.querySelector<HTMLElement>("[data-toast-slot='body']");
+    if (!bodySlot) return;
+    bodySlot.textContent = body;
 
     // Validate the live-region role at runtime; untrusted params/detail could
     // otherwise write an invalid ARIA role. Anything but "alert" stays polite.
-    item.setAttribute("role", this.#readField(event, "type") === "alert" ? "alert" : "status");
+    bodySlot.setAttribute("role", this.#readField(event, "type") === "alert" ? "alert" : "status");
 
     this.listTarget.appendChild(item);
     this.dispatch("show", { detail: { item } });
@@ -189,9 +216,7 @@ export class ToastController extends Controller<HTMLElement> {
 
   /** Dismisses the toast that contained the trigger. */
   dismiss(event: Event): void {
-    const target = (event.currentTarget || event.target) as HTMLElement | null;
-    if (!target) return;
-    const item = target.closest("[data-stimeo--toast-target='item']") as HTMLElement | null;
+    const item = this.#itemFromEvent(event);
     if (!item) return;
 
     this.#removeWithTransition(item, "user");
@@ -200,9 +225,11 @@ export class ToastController extends Controller<HTMLElement> {
   /** Dismisses the focused toast when Escape is pressed. */
   onKeydown(event: KeyboardEvent): void {
     if (event.key === "Escape") {
-      const target = (event.currentTarget || event.target) as HTMLElement | null;
-      if (!target) return;
-      const item = target.closest("[data-stimeo--toast-target='item']") as HTMLElement | null;
+      // Layered-Escape rule 1: leave a press an inner handler already owned.
+      // A press during IME composition (a text field inside the toast) cancels
+      // the conversion, never the toast.
+      if (event.defaultPrevented || event.isComposing) return;
+      const item = this.#itemFromEvent(event);
       if (!item) return;
 
       event.preventDefault();
@@ -237,6 +264,11 @@ export class ToastController extends Controller<HTMLElement> {
     const elapsed = Date.now() - timeout.startedAt;
     const remaining = Math.max(0, timeout.remaining - elapsed);
 
+    if (remaining <= 0) {
+      this.#removeWithTransition(item, "timeout");
+      return;
+    }
+
     this.#activeTimeouts.set(item, { id: 0, startedAt: 0, remaining });
     item.setAttribute("data-paused", "true");
   }
@@ -252,7 +284,8 @@ export class ToastController extends Controller<HTMLElement> {
     if (reasons.size > 0) return;
 
     const timeout = this.#activeTimeouts.get(item);
-    if (!timeout || timeout.remaining <= 0) return;
+    if (!timeout) return;
+    if (timeout.id !== 0 || timeout.remaining <= 0) return;
 
     item.removeAttribute("data-paused");
     this.#startTimer(item, timeout.remaining);
@@ -260,8 +293,10 @@ export class ToastController extends Controller<HTMLElement> {
 
   /** Resolves the toast item element a pause/resume event targets. */
   #itemFromEvent(event: Event): HTMLElement | null {
-    const target = (event.currentTarget || event.target) as HTMLElement | null;
-    return target?.closest("[data-stimeo--toast-target='item']") ?? null;
+    const target = event.target instanceof Element ? event.target : event.currentTarget;
+    if (!(target instanceof Element) || !this.hasListTarget) return null;
+    const item = target.closest<HTMLElement>("[data-stimeo--toast-target='item']");
+    return item && this.listTarget.contains(item) ? item : null;
   }
 
   /** Classifies a pause/resume event as a hover or focus reason. */
@@ -280,7 +315,13 @@ export class ToastController extends Controller<HTMLElement> {
   }
 
   #startTimer(element: HTMLElement, duration = this.durationValue): void {
-    if (duration <= 0) return;
+    if (
+      duration <= 0 ||
+      element.dataset.state === "leaving" ||
+      element.parentNode !== this.listTarget
+    ) {
+      return;
+    }
 
     this.#clearTimer(element);
     const id = this.#timers.set(() => {
@@ -300,13 +341,15 @@ export class ToastController extends Controller<HTMLElement> {
   }
 
   #removeWithTransition(element: HTMLElement, reason: "timeout" | "user"): void {
+    if (element.dataset.state === "leaving" || element.parentNode !== this.listTarget) return;
+
     this.#clearTimer(element);
+    this.#cancelAnimation(element);
     element.setAttribute("data-state", "leaving");
 
     const finalize = () => {
-      if (element.parentNode === this.listTarget) {
-        this.listTarget.removeChild(element);
-      }
+      if (element.parentNode !== this.listTarget) return;
+      this.listTarget.removeChild(element);
       this.dispatch("dismiss", { detail: { item: element, reason } });
     };
 
@@ -330,13 +373,65 @@ export class ToastController extends Controller<HTMLElement> {
    */
   enforceMaxLimit(): void {
     const currentItems = this.itemTargets;
-    if (currentItems.length > this.maxValue) {
-      const excessCount = currentItems.length - this.maxValue;
+    const max = Math.max(0, this.maxValue);
+    if (currentItems.length > max) {
+      const excessCount = currentItems.length - max;
       for (let i = 0; i < excessCount; i++) {
         const oldest = currentItems[i];
         if (oldest) this.#removeWithTransition(oldest, "timeout");
       }
     }
+  }
+
+  /** Wires stable-container delegation so newly appended items work immediately. */
+  #connectDelegatedEvents(list = this.hasListTarget ? this.listTarget : null): void {
+    this.#disconnectDelegatedEvents();
+    if (!list) return;
+
+    this.#delegatedList = list;
+    for (const type of DELEGATED_EVENTS) {
+      this.#delegatedList.addEventListener(type, this.#onListEvent);
+    }
+  }
+
+  /** Releases every delegated listener from the exact list that owns it. */
+  #disconnectDelegatedEvents(): void {
+    if (!this.#delegatedList) return;
+
+    for (const type of DELEGATED_EVENTS) {
+      this.#delegatedList.removeEventListener(type, this.#onListEvent);
+    }
+    this.#delegatedList = null;
+  }
+
+  /** Routes every delegated item interaction from the stable list. */
+  readonly #onListEvent = (event: Event): void => {
+    if (event.type === "click") {
+      const target = event.target instanceof Element ? event.target : null;
+      const trigger = target?.closest<HTMLElement>("[data-toast-dismiss]");
+      if (trigger && this.#delegatedList?.contains(trigger)) this.dismiss(event);
+    } else if (event.type === "keydown") {
+      this.onKeydown(event as KeyboardEvent);
+    } else if (this.#crossesItemBoundary(event)) {
+      if (event.type === "focusin" || event.type === "mouseover") this.pause(event);
+      else this.resume(event);
+    }
+  };
+
+  /** Whether a bubbling focus/pointer event enters or leaves a toast boundary. */
+  #crossesItemBoundary(event: Event): boolean {
+    const item = this.#itemFromEvent(event);
+    if (!item) return false;
+    const related = "relatedTarget" in event ? event.relatedTarget : null;
+    return !(related instanceof Node && item.contains(related));
+  }
+
+  /** Cancels the pending entering-to-visible frame owned by one item. */
+  #cancelAnimation(element: HTMLElement): void {
+    const handle = this.#rafHandles.get(element);
+    if (handle === undefined) return;
+    window.cancelAnimationFrame(handle);
+    this.#rafHandles.delete(element);
   }
 }
 

@@ -4,6 +4,7 @@ import { ReadMoreController } from "../src/controllers/read_more_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { byId, query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -44,7 +45,7 @@ describe("ReadMoreController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -141,7 +142,7 @@ describe("ReadMoreController", () => {
 
   it("becomes inert after disconnect", async () => {
     await start(true);
-    application.stop();
+    application.unload("stimeo--read-more");
     trigger().click();
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
   });

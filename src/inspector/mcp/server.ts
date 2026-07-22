@@ -17,10 +17,9 @@ import {
  * as read-only tools, resources, and prompts: `initialize`, the
  * `notifications/initialized` notification, `ping`, `tools/list`,
  * `tools/call`, `resources/list`, `resources/read`, `prompts/list`, and
- * `prompts/get` (newline-delimited messages, one per line). Hand-written on
- * purpose: the repo's constitution allows no runtime dependency beyond
- * `@hotwired/stimulus`, and this subset is small enough to conform to
- * directly.
+ * `prompts/get` (newline-delimited messages, one per line). It is hand-written
+ * to keep the shipped server dependency-free; this bounded subset is small
+ * enough to implement and review directly.
  *
  * stdout carries protocol messages only; anything diagnostic must go to the
  * caller-provided error log (stderr in production).

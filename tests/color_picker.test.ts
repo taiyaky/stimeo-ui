@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ColorPickerController } from "../src/controllers/color_picker_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -51,7 +52,7 @@ describe("ColorPickerController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

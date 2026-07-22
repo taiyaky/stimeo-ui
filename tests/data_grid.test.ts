@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DataGridController } from "../src/controllers/data_grid_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -51,7 +52,7 @@ describe("DataGridController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -192,7 +193,7 @@ describe("DataGridController", () => {
   it("does not set aria-multiselectable for single or none selection", async () => {
     await start("single");
     expect(root().hasAttribute("aria-multiselectable")).toBe(false);
-    application.stop();
+    disconnectAndStopApplication(application);
     await start("none");
     expect(root().hasAttribute("aria-multiselectable")).toBe(false);
   });

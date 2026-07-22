@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { ensureId } from "../utils/aria_ids";
+import { CompositionTracker } from "../utils/composition_tracker";
 import { scrollOptionIntoView } from "../utils/option_scroll";
 import { RovingTabindex } from "../utils/roving_tabindex";
 
@@ -80,6 +81,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
   declare readonly statusTarget: HTMLElement;
   declare readonly fieldsTarget: HTMLElement;
   declare readonly hasListTarget: boolean;
+  declare readonly hasInputTarget: boolean;
   declare readonly hasTagsTarget: boolean;
   declare readonly hasTagTemplateTarget: boolean;
   declare readonly hasStatusTarget: boolean;
@@ -92,10 +94,29 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** The active option (tracked via `aria-activedescendant`), or null. */
   #activeOption: HTMLElement | null = null;
+  /** Absorbs the browser's redundant final input after compositionend. */
+  #ignorePostCompositionInput = false;
+  /** Owns IME lifecycle state; confirmed text emits one filter result. */
+  readonly #composition = new CompositionTracker({
+    onStart: () => {
+      this.#ignorePostCompositionInput = false;
+    },
+    onEnd: () => {
+      // Apply the confirmed query even in browsers that omit a final input event.
+      // When the usual final input follows synchronously, absorb it so async
+      // consumers receive one filter event for the confirmed text, not two.
+      this.#ignorePostCompositionInput = true;
+      queueMicrotask(() => {
+        this.#ignorePostCompositionInput = false;
+      });
+      this.filter();
+    },
+  });
   readonly #roving = new RovingTabindex(() => this.#removeButtons);
 
   /** Starts closed, syncs chips for any pre-selected options, and listens out. */
   override connect(): void {
+    if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
     this.close();
     if (this.hasTagsTarget) {
       this.tagsTarget.addEventListener("keydown", this.#onTagKeydown);
@@ -115,6 +136,8 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Tears down document and chip listeners on disconnect (Turbo included). */
   override disconnect(): void {
+    this.#composition.disconnect();
+    this.#ignorePostCompositionInput = false;
     if (this.hasTagsTarget) {
       this.tagsTarget.removeEventListener("keydown", this.#onTagKeydown);
       this.tagsTarget.removeEventListener("click", this.#onTagClick);
@@ -122,8 +145,24 @@ export class MultiSelectController extends Controller<HTMLElement> {
     document.removeEventListener("click", this.#onOutsideClick);
   }
 
-  /** Filters options by the input substring, opens, and re-seeds the active one. */
-  filter(): void {
+  /** Tracks an input added initially or after connect. */
+  inputTargetConnected(input: HTMLInputElement): void {
+    this.#composition.observe(input);
+  }
+
+  /** Removes composition listeners when the active input is replaced or removed. */
+  inputTargetDisconnected(input: HTMLInputElement): void {
+    this.#composition.unobserve(input);
+    this.#ignorePostCompositionInput = false;
+  }
+
+  /** Filters confirmed input text, opens, and re-seeds the active option. */
+  filter(event?: InputEvent): void {
+    if (event && this.#ignorePostCompositionInput) {
+      this.#ignorePostCompositionInput = false;
+      return;
+    }
+    if (this.#composition.isComposing(event)) return;
     const query = this.inputTarget.value.trim().toLowerCase();
     for (const option of this.optionTargets) {
       const label = (option.textContent ?? "").trim().toLowerCase();
@@ -156,11 +195,9 @@ export class MultiSelectController extends Controller<HTMLElement> {
   onKeydown(event: KeyboardEvent): void {
     // Ignore keys fired during IME composition: the `Enter` that confirms a
     // candidate (and arrows that move within it) must not select an option or
-    // navigate the chip list. `keyCode === 229` covers browsers that omit
-    // `isComposing` on the confirming keydown. Aligns with the library's IME
-    // composition-guard policy (the keydown-level equivalent of the input-path
-    // guards in character-counter / auto-submit).
-    if (event.isComposing || event.keyCode === 229) return;
+    // navigate the chip list. Controller-owned lifecycle state covers confirming
+    // events that omit the standard per-event signal.
+    if (this.#composition.isComposing(event)) return;
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
@@ -193,6 +230,11 @@ export class MultiSelectController extends Controller<HTMLElement> {
         }
         break;
       case "Escape":
+        // Layered-Escape contract: leave a press an inner handler already
+        // owned (rule 1), and consume only while owning a dismissable state —
+        // with the list already closed the press stays free for the shared
+        // resolver, so an enclosing dialog still closes from a focused input.
+        if (event.defaultPrevented || this.#isClosed) break;
         event.preventDefault();
         this.close();
         break;

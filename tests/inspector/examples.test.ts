@@ -113,8 +113,7 @@ describe("buildExamplesIndex (real demo sidecars)", () => {
     const manifest = buildManifest("0.0.0");
     const index = buildExamplesIndex(collectDemoSources(root), manifest);
     const ids = Object.keys(index.examples);
-    // The pending-demo allowlist (the server-bound set awaiting the cable
-    // demo infrastructure) is the one documented gap in the bijection.
+    // Pending demo exemptions are the only permitted gap in the bijection.
     const expected = Object.keys(manifest.controllers)
       .filter((id) => !PENDING_DEMO_CONTROLLERS.has(id))
       .sort();

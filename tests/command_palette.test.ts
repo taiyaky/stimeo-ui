@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CommandPaletteController } from "../src/controllers/command_palette_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -13,12 +14,13 @@ import { tick } from "./helpers/timing";
 
 describe("CommandPaletteController", () => {
   let application: Application;
+  let listenerAbort: AbortController;
 
   beforeEach(async () => {
+    listenerAbort = new AbortController();
     document.body.innerHTML = `
       <button id="trigger">Opener</button>
-      <div data-controller="stimeo--command-palette"
-           data-stimeo--command-palette-hotkey-value="mod+k">
+      <div data-controller="stimeo--command-palette">
         <div id="dialog" data-stimeo--command-palette-target="dialog" role="dialog"
              aria-modal="true" aria-label="Command palette"
              data-action="click->stimeo--command-palette#closeOnBackdrop" hidden>
@@ -50,13 +52,8 @@ describe("CommandPaletteController", () => {
   });
 
   afterEach(() => {
-    // Disconnect first so the controller's global hotkey listener is removed and its
-    // FocusTrap is torn down between tests. (application.stop() does not disconnect
-    // controllers here, so without this a stale controller's trap would keep
-    // manipulating shared state — scroll lock, background inert, focus — and corrupt
-    // later tests.)
-    controller()?.disconnect();
-    application.stop();
+    listenerAbort.abort();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     document.body.style.overflow = "";
   });
@@ -80,18 +77,26 @@ describe("CommandPaletteController", () => {
     input().dispatchEvent(new Event("input", { bubbles: true }));
   };
 
-  const press = (key: string) =>
-    input().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  const press = (key: string, options: KeyboardEventInit = {}) =>
+    input().dispatchEvent(new KeyboardEvent("keydown", { ...options, key, bubbles: true }));
 
-  const pressGlobal = (key: string, ctrl = false, meta = false) => {
+  const pressGlobal = (key: string, ctrl = false, meta = false, shift = false, alt = false) => {
     document.dispatchEvent(
       new KeyboardEvent("keydown", {
         key,
         ctrlKey: ctrl,
         metaKey: meta,
+        shiftKey: shift,
+        altKey: alt,
         bubbles: true,
       }),
     );
+  };
+
+  const listenForSelection = (listener: EventListener): void => {
+    document.addEventListener("stimeo--command-palette:select", listener, {
+      signal: listenerAbort.signal,
+    });
   };
 
   const pressHotkey = () => {
@@ -131,8 +136,6 @@ describe("CommandPaletteController", () => {
 
     pressHotkey();
     await tick();
-    // RequestAnimationFrame delay
-    await new Promise((resolve) => requestAnimationFrame(resolve));
     expect(document.activeElement).toBe(input());
 
     press("Escape");
@@ -150,6 +153,16 @@ describe("CommandPaletteController", () => {
     expect(option("cmd-publish").getAttribute("aria-selected")).toBe("true");
 
     press("ArrowUp");
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
+  });
+
+  it("wraps ArrowUp from the first option and ArrowDown from the last", () => {
+    pressHotkey();
+
+    press("ArrowUp");
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
+
+    press("ArrowDown");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
   });
 
@@ -173,10 +186,22 @@ describe("CommandPaletteController", () => {
 
     // Activedescendant resets to first visible option
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+    expect(option("cmd-new").getAttribute("aria-selected")).toBe("false");
+    expect(option("cmd-new").hasAttribute("data-active")).toBe(false);
+    expect(
+      document.querySelectorAll(
+        '[data-stimeo--command-palette-target="option"]' + '[aria-selected="true"]',
+      ),
+    ).toHaveLength(1);
 
     type("zzz");
     expect(empty().hidden).toBe(false);
     expect(input().hasAttribute("aria-activedescendant")).toBe(false);
+    expect(
+      document.querySelectorAll(
+        '[data-stimeo--command-palette-target="option"]' + '[aria-selected="true"]',
+      ),
+    ).toHaveLength(0);
   });
 
   it("skips hidden options during keyboard navigation after filtering", () => {
@@ -193,9 +218,35 @@ describe("CommandPaletteController", () => {
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
   });
 
+  it("uses data-search-value instead of visible text when filtering", () => {
+    option("cmd-publish").dataset.searchValue = "ship production";
+    pressHotkey();
+
+    type("production");
+    expect(option("cmd-publish").hidden).toBe(false);
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+
+    type("Publish");
+    expect(option("cmd-publish").hidden).toBe(true);
+    expect(empty().hidden).toBe(false);
+  });
+
+  it("removes activedescendant instead of authoring an empty reference when an id is missing", () => {
+    option("cmd-new").removeAttribute("id");
+
+    pressHotkey();
+
+    expect(input().hasAttribute("aria-activedescendant")).toBe(false);
+    expect(
+      document
+        .querySelector('[data-stimeo--command-palette-target="option"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+  });
+
   it("dispatches select event and closes on Enter", () => {
     let firedEvent: CustomEvent | null = null;
-    document.addEventListener("stimeo--command-palette:select", (e) => {
+    listenForSelection((e) => {
       firedEvent = e as CustomEvent;
     });
 
@@ -211,7 +262,7 @@ describe("CommandPaletteController", () => {
 
   it("dispatches select event and closes on option click", () => {
     let firedEvent: CustomEvent | null = null;
-    document.addEventListener("stimeo--command-palette:select", (e) => {
+    listenForSelection((e) => {
       firedEvent = e as CustomEvent;
     });
 
@@ -224,8 +275,22 @@ describe("CommandPaletteController", () => {
     expect(dialog().hidden).toBe(true);
   });
 
+  it("falls back to option text when data-value is absent", () => {
+    let selectedValue = "";
+    listenForSelection((event) => {
+      selectedValue = (event as CustomEvent<{ value: string }>).detail.value;
+    });
+    option("cmd-new").removeAttribute("data-value");
+
+    pressHotkey();
+    option("cmd-new").click();
+
+    expect(selectedValue).toBe("New…");
+  });
+
   it("excludes disabled options from navigation, selection and the empty count", () => {
     pressHotkey();
+    expect(option("cmd-heading").getAttribute("aria-disabled")).toBe("true");
 
     // Disabled heading is shown but never navigable.
     press("End");
@@ -233,7 +298,7 @@ describe("CommandPaletteController", () => {
 
     // Clicking a disabled option does not select or close.
     let fired = false;
-    document.addEventListener("stimeo--command-palette:select", () => {
+    listenForSelection(() => {
       fired = true;
     });
     option("cmd-heading").click();
@@ -244,6 +309,108 @@ describe("CommandPaletteController", () => {
     type("Section heading");
     expect(option("cmd-heading").hasAttribute("hidden")).toBe(false);
     expect(empty().hidden).toBe(false);
+  });
+
+  it("treats authored aria-disabled options as unavailable", () => {
+    option("cmd-delete").setAttribute("aria-disabled", "true");
+    pressHotkey();
+
+    press("End");
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+
+    option("cmd-delete").click();
+    expect(dialog().hidden).toBe(false);
+  });
+
+  it("restores an authored aria-disabled value when the data-disabled override is removed", async () => {
+    const dynamic = document.createElement("li");
+    dynamic.id = "cmd-managed-disabled";
+    dynamic.setAttribute("role", "option");
+    dynamic.setAttribute("aria-disabled", "false");
+    dynamic.setAttribute("data-disabled", "true");
+    dynamic.setAttribute("data-stimeo--command-palette-target", "option");
+    document.getElementById("cmdk-list")?.appendChild(dynamic);
+    await tick();
+    expect(dynamic.getAttribute("aria-disabled")).toBe("true");
+
+    dynamic.removeAttribute("data-disabled");
+    type("");
+
+    expect(dynamic.getAttribute("aria-disabled")).toBe("false");
+  });
+
+  it("shows the empty state when every option is disabled", () => {
+    for (const id of ["cmd-new", "cmd-publish", "cmd-delete"]) {
+      option(id).setAttribute("data-disabled", "true");
+    }
+
+    pressHotkey();
+
+    expect(input().hasAttribute("aria-activedescendant")).toBe(false);
+    expect(empty().hidden).toBe(false);
+    expect(
+      document.querySelectorAll(
+        '[data-stimeo--command-palette-target="option"]' + '[aria-selected="true"]',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("defers filtering until compositionend and ignores its unflagged Enter", () => {
+    const selectedValues: string[] = [];
+    listenForSelection((event) => {
+      selectedValues.push((event as CustomEvent).detail.value);
+    });
+    pressHotkey();
+
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    input().value = "publish";
+    input().dispatchEvent(new InputEvent("input", { bubbles: true }));
+
+    // The active browser event can omit isComposing. Controller-owned lifecycle state
+    // still protects the Enter and keeps pre-conversion filtering idle.
+    press("Enter");
+    expect(selectedValues).toEqual([]);
+    expect(dialog().hidden).toBe(false);
+    expect(option("cmd-new").hidden).toBe(false);
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
+
+    input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    expect(option("cmd-new").hidden).toBe(true);
+    expect(option("cmd-publish").hidden).toBe(false);
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+
+    press("Enter");
+    expect(selectedValues).toEqual(["publish"]);
+    expect(dialog().hidden).toBe(true);
+  });
+
+  it("also honors the standard per-event IME signal without lifecycle events", () => {
+    let selections = 0;
+    listenForSelection(() => selections++);
+    pressHotkey();
+
+    press("Enter", { isComposing: true });
+    expect(selections).toBe(0);
+    expect(dialog().hidden).toBe(false);
+
+    press("Enter");
+    expect(selections).toBe(1);
+    expect(dialog().hidden).toBe(true);
+  });
+
+  it("clears composition state across disconnect and reconnect", () => {
+    let selections = 0;
+    listenForSelection(() => selections++);
+    pressHotkey();
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+
+    controller().disconnect();
+    controller().connect();
+    controller().open();
+    press("Enter");
+
+    expect(selections).toBe(1);
+    expect(dialog().hidden).toBe(true);
   });
 
   it("opens via either Cmd+K or Ctrl+K regardless of platform", async () => {
@@ -263,6 +430,95 @@ describe("CommandPaletteController", () => {
     expect(dialog().hidden).toBe(false);
   });
 
+  it("supports custom and bare hotkeys while rejecting extra modifiers", () => {
+    controller().hotkeyValue = "mod+p";
+
+    pressGlobal("p", true);
+    expect(dialog().hidden).toBe(false);
+    pressGlobal("p", true);
+    expect(dialog().hidden).toBe(true);
+
+    pressGlobal("p", true, false, true);
+    pressGlobal("p", true, false, false, true);
+    pressGlobal("p", true, true);
+    expect(dialog().hidden).toBe(true);
+
+    controller().hotkeyValue = "x";
+    pressGlobal("x", true);
+    pressGlobal("x", false, false, true);
+    expect(dialog().hidden).toBe(true);
+    pressGlobal("x");
+    expect(dialog().hidden).toBe(false);
+
+    controller().close();
+    controller().hotkeyValue = "mod";
+    pressGlobal("mod");
+    expect(dialog().hidden).toBe(true);
+
+    controller().hotkeyValue = "mod+shift+k";
+    pressGlobal("k", true, false, true);
+    expect(dialog().hidden).toBe(true);
+  });
+
+  it("keeps instances isolated when they use distinct hotkeys", async () => {
+    const secondRoot = document.createElement("div");
+    secondRoot.setAttribute("data-controller", "stimeo--command-palette");
+    secondRoot.setAttribute("data-stimeo--command-palette-hotkey-value", "mod+p");
+    secondRoot.innerHTML = `
+      <div id="dialog-2" role="dialog" aria-modal="true" aria-label="Second palette"
+           data-stimeo--command-palette-target="dialog" hidden>
+        <input id="input-2" role="combobox" aria-expanded="false"
+               aria-controls="list-2" aria-autocomplete="list" aria-label="Search"
+               data-stimeo--command-palette-target="input"
+               data-action="input->stimeo--command-palette#filter
+                            keydown->stimeo--command-palette#onKeydown">
+        <ul id="list-2" role="listbox" data-stimeo--command-palette-target="list">
+          <li id="second-option" role="option"
+              data-stimeo--command-palette-target="option">Second</li>
+        </ul>
+      </div>`;
+    document.body.appendChild(secondRoot);
+    await tick();
+    const second = application.getControllerForElementAndIdentifier(
+      secondRoot,
+      "stimeo--command-palette",
+    ) as CommandPaletteController;
+
+    pressGlobal("p", true);
+    expect(dialog().hidden).toBe(true);
+    expect((document.getElementById("dialog-2") as HTMLElement).hidden).toBe(false);
+
+    second.close();
+    pressHotkey();
+    expect(dialog().hidden).toBe(false);
+    expect((document.getElementById("dialog-2") as HTMLElement).hidden).toBe(true);
+  });
+
+  it("includes dynamically added options in navigation and selection", async () => {
+    const dynamic = document.createElement("li");
+    dynamic.id = "cmd-dynamic";
+    dynamic.setAttribute("role", "option");
+    dynamic.setAttribute("data-value", "dynamic");
+    dynamic.setAttribute("data-stimeo--command-palette-target", "option");
+    dynamic.setAttribute("data-action", "click->stimeo--command-palette#selectByClick");
+    dynamic.textContent = "Dynamic";
+    document.getElementById("cmdk-list")?.appendChild(dynamic);
+    await tick();
+
+    pressHotkey();
+    expect(dynamic.getAttribute("aria-selected")).toBe("false");
+    press("End");
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-dynamic");
+
+    let selectedValue = "";
+    listenForSelection((event) => {
+      selectedValue = (event as CustomEvent<{ value: string }>).detail.value;
+    });
+    dynamic.click();
+    expect(selectedValue).toBe("dynamic");
+    expect(dialog().hidden).toBe(true);
+  });
+
   it("traps Tab focus within the dialog no matter which element has focus", async () => {
     // A focusable close button inside the dialog, as the real demo has.
     const close = document.createElement("button");
@@ -272,7 +528,6 @@ describe("CommandPaletteController", () => {
 
     pressHotkey();
     await tick();
-    await new Promise((resolve) => requestAnimationFrame(resolve));
     expect(document.activeElement).toBe(input());
 
     // Shift+Tab from the first focusable (input) wraps to the last (close button).
@@ -359,7 +614,7 @@ describe("CommandPaletteController", () => {
       "option, New…, selected, position 1, set size 4",
       "option, Publish, not selected, position 2, set size 4",
       "option, Delete, not selected, position 3, set size 4",
-      "option, Section heading, not selected, position 4, set size 4",
+      "option, Section heading, not selected, disabled, position 4, set size 4",
       "end of listbox, orientated vertically",
     ]);
 
@@ -370,7 +625,7 @@ describe("CommandPaletteController", () => {
       "option, New…, not selected, position 1, set size 4",
       "option, Publish, selected, position 2, set size 4",
       "option, Delete, not selected, position 3, set size 4",
-      "option, Section heading, not selected, position 4, set size 4",
+      "option, Section heading, not selected, disabled, position 4, set size 4",
       "end of listbox, orientated vertically",
     ]);
   });
@@ -448,16 +703,7 @@ describe("CommandPaletteController restore-on-reconnect", () => {
   };
 
   afterEach(() => {
-    const root = document.querySelector("[data-controller='stimeo--command-palette']");
-    if (root) {
-      (
-        application.getControllerForElementAndIdentifier(
-          root as HTMLElement,
-          "stimeo--command-palette",
-        ) as CommandPaletteController | null
-      )?.disconnect();
-    }
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     document.body.style.overflow = "";
   });

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SidebarController } from "../src/controllers/sidebar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -82,7 +83,7 @@ describe("SidebarController", () => {
   });
 
   afterEach(() => {
-    application?.stop();
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     document.body.style.overflow = "";
     localStorage.clear();
@@ -149,7 +150,7 @@ describe("SidebarController", () => {
     expect(panel().getAttribute("data-state")).toBe("collapsed");
 
     // Reconnect Stimulus over the same DOM (the collapsed data-state is preserved).
-    application.stop();
+    disconnectAndStopApplication(application);
     application = Application.start();
     application.register("stimeo--sidebar", SidebarController);
     await tick();

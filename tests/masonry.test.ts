@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MasonryController } from "../src/controllers/masonry_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -34,7 +35,7 @@ describe("MasonryController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -94,7 +95,7 @@ describe("MasonryController", () => {
   it("stops observing on disconnect (no relayout after teardown)", async () => {
     await start(3, 800);
     // Invoke disconnect() directly (as the spinner teardown test does) rather than
-    // relying on application.stop()'s async MutationObserver flush.
+    // racing the document MutationObserver that normally drives context teardown.
     const controller = application.getControllerForElementAndIdentifier(
       root(),
       "stimeo--masonry",

@@ -5,6 +5,7 @@ import { FormValidationController } from "../src/controllers/form_validation_con
 import { ListboxController } from "../src/controllers/listbox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -57,7 +58,7 @@ describe("FormValidationController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -109,7 +110,7 @@ describe("FormValidationController", () => {
   });
 
   it("leaves an author-set novalidate untouched on disconnect", async () => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <form novalidate data-controller="stimeo--form-validation"
             data-stimeo--form-validation-stimeo--form-field-outlet="${OUTLET}">
@@ -317,7 +318,7 @@ describe("FormValidationController with a radio group", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -426,7 +427,7 @@ describe("FormValidationController with a listbox via a validatable mirror", () 
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -497,7 +498,7 @@ describe("FormValidationController mirror focus fallback", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -538,7 +539,7 @@ describe("FormValidationController with an unwired native radio group", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -584,7 +585,7 @@ describe("FormValidationController with a mirror field lacking a control target"
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -624,7 +625,7 @@ describe("FormValidationController with an unwired control", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -665,7 +666,7 @@ describe("FormValidationController declarative messages and custom rules", () =>
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

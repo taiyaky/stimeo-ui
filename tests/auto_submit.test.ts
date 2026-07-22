@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AutoSubmitController } from "../src/controllers/auto_submit_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -37,7 +38,7 @@ describe("AutoSubmitController", () => {
   });
 
   afterEach(() => {
-    application?.stop();
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     vi.useRealTimers();
   });

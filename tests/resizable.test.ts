@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ResizableController } from "../src/controllers/resizable_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 describe("ResizableController", () => {
@@ -30,7 +31,7 @@ describe("ResizableController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -86,7 +87,7 @@ describe("ResizableController", () => {
              data-action="pointerdown->stimeo--resizable#onPointerDown"></div>
       </div>
     `;
-    application.stop();
+    disconnectAndStopApplication(application);
     application = Application.start();
     application.register("stimeo--resizable", ResizableController);
     await tick();
@@ -290,7 +291,7 @@ describe("ResizableController", () => {
              data-action="pointerdown->stimeo--resizable#onPointerDown"></div>
       </div>
     `;
-    application.stop();
+    disconnectAndStopApplication(application);
     application = Application.start();
     application.register("stimeo--resizable", ResizableController);
     await tick();

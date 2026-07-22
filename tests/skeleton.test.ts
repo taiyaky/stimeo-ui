@@ -4,6 +4,7 @@ import { SkeletonController } from "../src/controllers/skeleton_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -32,7 +33,7 @@ describe("SkeletonController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     vi.useRealTimers();
     document.body.innerHTML = "";
   });
@@ -127,7 +128,7 @@ describe("SkeletonController accessibility", () => {
   let application: Application;
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

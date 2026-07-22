@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NumberInputController } from "../src/controllers/number_input_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -37,7 +38,7 @@ describe("NumberInputController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -65,7 +66,7 @@ describe("NumberInputController", () => {
   });
 
   it("never re-enables an author-disabled step button", async () => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <div data-controller="stimeo--number-input"
            data-stimeo--number-input-min-value="0"
@@ -162,8 +163,7 @@ describe("NumberInputController", () => {
     button.dispatchEvent(down);
     expect(down.defaultPrevented).toBe(true);
 
-    // Invoke disconnect directly: happy-dom's async MutationObserver makes
-    // application.stop()'s disconnect timing flaky (see scrollspy/slider tests).
+    // Invoke disconnect directly instead of racing happy-dom's async MutationObserver.
     const controller = application.getControllerForElementAndIdentifier(
       root(),
       "stimeo--number-input",
@@ -203,7 +203,7 @@ describe("NumberInputController on a custom spinbutton host", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -265,7 +265,7 @@ describe("NumberInputController press-and-hold", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     vi.useRealTimers();
     document.body.innerHTML = "";
   });

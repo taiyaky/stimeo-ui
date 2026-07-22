@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { FocusTrap } from "../../src/utils/focus_trap";
+import { EscapeLayer } from "../../src/utils/escape_layer";
+import { FocusTrap, type FocusTrapOptions } from "../../src/utils/focus_trap";
 
 /**
  * Unit tests for the {@link FocusTrap} primitive: the shared modal lifecycle
@@ -8,8 +9,10 @@ import { FocusTrap } from "../../src/utils/focus_trap";
  */
 describe("FocusTrap", () => {
   let container: HTMLElement;
+  let traps: FocusTrap[];
 
   beforeEach(() => {
+    traps = [];
     document.body.innerHTML = `
       <p id="background">Background</p>
       <button id="opener">Open</button>
@@ -21,11 +24,16 @@ describe("FocusTrap", () => {
   });
 
   afterEach(() => {
+    for (const activeTrap of traps) activeTrap.deactivate({ restoreFocus: false });
     document.body.innerHTML = "";
     document.body.style.overflow = "";
   });
 
-  const trap = (options = {}) => new FocusTrap(() => container, options);
+  const trap = (options: FocusTrapOptions = {}) => {
+    const instance = new FocusTrap(() => container, options);
+    traps.push(instance);
+    return instance;
+  };
   const byId = (id: string) => document.getElementById(id) as HTMLElement;
 
   it("locks body scroll and isolates background siblings on activate", () => {
@@ -106,12 +114,103 @@ describe("FocusTrap", () => {
     expect(document.activeElement).toBe(byId("first"));
   });
 
-  it("invokes onEscape on Escape and leaves Escape alone otherwise", () => {
+  it("invokes onEscape and prevents the handled Escape", () => {
     let escapes = 0;
     const t = trap({ onEscape: () => escapes++ });
     t.activate();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    document.dispatchEvent(event);
     expect(escapes).toBe(1);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("leaves Escape alone when no onEscape callback is provided", () => {
+    const t = trap();
+    t.activate();
+    const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+
+    document.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(t.active).toBe(true);
+  });
+
+  it("does not handle Escape already consumed by a nested component", () => {
+    let escapes = 0;
+    const t = trap({ onEscape: () => escapes++ });
+    t.activate();
+    const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    event.preventDefault();
+
+    document.dispatchEvent(event);
+
+    expect(escapes).toBe(0);
+    expect(t.active).toBe(true);
+  });
+
+  it("lets the most recently activated trap own Escape", () => {
+    let outerEscapes = 0;
+    let innerEscapes = 0;
+    const flags = { lockScroll: false, isolate: false, autoFocus: false };
+    const outer = trap({ ...flags, onEscape: () => outerEscapes++ });
+    const inner = trap({
+      ...flags,
+      onEscape: () => {
+        innerEscapes++;
+        inner.deactivate({ restoreFocus: false });
+      },
+    });
+    outer.activate();
+    inner.activate();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+    expect(innerEscapes).toBe(1);
+    expect(outerEscapes).toBe(0);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+    expect(outerEscapes).toBe(1);
+  });
+
+  it("leaves Escape ownership to lower layers when it has no onEscape", () => {
+    let escapes = 0;
+    const flags = { lockScroll: false, isolate: false, autoFocus: false };
+    const owner = trap({ ...flags, onEscape: () => escapes++ });
+    const silent = trap(flags); // no onEscape — must never join the Escape stack
+    owner.activate();
+    silent.activate();
+
+    const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    document.dispatchEvent(event);
+
+    // The silent trap neither consumes the press nor blocks the layer below it.
+    expect(escapes).toBe(1);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("keeps trapping Tab while a newer document layer owns Escape", () => {
+    let escapes = 0;
+    let aboveDismissed = 0;
+    const t = trap({ onEscape: () => escapes++ });
+    t.activate();
+    const above = new EscapeLayer();
+    above.activate(document, { onDismiss: () => aboveDismissed++ });
+
+    // Escape belongs to the newer layer: the shared resolver consumes the press
+    // and dismisses it, never the trap below …
+    const escapePress = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    document.dispatchEvent(escapePress);
+    expect(escapes).toBe(0);
+    expect(aboveDismissed).toBe(1);
+    expect(escapePress.defaultPrevented).toBe(true);
+
+    // … but the Tab cycle is owned by trap activation, not Escape ownership.
+    byId("last").focus();
+    const tab = new KeyboardEvent("keydown", { key: "Tab", cancelable: true });
+    document.dispatchEvent(tab);
+    expect(tab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(byId("first"));
+
+    above.deactivate();
   });
 
   it("does not track or clear elements that were already inert", () => {

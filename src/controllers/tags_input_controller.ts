@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { CompositionTracker } from "../utils/composition_tracker";
 import { RovingTabindex } from "../utils/roving_tabindex";
 
 /**
@@ -60,6 +61,7 @@ export class TagsInputController extends Controller<HTMLElement> {
   declare readonly hasStatusTarget: boolean;
   declare readonly hasFieldsTarget: boolean;
   declare readonly hasTagTemplateTarget: boolean;
+  declare readonly hasInputTarget: boolean;
 
   declare delimiterValue: string;
   declare maxValue: number;
@@ -67,9 +69,12 @@ export class TagsInputController extends Controller<HTMLElement> {
   declare nameValue: string;
 
   readonly #roving = new RovingTabindex(() => this.#removeButtons);
+  /** Owns IME lifecycle state for commit-key guarding. */
+  readonly #composition = new CompositionTracker();
 
   /** Wires tag-list keyboard navigation and removal, and seeds the single Tab stop. */
   override connect(): void {
+    if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
     this.tagsTarget.addEventListener("keydown", this.#onTagKeydown);
     this.tagsTarget.addEventListener("click", this.#onTagClick);
     this.#syncState();
@@ -77,19 +82,28 @@ export class TagsInputController extends Controller<HTMLElement> {
 
   /** Releases the delegated listeners so no handler outlives the element. */
   override disconnect(): void {
+    this.#composition.disconnect();
     this.tagsTarget.removeEventListener("keydown", this.#onTagKeydown);
     this.tagsTarget.removeEventListener("click", this.#onTagClick);
+  }
+
+  /** Tracks an input added initially or after connect. */
+  inputTargetConnected(input: HTMLInputElement): void {
+    this.#composition.observe(input);
+  }
+
+  /** Removes composition listeners when the active input is replaced or removed. */
+  inputTargetDisconnected(input: HTMLInputElement): void {
+    this.#composition.unobserve(input);
   }
 
   /** Commits on `Enter`/delimiter and deletes the last tag on empty `Backspace`. */
   onKeydown(event: KeyboardEvent): void {
     // Ignore keys fired during IME composition: the `Enter` that confirms a
     // candidate (and arrows that move within it) must not commit/navigate the
-    // chip list. `keyCode === 229` covers browsers that omit `isComposing` on
-    // the confirming keydown. Aligns with the library's IME composition-guard
-    // policy (the keydown-level equivalent of the input-path guards in
-    // character-counter / auto-submit).
-    if (event.isComposing || event.keyCode === 229) return;
+    // chip list. Controller-owned lifecycle state covers confirming events that
+    // omit the standard per-event signal.
+    if (this.#composition.isComposing(event)) return;
     if (event.key === "Enter" || event.key === this.delimiterValue) {
       event.preventDefault();
       this.#commitInput();

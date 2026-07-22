@@ -4,6 +4,7 @@ import { PasswordStrengthController } from "../src/controllers/password_strength
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -39,7 +40,7 @@ describe("PasswordStrengthController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     vi.useRealTimers();
     document.body.innerHTML = "";
   });

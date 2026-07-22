@@ -283,6 +283,9 @@ export class PointerDragController extends Controller<HTMLElement> {
 
     // Escape cancels whichever session is live (pointer drag or keyboard grab).
     if (event.key === "Escape") {
+      // Layered-Escape rule 1: leave a press an inner handler already owned;
+      // a press during IME composition steers the conversion, not the drag.
+      if (event.defaultPrevented || event.isComposing) return;
       if (this.#pointer?.started) {
         const { pointerType } = this.#pointer;
         this.#teardownSessions();
@@ -417,9 +420,8 @@ export class PointerDragController extends Controller<HTMLElement> {
 
   /**
    * Silently tears down whatever session is live (disconnect / disabled /
-   * Escape). Composed from the two single-session teardowns so a cleanup step
-   * added to one path can never be missed on the other (the bug-shape behind
-   * the capture-release fix).
+   * Escape). Composed from the two single-session teardowns so pointer and
+   * keyboard cleanup cannot diverge as either path evolves.
    */
   #teardownSessions(): void {
     this.#endPointerSession();

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PointerDragController } from "../src/controllers/pointer_drag_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay, flushMicrotasks, tick } from "./helpers/timing";
 
 /**
@@ -49,8 +50,7 @@ describe("PointerDragController", () => {
     </ul>`;
 
   afterEach(async () => {
-    controller()?.disconnect();
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     await delay(20);
   });
@@ -164,6 +164,22 @@ describe("PointerDragController", () => {
 
       pointerMove(150, 100); // listeners are gone; no further move
       expect(events.move).toHaveLength(1);
+    });
+
+    it("keeps the drag alive on an Escape that cancels an IME composition", async () => {
+      const events = await mount(defaultFixture);
+      pointerDown(100, 100);
+      pointerMove(110, 100);
+      // Widget-local half of the shared layered-Escape contract: a composing
+      // press steers the IME conversion and never cancels the session.
+      handle().dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, isComposing: true }),
+      );
+      expect(events.cancel).toEqual([]);
+      expect(root().hasAttribute("data-dragging")).toBe(true);
+
+      key("Escape"); // a real press still cancels
+      expect(events.cancel).toEqual([{ pointerType: "mouse" }]);
     });
 
     it("ignores non-primary buttons and events outside the handle", async () => {

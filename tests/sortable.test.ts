@@ -5,6 +5,7 @@ import { RovingController } from "../src/controllers/roving_controller";
 import { SortableController } from "../src/controllers/sortable_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay, flushMicrotasks } from "./helpers/timing";
 
 /**
@@ -67,7 +68,7 @@ describe("SortableController", () => {
   };
 
   afterEach(async () => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     await delay(20);
   });

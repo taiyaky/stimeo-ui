@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EditableController } from "../src/controllers/editable_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -35,7 +36,7 @@ describe("EditableController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -113,6 +114,42 @@ describe("EditableController", () => {
     expect(display().textContent).toBe("Original");
     expect(cancelled).toBe(true);
     expect(document.activeElement).toBe(display());
+  });
+
+  it("keeps editing when Escape cancels an IME conversion", async () => {
+    await mount();
+    display().click();
+    input().value = "にほん";
+
+    // Cancelling a conversion (isComposing keydown) must not discard the edit.
+    key(input(), { key: "Escape", isComposing: true });
+    expect(root().dataset.mode).toBe("editing");
+    expect(input().value).toBe("にほん");
+
+    // A composition tracked via lifecycle events must also shield keys that
+    // omit the per-event signal (the Safari-shaped confirm quirk).
+    input().dispatchEvent(new CompositionEvent("compositionstart"));
+    key(input(), { key: "Escape" });
+    expect(root().dataset.mode).toBe("editing");
+    input().dispatchEvent(new CompositionEvent("compositionend"));
+
+    // With the composition over, Escape cancels the edit as usual.
+    key(input(), { key: "Escape" });
+    expect(root().dataset.mode).toBe("display");
+  });
+
+  it("does not save when Enter confirms an IME candidate", async () => {
+    await mount();
+    display().click();
+    input().value = "日本";
+
+    key(input(), { key: "Enter", isComposing: true });
+    expect(root().dataset.mode).toBe("editing");
+    expect(display().textContent).toBe("Original");
+
+    key(input(), { key: "Enter" });
+    expect(root().dataset.mode).toBe("display");
+    expect(display().textContent).toBe("日本");
   });
 
   it("saves on blur when submitOnBlur is true", async () => {

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SliderController } from "../src/controllers/slider_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -34,7 +35,7 @@ describe("SliderController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -161,8 +162,7 @@ describe("SliderController", () => {
     track.dispatchEvent(new PointerEvent("pointerdown", { clientX: 150, bubbles: true }));
     expect(thumb().getAttribute("aria-valuenow")).toBe("80");
 
-    // Tearing the controller down mid-drag (the path application.stop() also
-    // triggers) must abort the document drag listeners.
+    // Tearing the controller down mid-drag must abort the document drag listeners.
     controller.disconnect();
 
     document.dispatchEvent(new PointerEvent("pointermove", { clientX: 0, bubbles: true }));

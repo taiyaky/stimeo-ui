@@ -21,9 +21,9 @@ const manifest = buildManifest("0.0.0");
 /** Known-clean markup (mirrors the engine test fixture in `check.test.ts`). */
 const validMenu = `
   <div data-controller="stimeo--menu">
-    <button aria-haspopup="menu" data-stimeo--menu-target="trigger"
+    <button id="menu-trigger" aria-haspopup="menu" data-stimeo--menu-target="trigger"
             data-action="click->stimeo--menu#toggle">Actions</button>
-    <ul role="menu" data-stimeo--menu-target="menu" hidden>
+    <ul role="menu" aria-labelledby="menu-trigger" data-stimeo--menu-target="menu" hidden>
       <li role="none"><button role="menuitem" data-stimeo--menu-target="item"
                   data-action="click->stimeo--menu#activate">Edit</button></li>
     </ul>

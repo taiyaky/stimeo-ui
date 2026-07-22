@@ -4,6 +4,7 @@ import { OverflowMenuController } from "../src/controllers/overflow_menu_control
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -22,8 +23,8 @@ const MARKUP = (trigger = "More") => `
       <a id="c" href="#">C</a>
     </div>
     <div data-stimeo--overflow-menu-target="more" hidden>
-      <button data-stimeo--menu-target="trigger">${trigger}</button>
-      <ul role="menu" data-stimeo--menu-target="menu"></ul>
+      <button id="more-trigger" data-stimeo--menu-target="trigger">${trigger}</button>
+      <ul role="menu" aria-labelledby="more-trigger" data-stimeo--menu-target="menu"></ul>
     </div>
   </div>`;
 
@@ -45,7 +46,7 @@ describe("OverflowMenuController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     vi.useRealTimers();
     document.body.innerHTML = "";
   });
@@ -119,8 +120,8 @@ describe("OverflowMenuController", () => {
           <a id="z" href="#" data-priority="2">Z</a>
         </div>
         <div data-stimeo--overflow-menu-target="more" hidden>
-          <button data-stimeo--menu-target="trigger">More</button>
-          <ul role="menu" data-stimeo--menu-target="menu"></ul>
+          <button id="more-trigger" data-stimeo--menu-target="trigger">More</button>
+          <ul role="menu" aria-labelledby="more-trigger" data-stimeo--menu-target="menu"></ul>
         </div>
       </div>`);
     setGeom(250, { x: 100, y: 100, z: 100 }); // banks only y (the middle, lowest priority)
@@ -304,7 +305,7 @@ describe("OverflowMenuController", () => {
     vi.useRealTimers();
     const speech = await captureSpeech({ container: menu(), steps: 2 });
     expect(speech).toEqual([
-      "menu, orientated vertically",
+      "menu, More, orientated vertically",
       "menuitem, B, position 1, set size 2",
       "menuitem, C, position 2, set size 2",
     ]);

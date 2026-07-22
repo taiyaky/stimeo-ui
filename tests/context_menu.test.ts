@@ -4,6 +4,7 @@ import { ContextMenuController } from "../src/controllers/context_menu_controlle
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -47,7 +48,7 @@ describe("ContextMenuController", () => {
   beforeEach(() => start());
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -91,21 +92,24 @@ describe("ContextMenuController", () => {
     expect(menu().hidden).toBe(false);
   });
 
-  const press = (el: Element, key: string) =>
-    el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  const press = (el: Element, key: string): KeyboardEvent => {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    el.dispatchEvent(event);
+    return event;
+  };
 
   it("moves focus with ArrowDown/ArrowUp, wrapping", () => {
     contextmenu(0, 0);
     const copy = query("#copy");
     const paste = query("#paste");
     const del = query("#del");
-    press(copy, "ArrowDown");
+    expect(press(copy, "ArrowDown").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(paste);
-    press(paste, "ArrowDown");
+    expect(press(paste, "ArrowDown").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(del);
-    press(del, "ArrowDown");
+    expect(press(del, "ArrowDown").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(copy);
-    press(copy, "ArrowUp");
+    expect(press(copy, "ArrowUp").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(del);
   });
 
@@ -114,9 +118,9 @@ describe("ContextMenuController", () => {
     const copy = query("#copy");
     const del = query("#del");
     del.focus();
-    press(del, "Home");
+    expect(press(del, "Home").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(copy);
-    press(copy, "End");
+    expect(press(copy, "End").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(del);
   });
 
@@ -135,28 +139,55 @@ describe("ContextMenuController", () => {
     expect(document.activeElement).toBe(region());
   });
 
-  it("closes on Tab without restoring focus to the region", () => {
+  it("defers Tab closing so the browser can move focus first", async () => {
     contextmenu(0, 0);
     query("#copy").dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    expect(menu().hidden).toBe(false);
+    await tick();
     expect(menu().hidden).toBe(true);
     expect(document.activeElement).not.toBe(region());
   });
 
-  it("closes on an outside click", () => {
+  it("closes on an outside click without stealing focus from its destination", () => {
     contextmenu(0, 0);
-    query("#outside").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const outside = query("#outside");
+    outside.focus();
+    outside.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(menu().hidden).toBe(true);
+    expect(document.activeElement).toBe(outside);
+  });
+
+  it("closes when a contextmenu event occurs outside the controller", () => {
+    contextmenu(0, 0);
+    query("#outside").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
     expect(menu().hidden).toBe(true);
   });
 
-  it("removes the document listener on disconnect", () => {
+  it("removes the document pointer listeners on disconnect", () => {
     const instance = application.getControllerForElementAndIdentifier(
       query("[data-controller='stimeo--context-menu']"),
       "stimeo--context-menu",
     ) as ContextMenuController;
     instance.disconnect();
-    // Opening still works through the data-action, but the outside-click guard is gone.
+    // Opening still works through data-action, but both outside guards are gone.
     contextmenu(0, 0);
     query("#outside").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(menu().hidden).toBe(false);
+    query("#outside").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    expect(menu().hidden).toBe(false);
+  });
+
+  it("cancels a pending Tab close on disconnect", async () => {
+    const instance = application.getControllerForElementAndIdentifier(
+      query("[data-controller='stimeo--context-menu']"),
+      "stimeo--context-menu",
+    ) as ContextMenuController;
+    contextmenu(0, 0);
+    press(query("#copy"), "Tab");
+
+    instance.disconnect();
+    await tick();
+
     expect(menu().hidden).toBe(false);
   });
 });
@@ -165,7 +196,7 @@ describe("ContextMenuController disabled items", () => {
   let application: Application;
 
   beforeEach(async () => {
-    // "Paste" is aria-disabled, "Cut" is natively disabled — roving must skip both.
+    // The first item is aria-disabled and the second is hidden; roving must skip both.
     document.body.innerHTML = `
       <main>
         <div data-controller="stimeo--context-menu">
@@ -175,9 +206,14 @@ describe("ContextMenuController disabled items", () => {
                             keydown->stimeo--context-menu#onRegionKeydown">Area</div>
           <ul id="ctx" role="menu" data-stimeo--context-menu-target="menu" hidden>
             <li role="none"><button id="copy" role="menuitem" tabindex="-1"
+                  aria-disabled="true"
                   data-stimeo--context-menu-target="item"
-                  data-action="keydown->stimeo--context-menu#onItemKeydown">Copy</button></li>
-            <li role="none"><button id="paste" role="menuitem" tabindex="-1" aria-disabled="true"
+                  data-action="click->stimeo--context-menu#activate
+                               keydown->stimeo--context-menu#onItemKeydown">Copy</button></li>
+            <li role="none"><button id="hidden" role="menuitem" tabindex="-1" hidden
+                  data-stimeo--context-menu-target="item"
+                  data-action="keydown->stimeo--context-menu#onItemKeydown">Hidden</button></li>
+            <li role="none"><button id="paste" role="menuitem" tabindex="-1"
                   data-stimeo--context-menu-target="item"
                   data-action="keydown->stimeo--context-menu#onItemKeydown">Paste</button></li>
             <li role="none"><button id="cut" role="menuitem" tabindex="-1" disabled
@@ -195,14 +231,17 @@ describe("ContextMenuController disabled items", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
   const region = () => query("#region");
   const menu = () => query("#ctx");
-  const press = (el: Element, key: string) =>
-    el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  const press = (el: Element, key: string): KeyboardEvent => {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    el.dispatchEvent(event);
+    return event;
+  };
   const contextmenu = () =>
     region().dispatchEvent(
       new MouseEvent("contextmenu", { bubbles: true, clientX: 0, clientY: 0 }),
@@ -211,27 +250,133 @@ describe("ContextMenuController disabled items", () => {
   it("focuses the first navigable item on open", () => {
     contextmenu();
     expect(menu().hidden).toBe(false);
-    expect(document.activeElement).toBe(query("#copy"));
+    expect(document.activeElement).toBe(query("#paste"));
   });
 
   it("skips disabled items moving down with ArrowDown", () => {
-    contextmenu(); // focus Copy
-    press(query("#copy"), "ArrowDown"); // skip Paste + Cut → Delete
+    contextmenu(); // focus Paste
+    press(query("#paste"), "ArrowDown"); // skip Cut → Delete
     expect(document.activeElement).toBe(query("#del"));
   });
 
   it("skips disabled items wrapping with ArrowUp", () => {
-    contextmenu(); // focus Copy
-    press(query("#copy"), "ArrowUp"); // wrap past disabled to last navigable → Delete
+    contextmenu(); // focus Paste
+    press(query("#paste"), "ArrowUp"); // wrap past disabled/hidden to Delete
     expect(document.activeElement).toBe(query("#del"));
   });
 
   it("End jumps to the last navigable item, Home to the first", () => {
     contextmenu();
-    press(query("#copy"), "End");
+    press(query("#paste"), "End");
     expect(document.activeElement).toBe(query("#del"));
     press(query("#del"), "Home");
-    expect(document.activeElement).toBe(query("#copy"));
+    expect(document.activeElement).toBe(query("#paste"));
+  });
+
+  it("recovers roving focus when the current target is disabled", () => {
+    contextmenu();
+    const disabled = query<HTMLButtonElement>("#copy");
+
+    disabled.focus();
+    expect(press(disabled, "ArrowDown").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(query("#paste"));
+
+    disabled.focus();
+    expect(press(disabled, "ArrowUp").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(query("#del"));
+  });
+
+  it("keeps the menu open when every item is disabled or hidden", () => {
+    query<HTMLButtonElement>("#paste").disabled = true;
+    query<HTMLButtonElement>("#del").disabled = true;
+    region().focus();
+
+    contextmenu();
+
+    expect(menu().hidden).toBe(false);
+    expect(document.activeElement).toBe(region());
+  });
+
+  it("blocks aria-disabled activation before consumer handlers", () => {
+    const disabled = query<HTMLButtonElement>("#copy");
+    let consumerActivations = 0;
+    disabled.addEventListener("click", () => consumerActivations++);
+    contextmenu();
+
+    disabled.click();
+
+    expect(consumerActivations).toBe(0);
+    expect(menu().hidden).toBe(false);
+    expect(region().getAttribute("data-state")).toBe("open");
+  });
+
+  it("removes the disabled activation blocker on disconnect", () => {
+    const disabled = query<HTMLButtonElement>("#copy");
+    let consumerActivations = 0;
+    disabled.addEventListener("click", () => consumerActivations++);
+    const instance = application.getControllerForElementAndIdentifier(
+      query("[data-controller='stimeo--context-menu']"),
+      "stimeo--context-menu",
+    ) as ContextMenuController;
+
+    instance.disconnect();
+    disabled.click();
+
+    expect(consumerActivations).toBe(1);
+  });
+
+  it("includes a dynamically added target in roving focus", async () => {
+    contextmenu();
+    const item = document.createElement("button");
+    item.id = "share";
+    item.setAttribute("role", "menuitem");
+    item.tabIndex = -1;
+    item.setAttribute("data-stimeo--context-menu-target", "item");
+    item.textContent = "Share";
+    menu().append(item);
+    await tick();
+
+    press(query("#del"), "ArrowDown");
+
+    expect(document.activeElement).toBe(item);
+  });
+});
+
+describe("ContextMenuController multiple instances", () => {
+  let application: Application;
+
+  beforeEach(async () => {
+    document.body.innerHTML = ["first", "second"]
+      .map(
+        (id) => `
+          <div data-controller="stimeo--context-menu" id="${id}">
+            <div id="${id}-region" data-stimeo--context-menu-target="region" tabindex="0"
+                 data-action="contextmenu->stimeo--context-menu#open">${id}</div>
+            <div id="${id}-menu" role="menu" data-stimeo--context-menu-target="menu" hidden>
+              <button role="menuitem" tabindex="-1"
+                      data-stimeo--context-menu-target="item">Action</button>
+            </div>
+          </div>`,
+      )
+      .join("");
+    application = Application.start();
+    application.register("stimeo--context-menu", ContextMenuController);
+    await tick();
+  });
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it("closes the first menu when another instance opens", () => {
+    query("#first-region").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    expect(query<HTMLElement>("#first-menu").hidden).toBe(false);
+
+    query("#second-region").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+
+    expect(query<HTMLElement>("#first-menu").hidden).toBe(true);
+    expect(query<HTMLElement>("#second-menu").hidden).toBe(false);
   });
 });
 
@@ -260,7 +405,7 @@ describe("ContextMenuController accessibility", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

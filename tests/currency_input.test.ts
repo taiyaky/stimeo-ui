@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CurrencyInputController } from "../src/controllers/currency_input_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -37,7 +38,7 @@ describe("CurrencyInputController", () => {
   };
 
   afterEach(() => {
-    application?.stop();
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

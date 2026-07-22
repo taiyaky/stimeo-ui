@@ -2,14 +2,12 @@
  * Shared `IntersectionObserver` plumbing for Stimeo's scroll-triggered
  * controllers (`intersection`, `scrollspy`, `sticky-observer`, `lazy-frame`).
  *
- * These controllers each grew a separate implementation of the same idea;
- * this util is that idea written once — the boilerplate every consumer
- * repeated: the `IntersectionObserver` support guard, root resolution from a
- * selector, observer creation/teardown, the **active guard** (the browser may
+ * It centralizes the `IntersectionObserver` support guard, root resolution from
+ * a selector, observer creation/teardown, the **active guard** (the browser may
  * flush a final queued callback batch right after `disconnect()`, and a
  * detached controller must not mutate possibly-cached DOM), and the
- * unobserve→observe **re-arm** that re-delivers the current state (the
- * infinite-scroll "sentinel never left the viewport" fix).
+ * unobserve→observe **re-arm** that re-delivers the current state even when the
+ * target never leaves the viewport.
  *
  * Like {@link RovingTabindex} and `FocusTrap`, this is a policy-free internal
  * util: what an intersection *means* (a spied link, a stuck header, a lazy

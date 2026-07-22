@@ -77,7 +77,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
       this.viewportTarget.removeEventListener("scroll", this.#onScroll);
       // Remove only the keyboard-reach attributes this controller added, so a
       // Turbo cache snapshot never preserves a controller-owned tab stop /
-      // landmark (matches the spec's Turbo-compatibility requirement).
+      // landmark (controller-added state must not outlive the controller).
       this.#clearAddedAttributes(this.viewportTarget);
     }
     this.#layout.disconnect();

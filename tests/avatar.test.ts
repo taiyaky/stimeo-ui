@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AvatarController } from "../src/controllers/avatar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -34,7 +35,7 @@ describe("AvatarController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

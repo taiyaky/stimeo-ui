@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -25,10 +26,14 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * button toggles its sub-panel (`aria-expanded` + `hidden` synced), only one panel
  * is open at a time, and the panel content is a plain set of links (not a
  * `role="menu"`). Focus is **not** trapped — `Tab` moves through the links
- * naturally. `Escape` closes the open panel and returns focus to its trigger; an
- * outside click or focus leaving the nav closes it. `ArrowLeft`/`ArrowRight` move
- * focus between triggers without rewriting `tabindex` (they keep their natural Tab
- * order). Hover open/close is opt-in via `openOnHover`.
+ * naturally. `Escape` closes the open panel and returns focus to its trigger.
+ * While a panel is open the nav is a layer on the shared {@link EscapeLayer}
+ * stack; it claims a press only while focus is inside the nav or fell to the
+ * body (a click on non-focusable panel content), so one keypress closes exactly
+ * one layer (the shared layered-Escape contract). An outside click, or focus
+ * leaving the nav for a known external destination, closes it. `ArrowLeft`/
+ * `ArrowRight` move focus between triggers without rewriting `tabindex` (they
+ * keep their natural Tab order). Hover open/close is opt-in via `openOnHover`.
  *
  * By default the hover region is each trigger and its panel. An optional
  * `hoverArea` target widens it: mark a wrapper that contains a trigger (e.g. the
@@ -77,19 +82,21 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    */
   readonly #hoverWired = new Set<HTMLElement>();
 
+  /** Escape-stack membership while any panel is open; the shared resolver dismisses via it. */
+  readonly #escapeLayer = new EscapeLayer();
+
   /** Establishes the closed baseline and the dismissal listeners. */
   override connect(): void {
     this.#closeAll();
     document.addEventListener("click", this.#onOutsideClick);
-    document.addEventListener("keydown", this.#onKeydown);
     this.element.addEventListener("focusout", this.#onFocusOut);
     if (this.openOnHoverValue) this.#addHoverListeners();
   }
 
-  /** Removes every listener and pending hover timer registered in {@link connect}. */
+  /** Removes every listener, pending hover timer, and stack membership registered while connected. */
   override disconnect(): void {
+    this.#escapeLayer.deactivate();
     document.removeEventListener("click", this.#onOutsideClick);
-    document.removeEventListener("keydown", this.#onKeydown);
     this.element.removeEventListener("focusout", this.#onFocusOut);
     this.#removeHoverListeners();
     this.#hoverTimers.clearAll();
@@ -158,6 +165,7 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     if (!panel) return;
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
+    this.#syncEscapeLayer();
   }
 
   /** Closes `trigger`'s panel and reflects the collapsed state. */
@@ -165,11 +173,28 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     const panel = this.#panelFor(trigger);
     if (panel) panel.hidden = true;
     trigger.setAttribute("aria-expanded", "false");
+    this.#syncEscapeLayer();
   }
 
   /** Closes every open panel. */
   #closeAll(): void {
     for (const trigger of this.triggerTargets) this.#closePanel(trigger);
+  }
+
+  /**
+   * Aligns Escape-stack membership with the open state: joins (or re-asserts to
+   * the top) while a panel is open, leaves once none is. Re-asserting when the
+   * user switches panels is deliberate — the nav is again the newest layer.
+   */
+  #syncEscapeLayer(): void {
+    if (this.#isAnyOpen) {
+      this.#escapeLayer.activate(document, {
+        onDismiss: () => this.#closeAndRestore(),
+        claims: claimsWhileFocusWithin(this.element),
+      });
+    } else {
+      this.#escapeLayer.deactivate();
+    }
   }
 
   /** Closes any open panel and returns focus to its trigger (Escape path). */
@@ -185,19 +210,17 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     if (this.#isAnyOpen && !this.element.contains(event.target as Node)) this.#closeAll();
   };
 
-  /** Closes (restoring focus) on `Escape` while a panel is open. */
-  readonly #onKeydown = (event: KeyboardEvent): void => {
-    if (event.key !== "Escape" || !this.#isAnyOpen) return;
-    // Only act when focus is within this nav so unrelated Escapes are ignored.
-    if (!this.element.contains(document.activeElement)) return;
-    event.preventDefault();
-    this.#closeAndRestore();
-  };
-
-  /** Closes (without restoring focus) when focus leaves the nav entirely. */
+  /**
+   * Closes (without restoring focus) when focus leaves the nav for a known
+   * external destination. A null/non-Node destination is indeterminate:
+   * browsers use it for clicks on non-focusable content and for window
+   * deactivation, so those never close the nav here (matching the popover
+   * convention) — the outside-click handler decides pointer dismissal, and the
+   * Escape stack's body-focus claim keeps keyboard dismissal working.
+   */
   readonly #onFocusOut = (event: FocusEvent): void => {
-    const next = event.relatedTarget as Node | null;
-    if (next && this.element.contains(next)) return;
+    const next = event.relatedTarget;
+    if (!(next instanceof Node) || this.element.contains(next)) return;
     this.#closeAll();
   };
 

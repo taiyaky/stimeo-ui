@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { CompositionTracker } from "../utils/composition_tracker";
 import { FocusTrap } from "../utils/focus_trap";
 
 /**
@@ -16,11 +17,10 @@ import { FocusTrap } from "../utils/focus_trap";
  *              data-action="input->stimeo--command-palette#filter
  *                           keydown->stimeo--command-palette#onKeydown" />
  *       <ul id="cmdk-list" data-stimeo--command-palette-target="list" role="listbox">
- *         <li id="cmd-new" role="option"
- *             data-stimeo--command-palette-target="option"
+ *         <li id="cmd-new" role="option" data-stimeo--command-palette-target="option"
  *             data-action="click->stimeo--command-palette#selectByClick">New…</li>
- *         <li role="option" data-stimeo--command-palette-target="option"
- *             data-disabled="true">Section heading (shown but not selectable)</li>
+ *         <li id="cmd-heading" role="option" data-stimeo--command-palette-target="option"
+ *             data-disabled="true">Disabled command (shown but not selectable)</li>
  *       </ul>
  *       <p data-stimeo--command-palette-target="empty" hidden>No commands</p>
  *     </div>
@@ -38,9 +38,14 @@ import { FocusTrap } from "../utils/focus_trap";
  * primitive (also used by dialog / alert-dialog / drawer). `Escape` closes and
  * `Tab`/`Shift+Tab` cycle focus regardless of which element inside the dialog holds
  * focus (input, close button, …), because the trap listens at the document level.
- * Styling, transitions, and the actual command handlers remain the consumer's.
+ * IME composition is tracked from start to end: intermediate input does not filter,
+ * and conversion-confirming keys never select a command. Styling, transitions, and
+ * the actual command handlers remain the consumer's.
  */
 export class CommandPaletteController extends Controller<HTMLElement> {
+  static readonly #ORIGINAL_ARIA_DISABLED = "data-command-palette-original-aria-disabled";
+  static readonly #ABSENT_ARIA_DISABLED = "absent";
+
   static override targets = ["dialog", "input", "list", "option", "empty"];
   static override values = {
     hotkey: { type: String, default: "mod+k" },
@@ -74,6 +79,13 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   /** The index of the currently active option within the visible subset. */
   #activeIndex = -1;
 
+  /** Owns IME lifecycle state; confirmed text re-filters an open palette once. */
+  readonly #composition = new CompositionTracker({
+    onEnd: () => {
+      if (this.#isOpen) this.filter();
+    },
+  });
+
   /**
    * Owns the modal side effects (focus trap, scroll lock, background `inert`, focus
    * restore). Escape closes; focus on open goes to the input, and is restored to
@@ -97,6 +109,8 @@ export class CommandPaletteController extends Controller<HTMLElement> {
    */
   override connect(): void {
     document.addEventListener("keydown", this.#onGlobalKeydown);
+    if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
+    this.#syncOptionSemantics();
     const shouldOpen = this.#isOpen || this.openValue;
     this.#resetToClosedState();
     if (shouldOpen) this.open();
@@ -105,8 +119,24 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   /** Tears down the global hotkey listener and reverts the modal side effects. */
   override disconnect(): void {
     document.removeEventListener("keydown", this.#onGlobalKeydown);
+    this.#composition.disconnect();
     this.#trap.deactivate({ restoreFocus: false });
     this.#resetToClosedState();
+  }
+
+  /** Initializes semantics for an option added before or after the controller connects. */
+  optionTargetConnected(option: HTMLElement): void {
+    this.#syncOptionSemanticsFor(option);
+  }
+
+  /** Tracks an input added initially or after connect without extra consumer actions. */
+  inputTargetConnected(input: HTMLInputElement): void {
+    this.#composition.observe(input);
+  }
+
+  /** Removes controller-owned listeners when the input target is replaced or removed. */
+  inputTargetDisconnected(input: HTMLInputElement): void {
+    this.#composition.unobserve(input);
   }
 
   /** Toggles the open state of the command palette. */
@@ -136,8 +166,11 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   }
 
   /** Filters option elements in-memory matching the input value. Bound to input target. */
-  filter(): void {
-    if (!this.hasInputTarget) return;
+  filter(event?: InputEvent): void {
+    // Match the library's Character Counter policy: do not react to intermediate
+    // pre-conversion text. `compositionend` applies the confirmed query once.
+    if (!this.hasInputTarget || this.#composition.isComposing(event)) return;
+    this.#syncOptionSemantics();
     const query = this.inputTarget.value.trim().toLowerCase();
     // Disabled options (e.g. group headings) may still be shown, but they do not
     // count toward the empty state and are never navigable/selectable.
@@ -169,6 +202,7 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     const target = event.currentTarget as HTMLElement | null;
     if (!target) return;
     const option = target.closest("[role='option']") as HTMLElement | null;
+    if (option) this.#syncOptionSemanticsFor(option);
     // Ignore clicks on disabled options (e.g. group headings) so they never fire select.
     if (option && !this.#isDisabled(option)) {
       this.#confirmSelection(option);
@@ -187,7 +221,9 @@ export class CommandPaletteController extends Controller<HTMLElement> {
    * focus — not only the input.
    */
   onKeydown(event: KeyboardEvent): void {
-    if (!this.#isOpen) return;
+    // Composition-confirming Enter must stay with the IME instead of selecting a
+    // command. Controller-owned lifecycle state covers events that omit isComposing.
+    if (this.#composition.isComposing(event) || !this.#isOpen) return;
 
     switch (event.key) {
       case "ArrowDown":
@@ -227,25 +263,28 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   }
 
   #setActiveIndex(index: number): void {
+    this.#syncOptionSemantics();
     const visible = this.#visibleOptions;
-    this.#activeIndex = index;
+    const activeOption = visible[index] ?? null;
+    this.#activeIndex = activeOption ? index : -1;
 
-    visible.forEach((option, i) => {
-      if (i === index) {
-        option.setAttribute("aria-selected", "true");
-        option.setAttribute("data-active", "true");
-        if (this.hasInputTarget) {
-          this.inputTarget.setAttribute("aria-activedescendant", option.id || "");
-        }
-        option.scrollIntoView({ block: "nearest" });
+    for (const option of this.optionTargets) {
+      option.setAttribute("aria-selected", "false");
+      option.removeAttribute("data-active");
+    }
+
+    if (activeOption) {
+      activeOption.setAttribute("aria-selected", "true");
+      activeOption.setAttribute("data-active", "true");
+      activeOption.scrollIntoView({ block: "nearest" });
+    }
+
+    if (this.hasInputTarget) {
+      if (activeOption?.id) {
+        this.inputTarget.setAttribute("aria-activedescendant", activeOption.id);
       } else {
-        option.setAttribute("aria-selected", "false");
-        option.removeAttribute("data-active");
+        this.inputTarget.removeAttribute("aria-activedescendant");
       }
-    });
-
-    if (index === -1 && this.hasInputTarget) {
-      this.inputTarget.removeAttribute("aria-activedescendant");
     }
   }
 
@@ -260,8 +299,9 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     for (const option of this.optionTargets) {
       option.removeAttribute("hidden");
     }
-    if (this.hasEmptyTarget) this.emptyTarget.hidden = true;
-    this.#setActiveIndex(0);
+    const hasSelectableOption = this.#visibleOptions.length > 0;
+    if (this.hasEmptyTarget) this.emptyTarget.hidden = hasSelectableOption;
+    this.#setActiveIndex(hasSelectableOption ? 0 : -1);
   }
 
   get #visibleOptions(): HTMLElement[] {
@@ -272,7 +312,38 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   }
 
   #isDisabled(option: HTMLElement): boolean {
-    return option.dataset.disabled === "true";
+    return option.dataset.disabled === "true" || option.getAttribute("aria-disabled") === "true";
+  }
+
+  /** Synchronizes every option's controller-owned selection and disabled semantics. */
+  #syncOptionSemantics(): void {
+    for (const option of this.optionTargets) this.#syncOptionSemanticsFor(option);
+  }
+
+  /** Reflects `data-disabled` to ARIA without losing a pre-existing authored value. */
+  #syncOptionSemanticsFor(option: HTMLElement): void {
+    if (!option.hasAttribute("aria-selected")) option.setAttribute("aria-selected", "false");
+
+    const originalAttribute = CommandPaletteController.#ORIGINAL_ARIA_DISABLED;
+    const originalValue = option.getAttribute(originalAttribute);
+    if (option.dataset.disabled === "true") {
+      if (originalValue === null) {
+        option.setAttribute(
+          originalAttribute,
+          option.getAttribute("aria-disabled") ?? CommandPaletteController.#ABSENT_ARIA_DISABLED,
+        );
+      }
+      option.setAttribute("aria-disabled", "true");
+      return;
+    }
+
+    if (originalValue === null) return;
+    if (originalValue === CommandPaletteController.#ABSENT_ARIA_DISABLED) {
+      option.removeAttribute("aria-disabled");
+    } else {
+      option.setAttribute("aria-disabled", originalValue);
+    }
+    option.removeAttribute(originalAttribute);
   }
 
   get #isOpen(): boolean {
@@ -280,23 +351,39 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   }
 
   readonly #onGlobalKeydown = (event: KeyboardEvent): void => {
-    const hotkey = this.hotkeyValue.toLowerCase();
-    const isMod = hotkey.includes("mod+");
-    const key = hotkey.split("+").pop();
+    if (this.#composition.isComposing(event) || !this.#matchesHotkey(event)) return;
 
-    if (!key) return;
-
-    // "mod" accepts *either* Cmd or Ctrl so the documented "Cmd+K / Ctrl+K" works
-    // on every platform — including Ctrl+K on macOS, not just Cmd+K. Without "mod",
-    // the hotkey is a bare key that must be pressed with no Cmd/Ctrl held.
-    const modPressed = isMod ? event.metaKey || event.ctrlKey : !event.metaKey && !event.ctrlKey;
-    const keyMatch = event.key.toLowerCase() === key;
-
-    if (modPressed && keyMatch) {
-      event.preventDefault();
-      this.toggle();
-    }
+    event.preventDefault();
+    this.toggle();
   };
+
+  /** Matches the configured `mod+key` or bare-key hotkey without extra modifiers. */
+  #matchesHotkey(event: KeyboardEvent): boolean {
+    const hotkey = this.#parseHotkey();
+    if (!hotkey || event.altKey || event.shiftKey) return false;
+
+    if (hotkey.requiresMod) {
+      // "mod" accepts exactly one of Cmd or Ctrl on every platform.
+      const hasExactlyOneModKey = event.metaKey !== event.ctrlKey;
+      if (!hasExactlyOneModKey) return false;
+    } else if (event.metaKey || event.ctrlKey) {
+      return false;
+    }
+
+    return event.key.toLowerCase() === hotkey.key;
+  }
+
+  /** Parses the intentionally small public hotkey grammar. */
+  #parseHotkey(): { key: string; requiresMod: boolean } | null {
+    const parts = this.hotkeyValue.toLowerCase().split("+");
+    if (parts.length === 1 && parts[0] && parts[0] !== "mod") {
+      return { key: parts[0], requiresMod: false };
+    }
+    if (parts.length === 2 && parts[0] === "mod" && parts[1]) {
+      return { key: parts[1], requiresMod: true };
+    }
+    return null;
+  }
 
   /** Resets transient open state so reconnect starts from a predictable closed snapshot. */
   #resetToClosedState(): void {

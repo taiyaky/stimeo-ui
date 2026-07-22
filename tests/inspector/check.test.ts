@@ -11,15 +11,15 @@ function codes(source: string): DiagnosticCode[] {
 }
 
 /**
- * End-to-end tests for the Inspector engine (stage 1 names + stage 2 structure),
- * exercising the full pipeline: ERB neutralization → parse → extract → check.
+ * End-to-end tests for the complete Inspector pipeline: ERB neutralization,
+ * parsing, extraction, stage 1–3 diagnostics, and stage 4 suggestions/fixes.
  */
 describe("checkSource", () => {
   const validMenu = `
     <div data-controller="stimeo--menu">
-      <button aria-haspopup="menu" data-stimeo--menu-target="trigger"
+      <button id="menu-trigger" aria-haspopup="menu" data-stimeo--menu-target="trigger"
               data-action="click->stimeo--menu#toggle">Actions</button>
-      <ul role="menu" data-stimeo--menu-target="menu" hidden>
+      <ul role="menu" aria-labelledby="menu-trigger" data-stimeo--menu-target="menu" hidden>
         <li role="none"><button role="menuitem" data-stimeo--menu-target="item"
                     data-action="click->stimeo--menu#activate">Edit</button></li>
       </ul>
@@ -180,6 +180,18 @@ describe("checkSource", () => {
       expect(codes(source)).not.toContain("missing-aria");
     });
 
+    it("requires a menu name and accepts aria-label as an alternative", () => {
+      const unnamed = validMenu.replace(' aria-labelledby="menu-trigger"', "");
+      const missing = checkSource(unnamed, manifest).filter((d) => d.code === "missing-aria");
+      expect(missing).toHaveLength(1);
+      expect(missing[0]?.suggestion).toBe(
+        "Name the menu via aria-labelledby (the trigger's id) or aria-label.",
+      );
+
+      const labelled = validMenu.replace('aria-labelledby="menu-trigger"', 'aria-label="Actions"');
+      expect(codes(labelled)).not.toContain("missing-aria");
+    });
+
     it("flags a dialog target missing role/aria-modal/name", () => {
       const codeList = codes(`
         <div data-controller="stimeo--dialog">
@@ -220,6 +232,31 @@ describe("checkSource", () => {
           <div data-stimeo--tabs-target="panel" role="tabpanel">A</div>
         </div>`;
       expect(codes(source)).toEqual([]);
+    });
+
+    it("requires an id on every command palette option target", () => {
+      const diagnostics = checkSource(
+        `
+          <div data-controller="stimeo--command-palette">
+            <div role="dialog" aria-modal="true" aria-label="Commands"
+                 data-stimeo--command-palette-target="dialog">
+              <input role="combobox" aria-autocomplete="list"
+                     data-stimeo--command-palette-target="input">
+              <ul role="listbox" data-stimeo--command-palette-target="list">
+                <li id="command-one" role="option"
+                    data-stimeo--command-palette-target="option">One</li>
+                <li role="option" data-stimeo--command-palette-target="option">Two</li>
+              </ul>
+            </div>
+          </div>`,
+        manifest,
+      );
+      const missingId = diagnostics.filter(
+        (diagnostic) =>
+          diagnostic.code === "missing-aria" && diagnostic.suggestion?.includes("unique id"),
+      );
+
+      expect(missingId).toHaveLength(1);
     });
 
     it('checks scope-element rules (target: "") on the data-controller element', () => {
@@ -434,8 +471,8 @@ describe("checkSource", () => {
         // tabindex while a native <button> passes as-is (cf. validMenu above).
         const menu = (item: string) => `
           <div data-controller="stimeo--menu">
-            <button aria-haspopup="menu" data-stimeo--menu-target="trigger">Actions</button>
-            <ul role="menu" data-stimeo--menu-target="menu" hidden>
+            <button id="menu-trigger" aria-haspopup="menu" data-stimeo--menu-target="trigger">Actions</button>
+            <ul role="menu" aria-labelledby="menu-trigger" data-stimeo--menu-target="menu" hidden>
               <li role="none">${item}</li>
             </ul>
           </div>`;
@@ -452,8 +489,8 @@ describe("checkSource", () => {
         // is correct for programmatic focus and must NOT be flagged.
         const source = `
           <div data-controller="stimeo--menu">
-            <button aria-haspopup="menu" data-stimeo--menu-target="trigger">Actions</button>
-            <ul role="menu" data-stimeo--menu-target="menu" hidden>
+            <button id="menu-trigger" aria-haspopup="menu" data-stimeo--menu-target="trigger">Actions</button>
+            <ul role="menu" aria-labelledby="menu-trigger" data-stimeo--menu-target="menu" hidden>
               <li role="none">
                 <div role="menuitem" tabindex="-1" data-stimeo--menu-target="item">Edit</div>
               </li>

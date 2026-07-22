@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { CompositionTracker } from "../utils/composition_tracker";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -68,40 +69,24 @@ export class AutoSubmitController extends Controller<HTMLElement> {
     }
   };
 
-  /** True while an IME composition is in progress on one of the form's fields. */
-  #composing = false;
-
-  /** Marks composition active so `input` events mid-conversion don't submit. */
-  readonly #onCompositionStart = (): void => {
-    this.#composing = true;
-  };
-
-  /**
-   * Composition finished (the IME conversion is confirmed): clear the flag and
-   * schedule a submit as if `input` fired, so the settled text triggers a submit
-   * even on browsers whose post-composition `input` still reads `isComposing`.
-   */
-  readonly #onCompositionEnd = (event: Event): void => {
-    this.#composing = false;
-    if (this.#triggers("input")) this.#schedule((event.target as HTMLElement | null) ?? null);
-  };
+  /** Owns delegated IME lifecycle state and submits confirmed input text. */
+  readonly #composition = new CompositionTracker({
+    onEnd: (event) => {
+      if (this.#triggers("input")) this.#schedule((event.target as HTMLElement | null) ?? null);
+    },
+  });
 
   override connect(): void {
     this.#form.addEventListener("turbo:submit-end", this.#onSubmitEnd);
-    this.#form.addEventListener("compositionstart", this.#onCompositionStart);
-    this.#form.addEventListener("compositionend", this.#onCompositionEnd);
+    this.#composition.observe(this.#form);
   }
 
   override disconnect(): void {
     this.#timers.clearAll();
     this.#pendingId = 0;
-    // Reset so a same-instance reconnect (e.g. Turbo cache restore mid-composition)
-    // never starts with submits suppressed.
-    this.#composing = false;
+    this.#composition.disconnect();
     this.#form.removeAttribute("data-auto-submit-pending");
     this.#form.removeEventListener("turbo:submit-end", this.#onSubmitEnd);
-    this.#form.removeEventListener("compositionstart", this.#onCompositionStart);
-    this.#form.removeEventListener("compositionend", this.#onCompositionEnd);
   }
 
   /**
@@ -114,7 +99,7 @@ export class AutoSubmitController extends Controller<HTMLElement> {
     // Ignore `input` events fired mid-IME-composition (e.g. typing kana before the
     // Japanese conversion is confirmed); the confirmed text submits on
     // `compositionend` and the browser's final post-composition `input`.
-    if (event.type === "input" && (this.#composing || (event as InputEvent).isComposing)) return;
+    if (event.type === "input" && this.#composition.isComposing(event as InputEvent)) return;
     this.#schedule((event.target as HTMLElement | null) ?? null);
   }
 

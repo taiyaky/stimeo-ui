@@ -4,6 +4,7 @@ import { ConfirmController } from "../src/controllers/confirm_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -52,7 +53,7 @@ describe("ConfirmController", () => {
   });
 
   afterEach(() => {
-    application?.stop();
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     (window as unknown as { Turbo?: TurboStub }).Turbo = undefined;
   });

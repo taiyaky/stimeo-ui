@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { NestedFormController } from "../src/controllers/nested_form_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -36,7 +37,7 @@ describe("NestedFormController", () => {
   };
 
   afterEach(() => {
-    application?.stop();
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

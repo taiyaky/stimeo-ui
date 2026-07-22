@@ -14,8 +14,7 @@
       mouseenter->stimeo--hover-card#open
       mouseleave->stimeo--hover-card#close
       focusin->stimeo--hover-card#open
-      focusout->stimeo--hover-card#close
-      keydown->stimeo--hover-card#onKeydown">
+      focusout->stimeo--hover-card#close">
     <%= t("components.hover_card.demo.trigger") %>
   </a>
 
@@ -26,7 +25,9 @@
     data-stimeo--hover-card-target="card"
     data-action="
       mouseenter->stimeo--hover-card#open
-      mouseleave->stimeo--hover-card#close"
+      mouseleave->stimeo--hover-card#close
+      focusin->stimeo--hover-card#open
+      focusout->stimeo--hover-card#close"
     hidden>
     <p class="hover-card__name"><%= t("components.hover_card.demo.name") %></p>
     <p class="hover-card__role"><%= t("components.hover_card.demo.role") %></p>

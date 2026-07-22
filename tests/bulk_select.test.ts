@@ -4,6 +4,7 @@ import { BulkSelectController } from "../src/controllers/bulk_select_controller"
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -40,7 +41,7 @@ describe("BulkSelectController", () => {
   };
 
   afterEach(() => {
-    application?.stop();
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

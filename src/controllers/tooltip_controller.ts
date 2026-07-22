@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { EscapeLayer } from "../utils/escape_layer";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { observeScrollDismiss } from "../utils/scroll_dismiss";
 
@@ -11,8 +12,7 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  *             data-action="mouseenter->stimeo--tooltip#show
  *                          mouseleave->stimeo--tooltip#hide
  *                          focusin->stimeo--tooltip#show
- *                          focusout->stimeo--tooltip#hide
- *                          keydown->stimeo--tooltip#onKeydown">Save</button>
+ *                          focusout->stimeo--tooltip#hide">Save</button>
  *     <span id="tip" role="tooltip" data-stimeo--tooltip-target="content"
  *           data-action="mouseenter->stimeo--tooltip#show
  *                        mouseleave->stimeo--tooltip#hide" hidden>…</span>
@@ -33,8 +33,13 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  *   `showDelay`/`hideDelay` to prevent flicker.
  * - **Hoverable bridge**: binding show/hide on the content too means moving the
  *   pointer from trigger into the tooltip cancels the pending hide, so it stays up.
- * - **Dismissible**: while shown, `Escape` is watched at the `document` level so it
- *   dismisses even when a hover (not focus) triggered it and focus is elsewhere.
+ * - **Persistent across input modalities**: focus and pointer presence are tracked
+ *   separately, so leaving one does not hide while the other still requires the hint.
+ * - **Dismissible**: while shown, the tooltip joins the shared {@link EscapeLayer}
+ *   stack, so `Escape` dismisses it even when a hover (not focus) triggered it and
+ *   focus is elsewhere. The resolver ignores an Escape already consumed by an
+ *   inner handler and lets the most recently shown layer own the press, so one
+ *   keypress closes exactly one layer (the shared layered-Escape contract).
  * - Visibility flips `hidden` and `data-state` (`open`/`closed`); the
  *   `aria-describedby` reference is always preserved.
  * - Opt-in **dismiss on scroll** (`closeOnScroll`): while shown, scrolling a tracked
@@ -49,7 +54,7 @@ export class TooltipController extends Controller<HTMLElement> {
     hideDelay: { type: Number, default: 0 },
     closeOnScroll: { type: Boolean, default: false },
   };
-  static actions = ["hide", "onKeydown", "show"] as const;
+  static actions = ["hide", "show"] as const;
 
   declare readonly contentTarget: HTMLElement;
   declare readonly hasContentTarget: boolean;
@@ -57,29 +62,41 @@ export class TooltipController extends Controller<HTMLElement> {
   declare readonly hideDelayValue: number;
   declare readonly closeOnScrollValue: boolean;
 
-  /** Pending show/hide timers, torn down together on disconnect. */
+  /** Registry whose pending timers are cancelled individually with their guard ids. */
   readonly #timers = new SafeTimeout();
-  /** The id of the currently pending show or hide timer, if any. */
+  /** Escape-stack membership while shown; the shared resolver dismisses via it. */
+  readonly #escapeLayer = new EscapeLayer();
+  /** The id of the currently pending show timer, if any. */
   #pendingShow: number | null = null;
+  /** The id of the currently pending hide timer, if any. */
   #pendingHide: number | null = null;
+  /** Whether focus or the pointer currently requires the tooltip to persist. */
+  #focusActive = false;
+  #pointerActive = false;
   /** Cleanup for the dismiss-on-scroll listeners while shown, or `null`. */
   #stopScrollDismiss: (() => void) | null = null;
 
-  /** Starts hidden. */
+  /** Starts hidden with no stale timer or interaction state from a prior connection. */
   override connect(): void {
+    this.#cancelShow();
+    this.#cancelHide();
+    this.#resetInteractionState();
     this.#conceal();
   }
 
-  /** Clears timers and the document `Escape` / scroll listeners so nothing outlives the element. */
+  /** Clears timers, the Escape-stack membership, and scroll listeners so nothing outlives the element. */
   override disconnect(): void {
-    this.#timers.clearAll();
-    document.removeEventListener("keydown", this.#onDocumentKeydown);
+    this.#cancelShow();
+    this.#cancelHide();
+    this.#resetInteractionState();
+    this.#escapeLayer.deactivate();
     this.#stopScrollDismiss?.();
     this.#stopScrollDismiss = null;
   }
 
-  /** Shows the tooltip, after `showDelay` ms (or immediately at 0). Cancels a pending hide. */
-  show(): void {
+  /** Shows after `showDelay`, recording the focus/pointer reason supplied by an action event. */
+  show(event?: Event): void {
+    this.#activateInteraction(event);
     this.#cancelHide();
     if (this.#isVisible || this.#pendingShow !== null) return;
     if (this.showDelayValue <= 0) {
@@ -92,8 +109,13 @@ export class TooltipController extends Controller<HTMLElement> {
     }, this.showDelayValue);
   }
 
-  /** Hides the tooltip, after `hideDelay` ms (or immediately at 0). Cancels a pending show. */
-  hide(): void {
+  /** Hides after `hideDelay` once no focus/pointer reason remains; eventless calls are explicit. */
+  hide(event?: Event): void {
+    const interactionEnded = this.#deactivateInteraction(event);
+    if (interactionEnded && this.#hasActiveInteraction) {
+      this.#cancelHide();
+      return;
+    }
     this.#cancelShow();
     if (!this.#isVisible || this.#pendingHide !== null) return;
     if (this.hideDelayValue <= 0) {
@@ -106,42 +128,25 @@ export class TooltipController extends Controller<HTMLElement> {
     }, this.hideDelayValue);
   }
 
-  /**
-   * Dismisses the tooltip on `Escape` from the trigger. The authoritative
-   * dismissal path is the document-level listener (added while shown) so a
-   * hover-triggered tooltip is dismissible regardless of focus; this handler
-   * keeps the documented `keydown->#onKeydown` binding meaningful too.
-   */
-  onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape" && this.#isVisible) {
-      event.preventDefault();
-      this.#cancelShow();
-      this.#cancelHide();
-      this.#conceal();
-    }
-  }
-
-  /** Reveals the content and starts watching for a dismissing `Escape`/scroll. */
+  /** Reveals the content and joins the Escape stack / starts the scroll watcher. */
   #reveal(): void {
     if (!this.hasContentTarget) return;
     this.contentTarget.hidden = false;
     this.contentTarget.setAttribute("data-state", "open");
-    document.addEventListener("keydown", this.#onDocumentKeydown);
+    // No claims predicate: a shown hover hint is dismissible regardless of
+    // where focus sits (WCAG 2.2 SC 1.4.13), so it always claims while shown.
+    this.#escapeLayer.activate(document, { onDismiss: () => this.#dismiss() });
     if (this.closeOnScrollValue && !this.#stopScrollDismiss) {
-      this.#stopScrollDismiss = observeScrollDismiss(this.element, () => {
-        this.#cancelShow();
-        this.#cancelHide();
-        this.#conceal();
-      });
+      this.#stopScrollDismiss = observeScrollDismiss(this.element, () => this.#dismiss());
     }
   }
 
-  /** Hides the content and stops watching for `Escape`/scroll. */
+  /** Hides the content and leaves the Escape stack / stops the scroll watcher. */
   #conceal(): void {
-    // Release listeners first, unconditionally: if the content target was removed
-    // from the DOM while shown, an early return would leak the document keydown
-    // and scroll-dismiss listeners.
-    document.removeEventListener("keydown", this.#onDocumentKeydown);
+    // Release the layer and observers first, unconditionally: if the content
+    // target was removed from the DOM while shown, an early return would leak
+    // the stack entry and the scroll-dismiss listeners.
+    this.#escapeLayer.deactivate();
     this.#stopScrollDismiss?.();
     this.#stopScrollDismiss = null;
     if (!this.hasContentTarget) return;
@@ -149,15 +154,42 @@ export class TooltipController extends Controller<HTMLElement> {
     this.contentTarget.setAttribute("data-state", "closed");
   }
 
-  /** Document-level `Escape` watcher (active only while shown). */
-  readonly #onDocumentKeydown = (event: KeyboardEvent): void => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      this.#cancelShow();
-      this.#cancelHide();
-      this.#conceal();
+  /** Cancels pending timers and conceals immediately (shared Escape / scroll path). */
+  #dismiss(): void {
+    this.#cancelShow();
+    this.#cancelHide();
+    this.#conceal();
+  }
+
+  /** Records the modality whose enter/focus event requires the tooltip to stay visible. */
+  #activateInteraction(event?: Event): void {
+    if (event?.type === "mouseenter") this.#pointerActive = true;
+    if (event?.type === "focusin") this.#focusActive = true;
+  }
+
+  /** Clears a modality on leave/blur and reports whether the event represented such a change. */
+  #deactivateInteraction(event?: Event): boolean {
+    if (event?.type === "mouseleave") {
+      this.#pointerActive = false;
+      return true;
     }
-  };
+    if (event?.type === "focusout") {
+      this.#focusActive = false;
+      return true;
+    }
+    return false;
+  }
+
+  /** Discards interaction reasons at a lifecycle boundary. */
+  #resetInteractionState(): void {
+    this.#focusActive = false;
+    this.#pointerActive = false;
+  }
+
+  /** Whether focus or pointer presence still requires a persistent tooltip. */
+  get #hasActiveInteraction(): boolean {
+    return this.#focusActive || this.#pointerActive;
+  }
 
   /** Cancels any pending show timer. */
   #cancelShow(): void {

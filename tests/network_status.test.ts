@@ -4,6 +4,7 @@ import { NetworkStatusController } from "../src/controllers/network_status_contr
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -36,7 +37,7 @@ describe("NetworkStatusController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     setOnline(true);
   });

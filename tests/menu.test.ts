@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MenuController } from "../src/controllers/menu_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -16,10 +17,11 @@ describe("MenuController", () => {
   beforeEach(async () => {
     document.body.innerHTML = `
       <div data-controller="stimeo--menu">
-        <button data-stimeo--menu-target="trigger"
+        <button id="menu-trigger" data-stimeo--menu-target="trigger"
                 data-action="click->stimeo--menu#toggle keydown->stimeo--menu#onTriggerKeydown"
                 aria-haspopup="menu" aria-expanded="false" aria-controls="menu">Actions</button>
-        <ul id="menu" role="menu" data-stimeo--menu-target="menu" hidden>
+        <ul id="menu" role="menu" aria-labelledby="menu-trigger"
+            data-stimeo--menu-target="menu" hidden>
           <li role="none"><button role="menuitem" tabindex="-1"
               data-stimeo--menu-target="item"
               data-action="click->stimeo--menu#activate keydown->stimeo--menu#onItemKeydown">Edit</button></li>
@@ -38,7 +40,7 @@ describe("MenuController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -99,13 +101,30 @@ describe("MenuController", () => {
     expect(document.activeElement).toBe(trigger());
   });
 
-  it("closes on Tab without forcing focus back to the trigger", () => {
+  it("defers Tab closing so the browser can move focus first", async () => {
     trigger().click();
     items()[0]?.focus();
     items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    // Still open at the synchronous point: hiding the focused item before the
+    // browser's default Tab action would restart traversal at the document head.
+    expect(menu().hidden).toBe(false);
+    await tick();
     expect(menu().hidden).toBe(true);
     // Tab lets focus move on naturally; it is not pulled back to the trigger.
     expect(document.activeElement).not.toBe(trigger());
+  });
+
+  it("discards a pending Tab close when the menu is reopened in the same task", async () => {
+    trigger().click();
+    items()[0]?.focus();
+    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    trigger().click(); // close synchronously …
+    trigger().click(); // … and reopen before the deferred close fires
+    expect(menu().hidden).toBe(false);
+    await tick();
+    // The stale Tab close must not slam the reopened menu shut.
+    expect(menu().hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
   });
 
   it("closes when an item is activated", () => {
@@ -117,8 +136,11 @@ describe("MenuController", () => {
 
   it("closes on an outside click", () => {
     trigger().click();
-    document.getElementById("outside")?.click();
+    const outside = document.getElementById("outside") as HTMLAnchorElement;
+    outside.focus();
+    outside.click();
     expect(menu().hidden).toBe(true);
+    expect(document.activeElement).toBe(outside);
   });
 
   // --- Layer ① machine a11y ---
@@ -139,11 +161,11 @@ describe("MenuController", () => {
     trigger().click();
     const phrases = await captureSpeech({ container: menu(), steps: 4 });
     expect(phrases).toEqual([
-      "menu, orientated vertically",
+      "menu, Actions, orientated vertically",
       "menuitem, Edit, position 1, set size 3",
       "menuitem, Duplicate, position 2, set size 3",
       "menuitem, Delete, position 3, set size 3",
-      "end of menu, orientated vertically",
+      "end of menu, Actions, orientated vertically",
     ]);
   });
 
@@ -161,6 +183,20 @@ describe("MenuController", () => {
 
     // After disconnect, outside click should not toggle menu (listener removed)
     document.body.click();
+    expect(menu().hidden).toBe(false);
+  });
+
+  it("cancels a pending Tab close on disconnect", async () => {
+    trigger().click();
+    items()[0]?.focus();
+    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+
+    const controller = application.getControllerForElementAndIdentifier(root(), "stimeo--menu");
+    if (!controller) throw new Error("menu controller not found");
+    controller.disconnect();
+    await tick();
+
+    // The deferred close must not fire against a disconnected controller.
     expect(menu().hidden).toBe(false);
   });
 
@@ -200,23 +236,27 @@ describe("MenuController disabled items", () => {
   let application: Application;
 
   beforeEach(async () => {
-    // "Duplicate" is aria-disabled, "Delete" is natively disabled — both must be
-    // skipped by roving focus.
+    // The first item and "Delete" are aria-disabled; "Archive" is natively
+    // disabled. Roving focus must skip all three.
     document.body.innerHTML = `
       <div data-controller="stimeo--menu">
-        <button data-stimeo--menu-target="trigger"
+        <button id="menu-trigger" data-stimeo--menu-target="trigger"
                 data-action="click->stimeo--menu#toggle keydown->stimeo--menu#onTriggerKeydown"
                 aria-haspopup="menu" aria-expanded="false" aria-controls="menu">Actions</button>
-        <ul id="menu" role="menu" data-stimeo--menu-target="menu" hidden>
-          <li role="none"><button role="menuitem" tabindex="-1"
-              data-stimeo--menu-target="item"
-              data-action="click->stimeo--menu#activate keydown->stimeo--menu#onItemKeydown">Edit</button></li>
+        <ul id="menu" role="menu" aria-labelledby="menu-trigger"
+            data-stimeo--menu-target="menu" hidden>
           <li role="none"><button role="menuitem" tabindex="-1" aria-disabled="true"
               data-stimeo--menu-target="item"
+              data-action="click->stimeo--menu#activate keydown->stimeo--menu#onItemKeydown">Edit</button></li>
+          <li role="none"><button role="menuitem" tabindex="-1"
+              data-stimeo--menu-target="item"
               data-action="click->stimeo--menu#activate keydown->stimeo--menu#onItemKeydown">Duplicate</button></li>
-          <li role="none"><button role="menuitem" tabindex="-1" disabled
+          <li role="none"><button role="menuitem" tabindex="-1" aria-disabled="true"
               data-stimeo--menu-target="item"
               data-action="click->stimeo--menu#activate keydown->stimeo--menu#onItemKeydown">Delete</button></li>
+          <li role="none"><button role="menuitem" tabindex="-1" disabled
+              data-stimeo--menu-target="item"
+              data-action="click->stimeo--menu#activate keydown->stimeo--menu#onItemKeydown">Archive</button></li>
           <li role="none"><button role="menuitem" tabindex="-1"
               data-stimeo--menu-target="item"
               data-action="click->stimeo--menu#activate keydown->stimeo--menu#onItemKeydown">Rename</button></li>
@@ -228,7 +268,7 @@ describe("MenuController disabled items", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -238,36 +278,64 @@ describe("MenuController disabled items", () => {
     ) as HTMLButtonElement;
   const items = () =>
     Array.from(document.querySelectorAll<HTMLButtonElement>("[data-stimeo--menu-target='item']"));
+  const menu = () => document.getElementById("menu") as HTMLElement;
   const itemKey = (index: number, key: string) =>
     items()[index]?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
 
-  it("focuses the first navigable item on open (skips none here — Edit is enabled)", () => {
+  it("skips a disabled first item when opening", () => {
     trigger().click();
-    expect(document.activeElement).toBe(items()[0]); // Edit
+    expect(document.activeElement).toBe(items()[1]); // Duplicate
   });
 
   it("skips disabled items when moving down with ArrowDown", () => {
-    trigger().click(); // open, focus Edit (index 0)
-    itemKey(0, "ArrowDown"); // skip Duplicate (aria-disabled) + Delete (disabled) → Rename
-    expect(document.activeElement).toBe(items()[3]); // Rename
+    trigger().click(); // open, focus Duplicate (index 1)
+    itemKey(1, "ArrowDown"); // skip Delete (aria-disabled) + Archive (disabled) → Rename
+    expect(document.activeElement).toBe(items()[4]); // Rename
   });
 
   it("skips disabled items when wrapping with ArrowUp", () => {
-    trigger().click(); // open, focus Edit (index 0)
-    itemKey(0, "ArrowUp"); // wrap past the two disabled items to the last navigable → Rename
-    expect(document.activeElement).toBe(items()[3]); // Rename
+    trigger().click(); // open, focus Duplicate (index 1)
+    itemKey(1, "ArrowUp"); // wrap past the disabled first item → Rename
+    expect(document.activeElement).toBe(items()[4]); // Rename
   });
 
   it("focuses the last navigable item on ArrowUp from the trigger", () => {
     trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
-    expect(document.activeElement).toBe(items()[3]); // Rename, not the disabled Delete
+    expect(document.activeElement).toBe(items()[4]); // Rename, not the disabled Archive
   });
 
   it("End jumps to the last navigable item, Home to the first", () => {
     trigger().click();
-    itemKey(0, "End");
-    expect(document.activeElement).toBe(items()[3]); // Rename
-    itemKey(3, "Home");
-    expect(document.activeElement).toBe(items()[0]); // Edit
+    itemKey(1, "End");
+    expect(document.activeElement).toBe(items()[4]); // Rename
+    itemKey(4, "Home");
+    expect(document.activeElement).toBe(items()[1]); // Duplicate
+  });
+
+  it("blocks aria-disabled click activation before consumer handlers", () => {
+    trigger().click();
+    const disabledItem = items()[2] as HTMLButtonElement;
+    let consumerActivations = 0;
+    disabledItem.addEventListener("click", () => consumerActivations++);
+
+    disabledItem.click();
+
+    expect(consumerActivations).toBe(0);
+    expect(menu().hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("removes the disabled-item activation blocker on disconnect", () => {
+    const disabledItem = items()[2] as HTMLButtonElement;
+    let consumerActivations = 0;
+    disabledItem.addEventListener("click", () => consumerActivations++);
+    const root = document.querySelector("[data-controller='stimeo--menu']") as HTMLElement;
+    const controller = application.getControllerForElementAndIdentifier(root, "stimeo--menu");
+    if (!controller) throw new Error("menu controller not found");
+
+    controller.disconnect();
+    disabledItem.click();
+
+    expect(consumerActivations).toBe(1);
   });
 });

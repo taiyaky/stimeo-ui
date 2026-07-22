@@ -1,3 +1,5 @@
+import { EscapeLayer } from "./escape_layer";
+
 /**
  * Modal focus-trap primitive shared by the modal-overlay controllers
  * (dialog / alert-dialog / confirm / drawer / command-palette / sidebar); the
@@ -36,8 +38,11 @@ export const FOCUSABLE =
 export interface FocusTrapOptions {
   /**
    * Called when `Escape` is pressed while the trap is active. When omitted,
-   * `Escape` is left alone (the trap never closes itself). The trap calls
-   * `preventDefault()` before invoking it.
+   * `Escape` is left alone (the trap never joins the Escape stack). Dismissal
+   * is resolved by the shared {@link EscapeLayer}: an Escape already consumed
+   * by an inner handler is ignored, and among active layers the most recently
+   * activated claiming one owns the press. The resolver consumes the event
+   * before invoking the callback (the shared layered-Escape contract).
    */
   onEscape?: () => void;
   /**
@@ -86,6 +91,8 @@ export class FocusTrap {
   #inertedSiblings: HTMLElement[] = [];
   /** Whether the modal side effects are currently applied. */
   #activeState = false;
+  /** Registers the trap on the shared Escape stack while active (see {@link EscapeLayer}). */
+  readonly #escapeLayer = new EscapeLayer();
 
   /** Returns the trapped element; called on every operation for the live target. */
   readonly #getContainer: () => HTMLElement;
@@ -129,6 +136,8 @@ export class FocusTrap {
     if (this.#flag(this.#options.isolate, true)) this.#isolateBackground();
     document.addEventListener("keydown", this.#onKeydown);
     document.addEventListener("turbo:before-cache", this.#onBeforeCache);
+    const onEscape = this.#options.onEscape;
+    if (onEscape) this.#escapeLayer.activate(document, { onDismiss: () => onEscape() });
     if (this.#flag(this.#options.autoFocus, true)) this.#focusInitial();
   }
 
@@ -142,6 +151,7 @@ export class FocusTrap {
   deactivate({ restoreFocus = true }: { restoreFocus?: boolean } = {}): void {
     if (!this.#activeState) return;
     this.#activeState = false;
+    this.#escapeLayer.deactivate();
     document.removeEventListener("keydown", this.#onKeydown);
     document.removeEventListener("turbo:before-cache", this.#onBeforeCache);
     if (this.#scrollLocked) {
@@ -173,15 +183,12 @@ export class FocusTrap {
     this.deactivate({ restoreFocus: false });
   };
 
-  /** Handles `Escape` (delegated) and `Tab` (focus trap) while active. */
+  /**
+   * Handles `Tab` (focus trap) while active. `Escape` dismissal is owned by the
+   * shared {@link EscapeLayer} resolver, so Tab trapping stays independent of
+   * which layer currently owns Escape.
+   */
   readonly #onKeydown = (event: KeyboardEvent): void => {
-    if (event.key === "Escape") {
-      if (this.#options.onEscape) {
-        event.preventDefault();
-        this.#options.onEscape();
-      }
-      return;
-    }
     if (event.key === "Tab") this.#trapTab(event);
   };
 

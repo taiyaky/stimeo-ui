@@ -13,8 +13,8 @@ import type { StructureRules } from "./types";
  * noisy. Dynamically-generated targets (e.g. `toast` items rendered from a
  * `<template>`) are deliberately omitted.
  *
- * @remarks Method-name checks for `data-action` are out of scope for the
- * minimal version; only the controller identifier is validated.
+ * `data-action` controller and method validation is handled separately from the
+ * reflected `static actions`; this table owns only target requiredness.
  */
 export const structureRules: StructureRules = {
   "stimeo--accordion": { requiredTargets: ["trigger", "panel"] },

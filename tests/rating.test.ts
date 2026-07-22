@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RatingController } from "../src/controllers/rating_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -50,7 +51,7 @@ describe("RatingController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -210,7 +211,7 @@ describe("RatingController", () => {
   it("has no machine-detectable a11y violations (interactive and readonly)", async () => {
     await start();
     await expectNoA11yViolations(root());
-    application.stop();
+    disconnectAndStopApplication(application);
     await start('data-stimeo--rating-readonly-value="true"');
     await expectNoA11yViolations(root());
   });
@@ -244,7 +245,7 @@ describe("RatingController with max above the symbol count", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

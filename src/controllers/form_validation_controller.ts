@@ -323,8 +323,8 @@ export class FormValidationController extends Controller<HTMLFormElement> {
 
   /**
    * Applies (or clears) a declarative custom constraint via `setCustomValidity`,
-   * for controls that opt in with `data-stimeo--form-field-disallow`. The one
-   * supported rule today is `"whitespace"` — a value that is non-empty but blank
+   * for controls that opt in with `data-stimeo--form-field-disallow`. The supported
+   * rule is `"whitespace"` — a value that is non-empty but blank
    * after trimming (which slips past `required` / `minlength`); its message follows
    * the per-constraint (`value-missing`) → generic → default chain.
    *

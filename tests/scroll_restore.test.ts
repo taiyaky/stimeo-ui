@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ScrollRestoreController } from "../src/controllers/scroll_restore_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -33,7 +34,7 @@ describe("ScrollRestoreController", () => {
   });
 
   afterEach(() => {
-    application?.stop();
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     sessionStorage.clear();
   });

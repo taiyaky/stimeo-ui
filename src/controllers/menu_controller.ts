@@ -1,17 +1,20 @@
 import { Controller } from "@hotwired/stimulus";
+import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
+import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
  * Headless, accessible menu button behavior.
  *
  * Markup contract (identifier: `stimeo--menu`):
  *   <div data-controller="stimeo--menu">
- *     <button data-stimeo--menu-target="trigger"
+ *     <button id="menu-trigger" data-stimeo--menu-target="trigger"
  *             data-action="click->stimeo--menu#toggle
  *                          keydown->stimeo--menu#onTriggerKeydown"
  *             aria-haspopup="menu" aria-expanded="false" aria-controls="menu">
  *       Actions
  *     </button>
- *     <ul id="menu" role="menu" data-stimeo--menu-target="menu" hidden>
+ *     <ul id="menu" role="menu" aria-labelledby="menu-trigger"
+ *         data-stimeo--menu-target="menu" hidden>
  *       <li role="none">
  *         <button role="menuitem" tabindex="-1"
  *                 data-stimeo--menu-target="item"
@@ -27,18 +30,24 @@ import { Controller } from "@hotwired/stimulus";
  * children.
  *
  * @remarks
- * Behavior only — static placement is the consumer's responsibility (CSS), and
- * viewport-edge collision handling is intentionally out of scope (a future shared
- * positioning module will own it). State is exposed via `aria-expanded` and the
- * menu's `hidden` attribute.
+ * Behavior only — the core controller owns no placement. Consumers can use static
+ * CSS or compose the menu with the opt-in `stimeo-ui/positioning` entrypoint for
+ * viewport-aware placement. State is exposed via `aria-expanded` and the menu's
+ * `hidden` attribute.
  *
  * Behavior provided:
  * - Click the trigger to toggle; `ArrowDown`/`ArrowUp` open and focus the
  *   first/last item.
  * - Within the menu, `ArrowDown`/`ArrowUp` move focus (wrapping), `Home`/`End`
- *   jump to the first/last item, `Escape`/`Tab` close and return focus to the
- *   trigger, and activating an item closes the menu.
- * - A click outside the controller closes the menu.
+ *   jump to the first/last item, `Tab` lets the browser move focus first and
+ *   then closes on the next task, and activating an enabled item closes the menu.
+ * - `Escape` closes and returns focus to the trigger. While open the menu is a
+ *   layer on the shared {@link EscapeLayer} stack; it claims a press only while
+ *   focus is inside the controller or fell to the body, so one keypress closes
+ *   exactly one layer (the shared layered-Escape contract) and a newer layer
+ *   (e.g. a tooltip shown over an item) is dismissed first.
+ * - A click outside the controller closes the menu without moving focus away
+ *   from the clicked element.
  *
  * Roving focus skips items that are not navigable — `hidden`, natively
  * `disabled`, or `aria-disabled="true"` — so the keyboard never lands focus on an
@@ -61,14 +70,23 @@ export class MenuController extends Controller<HTMLElement> {
   declare readonly hasTriggerTarget: boolean;
   declare readonly hasMenuTarget: boolean;
 
-  /** Starts closed and registers the outside-click listener. */
+  readonly #timers = new SafeTimeout();
+
+  /** Escape-stack membership while open; the shared resolver dismisses via it. */
+  readonly #escapeLayer = new EscapeLayer();
+
+  /** Starts closed and registers delegated listeners. */
   override connect(): void {
     this.close();
+    this.element.addEventListener("click", this.#onItemClickCapture, true);
     document.addEventListener("click", this.#onOutsideClick);
   }
 
-  /** Removes the document-level listener registered in {@link connect}. */
+  /** Releases the listeners, stack membership, and any pending Tab-close task. */
   override disconnect(): void {
+    this.#timers.clearAll();
+    this.#escapeLayer.deactivate();
+    this.element.removeEventListener("click", this.#onItemClickCapture, true);
     document.removeEventListener("click", this.#onOutsideClick);
   }
 
@@ -84,13 +102,22 @@ export class MenuController extends Controller<HTMLElement> {
 
   /** Opens the menu and reflects the expanded state on the trigger. */
   open(): void {
+    // A reopen must discard a pending Tab close, or the stale task would slam
+    // the freshly opened menu shut on the next tick.
+    this.#timers.clearAll();
     if (!this.hasMenuTarget) return;
+    this.#escapeLayer.activate(document, {
+      onDismiss: () => this.#closeAndRestore(),
+      claims: claimsWhileFocusWithin(this.element),
+    });
     this.menuTarget.hidden = false;
     if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "true");
   }
 
   /** Closes the menu and reflects the collapsed state on the trigger. */
   close(): void {
+    this.#timers.clearAll();
+    this.#escapeLayer.deactivate();
     if (!this.hasMenuTarget) return;
     this.menuTarget.hidden = true;
     if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "false");
@@ -138,15 +165,14 @@ export class MenuController extends Controller<HTMLElement> {
         event.preventDefault();
         items[items.length - 1]?.focus();
         break;
-      case "Escape":
-        event.preventDefault();
-        this.close();
-        if (this.hasTriggerTarget) this.triggerTarget.focus();
-        break;
       case "Tab":
         // Per APG, Tab closes the menu but focus moves on naturally (it is not
-        // returned to the trigger — that is Escape's job).
-        this.close();
+        // returned to the trigger — that is Escape's job). Closing synchronously
+        // would remove the focused item before the browser's default Tab action,
+        // which can restart traversal at the document head, so the close is
+        // deferred to the next task.
+        this.#timers.clearAll();
+        this.#timers.set(() => this.close(), 0);
         break;
       default:
         break;
@@ -155,6 +181,11 @@ export class MenuController extends Controller<HTMLElement> {
 
   /** Closes the menu after an item is activated. Bound via `data-action`. */
   activate(): void {
+    this.#closeAndRestore();
+  }
+
+  /** Closes and returns focus to the trigger (Escape / item-activation path). */
+  #closeAndRestore(): void {
     this.close();
     if (this.hasTriggerTarget) this.triggerTarget.focus();
   }
@@ -162,6 +193,21 @@ export class MenuController extends Controller<HTMLElement> {
   /** Closes the menu when a click lands outside the controller's element. */
   readonly #onOutsideClick = (event: MouseEvent): void => {
     if (this.#isOpen && !this.element.contains(event.target as Node)) this.close();
+  };
+
+  /**
+   * Captures clicks so `aria-disabled` commands cannot reach consumer handlers.
+   * Native Enter/Space activation also synthesizes a click and is blocked here.
+   */
+  readonly #onItemClickCapture = (event: MouseEvent): void => {
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    const disabled = this.itemTargets.some(
+      (item) => item.getAttribute("aria-disabled") === "true" && item.contains(target),
+    );
+    if (!disabled) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
   };
 
   /** Moves focus to the first navigable item (no-op if none). */

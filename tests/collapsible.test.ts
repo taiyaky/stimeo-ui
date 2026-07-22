@@ -4,6 +4,7 @@ import { CollapsibleController } from "../src/controllers/collapsible_controller
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -34,7 +35,7 @@ describe("CollapsibleController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -66,7 +67,7 @@ describe("CollapsibleController", () => {
   it("honors the initial open value on a fresh render (no state attribute yet)", async () => {
     // A genuinely fresh render carries no explicit state attribute, so the `open`
     // Value seeds the initial state.
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <div data-controller="stimeo--collapsible"
            data-stimeo--collapsible-open-value="true">
@@ -87,7 +88,7 @@ describe("CollapsibleController", () => {
   it("stays closed on reconnect when the restored DOM reads closed (DOM wins over open Value)", async () => {
     // The mirror of the test below: an `open` Value of true must NOT reopen a region
     // the user had closed before a Turbo cache restore (explicit aria-expanded="false").
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <div data-controller="stimeo--collapsible"
            data-stimeo--collapsible-open-value="true">
@@ -110,7 +111,7 @@ describe("CollapsibleController", () => {
     // (aria-expanded="true", data-state="open", no hidden) even though the
     // declarative open Value defaults to false. The DOM must win — connect must
     // not collapse a region the user had opened.
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <div data-controller="stimeo--collapsible">
         <button data-stimeo--collapsible-target="trigger"
@@ -203,7 +204,7 @@ describe("CollapsibleController", () => {
   });
 
   it("is a safe no-op when the trigger/content targets are absent", async () => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = `<div data-controller="stimeo--collapsible"></div>`;
     application = Application.start();
     application.register("stimeo--collapsible", CollapsibleController);
@@ -217,10 +218,10 @@ describe("CollapsibleController", () => {
     expect(() => instance.toggle()).not.toThrow();
   });
 
-  // Disconnect teardown: after stop() the element is inert (no toggle, no
-  // lingering transitionend listener mutating a detached node).
+  // Context teardown leaves the element inert (no toggle) and invokes the
+  // controller hook that removes any pending transitionend listener.
   it("becomes inert after disconnect", () => {
-    application.stop();
+    application.unload("stimeo--collapsible");
     trigger().click();
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
   });

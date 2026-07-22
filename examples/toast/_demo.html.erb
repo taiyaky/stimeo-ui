@@ -41,7 +41,7 @@
   <div
     id="playground-toast"
     role="region"
-    aria-label="<%= t("components.toast.demo.dismiss_label") %>"
+    aria-label="<%= t("components.toast.demo.region_label") %>"
     class="toast-container">
     
     <%# The element where notifications are placed. %>
@@ -50,21 +50,15 @@
     <%# Template used to create new toasts. %>
     <template data-stimeo--toast-target="template">
       <li
-        role="status"
         class="toast-item"
         data-stimeo--toast-target="item"
-        data-action="mouseenter->stimeo--toast#pause
-                     mouseleave->stimeo--toast#resume
-                     focusin->stimeo--toast#pause
-                     focusout->stimeo--toast#resume
-                     keydown->stimeo--toast#onKeydown"
         tabindex="0">
         <div class="toast-item__content">
-          <span data-toast-slot="body" class="toast-item__body"></span>
+          <span role="status" data-toast-slot="body" class="toast-item__body"></span>
           <button
             type="button"
             class="toast-item__dismiss"
-            data-action="click->stimeo--toast#dismiss"
+            data-toast-dismiss
             aria-label="<%= t("components.toast.demo.dismiss_label") %>">
             <svg
               class="toast-item__icon"

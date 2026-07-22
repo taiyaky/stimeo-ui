@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { RovingTabindex } from "../utils/roving_tabindex";
 import { SafeTimeout } from "../utils/safe_timeout";
 
@@ -32,7 +33,11 @@ const TYPEAHEAD_RESET_MS = 500;
  * `ArrowDown`/`Enter`/`Space` open a menu (`ArrowUp` opens it at the last item),
  * the arrow keys then move within the menu, and pressing `ArrowLeft`/`ArrowRight`
  * while a menu is open jumps to the adjacent top menu. `Escape` closes and
- * returns focus to the owning top item; `Tab` and an outside click close.
+ * returns focus to the owning top item — while a menu is open the menubar is a
+ * layer on the shared {@link EscapeLayer} stack, claiming a press only while
+ * focus is inside the controller or fell to the body, so one keypress closes
+ * exactly one layer (the shared layered-Escape contract). `Tab` and an outside
+ * click close.
  *
  * @remarks
  * Behavior only. Each top item↔menu pair is linked by `aria-controls`/`id` (not by
@@ -57,6 +62,9 @@ export class MenubarController extends Controller<HTMLElement> {
   #typeaheadId = 0;
   readonly #timers = new SafeTimeout();
 
+  /** Escape-stack membership while a menu is open; the shared resolver dismisses via it. */
+  readonly #escapeLayer = new EscapeLayer();
+
   /** Establishes the single tab stop and the closed baseline. */
   override connect(): void {
     const active = this.#roving.activeIndex;
@@ -65,8 +73,9 @@ export class MenubarController extends Controller<HTMLElement> {
     document.addEventListener("click", this.#onOutsideClick);
   }
 
-  /** Removes the document listener and any pending typeahead timer. */
+  /** Removes the document listener, stack membership, and any pending typeahead timer. */
   override disconnect(): void {
+    this.#escapeLayer.deactivate();
     document.removeEventListener("click", this.#onOutsideClick);
     this.#timers.clearAll();
   }
@@ -116,17 +125,12 @@ export class MenubarController extends Controller<HTMLElement> {
         event.preventDefault();
         this.#gotoTop(length - 1, anyOpen);
         break;
-      case "Escape":
-        if (anyOpen) {
-          event.preventDefault();
-          this.#closeAllMenus();
-        }
-        break;
       default:
         break;
     }
     // Enter/Space are intentionally left to the native button click, which runs
     // toggle() (open + focus first item) — handling them here would double-fire.
+    // Escape is owned by the shared EscapeLayer resolver (see #dismissOpenMenu).
   }
 
   /** Keyboard handling while focus is on a menu item. */
@@ -162,11 +166,6 @@ export class MenubarController extends Controller<HTMLElement> {
       case "ArrowLeft":
         event.preventDefault();
         this.#moveToAdjacentMenu(menu, -1);
-        break;
-      case "Escape":
-        event.preventDefault();
-        this.#closeMenu(this.#topFor(menu));
-        this.#focusTop(this.#topFor(menu));
         break;
       case "Tab":
         // Per APG, Tab closes the menubar but lets focus move on naturally.
@@ -210,6 +209,10 @@ export class MenubarController extends Controller<HTMLElement> {
     if (!menu) return;
     menu.hidden = false;
     top.setAttribute("aria-expanded", "true");
+    this.#escapeLayer.activate(document, {
+      onDismiss: () => this.#dismissOpenMenu(),
+      claims: claimsWhileFocusWithin(this.element),
+    });
     this.#roving.setActive(this.topTargets.indexOf(top));
     const items = this.#itemsIn(menu);
     this.#focusAt(items, focus === "first" ? 0 : items.length - 1);
@@ -221,12 +224,31 @@ export class MenubarController extends Controller<HTMLElement> {
     const menu = this.#menuFor(top);
     if (menu) menu.hidden = true;
     top.setAttribute("aria-expanded", "false");
+    if (!this.#isAnyOpen) this.#escapeLayer.deactivate();
   }
 
   /** Closes every menu and resets the typeahead buffer. */
   #closeAllMenus(): void {
     for (const top of this.topTargets) this.#closeMenu(top);
     this.#resetTypeahead();
+  }
+
+  /**
+   * Escape path, invoked by the shared resolver: pressed inside an open menu it
+   * closes that menu and returns focus to its top item (the APG behavior);
+   * pressed while focus is on a top item (or fell to the body) it closes every
+   * menu without moving focus.
+   */
+  #dismissOpenMenu(): void {
+    const active = document.activeElement;
+    const menu = this.menuTargets.find((candidate) => candidate.contains(active));
+    if (menu) {
+      const top = this.#topFor(menu);
+      this.#closeMenu(top);
+      this.#focusTop(top);
+      return;
+    }
+    this.#closeAllMenus();
   }
 
   /** Opens the menu of the top item `delta` steps from the one owning `menu`. */

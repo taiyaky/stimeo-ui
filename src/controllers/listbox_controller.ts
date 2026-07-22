@@ -154,6 +154,10 @@ export class ListboxController extends Controller<HTMLElement> {
         this.#commitActive();
         break;
       case "Escape":
+        // Layered-Escape rule 1: leave a press an inner handler already owned;
+        // a press during IME composition never dismisses (contract uniformity —
+        // the trigger is a button, so composition cannot start here today).
+        if (event.defaultPrevented || event.isComposing) break;
         event.preventDefault();
         this.close();
         this.triggerTarget.focus();

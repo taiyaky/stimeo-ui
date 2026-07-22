@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { CompositionTracker } from "../utils/composition_tracker";
 
 /**
  * Headless, accessible inline-editing behavior.
@@ -25,7 +26,11 @@ import { Controller } from "@hotwired/stimulus";
  * - Activating the display element (`Enter`/`Space` via the `<button>`, or `F2`)
  *   enters edit mode, focuses the input, and selects its text.
  * - `Enter` (single-line) or `Ctrl+Enter` / `Cmd+Enter` (multiline `<textarea>`)
- *   saves; `Escape` cancels. Both return focus to the display element.
+ *   saves; `Escape` cancels. Both return focus to the display element. Keys
+ *   pressed during an IME composition act on the composition, never the edit:
+ *   a conversion-cancelling `Escape` keeps editing and a conversion-confirming
+ *   `Enter` never saves (lifecycle-tracked, covering events that omit
+ *   `isComposing`).
  * - Losing focus while editing saves when `submitOnBlur` is true (the default),
  *   honoring wherever focus moved; when false, editing is kept.
  * - Saving dispatches `stimeo--editable:change` with `{ value, previous }` only
@@ -50,9 +55,31 @@ export class EditableController extends Controller<HTMLElement> {
   /** The value captured when edit mode began, used to detect real changes. */
   #previousValue = "";
 
+  /**
+   * Owns IME lifecycle state for the edit surface, so a keydown that belongs to
+   * a composition (cancel or confirm) is never treated as an edit command.
+   */
+  readonly #composition = new CompositionTracker();
+
   /** Establishes the initial display mode (display shown, input hidden). */
   override connect(): void {
+    if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
     this.#setMode("display");
+  }
+
+  /** Releases the composition listeners so nothing outlives the element. */
+  override disconnect(): void {
+    this.#composition.disconnect();
+  }
+
+  /** Tracks an input added initially or after connect (e.g. a Turbo swap). */
+  inputTargetConnected(input: HTMLElement): void {
+    this.#composition.observe(input);
+  }
+
+  /** Removes composition listeners when the active input is replaced or removed. */
+  inputTargetDisconnected(input: HTMLElement): void {
+    this.#composition.unobserve(input);
   }
 
   /** Enters edit mode: seeds the input from the display text, focuses, selects. */
@@ -75,7 +102,12 @@ export class EditableController extends Controller<HTMLElement> {
 
   /** Commits on `Enter` (or `Ctrl+Enter` when multiline) and cancels on `Escape`. */
   onKeydown(event: KeyboardEvent): void {
+    // Keys fired during IME composition steer the composition (cancel a
+    // conversion, confirm a candidate) and must never cancel or save the edit.
+    if (this.#composition.isComposing(event)) return;
     if (event.key === "Escape") {
+      // Layered-Escape rule 1: leave a press an inner handler already owned.
+      if (event.defaultPrevented) return;
       event.preventDefault();
       this.#cancel();
       return;

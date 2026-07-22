@@ -22,10 +22,9 @@ describe("buildManifest", () => {
     expect(manifest.packageVersion).toBe("1.2.3");
   });
 
-  it("includes every official core + opt-in positioning controller identifier", () => {
-    // The private build may reflect additional opt-in controllers that the public npm
-    // mirror strips, so assert the manifest is a *superset* of core + positioning here
-    // rather than an exact match.
+  it("includes every core, positioning, and cable controller identifier", () => {
+    // Combined builds may merge additional registries, so this shared suite asserts
+    // the public registries as a required subset rather than an exact upper bound.
     expect(Object.keys(manifest.controllers)).toEqual(
       expect.arrayContaining(Object.keys(allControllers)),
     );

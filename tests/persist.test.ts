@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PersistController } from "../src/controllers/persist_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -31,7 +32,7 @@ describe("PersistController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     vi.useRealTimers();
     window.localStorage.clear();
     document.body.innerHTML = "";
@@ -88,7 +89,7 @@ describe("PersistController", () => {
     expect(Object.values(JSON.parse(stored("draft") ?? "{}"))).toEqual(["ruby", "rails"]);
 
     // A fresh mount restores each value to its own field by occurrence.
-    application.stop();
+    disconnectAndStopApplication(application);
     await mount(
       'data-stimeo--persist-key-value="draft"',
       '<input name="tags[]"><input name="tags[]">',
@@ -170,7 +171,7 @@ describe("PersistController", () => {
     expect(JSON.parse(stored("draft") ?? "{}")).toEqual({ agree: true, plan: "b" });
 
     // Re-mount restores them.
-    application.stop();
+    disconnectAndStopApplication(application);
     await mount(
       'data-stimeo--persist-key-value="draft"',
       `<input type="checkbox" name="agree">

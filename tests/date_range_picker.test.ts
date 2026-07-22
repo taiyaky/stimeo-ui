@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DateRangePickerController } from "../src/controllers/date_range_picker_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -68,7 +69,7 @@ describe("DateRangePickerController", () => {
   };
 
   afterEach(() => {
-    application?.stop();
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -157,6 +158,17 @@ describe("DateRangePickerController", () => {
     expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(false);
     expect(cell("2026-06-10").getAttribute("aria-selected")).toBe("true");
     expect(field("start").value).toBe("2026-06-10");
+  });
+
+  it("keeps the pending start on an Escape that cancels an IME composition", async () => {
+    await mount();
+    click("2026-06-05");
+    // Widget-local half of the shared layered-Escape contract: a composing
+    // press steers the IME conversion and never clears the pending range.
+    cell("2026-06-05").dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, isComposing: true }),
+    );
+    expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(true);
   });
 
   it("moves roving focus with the arrow keys", async () => {

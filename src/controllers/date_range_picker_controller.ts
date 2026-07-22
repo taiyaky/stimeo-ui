@@ -187,7 +187,9 @@ export class DateRangePickerController extends Controller<HTMLElement> {
       return;
     }
     if (event.key === "Escape") {
-      if (this.#pendingStart) {
+      // Layered-Escape rule 1: leave a press an inner handler already owned;
+      // a press during IME composition steers the conversion, not the range.
+      if (this.#pendingStart && !event.defaultPrevented && !event.isComposing) {
         event.preventDefault();
         this.#pendingStart = "";
         this.#previewDate = "";

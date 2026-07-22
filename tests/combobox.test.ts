@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComboboxController } from "../src/controllers/combobox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -38,7 +39,7 @@ describe("ComboboxController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -46,6 +47,13 @@ describe("ComboboxController", () => {
     document.querySelector<HTMLInputElement>(
       "[data-stimeo--combobox-target='input']",
     ) as HTMLInputElement;
+  const root = () =>
+    document.querySelector<HTMLElement>("[data-controller='stimeo--combobox']") as HTMLElement;
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--combobox",
+    ) as ComboboxController;
   const list = () => document.getElementById("listbox") as HTMLElement;
   const option = (id: string) => document.getElementById(id) as HTMLElement;
   const type = (value: string) => {
@@ -135,15 +143,45 @@ describe("ComboboxController", () => {
     expect(list().hidden).toBe(true);
   });
 
-  it("ignores Enter with keyCode 229 (legacy IME signal)", () => {
+  it("defers filtering until compositionend and ignores its unflagged Enter", () => {
     type("ap");
     press("ArrowDown"); // active apple
-    // Browsers that omit isComposing on the confirming keydown report keyCode 229.
-    input().dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true }),
-    );
-    expect(input().value).toBe("ap");
+
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    input().value = "b";
+    input().dispatchEvent(new InputEvent("input", { bubbles: true }));
+
+    // Some browsers omit isComposing on the confirming keydown. The controller's
+    // lifecycle state must still protect Enter and defer intermediate filtering.
+    press("Enter");
+    expect(input().value).toBe("b");
     expect(list().hidden).toBe(false);
+    expect(option("opt-apple").hidden).toBe(false);
+    expect(option("opt-apricot").hidden).toBe(false);
+    expect(option("opt-banana").hidden).toBe(true);
+
+    input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    expect(option("opt-apple").hidden).toBe(true);
+    expect(option("opt-apricot").hidden).toBe(true);
+    expect(option("opt-banana").hidden).toBe(false);
+
+    press("ArrowDown");
+    press("Enter");
+    expect(input().value).toBe("banana");
+    expect(list().hidden).toBe(true);
+  });
+
+  it("clears composition state across disconnect and reconnect", () => {
+    type("ap");
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+
+    controller().disconnect();
+    controller().connect();
+    press("ArrowDown");
+
+    expect(input().getAttribute("aria-activedescendant")).toBe("opt-apple");
+    press("Enter");
+    expect(input().value).toBe("apple");
   });
 
   it("selects an option on click", () => {
@@ -190,6 +228,15 @@ describe("ComboboxController", () => {
     expect(input().getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("leaves Escape unconsumed while the list is closed", () => {
+    // With nothing to close the widget owns no dismissable state, so the press
+    // stays free for the shared Escape resolver (an enclosing dialog etc.).
+    expect(list().hidden).toBe(true);
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    input().dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it("closes when Tab moves focus out", () => {
     type("ap");
     press("Tab");
@@ -223,8 +270,6 @@ describe("ComboboxController", () => {
   });
 
   it("re-filters on open so a stale non-matching value keeps the empty state", () => {
-    const root = () =>
-      document.querySelector("[data-controller='stimeo--combobox']") as HTMLElement;
     input().value = "zz";
     clickInput();
     expect(list().hidden).toBe(false);

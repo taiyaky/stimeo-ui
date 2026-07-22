@@ -113,8 +113,8 @@ export class CountdownController extends Controller<HTMLElement> {
    * paused (or completed) one resets the displayed amount but stays paused until the
    * user resumes — it never silently restarts. The run state is read from the DOM,
    * not re-derived from the declarative `autostart` Value (which only governs the
-   * initial state on connect); re-deriving it would override a user's pause, the same
-   * anti-pattern the Turbo-lifecycle guide warns about.
+   * initial state on connect); re-deriving it would override a user's pause —
+   * the DOM, not a re-run of declarative config, is the source of truth.
    */
   reset(): void {
     const wasRunning = this.#state === "running";

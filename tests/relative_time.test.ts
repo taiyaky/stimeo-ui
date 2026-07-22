@@ -4,6 +4,7 @@ import { RelativeTimeController } from "../src/controllers/relative_time_control
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -33,7 +34,7 @@ describe("RelativeTimeController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     vi.useRealTimers();
     document.body.innerHTML = "";
     document.documentElement.removeAttribute("lang");
@@ -126,7 +127,7 @@ describe("RelativeTimeController accessibility", () => {
   let application: Application;
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

@@ -25,10 +25,10 @@ import type { A11yRules } from "./types";
  *    `aria-expanded`/`aria-activedescendant`, separator's defaulted `role`);
  * 2. the documented markup contract and demo actually author it;
  * 3. the APG pattern is broken for AT without it — accessible-name rules are
- *    limited to roles that only name from author (dialog, combobox, slider,
- *    spinbutton, meter, progressbar, separator-handle), never to plain inputs
- *    (a native `<label for>` is a legitimate alternative the static check
- *    cannot see) nor to container roles where a name is merely recommended;
+ *    limited to roles that only name from author (dialog, menu, combobox,
+ *    slider, spinbutton, meter, progressbar, separator-handle), never to plain
+ *    inputs (a native `<label for>` is a legitimate alternative the static
+ *    check cannot see) nor to optional names outside the documented contract;
  * 4. no legitimate alternative spelling exists (e.g. `<td>` inside a
  *    `role="grid"` table is an *implicit* gridcell, so cell roles on
  *    table-based grids are not required; a controller that documents an
@@ -164,6 +164,12 @@ export const a11yRules: A11yRules = {
       values: ["option"],
       suggestion: 'Add role="option" to each option target.',
     },
+    {
+      target: "option",
+      attrs: ["id"],
+      suggestion:
+        "Add a unique id to each option target so aria-activedescendant can reference it.",
+    },
   ],
   // Non-modal popover (APG dialog run modelessly): the panel's dialog role and
   // name are authored; deliberately NO aria-modal (the background stays
@@ -199,9 +205,9 @@ export const a11yRules: A11yRules = {
         "Point the trigger at the tooltip via aria-describedby (the content target's id).",
     },
   ],
-  // Menu button (APG menu): the controller manages aria-expanded and the
-  // roving focus, but the popup signal on the trigger and the menu/menuitem
-  // roles are authored. Item roles admit the checkbox/radio variants.
+  // Menu button (APG menu): the controller manages aria-expanded and roving
+  // focus, but the popup signal, menu name, and menu/menuitem roles are authored.
+  // Item roles admit the checkbox/radio variants.
   "stimeo--menu": [
     {
       target: "trigger",
@@ -214,6 +220,11 @@ export const a11yRules: A11yRules = {
       attrs: ["role"],
       values: ["menu"],
       suggestion: 'Add role="menu" to the menu target.',
+    },
+    {
+      target: "menu",
+      attrs: ["aria-labelledby", "aria-label"],
+      suggestion: "Name the menu via aria-labelledby (the trigger's id) or aria-label.",
     },
     {
       target: "item",

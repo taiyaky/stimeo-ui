@@ -4,6 +4,7 @@ import { SeparatorController } from "../src/controllers/separator_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -23,7 +24,7 @@ describe("SeparatorController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -108,7 +109,7 @@ describe("SeparatorController", () => {
     });
 
     it("respects a custom step", async () => {
-      application.stop();
+      disconnectAndStopApplication(application);
       await start(`
         <div data-controller="stimeo--separator" role="separator" tabindex="0"
              aria-label="Resize" aria-orientation="vertical"
@@ -177,7 +178,7 @@ describe("SeparatorController", () => {
            aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"
            data-stimeo--separator-focusable-value="true"
            data-action="keydown->stimeo--separator#onKeydown"></div>`);
-    application.stop();
+    application.unload("stimeo--separator");
     key("ArrowRight");
     expect(separator().getAttribute("aria-valuenow")).toBe("50");
   });

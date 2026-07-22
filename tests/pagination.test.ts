@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PaginationController } from "../src/controllers/pagination_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -38,7 +39,7 @@ describe("PaginationController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

@@ -16,8 +16,10 @@ describe("speech helper", () => {
       <a href="/help">Help</a>`;
     const log = await captureSpeech({ steps: 2 });
 
-    expect(log).toContain("button, Save");
-    expect(log.some((phrase) => phrase.includes("Help"))).toBe(true);
+    const buttonIndex = log.indexOf("button, Save");
+    const linkIndex = log.findIndex((phrase) => phrase.includes("Help"));
+    expect(buttonIndex).toBeGreaterThanOrEqual(0);
+    expect(linkIndex).toBeGreaterThan(buttonIndex);
   });
 
   it("reflects ARIA state in the spoken phrase", async () => {

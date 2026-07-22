@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { CompositionTracker } from "../utils/composition_tracker";
 
 /**
  * Headless, accessible One-Time Password / PIN input logic.
@@ -44,24 +45,27 @@ export class OtpController extends Controller<HTMLElement> {
   declare lengthValue: number;
   declare patternValue: string;
 
-  #isComposing = new Map<HTMLInputElement, boolean>();
+  /** Owns IME lifecycle state across every digit field. */
+  readonly #composition = new CompositionTracker({
+    onEnd: (event) => {
+      const input = event.currentTarget as HTMLInputElement | null;
+      if (input) this.#handleInputValidation(input);
+    },
+  });
 
   override connect(): void {
     // Dynamically bind auto-selection and IME tracking logic to all connected inputs
     for (const field of this.fieldTargets) {
       field.addEventListener("focus", this.#onFieldFocus);
-      field.addEventListener("compositionstart", this.#onCompositionStart);
-      field.addEventListener("compositionend", this.#onCompositionEnd);
+      this.#composition.observe(field);
     }
   }
 
   override disconnect(): void {
     for (const field of this.fieldTargets) {
       field.removeEventListener("focus", this.#onFieldFocus);
-      field.removeEventListener("compositionstart", this.#onCompositionStart);
-      field.removeEventListener("compositionend", this.#onCompositionEnd);
     }
-    this.#isComposing.clear();
+    this.#composition.disconnect();
   }
 
   /**
@@ -70,16 +74,13 @@ export class OtpController extends Controller<HTMLElement> {
    */
   fieldTargetConnected(element: HTMLInputElement): void {
     element.addEventListener("focus", this.#onFieldFocus);
-    element.addEventListener("compositionstart", this.#onCompositionStart);
-    element.addEventListener("compositionend", this.#onCompositionEnd);
+    this.#composition.observe(element);
   }
 
   /** Removes focus listeners when fields are dropped. */
   fieldTargetDisconnected(element: HTMLInputElement): void {
     element.removeEventListener("focus", this.#onFieldFocus);
-    element.removeEventListener("compositionstart", this.#onCompositionStart);
-    element.removeEventListener("compositionend", this.#onCompositionEnd);
-    this.#isComposing.delete(element);
+    this.#composition.unobserve(element);
   }
 
   /** Handles keystroke inputs and advances focus to the next field. */
@@ -88,7 +89,7 @@ export class OtpController extends Controller<HTMLElement> {
     if (!input) return;
 
     // Guard during active composition to prevent premature focus switching
-    if (this.#isComposing.get(input)) return;
+    if (this.#composition.isComposing(event as InputEvent)) return;
 
     this.#handleInputValidation(input);
   }
@@ -102,7 +103,7 @@ export class OtpController extends Controller<HTMLElement> {
     if (index === -1) return;
 
     // Do not trigger keydown actions during composition
-    if (this.#isComposing.get(input)) return;
+    if (this.#composition.isComposing(event)) return;
 
     switch (event.key) {
       case "Backspace":
@@ -208,19 +209,6 @@ export class OtpController extends Controller<HTMLElement> {
       // Auto-selection enables effortless character overwrites
       input.select();
     }
-  };
-
-  readonly #onCompositionStart = (event: CompositionEvent): void => {
-    const input = event.currentTarget as HTMLInputElement;
-    this.#isComposing.set(input, true);
-  };
-
-  readonly #onCompositionEnd = (event: CompositionEvent): void => {
-    const input = event.currentTarget as HTMLInputElement;
-    this.#isComposing.set(input, false);
-
-    // Force validation after IME conversion finishes
-    this.#handleInputValidation(input);
   };
 
   #handleInputValidation(input: HTMLInputElement): void {

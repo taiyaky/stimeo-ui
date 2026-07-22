@@ -4,6 +4,7 @@ import { ThemeController } from "../src/controllers/theme_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -76,7 +77,7 @@ describe("ThemeController", () => {
   });
 
   afterEach(() => {
-    application?.stop();
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     root().removeAttribute("data-theme");
     root().style.removeProperty("color-scheme");

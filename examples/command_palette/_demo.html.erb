@@ -71,7 +71,8 @@
         data-stimeo--command-palette-target="list">
         
         <%# Section heading (data-disabled="true" makes it non-selectable). %>
-        <li role="option" data-stimeo--command-palette-target="option"
+        <li id="cmd-popular-heading" role="option"
+            data-stimeo--command-palette-target="option"
             data-disabled="true" class="command-palette__group-title">
           <%= t("components.command_palette.demo.popular_title") %>
         </li>
@@ -120,7 +121,8 @@
           <span class="command-palette__option-shortcut">Go S</span>
         </li>
 
-        <li role="option" data-stimeo--command-palette-target="option"
+        <li id="cmd-admin-heading" role="option"
+            data-stimeo--command-palette-target="option"
             data-disabled="true" class="command-palette__group-title">
           <%= t("components.command_palette.demo.admin_title") %>
         </li>

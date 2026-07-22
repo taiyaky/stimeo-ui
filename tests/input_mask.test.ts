@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { applyMask, InputMaskController } from "../src/controllers/input_mask_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -54,7 +55,7 @@ describe("InputMaskController", () => {
   };
 
   afterEach(() => {
-    application?.stop();
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

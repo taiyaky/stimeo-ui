@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ScrollspyController } from "../src/controllers/scrollspy_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay, tick } from "./helpers/timing";
 
 describe("ScrollspyController", () => {
@@ -63,7 +64,7 @@ describe("ScrollspyController", () => {
   });
 
   afterEach(async () => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -160,7 +161,7 @@ describe("ScrollspyController", () => {
     container.getBoundingClientRect = () =>
       ({ top: 200, left: 0, width: 800, height: 600 }) as DOMRect;
 
-    application.stop();
+    disconnectAndStopApplication(application);
     application = Application.start();
     application.register("stimeo--scrollspy", ScrollspyController);
     await delay(50);

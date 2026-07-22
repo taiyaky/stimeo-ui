@@ -4,6 +4,7 @@ import { FlashController } from "../src/controllers/flash_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -42,7 +43,7 @@ describe("FlashController", () => {
 
   afterEach(() => {
     window.removeEventListener("stimeo--announcer:announce", onAnnounce);
-    application.stop();
+    disconnectAndStopApplication(application);
     vi.useRealTimers();
     document.body.innerHTML = "";
   });

@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { CompositionTracker } from "../utils/composition_tracker";
 import { scrollOptionIntoView } from "../utils/option_scroll";
 
 /**
@@ -63,20 +64,35 @@ export class ComboboxController extends Controller<HTMLElement> {
    * does not immediately re-open the listbox via a `focus`-bound action.
    */
   #suppressOpen = false;
+  /** Owns IME lifecycle state; confirmed text re-filters the list once. */
+  readonly #composition = new CompositionTracker({ onEnd: () => this.filter() });
 
   /** Starts closed with no active option and registers the outside-click listener. */
   override connect(): void {
+    if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
     this.close();
     document.addEventListener("click", this.#onOutsideClick);
   }
 
   /** Removes the document-level listener registered in {@link connect}. */
   override disconnect(): void {
+    this.#composition.disconnect();
     document.removeEventListener("click", this.#onOutsideClick);
   }
 
-  /** Filters options by the current input value and opens the listbox. */
-  filter(): void {
+  /** Tracks an input added initially or after connect. */
+  inputTargetConnected(input: HTMLInputElement): void {
+    this.#composition.observe(input);
+  }
+
+  /** Removes composition listeners when the active input is replaced or removed. */
+  inputTargetDisconnected(input: HTMLInputElement): void {
+    this.#composition.unobserve(input);
+  }
+
+  /** Filters confirmed input text and opens the listbox. */
+  filter(event?: InputEvent): void {
+    if (this.#composition.isComposing(event)) return;
     this.open();
   }
 
@@ -119,11 +135,9 @@ export class ComboboxController extends Controller<HTMLElement> {
   onKeydown(event: KeyboardEvent): void {
     // Ignore keys fired during IME composition: the `Enter` that confirms a
     // candidate (and arrows that move within it) must not select an option or
-    // close the popup. `keyCode === 229` covers browsers that omit `isComposing`
-    // on the confirming keydown. Aligns with the library's IME composition-guard
-    // policy (the keydown-level equivalent of the input-path guards in
-    // character-counter / auto-submit).
-    if (event.isComposing || event.keyCode === 229) return;
+    // close the popup. Controller-owned lifecycle state covers confirming events
+    // that omit the standard per-event signal.
+    if (this.#composition.isComposing(event)) return;
     switch (event.key) {
       case "ArrowDown": {
         event.preventDefault();
@@ -175,6 +189,11 @@ export class ComboboxController extends Controller<HTMLElement> {
         break;
       }
       case "Escape":
+        // Layered-Escape contract: leave a press an inner handler already
+        // owned (rule 1), and consume only while owning a dismissable state —
+        // with the list already closed the press stays free for the shared
+        // resolver, so an enclosing dialog still closes from a focused input.
+        if (event.defaultPrevented || this.#isClosed) break;
         event.preventDefault();
         this.close();
         break;

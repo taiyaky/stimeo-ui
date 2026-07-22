@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SmartStickyHeaderController } from "../src/controllers/smart_sticky_header_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -48,7 +49,7 @@ describe("SmartStickyHeaderController", () => {
 
   afterEach(async () => {
     controller()?.disconnect();
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     vi.unstubAllGlobals();
     await tick();

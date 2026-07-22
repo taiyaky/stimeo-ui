@@ -33,6 +33,7 @@
       data-stimeo--overflow-menu-target="more"
       hidden>
       <button
+        id="overflow-menu-trigger"
         type="button"
         class="overflow-demo__trigger"
         aria-haspopup="menu"
@@ -41,7 +42,8 @@
         data-action="click->stimeo--menu#toggle keydown->stimeo--menu#onTriggerKeydown">
         <%= t("components.overflow_menu.demo.more") %>
       </button>
-      <ul class="overflow-demo__menu" role="menu" data-stimeo--menu-target="menu" hidden></ul>
+      <ul class="overflow-demo__menu" role="menu" aria-labelledby="overflow-menu-trigger"
+          data-stimeo--menu-target="menu" hidden></ul>
     </div>
   </div>
 </div>

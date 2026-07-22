@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { TagsInputController } from "../src/controllers/tags_input_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -40,12 +41,17 @@ describe("TagsInputController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
   const root = () =>
     document.querySelector<HTMLElement>("[data-controller='stimeo--tags-input']") as HTMLElement;
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--tags-input",
+    ) as TagsInputController;
   const input = () =>
     document.querySelector<HTMLInputElement>(
       "[data-stimeo--tags-input-target='input']",
@@ -98,13 +104,28 @@ describe("TagsInputController", () => {
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["ぎじゅつ"]);
   });
 
-  it("treats keyCode 229 (legacy IME signal) as composition", async () => {
+  it("ignores an unflagged Enter until the composition lifecycle ends", async () => {
     await mount();
     input().value = "やまだ";
-    input().dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true }),
-    );
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(tags()).toHaveLength(0);
+
+    input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    type("やまだ", "Enter");
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["やまだ"]);
+  });
+
+  it("clears composition state across disconnect and reconnect", async () => {
+    await mount();
+    input().value = "日本語";
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+
+    controller().disconnect();
+    controller().connect();
+    input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["日本語"]);
   });
 
   it("mirrors tags into hidden fields with the configured name", async () => {

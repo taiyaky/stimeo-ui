@@ -1,14 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
-
-/** Elements that can hold keyboard focus, used to pick a safe focus fallback. */
-const FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  '[tabindex]:not([tabindex="-1"])',
-].join(",");
+import { FOCUSABLE } from "../utils/focus_trap";
 
 /**
  * Headless "dismissible" behavior for banners, notices, and inline alerts.
@@ -57,13 +48,16 @@ export class DismissibleController extends Controller<HTMLElement> {
     if (!root.hasAttribute("data-state")) {
       root.setAttribute("data-state", "open");
     }
-    if (this.closeOnEscapeValue) {
-      this.element.addEventListener("keydown", this.#onKeydown);
-    }
+    this.#syncEscapeListener();
   }
 
   override disconnect(): void {
     this.element.removeEventListener("keydown", this.#onKeydown);
+  }
+
+  /** Keeps the Escape listener aligned with a live `closeOnEscape` Value. */
+  closeOnEscapeValueChanged(): void {
+    this.#syncEscapeListener();
   }
 
   /** Dismisses the element. Bound via `data-action` (click on the close button). */
@@ -73,12 +67,23 @@ export class DismissibleController extends Controller<HTMLElement> {
 
   /** Dismisses on Escape when `closeOnEscape` is set and focus is inside. */
   readonly #onKeydown = (event: KeyboardEvent): void => {
-    if (event.key !== "Escape") return;
+    // A press during IME composition cancels the conversion (e.g. in a text
+    // field inside this element), never the element itself.
+    if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+    if (!this.closeOnEscapeValue) return;
     const active = document.activeElement;
     if (!active || !this.element.contains(active)) return;
     event.preventDefault();
     this.#performDismiss();
   };
+
+  /** Adds or removes the one stable listener reference without duplicating it. */
+  #syncEscapeListener(): void {
+    this.element.removeEventListener("keydown", this.#onKeydown);
+    if (this.closeOnEscapeValue) {
+      this.element.addEventListener("keydown", this.#onKeydown);
+    }
+  }
 
   /** The element to dismiss: the explicit `root` target, or the host element. */
   get #root(): HTMLElement {
@@ -109,29 +114,65 @@ export class DismissibleController extends Controller<HTMLElement> {
   #retreatFocus(root: HTMLElement): void {
     const active = document.activeElement;
     if (!(active instanceof HTMLElement) || !root.contains(active)) return;
-    this.#focusFallback(root).focus();
+
+    for (const candidate of this.#focusFallbacks(root)) {
+      candidate.focus();
+      if (document.activeElement === candidate) return;
+    }
+    document.body.focus();
   }
 
-  /** Resolves the best focus fallback per the documented precedence. */
-  #focusFallback(root: HTMLElement): HTMLElement {
-    if (this.hasFallbackTarget && !root.contains(this.fallbackTarget)) {
-      return this.fallbackTarget;
+  /** Yields available focus fallbacks in precedence order, stopping after focus succeeds. */
+  *#focusFallbacks(root: HTMLElement): Generator<HTMLElement> {
+    const explicitFallback = this.hasFallbackTarget ? this.fallbackTarget : null;
+    if (
+      explicitFallback &&
+      !root.contains(explicitFallback) &&
+      this.#isFocusAvailable(explicitFallback)
+    ) {
+      yield explicitFallback;
     }
 
-    const candidates = Array.from(
-      document.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-    ).filter((element) => !root.contains(element));
+    const candidates = document.querySelectorAll<HTMLElement>(FOCUSABLE);
+    for (const element of candidates) {
+      if (
+        element === explicitFallback ||
+        root.contains(element) ||
+        !(root.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)
+      ) {
+        continue;
+      }
+      if (this.#isFocusAvailable(element)) yield element;
+    }
 
-    const after = candidates.find(
-      (element) => root.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING,
-    );
-    if (after) return after;
+    for (let index = candidates.length - 1; index >= 0; index -= 1) {
+      const element = candidates.item(index);
+      if (
+        element === explicitFallback ||
+        root.contains(element) ||
+        !(root.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_PRECEDING)
+      ) {
+        continue;
+      }
+      if (this.#isFocusAvailable(element)) yield element;
+    }
+  }
 
-    const before = candidates
-      .reverse()
-      .find((element) => root.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_PRECEDING);
-    if (before) return before;
+  /** Whether focus is allowed by the element and its semantic ancestors. */
+  #isFocusAvailable(element: HTMLElement): boolean {
+    if (
+      !element.matches(FOCUSABLE) &&
+      !element.hasAttribute("tabindex") &&
+      !element.isContentEditable
+    ) {
+      return false;
+    }
+    if (element.matches(":disabled")) return false;
+    if (element instanceof HTMLInputElement && element.type === "hidden") return false;
 
-    return document.body;
+    for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+      if (current.hidden || current.inert) return false;
+    }
+    return true;
   }
 }

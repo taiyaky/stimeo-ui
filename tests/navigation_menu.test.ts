@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NavigationMenuController } from "../src/controllers/navigation_menu_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -49,7 +50,7 @@ describe("NavigationMenuController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -97,7 +98,53 @@ describe("NavigationMenuController", () => {
   it("closes on Escape and returns focus to the trigger", () => {
     byId("t1").focus();
     byId("t1").click();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    byId("t1").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(panelHidden("p1")).toBe(true);
+    expect(document.activeElement).toBe(byId("t1"));
+  });
+
+  it("consumes the Escape it owns", () => {
+    byId("t1").focus();
+    byId("t1").click();
+    const event = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    byId("t1").dispatchEvent(event);
+    // Owning the press marks it handled so outer layers skip the same Escape.
+    expect(event.defaultPrevented).toBe(true);
+    expect(panelHidden("p1")).toBe(true);
+  });
+
+  it("ignores an Escape already handled by an inner layer", () => {
+    byId("t1").focus();
+    byId("t1").click();
+    const handled = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    handled.preventDefault();
+    byId("t1").dispatchEvent(handled);
+    expect(panelHidden("p1")).toBe(false);
+    expect(document.activeElement).toBe(byId("t1"));
+  });
+
+  it("stays open on a destination-less focus loss and still closes on Escape", () => {
+    byId("t1").focus();
+    byId("t1").click();
+    expect(panelHidden("p1")).toBe(false);
+
+    // A null relatedTarget is indeterminate (clicks on non-focusable panel
+    // content, window deactivation), so it must not close the nav — the popover
+    // convention. Keyboard dismissal survives via the Escape stack's body claim.
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(panelHidden("p1")).toBe(false);
+
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    document.body.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
     expect(panelHidden("p1")).toBe(true);
     expect(document.activeElement).toBe(byId("t1"));
   });
@@ -128,7 +175,7 @@ describe("NavigationMenuController", () => {
     expect(panelHidden("p1")).toBe(false);
   });
 
-  it("releases the document listener on disconnect", () => {
+  it("releases the dismissal listeners on disconnect", () => {
     byId("t1").click();
     const nav = document.querySelector(
       "[data-controller='stimeo--navigation-menu']",
@@ -140,6 +187,8 @@ describe("NavigationMenuController", () => {
     controller?.disconnect();
     document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(panelHidden("p1")).toBe(false); // a surviving listener would have closed it
+    byId("t1").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(panelHidden("p1")).toBe(false);
   });
 
   it("has no machine-detectable a11y violations (closed and open)", async () => {
@@ -177,7 +226,7 @@ describe("NavigationMenuController with openOnHover", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -240,7 +289,7 @@ describe("NavigationMenuController with openOnHover and hoverArea", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -305,7 +354,7 @@ describe("NavigationMenuController hover-region continuity (relatedTarget)", () 
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -373,7 +422,7 @@ describe("NavigationMenuController with a panel outside its hoverArea", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -406,7 +455,7 @@ describe("NavigationMenuController with targets changing after connect", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -483,7 +532,7 @@ describe("NavigationMenuController with hoverArea but openOnHover disabled", () 
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

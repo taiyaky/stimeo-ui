@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MultiSelectController } from "../src/controllers/multi_select_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -97,12 +98,17 @@ describe("MultiSelectController", () => {
     );
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
   const root = () =>
     document.querySelector<HTMLElement>("[data-controller='stimeo--multi-select']") as HTMLElement;
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--multi-select",
+    ) as MultiSelectController;
   const input = () =>
     document.querySelector<HTMLInputElement>(
       "[data-stimeo--multi-select-target='input']",
@@ -208,7 +214,7 @@ describe("MultiSelectController", () => {
     expect(changes).toEqual([["apple"], []]);
   });
 
-  it("ignores the Enter that confirms an IME composition", async () => {
+  it("honors the standard per-event IME signal", async () => {
     await mount();
     key("ArrowDown"); // open, active apple
     // The Enter confirming an IME candidate carries isComposing=true: it must
@@ -218,12 +224,47 @@ describe("MultiSelectController", () => {
     );
     expect(selected()).toEqual(["false", "false", "false"]);
     expect(tags()).toHaveLength(0);
-    // keyCode 229 (legacy IME signal) is treated the same way.
-    input().dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true }),
-    );
-    expect(selected()).toEqual(["false", "false", "false"]);
     // A real Enter still selects.
+    key("Enter");
+    expect(selected()).toEqual(["true", "false", "false"]);
+  });
+
+  it("defers filtering until compositionend and ignores its unflagged Enter", async () => {
+    await mount();
+    filterTo("a"); // Apple and Banana are visible; Apple is active.
+    const queries: string[] = [];
+    root().addEventListener("stimeo--multi-select:filter", (event) => {
+      queries.push((event as CustomEvent).detail.query);
+    });
+
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    input().value = "ch";
+    input().dispatchEvent(new InputEvent("input", { bubbles: true }));
+    key("Enter");
+
+    expect(selected()).toEqual(["false", "false", "false"]);
+    expect(options().map((option) => option.hidden)).toEqual([false, false, true]);
+
+    input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    // The usual post-composition input must not duplicate the confirmed query event.
+    input().dispatchEvent(new InputEvent("input", { bubbles: true }));
+    expect(options().map((option) => option.hidden)).toEqual([true, true, false]);
+    expect(active()).toBe("ms-cherry");
+    expect(queries).toEqual(["ch"]);
+
+    key("Enter");
+    expect(selected()).toEqual(["false", "false", "true"]);
+  });
+
+  it("clears composition state across disconnect and reconnect", async () => {
+    await mount();
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+
+    controller().disconnect();
+    controller().connect();
+    key("ArrowDown");
+
+    expect(active()).toBe("ms-apple");
     key("Enter");
     expect(selected()).toEqual(["true", "false", "false"]);
   });
@@ -343,6 +384,16 @@ describe("MultiSelectController", () => {
     key("ArrowDown");
     document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(list().hidden).toBe(true);
+  });
+
+  it("leaves Escape unconsumed while the list is closed", async () => {
+    await mount();
+    // With nothing to close the widget owns no dismissable state, so the press
+    // stays free for the shared Escape resolver (an enclosing dialog etc.).
+    expect(list().hidden).toBe(true);
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    input().dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
   });
 
   it("removes aria-activedescendant when closed", async () => {

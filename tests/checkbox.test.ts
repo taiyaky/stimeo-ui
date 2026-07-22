@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CheckboxController } from "../src/controllers/checkbox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -32,7 +33,7 @@ describe("CheckboxController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -100,7 +101,7 @@ describe("CheckboxController", () => {
   });
 
   it("stops reacting after disconnect", () => {
-    application.stop();
+    application.unload("stimeo--checkbox");
     changeChild(0, true);
     expect(parent().indeterminate).toBe(false);
     expect(root().getAttribute("data-state")).toBe("none");
@@ -142,7 +143,7 @@ describe("CheckboxController initial reflection", () => {
   let application: Application;
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

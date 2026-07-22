@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DirtyFormController } from "../src/controllers/dirty_form_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -38,12 +39,9 @@ describe("DirtyFormController", () => {
     document.body.innerHTML = "";
   });
 
-  afterEach(async () => {
-    // Remove the element first so controllers disconnect (and drop their window
-    // listeners); application.stop() alone does not disconnect them.
+  afterEach(() => {
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
-    await tick();
-    application.stop();
     vi.restoreAllMocks();
   });
 

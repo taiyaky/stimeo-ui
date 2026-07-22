@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { BreadcrumbController } from "../src/controllers/breadcrumb_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -41,7 +42,7 @@ describe("BreadcrumbController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

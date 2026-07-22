@@ -3,359 +3,542 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cssTimeToMs, ToastController } from "../src/controllers/toast_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-import { delay, tick } from "./helpers/timing";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { tick } from "./helpers/timing";
 
 /**
- * Behavioral tests for {@link ToastController}: verifying notifications list limits,
- * live-region status roles, timing pause/resume on hover/focus (WCAG 2.2.1), and Escape closure.
+ * Behavioral tests for {@link ToastController}: list/live-region semantics,
+ * delegated interaction, timer policy, public events, and Turbo-safe teardown.
  */
 
 describe("ToastController", () => {
   let application: Application;
 
+  const markup = ({
+    suffix = "",
+    duration = 200,
+    max = 2,
+    includeValues = true,
+  }: {
+    suffix?: string;
+    duration?: number;
+    max?: number;
+    includeValues?: boolean;
+  } = {}) => `
+    <div id="toast-root${suffix}" data-controller="stimeo--toast"
+         ${includeValues ? `data-stimeo--toast-duration-value="${duration}"` : ""}
+         ${includeValues ? `data-stimeo--toast-max-value="${max}"` : ""}>
+      <button id="show-trigger${suffix}" type="button"
+              data-action="click->stimeo--toast#show"
+              data-stimeo--toast-body-param="Param notification"
+              data-stimeo--toast-type-param="alert">Show</button>
+      <div role="region" aria-label="Notifications">
+        <ol id="toast-list${suffix}" data-stimeo--toast-target="list"></ol>
+        <template data-stimeo--toast-target="template">
+          <li data-stimeo--toast-target="item" tabindex="0">
+            <span role="status" data-toast-slot="body"></span>
+            <button type="button" data-toast-dismiss>Dismiss</button>
+          </li>
+        </template>
+      </div>
+    </div>`;
+
+  const requireElement = <T extends Element>(selector: string): T => {
+    const element = document.querySelector<T>(selector);
+    if (!element) throw new Error(`Element not found: ${selector}`);
+    return element;
+  };
+
+  const root = (suffix = "") => requireElement<HTMLElement>(`#toast-root${suffix}`);
+  const list = (suffix = "") => requireElement<HTMLOListElement>(`#toast-list${suffix}`);
+  const controller = (suffix = "") => {
+    const instance = application.getControllerForElementAndIdentifier(
+      root(suffix),
+      "stimeo--toast",
+    );
+    if (!(instance instanceof ToastController)) throw new Error("Toast controller not connected");
+    return instance;
+  };
+  const item = (suffix = "") =>
+    requireElement<HTMLElement>(`#toast-list${suffix} [data-stimeo--toast-target='item']`);
+  const body = (toast: HTMLElement) => toast.querySelector<HTMLElement>("[data-toast-slot='body']");
+  const dismissButton = (toast: HTMLElement) =>
+    toast.querySelector<HTMLButtonElement>("[data-toast-dismiss]");
+
+  const triggerShow = (text: string, type: "status" | "alert" = "status", suffix = "") => {
+    controller(suffix).show(new CustomEvent("show", { detail: { body: text, type } }));
+  };
+
   beforeEach(async () => {
-    document.body.innerHTML = `
-      <div data-controller="stimeo--toast"
-           data-stimeo--toast-duration-value="200"
-           data-stimeo--toast-max-value="2">
-        <div role="region" aria-label="Notifications">
-          <ol id="list" data-stimeo--toast-target="list"></ol>
-          <template data-stimeo--toast-target="template">
-            <li role="status" id="toast-item" data-stimeo--toast-target="item"
-                data-action="mouseenter->stimeo--toast#pause mouseleave->stimeo--toast#resume focusin->stimeo--toast#pause focusout->stimeo--toast#resume keydown->stimeo--toast#onKeydown"
-                tabindex="0">
-              <span data-toast-slot="body"></span>
-              <button id="dismiss-btn" type="button" data-action="stimeo--toast#dismiss">Dismiss</button>
-            </li>
-          </template>
-        </div>
-      </div>`;
+    document.body.innerHTML = markup();
     application = Application.start();
     application.register("stimeo--toast", ToastController);
     await tick();
   });
 
-  afterEach(async () => {
-    application.stop();
+  afterEach(() => {
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
-    await delay(50);
+    vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
-  const list = () => document.getElementById("list") as HTMLElement;
-  const controllerElement = () =>
-    document.querySelector("[data-controller='stimeo--toast']") as HTMLElement;
-
-  const triggerShow = (body: string, type: "status" | "alert" = "status") => {
-    const controller = application.getControllerForElementAndIdentifier(
-      controllerElement(),
-      "stimeo--toast",
-    ) as ToastController;
-    const event = new CustomEvent("show", {
-      detail: { body, type },
-    });
-    controller.show(event);
-  };
-
-  it("starts empty with no elements inside list", () => {
+  it("starts empty with no elements inside the list", () => {
     expect(list().children.length).toBe(0);
   });
 
-  it("clones template and appends to the list when show event is dispatched", async () => {
+  it("clones a listitem with a nested status region when show is dispatched", () => {
     triggerShow("Success notification");
-    await delay(20);
+
+    const toast = item();
     expect(list().children.length).toBe(1);
-    const item = list().querySelector("[data-stimeo--toast-target='item']") as HTMLElement;
-    expect(item).toBeDefined();
-    expect(item.getAttribute("role")).toBe("status");
-    expect(item.querySelector("[data-toast-slot='body']")?.textContent).toBe(
-      "Success notification",
+    expect(toast.getAttribute("role")).toBeNull();
+    expect(body(toast)?.getAttribute("role")).toBe("status");
+    expect(body(toast)?.textContent).toBe("Success notification");
+    expect(dismissButton(toast)).not.toBeNull();
+  });
+
+  it("applies status or alert to the nested live region", () => {
+    triggerShow("Emergency alert", "alert");
+
+    expect(body(item())?.getAttribute("role")).toBe("alert");
+  });
+
+  it("runs the attribute-only show action through Stimulus", () => {
+    requireElement<HTMLButtonElement>("#show-trigger").click();
+
+    expect(body(item())?.textContent).toBe("Param notification");
+    expect(body(item())?.getAttribute("role")).toBe("alert");
+  });
+
+  it("prefers action params over event detail", () => {
+    const event = Object.assign(
+      new CustomEvent("show", { detail: { body: "Detail notification", type: "status" } }),
+      { params: { body: "Param notification", type: "alert" } },
     );
+    controller().show(event);
+
+    expect(body(item())?.textContent).toBe("Param notification");
+    expect(body(item())?.getAttribute("role")).toBe("alert");
   });
 
-  it("applies status or alert roles based on show event details", async () => {
-    triggerShow("Emergency Alert", "alert");
-    await delay(20);
-    const item = list().querySelector("[data-stimeo--toast-target='item']") as HTMLElement;
-    expect(item.getAttribute("role")).toBe("alert");
+  it("rejects invalid bodies and normalizes an invalid type to status", () => {
+    controller().show(new CustomEvent("show", { detail: {} }));
+    controller().show(new CustomEvent("show", { detail: { body: 42 } }));
+    expect(list().children.length).toBe(0);
+
+    controller().show(
+      new CustomEvent("show", { detail: { body: "Normalized notification", type: "urgent" } }),
+    );
+    expect(body(item())?.getAttribute("role")).toBe("status");
   });
 
-  it("reads body and type from a Stimulus action param (attribute-only trigger)", async () => {
-    const controller = application.getControllerForElementAndIdentifier(
-      controllerElement(),
-      "stimeo--toast",
-    ) as ToastController;
-    // Disable the auto-dismiss timer so this assertion-only test leaves no real
-    // timer pending that could race the action-binding later tests depend on.
-    controller.durationValue = 0;
-    // Stimulus attaches `params` to the action event from data-*-param attributes;
-    // this mirrors a `click->stimeo--toast#show` trigger without a hand-written event.
-    const actionEvent = Object.assign(new CustomEvent("show"), {
-      params: { body: "Param triggered", type: "alert" },
-    });
-    controller.show(actionEvent);
+  it("dispatches show with the appended item", () => {
+    const listener = vi.fn();
+    root().addEventListener("stimeo--toast:show", listener);
+
+    triggerShow("Event notification");
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener.mock.calls[0]?.[0]).toMatchObject({ detail: { item: item() } });
+  });
+
+  it("uses duration 0 and max 3 when Values are omitted", async () => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = markup({ includeValues: false });
+    application = Application.start();
+    application.register("stimeo--toast", ToastController);
     await tick();
 
-    const item = list().querySelector("[data-stimeo--toast-target='item']") as HTMLElement;
-    expect(item.querySelector("[data-toast-slot='body']")?.textContent).toBe("Param triggered");
-    expect(item.getAttribute("role")).toBe("alert");
+    expect(controller().durationValue).toBe(0);
+    expect(controller().maxValue).toBe(3);
+    for (let index = 1; index <= 4; index++) triggerShow(`Notification ${index}`);
+    controller().enforceMaxLimit();
+    expect(list().children.length).toBe(3);
+    expect(body(list().firstElementChild as HTMLElement)?.textContent).toBe("Notification 2");
   });
 
-  it("ignores a show invocation that carries neither a param nor a detail body", () => {
-    const controller = application.getControllerForElementAndIdentifier(
-      controllerElement(),
-      "stimeo--toast",
-    ) as ToastController;
-    controller.show(new CustomEvent("show", { detail: {} }));
-    expect(list().children.length).toBe(0);
-  });
-
-  it("limits visible items to max value by removing older items", async () => {
+  it("limits items to max by removing the oldest first", () => {
     triggerShow("First notification");
-    await delay(20);
     triggerShow("Second notification");
-    await delay(20);
     triggerShow("Third notification");
 
-    const controller = application.getControllerForElementAndIdentifier(
-      controllerElement(),
-      "stimeo--toast",
-    ) as ToastController;
-    // enforceMaxLimit normally runs from itemTargetConnected (a MutationObserver-driven
-    // Stimulus callback happy-dom does not reliably fire); call it directly for determinism.
-    controller.enforceMaxLimit();
-    await delay(20);
+    controller().enforceMaxLimit();
 
-    // Max is 2, so the first one should be removed.
     expect(list().children.length).toBe(2);
-    const firstText = list().firstElementChild?.querySelector(
-      "[data-toast-slot='body']",
-    )?.textContent;
-    expect(firstText).toBe("Second notification");
+    expect(body(list().firstElementChild as HTMLElement)?.textContent).toBe("Second notification");
   });
 
-  it("dismisses an item automatically after duration", () => {
+  it("keeps no item or delayed callback when max is zero", () => {
     vi.useFakeTimers();
-    try {
-      triggerShow("Auto dismiss toast"); // appends the item synchronously
-      const item = list().querySelector("[data-stimeo--toast-target='item']") as HTMLElement;
-      expect(list().children.length).toBe(1);
+    controller().maxValue = 0;
+    controller().maxValueChanged();
+    const dismissListener = vi.fn();
+    root().addEventListener("stimeo--toast:dismiss", dismissListener);
+    triggerShow("Rejected by max");
+    const toast = item();
 
-      const controller = application.getControllerForElementAndIdentifier(
-        controllerElement(),
-        "stimeo--toast",
-      ) as ToastController;
-      // Start the auto-dismiss timer directly, bypassing happy-dom's async
-      // MutationObserver (the source of the flakiness). startTimer clears any prior
-      // timer first, so this stays correct even if the observer also fires it.
-      controller.itemTargetConnected(item);
+    controller().itemTargetConnected(toast);
+    expect(list().children.length).toBe(0);
+    expect(dismissListener).toHaveBeenCalledOnce();
 
-      // Drive virtual time past the 200ms auto-dismiss; the zero-duration
-      // transition makes finalize() remove the item synchronously. A synchronous
-      // advance never flushes microtasks, so the observer cannot interfere.
-      vi.advanceTimersByTime(400);
-      expect(list().children.length).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
+    vi.advanceTimersByTime(1_000);
+    expect(dismissListener).toHaveBeenCalledOnce();
   });
 
-  it("pauses automatic dismiss on mouseenter and resumes on mouseleave", () => {
+  it("auto-dismisses and reports the timeout event detail", () => {
     vi.useFakeTimers();
-    try {
-      triggerShow("Hover pause toast");
-      const item = list().querySelector("[data-stimeo--toast-target='item']") as HTMLElement;
-      const controller = application.getControllerForElementAndIdentifier(
-        controllerElement(),
-        "stimeo--toast",
-      ) as ToastController;
-      // Arm the auto-dismiss timer directly, bypassing happy-dom's async observer.
-      controller.itemTargetConnected(item);
+    const listener = vi.fn();
+    root().addEventListener("stimeo--toast:dismiss", listener);
+    triggerShow("Auto dismiss notification");
+    const toast = item();
+    controller().itemTargetConnected(toast);
 
-      // Direct invoke only to bypass happy-dom event propagation delays.
-      controller.pause({ currentTarget: item } as unknown as Event);
-      expect(item.getAttribute("data-paused")).toBe("true");
+    vi.advanceTimersByTime(200);
 
-      vi.advanceTimersByTime(150); // paused: the 200ms timer cannot fire
-      expect(list().children.length).toBe(1); // Still visible
-
-      controller.resume({ currentTarget: item } as unknown as Event);
-      expect(item.hasAttribute("data-paused")).toBe(false);
-
-      vi.advanceTimersByTime(300); // past the resumed 200ms remaining
-      expect(list().children.length).toBe(0); // Dismissed
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(list().children.length).toBe(0);
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener.mock.calls[0]?.[0]).toMatchObject({
+      detail: { item: toast, reason: "timeout" },
+    });
   });
 
-  it("pauses automatic dismiss on focusin and resumes on focusout", () => {
+  it("pauses and resumes through delegated pointer events", () => {
     vi.useFakeTimers();
-    try {
-      triggerShow("Focus pause toast");
-      const item = list().querySelector("[data-stimeo--toast-target='item']") as HTMLElement;
-      const controller = application.getControllerForElementAndIdentifier(
-        controllerElement(),
-        "stimeo--toast",
-      ) as ToastController;
-      // Arm the auto-dismiss timer directly, bypassing happy-dom's async observer.
-      controller.itemTargetConnected(item);
+    triggerShow("Hover pause notification");
+    const toast = item();
+    controller().itemTargetConnected(toast);
 
-      // Direct invoke only to bypass happy-dom event propagation delays.
-      controller.pause({ currentTarget: item, type: "focusin" } as unknown as Event);
-      expect(item.getAttribute("data-paused")).toBe("true");
+    vi.advanceTimersByTime(50);
+    toast.dispatchEvent(
+      new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }),
+    );
+    expect(toast.getAttribute("data-paused")).toBe("true");
+    vi.advanceTimersByTime(300);
+    expect(list().children.length).toBe(1);
 
-      vi.advanceTimersByTime(150); // paused: the 200ms timer cannot fire
-      expect(list().children.length).toBe(1);
-
-      controller.resume({ currentTarget: item, type: "focusout" } as unknown as Event);
-      expect(item.hasAttribute("data-paused")).toBe(false);
-
-      vi.advanceTimersByTime(300); // past the resumed 200ms remaining
-      expect(list().children.length).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
+    toast.dispatchEvent(
+      new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }),
+    );
+    expect(toast.hasAttribute("data-paused")).toBe(false);
+    vi.advanceTimersByTime(149);
+    expect(list().children.length).toBe(1);
+    vi.advanceTimersByTime(1);
+    expect(list().children.length).toBe(0);
   });
 
-  it("dismisses focused item immediately when Escape is pressed", () => {
-    triggerShow("Press Escape toast");
-    const item = list().querySelector("[data-stimeo--toast-target='item']") as HTMLElement;
-    const controller = application.getControllerForElementAndIdentifier(
-      controllerElement(),
-      "stimeo--toast",
-    ) as ToastController;
+  it("pauses and resumes through delegated focus events", () => {
+    vi.useFakeTimers();
+    triggerShow("Focus pause notification");
+    const toast = item();
+    controller().itemTargetConnected(toast);
 
-    // Drive the keydown handler directly (bypasses happy-dom's async action binding).
-    controller.onKeydown({
+    toast.dispatchEvent(new FocusEvent("focusin", { bubbles: true, relatedTarget: document.body }));
+    expect(toast.getAttribute("data-paused")).toBe("true");
+    vi.advanceTimersByTime(300);
+    expect(list().children.length).toBe(1);
+
+    toast.dispatchEvent(
+      new FocusEvent("focusout", { bubbles: true, relatedTarget: document.body }),
+    );
+    vi.advanceTimersByTime(200);
+    expect(list().children.length).toBe(0);
+  });
+
+  it("stays paused until both pointer and focus have left", () => {
+    vi.useFakeTimers();
+    triggerShow("Combined pause notification");
+    const toast = item();
+    controller().itemTargetConnected(toast);
+
+    toast.dispatchEvent(
+      new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }),
+    );
+    toast.dispatchEvent(new FocusEvent("focusin", { bubbles: true, relatedTarget: document.body }));
+    toast.dispatchEvent(
+      new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }),
+    );
+    vi.advanceTimersByTime(300);
+    expect(toast.getAttribute("data-paused")).toBe("true");
+    expect(list().children.length).toBe(1);
+
+    toast.dispatchEvent(
+      new FocusEvent("focusout", { bubbles: true, relatedTarget: document.body }),
+    );
+    vi.advanceTimersByTime(200);
+    expect(list().children.length).toBe(0);
+  });
+
+  it("clears existing timers when duration changes to zero", () => {
+    vi.useFakeTimers();
+    triggerShow("Persistent notification");
+    const toast = item();
+    controller().itemTargetConnected(toast);
+
+    controller().durationValue = 0;
+    controller().durationValueChanged();
+    vi.advanceTimersByTime(1_000);
+
+    expect(list().children.length).toBe(1);
+    expect(toast.hasAttribute("data-paused")).toBe(false);
+  });
+
+  it("restarts active timers with a new positive duration", () => {
+    vi.useFakeTimers();
+    triggerShow("Reset duration notification");
+    controller().itemTargetConnected(item());
+    vi.advanceTimersByTime(100);
+
+    controller().durationValue = 500;
+    controller().durationValueChanged();
+    vi.advanceTimersByTime(499);
+    expect(list().children.length).toBe(1);
+    vi.advanceTimersByTime(1);
+    expect(list().children.length).toBe(0);
+  });
+
+  it("preserves pause while applying a new positive duration", () => {
+    vi.useFakeTimers();
+    triggerShow("Paused duration notification");
+    const toast = item();
+    controller().itemTargetConnected(toast);
+    toast.dispatchEvent(new FocusEvent("focusin", { bubbles: true, relatedTarget: document.body }));
+
+    controller().durationValue = 500;
+    controller().durationValueChanged();
+    vi.advanceTimersByTime(1_000);
+    expect(list().children.length).toBe(1);
+    expect(toast.getAttribute("data-paused")).toBe("true");
+
+    toast.dispatchEvent(
+      new FocusEvent("focusout", { bubbles: true, relatedTarget: document.body }),
+    );
+    vi.advanceTimersByTime(500);
+    expect(list().children.length).toBe(0);
+  });
+
+  it("dismisses instead of stranding a pause whose remaining time reached zero", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    triggerShow("Expired pause notification");
+    const toast = item();
+    controller().itemTargetConnected(toast);
+    vi.setSystemTime(new Date("2026-07-20T00:00:01Z"));
+
+    toast.dispatchEvent(new FocusEvent("focusin", { bubbles: true, relatedTarget: document.body }));
+
+    expect(list().children.length).toBe(0);
+    expect(toast.hasAttribute("data-paused")).toBe(false);
+  });
+
+  it("ignores non-Escape keys and prevents the delegated Escape action", () => {
+    triggerShow("Keyboard notification");
+    const toast = item();
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    toast.dispatchEvent(enter);
+    expect(enter.defaultPrevented).toBe(false);
+    expect(list().children.length).toBe(1);
+
+    const escapeEvent = new KeyboardEvent("keydown", {
       key: "Escape",
-      currentTarget: item,
-      preventDefault() {},
-    } as unknown as KeyboardEvent);
+      bubbles: true,
+      cancelable: true,
+    });
+    toast.dispatchEvent(escapeEvent);
+    expect(escapeEvent.defaultPrevented).toBe(true);
     expect(list().children.length).toBe(0);
   });
 
-  it("dismisses the item immediately when clicking dismiss button", () => {
-    triggerShow("Manual dismiss toast");
-    const item = list().querySelector("[data-stimeo--toast-target='item']") as HTMLElement;
-    const btn = item.querySelector("#dismiss-btn") as HTMLElement;
-    const controller = application.getControllerForElementAndIdentifier(
-      controllerElement(),
-      "stimeo--toast",
-    ) as ToastController;
+  it("keeps the toast when Escape cancels an IME composition", () => {
+    triggerShow("Composing notification");
+    const toast = item();
+    // Widget-local half of the shared layered-Escape contract: a composing press
+    // (e.g. in a text field inside the toast) steers the IME conversion,
+    // never the toast.
+    const composing = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    toast.dispatchEvent(composing);
+    expect(composing.defaultPrevented).toBe(false);
+    expect(list().children.length).toBe(1);
+  });
 
-    // Drive the dismiss action directly (bypasses happy-dom's async action binding).
-    controller.dismiss({ currentTarget: btn } as unknown as Event);
+  it("dismisses immediately through the delegated button and reports user detail", () => {
+    const listener = vi.fn();
+    root().addEventListener("stimeo--toast:dismiss", listener);
+    triggerShow("Manual notification");
+    const toast = item();
+
+    dismissButton(toast)?.click();
+
+    expect(list().children.length).toBe(0);
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener.mock.calls[0]?.[0]).toMatchObject({
+      detail: { item: toast, reason: "user" },
+    });
+  });
+
+  it("keeps the legacy per-item action markup working", async () => {
+    const template = requireElement<HTMLTemplateElement>(
+      "#toast-root template[data-stimeo--toast-target='template']",
+    );
+    const templateItem = template.content.querySelector<HTMLElement>(
+      "[data-stimeo--toast-target='item']",
+    );
+    const templateButton = template.content.querySelector<HTMLButtonElement>("button");
+    templateItem?.setAttribute(
+      "data-action",
+      "mouseenter->stimeo--toast#pause mouseleave->stimeo--toast#resume",
+    );
+    templateButton?.removeAttribute("data-toast-dismiss");
+    templateButton?.setAttribute("data-action", "click->stimeo--toast#dismiss");
+
+    triggerShow("Legacy action notification");
+    await tick();
+    const toast = item();
+    const legacyButton = toast.querySelector<HTMLButtonElement>("button");
+    toast.dispatchEvent(new MouseEvent("mouseenter"));
+    expect(toast.getAttribute("data-paused")).toBe("true");
+
+    legacyButton?.click();
     expect(list().children.length).toBe(0);
   });
 
-  it("stays paused while focused after the mouse leaves, then resumes when focus leaves too", () => {
+  it("rebinds delegated interaction when the list target is replaced", async () => {
+    const replacement = document.createElement("ol");
+    replacement.id = "toast-list";
+    replacement.setAttribute("data-stimeo--toast-target", "list");
+    list().replaceWith(replacement);
+    await tick();
+
+    triggerShow("Replacement list notification");
+    dismissButton(item())?.click();
+
+    expect(list().children.length).toBe(0);
+  });
+
+  it("ignores direct item actions when the required list target is missing", async () => {
+    triggerShow("Missing list notification");
+    const toast = item();
+    list().remove();
+    await tick();
+
+    expect(() => controller().dismiss({ currentTarget: toast } as unknown as Event)).not.toThrow();
+    expect(() =>
+      controller().onKeydown({
+        key: "Escape",
+        currentTarget: toast,
+        preventDefault: vi.fn(),
+      } as unknown as KeyboardEvent),
+    ).not.toThrow();
+  });
+
+  it("finalizes one dismissal when a leaving item is dismissed repeatedly", () => {
     vi.useFakeTimers();
-    try {
-      triggerShow("Combined pause toast");
-      const item = list().querySelector("[data-stimeo--toast-target='item']") as HTMLElement;
-      const controller = application.getControllerForElementAndIdentifier(
-        controllerElement(),
-        "stimeo--toast",
-      ) as ToastController;
-      // Arm the auto-dismiss timer directly, bypassing happy-dom's async observer.
-      controller.itemTargetConnected(item);
+    const listener = vi.fn();
+    root().addEventListener("stimeo--toast:dismiss", listener);
+    triggerShow("Single finalize notification");
+    const toast = item();
+    toast.style.transitionDuration = "100ms";
 
-      // Hover and focus are independent reasons; both active.
-      controller.pause({ currentTarget: item, type: "mouseenter" } as unknown as Event);
-      controller.pause({ currentTarget: item, type: "focusin" } as unknown as Event);
-      expect(item.getAttribute("data-paused")).toBe("true");
+    dismissButton(toast)?.click();
+    dismissButton(toast)?.click();
+    controller().enforceMaxLimit();
+    expect(toast.dataset.state).toBe("leaving");
+    vi.advanceTimersByTime(100);
 
-      // Mouse leaves but focus remains: must stay paused.
-      controller.resume({ currentTarget: item, type: "mouseleave" } as unknown as Event);
-      expect(item.getAttribute("data-paused")).toBe("true");
-
-      vi.advanceTimersByTime(300); // longer than 200ms, but still alive because paused
-      expect(list().children.length).toBe(1);
-
-      // Focus leaves too: now the timer resumes.
-      controller.resume({ currentTarget: item, type: "focusout" } as unknown as Event);
-      expect(item.hasAttribute("data-paused")).toBe(false);
-
-      vi.advanceTimersByTime(300); // past the resumed 200ms remaining
-      expect(list().children.length).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(list().children.length).toBe(0);
+    expect(listener).toHaveBeenCalledOnce();
   });
 
-  it("parses CSS transition durations in both seconds and milliseconds", () => {
+  it("parses CSS transition durations in seconds and milliseconds", () => {
     expect(cssTimeToMs("0.2s")).toBe(200);
     expect(cssTimeToMs("150ms")).toBe(150);
-    expect(cssTimeToMs("0.3s, 0.1s")).toBe(300); // only the first value matters
+    expect(cssTimeToMs("0.3s, 0.1s")).toBe(300);
     expect(cssTimeToMs("")).toBe(0);
   });
 
   it("has no machine-detectable a11y violations with a live toast present", async () => {
     triggerShow("Saved successfully");
-    await tick();
-    // The toast markup contract places `role="status"` on `<li>` elements inside an `<ol>`.
-    // Per ARIA-in-HTML, `<li>` has a restricted allowed-role set that excludes `status`,
-    // which causes axe to flag `aria-allowed-role` and `list` (the <ol> child is no longer
-    // seen as a listitem). These are intentional trade-offs in the existing markup contract;
-    // disabling only these two rules here so we still catch any other violations.
-    await expectNoA11yViolations(controllerElement(), {
-      rules: {
-        "aria-allowed-role": { enabled: false },
-        list: { enabled: false },
-      },
-    });
+
+    await expectNoA11yViolations(root());
   });
 
-  it("announces the live-region status role and body in order after show", async () => {
+  it("announces listitem, status body, and dismiss button in order", async () => {
     triggerShow("File saved");
-    await tick();
 
-    // Container is the <ol> list element; virtual reader traverses:
-    //   "list" (ol), "status" (li role=status), "File saved" (body text),
-    //   "button, Dismiss" (dismiss btn), "end of status", "end of list".
-    // captureSpeech returns (steps + 1) phrases; pass steps: 5 to get 6 items.
-    // captureSpeech renders button as "button, <name>" (role-first).
-    const phrases = await captureSpeech({ container: list(), steps: 5 });
+    const phrases = await captureSpeech({ container: list(), steps: 7 });
     expect(phrases).toEqual([
       "list",
+      "listitem, level 1, position 1, set size 1",
       "status",
       "File saved",
-      "button, Dismiss",
       "end of status",
+      "button, Dismiss",
+      "end of listitem, level 1, position 1, set size 1",
       "end of list",
     ]);
   });
 
-  it("clears auto-dismiss, finalize, and pending rAF callbacks on disconnect", () => {
+  it("removes delegated listeners on disconnect", () => {
+    triggerShow("Disconnected interaction");
+    const toast = item();
+    const button = dismissButton(toast);
+    controller().disconnect();
+
+    button?.click();
+    toast.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    expect(list().children.length).toBe(1);
+  });
+
+  it("clears auto-dismiss and pending animation callbacks on disconnect", () => {
     vi.useFakeTimers();
-    try {
-      triggerShow("Survives teardown"); // appends the item synchronously
-      const item = list().querySelector("[data-stimeo--toast-target='item']") as HTMLElement;
-      const controller = application.getControllerForElementAndIdentifier(
-        controllerElement(),
-        "stimeo--toast",
-      ) as ToastController;
-      // Arm the auto-dismiss timer and the entering→visible rAF directly (the
-      // connect path), bypassing happy-dom's async MutationObserver.
-      item.setAttribute("data-state", "entering");
-      controller.itemTargetConnected(item);
-      expect(item.getAttribute("data-state")).toBe("entering");
+    const listener = vi.fn();
+    root().addEventListener("stimeo--toast:dismiss", listener);
+    triggerShow("Async teardown notification");
+    const toast = item();
+    controller().itemTargetConnected(toast);
+    expect(toast.dataset.state).toBe("entering");
 
-      const dismissSpy = vi.fn();
-      controllerElement().addEventListener("stimeo--toast:dismiss", dismissSpy);
+    controller().disconnect();
+    vi.advanceTimersByTime(1_000);
 
-      // Disconnect synchronously — what Stimulus does when the element detaches —
-      // before yielding to the event loop. This must cancel the pending timer and
-      // rAF; a synchronous advance below never flushes microtasks, so the observer
-      // cannot re-arm them.
-      controller.disconnect();
+    expect(list().children.length).toBe(1);
+    expect(toast.dataset.state).toBe("entering");
+    expect(listener).not.toHaveBeenCalled();
+  });
 
-      vi.advanceTimersByTime(500); // any uncancelled timer/rAF would fire here
-      expect(dismissSpy).not.toHaveBeenCalled();
-      // The cancelled rAF never flipped the state to "visible".
-      expect(item.getAttribute("data-state")).toBe("entering");
-    } finally {
-      vi.useRealTimers();
-    }
+  it("clears a real transition-finalize timer on disconnect", () => {
+    vi.useFakeTimers();
+    const listener = vi.fn();
+    root().addEventListener("stimeo--toast:dismiss", listener);
+    triggerShow("Finalize teardown notification");
+    const toast = item();
+    toast.style.transitionDuration = "100ms";
+    dismissButton(toast)?.click();
+    expect(toast.dataset.state).toBe("leaving");
+
+    controller().disconnect();
+    vi.advanceTimersByTime(100);
+
+    expect(list().children.length).toBe(1);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("keeps multiple controller instances independent", async () => {
+    document.body.insertAdjacentHTML("beforeend", markup({ suffix: "-second" }));
+    await tick();
+
+    triggerShow("First instance");
+    triggerShow("Second instance", "alert", "-second");
+    dismissButton(item())?.click();
+
+    expect(list().children.length).toBe(0);
+    expect(list("-second").children.length).toBe(1);
+    expect(body(item("-second"))?.textContent).toBe("Second instance");
   });
 });

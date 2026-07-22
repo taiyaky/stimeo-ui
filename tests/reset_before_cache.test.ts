@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ResetBeforeCacheController } from "../src/controllers/reset_before_cache_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -23,7 +24,7 @@ describe("ResetBeforeCacheController", () => {
   };
 
   afterEach(() => {
-    application?.stop();
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

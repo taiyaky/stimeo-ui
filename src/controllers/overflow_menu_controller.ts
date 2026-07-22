@@ -14,8 +14,9 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *       <a data-priority="1">Save</a><a data-priority="2">Duplicate</a><a>Delete</a>
  *     </div>
  *     <div data-controller="stimeo--menu" data-stimeo--overflow-menu-target="more" hidden>
- *       <button data-stimeo--menu-target="trigger">More</button>
- *       <ul role="menu" data-stimeo--menu-target="menu" hidden></ul>
+ *       <button id="more-trigger" data-stimeo--menu-target="trigger">More</button>
+ *       <ul role="menu" aria-labelledby="more-trigger"
+ *           data-stimeo--menu-target="menu" hidden></ul>
  *     </div>
  *   </div>
  *

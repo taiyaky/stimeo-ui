@@ -5,6 +5,7 @@ import { setCableConsumer } from "../src/cable/consumer";
 import { LiveCounterController } from "../src/cable/live_counter_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -60,7 +61,7 @@ describe("LiveCounterController", () => {
 
   afterEach(async () => {
     controller()?.disconnect();
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     setCableConsumer(null);
     await tick();

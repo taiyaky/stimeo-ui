@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TabsController } from "../src/controllers/tabs_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -37,7 +38,7 @@ describe("TabsController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -120,12 +121,11 @@ describe("TabsController", () => {
     ]);
   });
 
-  // Disconnect-teardown regression. The controller holds no timers, observers, or
+  // Context-teardown regression. The controller holds no timers, observers, or
   // document/window listeners (only Stimulus-managed data-action bindings), so
-  // teardown means: after application.stop() the tabs are inert — a click no
-  // longer reselects and arrow navigation no longer moves or activates.
+  // unloading its identifier must make the tabs inert.
   it("becomes inert after disconnect (no lingering side effects)", () => {
-    application.stop();
+    application.unload("stimeo--tabs");
     tabs()[1]?.click();
     expect(tabs()[1]?.getAttribute("aria-selected")).toBe("false");
     expect(tabs()[0]?.getAttribute("aria-selected")).toBe("true");

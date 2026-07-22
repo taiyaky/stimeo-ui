@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ListboxController } from "../src/controllers/listbox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -49,7 +50,7 @@ describe("ListboxController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -185,6 +186,17 @@ describe("ListboxController", () => {
     expect(document.activeElement).toBe(trigger());
   });
 
+  it("stays open on an Escape that cancels an IME composition", () => {
+    trigger().focus();
+    triggerKey("ArrowDown");
+    // Widget-local half of the shared layered-Escape contract: a composing
+    // press steers the IME conversion and never dismisses the popup.
+    trigger().dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, isComposing: true }),
+    );
+    expect(listEl().hidden).toBe(false);
+  });
+
   it("closes on Tab without forcing focus back", () => {
     triggerKey("ArrowDown");
     triggerKey("Tab");
@@ -284,7 +296,7 @@ describe("ListboxController with no options", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

@@ -4,6 +4,7 @@
     Positioning (static placement) is the Playground's CSS. %>
 <div class="menu" data-controller="stimeo--menu">
   <button
+    id="menu-trigger"
     type="button"
     class="menu__trigger"
     aria-haspopup="menu"
@@ -14,8 +15,9 @@
     <%= t("components.menu.demo.trigger") %>
   </button>
 
-  <%# role="menu". Each item is a role="menuitem" button (tabindex=-1). %>
-  <ul id="menu-list" class="menu__list" role="menu" data-stimeo--menu-target="menu" hidden>
+  <%# The trigger labels the menu; each item is a role="menuitem" button (tabindex=-1). %>
+  <ul id="menu-list" class="menu__list" role="menu" aria-labelledby="menu-trigger"
+      data-stimeo--menu-target="menu" hidden>
     <li role="none">
       <button type="button" role="menuitem" class="menu__item" tabindex="-1"
               data-stimeo--menu-target="item"

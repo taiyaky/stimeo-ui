@@ -52,21 +52,18 @@ export interface DemoSource {
 /**
  * Maps a demo directory basename to its controller identifier. Demo dirs use
  * snake_case (`date_range_picker`); controller identifiers are the `stimeo--`
- * prefix plus the kebab-case name (`stimeo--date-range-picker`). The demos tree
- * and the manifest are 1:1 today; {@link buildExamplesIndex} fails the build
- * when either side drifts.
+ * prefix plus the kebab-case name (`stimeo--date-range-picker`).
+ * {@link buildExamplesIndex} enforces a 1:1 mapping between the demos tree and
+ * the manifest.
  */
 export function demoDirToControllerId(dir: string): string {
   return `stimeo--${dir.replaceAll("_", "-")}`;
 }
 
 /**
- * Controllers deliberately shipping without a catalog demo *yet*, exempted
- * from the bijection gate below. Currently empty — the server-bound set
- * (typing-indicator / presence / live-counter) and `stimeo--optimistic`
- * gained their demos together with the playground's Action Cable
- * infrastructure. The gate still fails loudly when an entry here gains a
- * demo (stale allowlist) so an exemption cannot outlive its reason.
+ * Controllers temporarily exempted from the demo/manifest bijection. The
+ * reverse check fails when an exempted controller gains a demo, so every entry
+ * must be removed as soon as its exemption is no longer needed.
  */
 export const PENDING_DEMO_CONTROLLERS: ReadonlySet<string> = new Set([]);
 

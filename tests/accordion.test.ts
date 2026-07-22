@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AccordionController } from "../src/controllers/accordion_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -33,7 +34,7 @@ describe("AccordionController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -116,17 +117,16 @@ describe("AccordionController", () => {
     ]);
   });
 
-  // Disconnect-teardown regression. The controller holds no timers, observers, or
+  // Context-teardown regression. The controller holds no timers, observers, or
   // document/window listeners (only Stimulus-managed data-action bindings), so
-  // teardown means: after application.stop() the headers are inert — a click no
-  // longer toggles and keyboard navigation no longer moves focus.
+  // unloading its identifier must make the headers inert.
   it("becomes inert after disconnect (no lingering side effects)", () => {
     triggers()[0]?.click();
     expect(panel("p1").hidden).toBe(false);
 
-    application.stop();
+    application.unload("stimeo--accordion");
     triggers()[0]?.click();
-    // State is frozen at disconnect: a post-stop click neither collapses the panel
+    // State is frozen at disconnect: a post-unload click neither collapses the panel
     // nor flips aria-expanded.
     expect(panel("p1").hidden).toBe(false);
     expect(triggers()[0]?.getAttribute("aria-expanded")).toBe("true");
@@ -155,7 +155,7 @@ describe("AccordionController", () => {
     // Mirrors the catalog's filter + accordion composition: each header sits in a
     // section a filter can hide. Arrow nav must jump over the hidden middle one
     // rather than calling .focus() on an unperceivable header (focus would stall).
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <div data-controller="stimeo--accordion">
         <section><h3><button id="h1" data-stimeo--accordion-target="trigger"

@@ -5,6 +5,7 @@ import { setCableConsumer } from "../src/cable/consumer";
 import { TypingIndicatorController } from "../src/cable/typing_indicator_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay } from "./helpers/timing";
 
 /**
@@ -64,7 +65,7 @@ describe("TypingIndicatorController", () => {
 
   afterEach(async () => {
     controller()?.disconnect();
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     setCableConsumer(null);
     vi.useRealTimers();

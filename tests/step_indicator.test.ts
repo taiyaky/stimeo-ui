@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { StepIndicatorController } from "../src/controllers/step_indicator_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -31,7 +32,7 @@ describe("StepIndicatorController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

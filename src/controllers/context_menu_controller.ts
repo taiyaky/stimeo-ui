@@ -1,4 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
+import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
  * Headless, accessible **context menu** behavior.
@@ -43,10 +45,15 @@ import { Controller } from "@hotwired/stimulus";
  *   the pointer; `Shift+F10` / `ContextMenu` opens it at the region's center.
  * - On open, focus moves to the first item; the region's `data-state` syncs.
  * - Roving focus inside the menu: `ArrowUp`/`ArrowDown` (wrapping), `Home`/`End`.
- * - Activating an item (click / native `Enter`/`Space` on the button) closes the
- *   menu and restores focus to the region.
- * - `Escape` closes and restores focus to the region; `Tab` closes without
- *   restoring (focus moves on naturally); an outside click closes.
+ * - Activating an enabled item (click / native `Enter`/`Space` on the button)
+ *   closes the menu and restores focus to the region. `aria-disabled` activation
+ *   is blocked before consumer click handlers run.
+ * - `Escape` closes and restores focus to the region. While open the menu is a
+ *   layer on the shared {@link EscapeLayer} stack; it claims a press only while
+ *   focus is inside the controller or fell to the body, so one keypress closes
+ *   exactly one layer (the shared layered-Escape contract). `Tab` lets the
+ *   browser move focus first, then closes on the next task. An outside click or
+ *   context-menu invocation closes without stealing focus from its destination.
  *
  * Roving focus skips items that are not navigable — `hidden`, natively
  * `disabled`, or `aria-disabled="true"` — so the keyboard never lands focus on an
@@ -62,15 +69,26 @@ export class ContextMenuController extends Controller<HTMLElement> {
   declare readonly hasRegionTarget: boolean;
   declare readonly hasMenuTarget: boolean;
 
-  /** Starts closed and registers the outside-click listener. */
+  readonly #timers = new SafeTimeout();
+
+  /** Escape-stack membership while open; the shared resolver dismisses via it. */
+  readonly #escapeLayer = new EscapeLayer();
+
+  /** Starts closed and registers delegated activation and outside-pointer listeners. */
   override connect(): void {
     this.#closeMenu();
-    document.addEventListener("click", this.#onOutsideClick);
+    this.element.addEventListener("click", this.#onItemClickCapture, true);
+    document.addEventListener("click", this.#onOutsidePointer);
+    document.addEventListener("contextmenu", this.#onOutsidePointer);
   }
 
-  /** Removes the document-level listener registered in {@link connect}. */
+  /** Releases the listeners, stack membership, and pending Tab-close task. */
   override disconnect(): void {
-    document.removeEventListener("click", this.#onOutsideClick);
+    this.#timers.clearAll();
+    this.#escapeLayer.deactivate();
+    this.element.removeEventListener("click", this.#onItemClickCapture, true);
+    document.removeEventListener("click", this.#onOutsidePointer);
+    document.removeEventListener("contextmenu", this.#onOutsidePointer);
   }
 
   /**
@@ -101,11 +119,17 @@ export class ContextMenuController extends Controller<HTMLElement> {
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
-        if (items.length > 0) items[(currentIndex + 1) % items.length]?.focus();
+        if (items.length > 0) {
+          const nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
+          items[nextIndex]?.focus();
+        }
         break;
       case "ArrowUp":
         event.preventDefault();
-        if (items.length > 0) items[(currentIndex - 1 + items.length) % items.length]?.focus();
+        if (items.length > 0) {
+          const previousIndex = currentIndex < 0 ? items.length - 1 : currentIndex - 1;
+          items[(previousIndex + items.length) % items.length]?.focus();
+        }
         break;
       case "Home":
         event.preventDefault();
@@ -115,13 +139,11 @@ export class ContextMenuController extends Controller<HTMLElement> {
         event.preventDefault();
         items[items.length - 1]?.focus();
         break;
-      case "Escape":
-        event.preventDefault();
-        this.#closeAndRestore();
-        break;
       case "Tab":
-        // Per APG, Tab closes the menu but lets focus move on naturally.
-        this.#closeMenu();
+        // Closing synchronously removes the focused item before the browser's
+        // default Tab action, which can restart traversal at the document head.
+        this.#timers.clearAll();
+        this.#timers.set(() => this.#closeMenu(), 0);
         break;
       default:
         break;
@@ -136,6 +158,11 @@ export class ContextMenuController extends Controller<HTMLElement> {
   /** Opens the menu at viewport coordinates `(x, y)` and focuses the first item. */
   #openAt(x: number, y: number): void {
     if (!this.hasMenuTarget) return;
+    this.#timers.clearAll();
+    this.#escapeLayer.activate(document, {
+      onDismiss: () => this.#closeAndRestore(),
+      claims: claimsWhileFocusWithin(this.element),
+    });
     this.menuTarget.style.setProperty("--stimeo-context-menu-x", `${x}px`);
     this.menuTarget.style.setProperty("--stimeo-context-menu-y", `${y}px`);
     this.menuTarget.hidden = false;
@@ -145,6 +172,8 @@ export class ContextMenuController extends Controller<HTMLElement> {
 
   /** Hides the menu and reflects the collapsed state on the region. */
   #closeMenu(): void {
+    this.#timers.clearAll();
+    this.#escapeLayer.deactivate();
     if (!this.hasMenuTarget) return;
     this.menuTarget.hidden = true;
     if (this.hasRegionTarget) this.regionTarget.setAttribute("data-state", "closed");
@@ -156,9 +185,24 @@ export class ContextMenuController extends Controller<HTMLElement> {
     if (this.hasRegionTarget) this.regionTarget.focus();
   }
 
-  /** Closes the menu when a click lands outside the controller's element. */
-  readonly #onOutsideClick = (event: MouseEvent): void => {
+  /** Closes when a click or context-menu invocation lands outside this instance. */
+  readonly #onOutsidePointer = (event: MouseEvent): void => {
     if (this.#isOpen && !this.element.contains(event.target as Node)) this.#closeMenu();
+  };
+
+  /**
+   * Captures clicks so `aria-disabled` commands cannot reach consumer handlers.
+   * Native Enter/Space activation also synthesizes a click and is blocked here.
+   */
+  readonly #onItemClickCapture = (event: MouseEvent): void => {
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    const disabled = this.itemTargets.some(
+      (item) => item.getAttribute("aria-disabled") === "true" && item.contains(target),
+    );
+    if (!disabled) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
   };
 
   /** Menu items eligible for roving focus (excludes disabled / hidden). */

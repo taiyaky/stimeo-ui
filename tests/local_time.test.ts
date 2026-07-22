@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { LocalTimeController } from "../src/controllers/local_time_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -33,7 +34,7 @@ describe("LocalTimeController", () => {
   };
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     document.documentElement.removeAttribute("lang");
   });
@@ -180,7 +181,7 @@ describe("LocalTimeController accessibility", () => {
   let application: Application;
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 

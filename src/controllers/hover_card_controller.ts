@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { EscapeLayer } from "../utils/escape_layer";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { observeScrollDismiss } from "../utils/scroll_dismiss";
 
@@ -12,11 +13,12 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  *        data-action="mouseenter->stimeo--hover-card#open
  *                     mouseleave->stimeo--hover-card#close
  *                     focusin->stimeo--hover-card#open
- *                     focusout->stimeo--hover-card#close
- *                     keydown->stimeo--hover-card#onKeydown">@jane</a>
+ *                     focusout->stimeo--hover-card#close">@jane</a>
  *     <div id="hc" data-stimeo--hover-card-target="card"
  *          data-action="mouseenter->stimeo--hover-card#open
- *                       mouseleave->stimeo--hover-card#close" hidden>…</div>
+ *                       mouseleave->stimeo--hover-card#close
+ *                       focusin->stimeo--hover-card#open
+ *                       focusout->stimeo--hover-card#close" hidden>…</div>
  *   </span>
  *
  * There is no dedicated APG pattern; this follows the **Disclosure** convention
@@ -34,10 +36,14 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  * - Open on `mouseenter`/`focusin`, close on `mouseleave`/`focusout`, each gated by
  *   `openDelay`/`closeDelay` to prevent accidental flicker.
  * - **Hoverable bridge**: binding open/close on the card cancels a pending close
- *   when the pointer crosses into it; the delayed close also re-checks focus, so
- *   tabbing into a link inside the card keeps it open.
- * - **Dismissible**: while open, `Escape` is watched at the `document` level, so it
- *   closes regardless of where focus sits (card, trigger, or elsewhere).
+ *   when the pointer crosses into it. Matching focus actions on the card cancel
+ *   the trigger's pending close while focus is inside, then schedule close once
+ *   focus leaves the whole controller.
+ * - **Dismissible**: while open, the card joins the shared {@link EscapeLayer}
+ *   stack, so `Escape` closes it regardless of where focus sits (card, trigger,
+ *   or elsewhere). The resolver ignores an Escape already consumed by an inner
+ *   handler and lets the most recently shown layer own the press, so one
+ *   keypress closes exactly one layer (the shared layered-Escape contract).
  * - Open/closed flips the trigger's `aria-expanded`, the card's `hidden`, and a
  *   `data-state` (`open`/`closed`). Focus is never stolen on open.
  * - Opt-in **dismiss on scroll** (`closeOnScroll`): while open, scrolling a tracked
@@ -52,7 +58,7 @@ export class HoverCardController extends Controller<HTMLElement> {
     closeDelay: { type: Number, default: 200 },
     closeOnScroll: { type: Boolean, default: false },
   };
-  static actions = ["close", "onKeydown", "open"] as const;
+  static actions = ["close", "open"] as const;
 
   declare readonly triggerTarget: HTMLElement;
   declare readonly cardTarget: HTMLElement;
@@ -62,22 +68,27 @@ export class HoverCardController extends Controller<HTMLElement> {
   declare readonly closeDelayValue: number;
   declare readonly closeOnScrollValue: boolean;
 
-  /** Pending open/close timers, torn down together on disconnect. */
+  /** Pending open/close timers, with their IDs reset on every lifecycle boundary. */
   readonly #timers = new SafeTimeout();
+  /** Escape-stack membership while open; the shared resolver dismisses via it. */
+  readonly #escapeLayer = new EscapeLayer();
   #pendingOpen: number | null = null;
   #pendingClose: number | null = null;
   /** Cleanup for the dismiss-on-scroll listeners while open, or `null`. */
   #stopScrollDismiss: (() => void) | null = null;
 
-  /** Starts closed. */
+  /** Starts closed and discards any stale pending state from a prior connection. */
   override connect(): void {
+    this.#cancelOpen();
+    this.#cancelClose();
     this.#conceal();
   }
 
-  /** Clears timers and the document `Escape` / scroll listeners so nothing outlives the element. */
+  /** Clears timers, the Escape-stack membership, and scroll listeners so nothing outlives the element. */
   override disconnect(): void {
-    this.#timers.clearAll();
-    document.removeEventListener("keydown", this.#onDocumentKeydown);
+    this.#cancelOpen();
+    this.#cancelClose();
+    this.#escapeLayer.deactivate();
     this.#stopScrollDismiss?.();
     this.#stopScrollDismiss = null;
   }
@@ -112,37 +123,32 @@ export class HoverCardController extends Controller<HTMLElement> {
     }, this.closeDelayValue);
   }
 
-  /** Closes immediately on `Escape` while open (keyboard dismissal from the trigger). */
-  onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape" && this.#isOpen) {
-      event.preventDefault();
-      this.#dismiss();
-    }
-  }
-
-  /** Reveals the card, reflects state, and starts watching for a dismissing `Escape`/scroll. */
+  /** Reveals the card, reflects state, and joins the Escape stack / scroll watcher. */
   #reveal(): void {
     if (!this.hasCardTarget) return;
     this.cardTarget.hidden = false;
     this.cardTarget.setAttribute("data-state", "open");
     if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "true");
-    document.addEventListener("keydown", this.#onDocumentKeydown);
+    // No claims predicate: hover-revealed content is dismissible regardless of
+    // where focus sits (WCAG 2.2 SC 1.4.13), so it always claims while open.
+    this.#escapeLayer.activate(document, { onDismiss: () => this.#dismiss() });
     if (this.closeOnScrollValue && !this.#stopScrollDismiss) {
       this.#stopScrollDismiss = observeScrollDismiss(this.element, () => this.#dismiss());
     }
   }
 
-  /** Hides the card, reflects state, and stops watching for `Escape`/scroll. */
+  /** Hides the card, reflects state, and leaves the Escape stack / scroll watcher. */
   #conceal(): void {
-    // Release listeners first, unconditionally: if the card target was removed
-    // from the DOM while open, an early return would leak the document keydown
-    // and scroll-dismiss listeners.
-    document.removeEventListener("keydown", this.#onDocumentKeydown);
+    // Release the layer and observers first, unconditionally: if the card
+    // target was removed from the DOM while open, an early return would leak
+    // the stack entry and the scroll-dismiss listeners.
+    this.#escapeLayer.deactivate();
     this.#stopScrollDismiss?.();
     this.#stopScrollDismiss = null;
-    if (!this.hasCardTarget) return;
-    this.cardTarget.hidden = true;
-    this.cardTarget.setAttribute("data-state", "closed");
+    if (this.hasCardTarget) {
+      this.cardTarget.hidden = true;
+      this.cardTarget.setAttribute("data-state", "closed");
+    }
     if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "false");
   }
 
@@ -152,14 +158,6 @@ export class HoverCardController extends Controller<HTMLElement> {
     this.#cancelClose();
     this.#conceal();
   }
-
-  /** Document-level `Escape` watcher (active only while open). */
-  readonly #onDocumentKeydown = (event: KeyboardEvent): void => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      this.#dismiss();
-    }
-  };
 
   /** Cancels any pending open timer. */
   #cancelOpen(): void {

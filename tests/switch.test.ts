@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SwitchController } from "../src/controllers/switch_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -28,7 +29,7 @@ describe("SwitchController", () => {
   });
 
   afterEach(() => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
 
@@ -71,7 +72,7 @@ describe("SwitchController", () => {
   });
 
   it("leaves keydown to the browser on a native <button> host (no double toggle)", async () => {
-    application.stop();
+    disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <button data-controller="stimeo--switch"
               data-action="stimeo--switch#toggle keydown->stimeo--switch#onKeydown"
@@ -106,15 +107,14 @@ describe("SwitchController", () => {
     expect(after).toEqual(["switch, Notifications, checked"]);
   });
 
-  // Disconnect-teardown regression. The controller registers no timers, observers,
+  // Context-teardown regression. The controller registers no timers, observers,
   // or document/window listeners (only Stimulus-managed data-action bindings), so
-  // teardown means: after application.stop() the element is inert — a click no
-  // longer toggles and no changed event escapes.
+  // unloading its identifier must make the element inert.
   it("becomes inert after disconnect (no lingering side effects)", () => {
     sw().click();
     expect(sw().getAttribute("aria-checked")).toBe("true");
 
-    application.stop();
+    application.unload("stimeo--switch");
     let escaped = false;
     sw().addEventListener("stimeo--switch:changed", () => {
       escaped = true;
