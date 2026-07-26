@@ -234,6 +234,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.2.1]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.2.1
 [0.2.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.2.0
 [0.1.0-beta.3]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.1.0-beta.2
