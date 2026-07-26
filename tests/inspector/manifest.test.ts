@@ -71,13 +71,12 @@ describe("buildManifest", () => {
 
   it("merges hand-written required targets", () => {
     expect(manifest.controllers["stimeo--menu"]?.requiredTargets).toEqual(["trigger", "menu"]);
+    expect(manifest.controllers["stimeo--tabs"]?.requiredTargets).toEqual(["tab", "panel", "list"]);
     expect(manifest.controllers["stimeo--switch"]?.requiredTargets).toEqual([]);
   });
 
-  it("only writes structure rules for known controllers", () => {
-    for (const id of Object.keys(structureRules)) {
-      expect(allControllers).toHaveProperty(id);
-    }
+  it("defines exactly one structure rule for every public controller", () => {
+    expect(Object.keys(structureRules).sort()).toEqual(Object.keys(allControllers).sort());
   });
 
   it("declares required targets that the controller actually understands", () => {
@@ -96,6 +95,11 @@ describe("buildManifest", () => {
       "aria-labelledby/aria-label",
     ]);
     expect(dialog[0]?.values).toEqual(["dialog"]);
+    expect(
+      manifest.controllers["stimeo--tabs"]?.a11y.map(
+        (requirement) => `${requirement.target}:${requirement.attrs.join("/")}`,
+      ),
+    ).toEqual(["tab:role", "panel:role", "list:role", "list:aria-labelledby/aria-label"]);
     // switch sets its own ARIA, so it carries no authoring requirements.
     expect(manifest.controllers["stimeo--switch"]?.a11y).toEqual([]);
   });

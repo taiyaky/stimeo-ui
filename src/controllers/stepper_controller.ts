@@ -28,6 +28,7 @@ import { Controller } from "@hotwired/stimulus";
  * - `goto` jumps to the step in its `index` action param.
  * - With `linear=true`, `goto` may not skip more than one step ahead of the
  *   current one (moving backward is always allowed).
+ * - Runtime changes to the `index` Value re-derive every step's state.
  * - Each move re-derives `data-state`/`aria-current` and dispatches
  *   `stimeo--stepper:change`.
  */
@@ -44,26 +45,38 @@ export class StepperController extends Controller<HTMLElement> {
   declare indexValue: number;
   declare linearValue: boolean;
 
+  #isConnected = false;
+
   /** Normalizes an out-of-range initial `index` and renders the initial state. */
   override connect(): void {
-    this.indexValue = this.#clampIndex(this.indexValue);
-    this.#render();
+    this.#isConnected = true;
+    this.#normalizeAndRender();
+  }
+
+  override disconnect(): void {
+    this.#isConnected = false;
+  }
+
+  /** Re-renders when Turbo Morph or application code changes `index` at runtime. */
+  indexValueChanged(): void {
+    if (!this.#isConnected) return;
+    this.#normalizeAndRender();
   }
 
   /** Advances to the next step (ignored at the last step). */
   next(): void {
-    this.#moveTo(this.indexValue + 1);
+    this.#moveTo(this.#clampIndex(this.indexValue) + 1);
   }
 
   /** Returns to the previous step (ignored at the first step). */
   prev(): void {
-    this.#moveTo(this.indexValue - 1);
+    this.#moveTo(this.#clampIndex(this.indexValue) - 1);
   }
 
   /** Jumps to the step carried in the action's `index` param. */
   goto(event: { params: { index?: number } }): void {
     const target = Number(event.params.index);
-    if (!Number.isFinite(target)) return;
+    if (!Number.isFinite(target) || !Number.isInteger(target)) return;
     this.#moveTo(target);
   }
 
@@ -74,16 +87,25 @@ export class StepperController extends Controller<HTMLElement> {
    */
   #moveTo(target: number): void {
     const total = this.stepTargets.length;
+    if (!Number.isFinite(target) || !Number.isInteger(target)) return;
     if (target < 0 || target >= total) return;
-    if (target === this.indexValue) return;
-    if (this.linearValue && target > this.indexValue + 1) return;
+    const current = this.#clampIndex(this.indexValue);
+    if (target === current) return;
+    if (this.linearValue && target > current + 1) return;
 
-    const previous = this.indexValue;
+    const previous = current;
     this.indexValue = target;
-    this.#render();
+    this.#render(target);
     this.dispatch("change", {
       detail: { index: target, previous, step: this.stepTargets[target] },
     });
+  }
+
+  /** Normalizes the public Value and reflects it without dispatching an action event. */
+  #normalizeAndRender(): void {
+    const normalized = this.#clampIndex(this.indexValue);
+    if (!Object.is(normalized, this.indexValue)) this.indexValue = normalized;
+    this.#render(normalized);
   }
 
   /**
@@ -93,8 +115,7 @@ export class StepperController extends Controller<HTMLElement> {
    * contract assumes one operable button per step. If a step needs multiple
    * buttons, mark the navigational one first (or this would target the wrong one).
    */
-  #render(): void {
-    const current = this.indexValue;
+  #render(current: number): void {
     this.stepTargets.forEach((step, index) => {
       step.dataset.state =
         index < current ? "complete" : index === current ? "current" : "upcoming";
@@ -111,7 +132,7 @@ export class StepperController extends Controller<HTMLElement> {
   /** Constrains an index to `[0, total-1]` (or `0` when there are no steps). */
   #clampIndex(index: number): number {
     const last = this.stepTargets.length - 1;
-    if (last < 0) return 0;
+    if (last < 0 || !Number.isFinite(index)) return 0;
     return Math.min(last, Math.max(0, Math.trunc(index)));
   }
 }

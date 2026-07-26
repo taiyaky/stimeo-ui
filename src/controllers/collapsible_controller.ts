@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { TransitionCompletion } from "../utils/transition_completion";
 
 /**
  * Headless, accessible single-disclosure (collapsible) behavior.
@@ -24,8 +25,9 @@ import { Controller } from "@hotwired/stimulus";
  * - **Open**: drop `hidden` → measure the natural height into
  *   `--stimeo-collapsible-content-height` → set `data-state="open"`.
  * - **Close**: set `data-state="closed"` (CSS shrinks the height) → re-apply
- *   `hidden` after `transitionend`. With no transition (or reduced motion, which
- *   the consumer's CSS expresses as a zero duration) it is applied immediately.
+ *   `hidden` once the transition settles. With no transition (or reduced motion,
+ *   which the consumer's CSS expresses as a zero duration) it is applied
+ *   immediately; an owned fallback covers missing terminal events.
  */
 export class CollapsibleController extends Controller<HTMLElement> {
   static override targets = ["trigger", "content"];
@@ -41,23 +43,25 @@ export class CollapsibleController extends Controller<HTMLElement> {
 
   declare openValue: boolean;
 
-  /**
-   * The pending `transitionend` handler that re-applies `hidden` after a close.
-   * Tracked so {@link disconnect} can detach it and a reopen can supersede it.
-   */
-  #pendingTransitionEnd: ((event: Event) => void) | null = null;
+  /** Owns the cancellable close-transition wait and its bounded fallback. */
+  readonly #transition = new TransitionCompletion();
+  /** Distinguishes dynamic target churn from the callbacks that precede `connect()`. */
+  #connected = false;
 
   /**
-   * Establishes the initial open/closed state without animating.
+   * Establishes the initial open/closed state without waiting for a close transition.
    *
    * The DOM is the source of truth on reconnect (Turbo cache restore / morph): an
    * **explicit** state attribute — `aria-expanded="true"`/`"false"` (or, with no
    * trigger, `data-state="open"`/`"closed"`) — is honored verbatim so a region the
    * user opened *or* closed survives a back-navigation, even when the declarative
-   * `open` Value disagrees. The Value only seeds a genuinely fresh render where no
-   * state attribute is present yet. Mirrors `sidebar`'s `#restoreCollapsed`.
+   * `open` Value disagrees. An already-open region remains open without a
+   * close/reopen cycle. The Value only seeds a genuinely fresh render where no
+   * state attribute is present yet; any opening animation in that case belongs to
+   * the consumer's CSS. Mirrors `sidebar`'s `#restoreCollapsed`.
    */
   override connect(): void {
+    this.#connected = true;
     this.#apply(this.#initialOpen(), false);
   }
 
@@ -76,7 +80,32 @@ export class CollapsibleController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
-    this.#detachTransitionEnd();
+    this.#connected = false;
+    this.#transition.cancel();
+  }
+
+  /** Reconciles a replacement trigger target with the content's live state. */
+  triggerTargetConnected(trigger: HTMLElement): void {
+    if (!this.#connected || !this.hasContentTarget) return;
+    trigger.setAttribute(
+      "aria-expanded",
+      this.contentTarget.getAttribute("data-state") === "open" ? "true" : "false",
+    );
+  }
+
+  /** Reconciles a replacement content target with the disclosure's live state. */
+  contentTargetConnected(content: HTMLElement): void {
+    if (!this.#connected) return;
+    this.#transition.cancel();
+    const open = this.hasTriggerTarget
+      ? this.triggerTarget.getAttribute("aria-expanded") === "true"
+      : content.getAttribute("data-state") === "open";
+    this.#applyContent(content, open, false);
+  }
+
+  /** Cancels a wait tied to a content target that was removed or replaced. */
+  contentTargetDisconnected(): void {
+    this.#transition.cancel();
   }
 
   /** Toggles the region open/closed. Bound via `data-action` (click). */
@@ -102,18 +131,23 @@ export class CollapsibleController extends Controller<HTMLElement> {
    * spec requires.
    *
    * @param open - Target state.
-   * @param animate - When `false` (initial `connect`) the close path applies
-   *   `hidden` immediately instead of waiting for a transition.
+   * @param waitForCloseTransition - When `false` (initial `connect`) the close
+   *   path applies `hidden` immediately. This flag does not suppress consumer CSS
+   *   on the open path.
    */
-  #apply(open: boolean, animate: boolean): void {
+  #apply(open: boolean, waitForCloseTransition: boolean): void {
     if (this.hasTriggerTarget) {
       this.triggerTarget.setAttribute("aria-expanded", open ? "true" : "false");
     }
     if (!this.hasContentTarget) return;
 
     const content = this.contentTarget;
-    this.#detachTransitionEnd();
+    this.#transition.cancel();
+    this.#applyContent(content, open, waitForCloseTransition);
+  }
 
+  /** Reflects one content target without relying on a later target lookup. */
+  #applyContent(content: HTMLElement, open: boolean, waitForCloseTransition: boolean): void {
     if (open) {
       content.hidden = false;
       // Measure the natural height only once it is laid out (hidden removed) so
@@ -124,7 +158,7 @@ export class CollapsibleController extends Controller<HTMLElement> {
     }
 
     content.setAttribute("data-state", "closed");
-    if (animate && this.#transitionMs(content) > 0) {
+    if (waitForCloseTransition) {
       this.#applyHiddenAfterTransition(content);
     } else {
       content.hidden = true;
@@ -132,38 +166,15 @@ export class CollapsibleController extends Controller<HTMLElement> {
   }
 
   /**
-   * Re-applies `hidden` once the close transition finishes. Guarded against a
-   * reopen mid-transition: if the region is open again by the time the
-   * transition ends, `hidden` is left off.
+   * Re-applies `hidden` once the close transition settles. Guarded against a
+   * reopen mid-transition; the shared waiter also guarantees a bounded fallback
+   * when the browser emits no terminal transition event.
    */
   #applyHiddenAfterTransition(content: HTMLElement): void {
-    const handler = (event: Event): void => {
-      if (event.target !== content) return;
-      this.#detachTransitionEnd();
+    this.#transition.wait(content, () => {
       if (content.getAttribute("data-state") === "closed") {
         content.hidden = true;
       }
-    };
-    this.#pendingTransitionEnd = handler;
-    content.addEventListener("transitionend", handler);
-  }
-
-  #detachTransitionEnd(): void {
-    if (this.#pendingTransitionEnd && this.hasContentTarget) {
-      this.contentTarget.removeEventListener("transitionend", this.#pendingTransitionEnd);
-    }
-    this.#pendingTransitionEnd = null;
-  }
-
-  /**
-   * First `transition-duration` of `element` in milliseconds. Browsers normalize
-   * computed `<time>` to seconds (`0.2s`), but `ms` is parsed defensively. A zero
-   * here — including the consumer's reduced-motion CSS — takes the immediate path.
-   */
-  #transitionMs(element: HTMLElement): number {
-    const first = window.getComputedStyle(element).transitionDuration.split(",")[0]?.trim() ?? "";
-    const amount = Number.parseFloat(first);
-    if (Number.isNaN(amount)) return 0;
-    return first.endsWith("ms") ? amount : amount * 1000;
+    });
   }
 }

@@ -5,7 +5,11 @@
     (this demo frame). %>
 <div class="sticky-demo" data-controller="stimeo--sticky-observer"
      data-stimeo--sticky-observer-root-selector-value=".sticky-demo__scroll">
-  <div class="sticky-demo__scroll">
+  <%# The scroll box is a labelled, focusable region so it can be scrolled with the
+      keyboard alone (arrows / PageDown) in every browser, not only the ones that
+      make scrollers focusable by themselves. %>
+  <div class="sticky-demo__scroll" role="region" tabindex="0"
+       aria-label="<%= t('components.sticky_observer.demo.viewport_label') %>">
     <%# Place the sentinel right before the sticky element. A 1px non-zero height keeps
         intersection detection stable. %>
     <div class="sticky-demo__sentinel" aria-hidden="true"

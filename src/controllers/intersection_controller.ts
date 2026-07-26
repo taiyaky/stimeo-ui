@@ -1,5 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
-import { IntersectionWatcher } from "../utils/intersection_watcher";
+import { IntersectionWatcher, isBeforeRootStart } from "../utils/intersection_watcher";
 
 /** Name of the CSS custom property exposing the visible ratio (0..1). */
 const RATIO_PROPERTY = "--stimeo--intersection-ratio";
@@ -99,7 +99,7 @@ export class IntersectionController extends Controller<HTMLElement> {
       this.element.style.setProperty(RATIO_PROPERTY, String(ratio));
       this.dispatch("change", { detail: { intersecting, ratio } });
       this.#syncIntersecting(intersecting, ratio, entry);
-      this.#syncPassed(!intersecting && this.#isBefore(entry));
+      this.#syncPassed(!intersecting && isBeforeRootStart(entry));
     }
   }
 
@@ -156,7 +156,7 @@ export class IntersectionController extends Controller<HTMLElement> {
       if (this.onceValue) this.#watcher.stop();
     } else if (!intersecting && previous === "true") {
       this.dispatch("exit", {
-        detail: { ratio, position: this.#isBefore(entry) ? "before" : "after" },
+        detail: { ratio, position: isBeforeRootStart(entry) ? "before" : "after" },
       });
     }
   }
@@ -172,14 +172,6 @@ export class IntersectionController extends Controller<HTMLElement> {
     this.element.setAttribute("data-passed", passed ? "true" : "false");
     const changed = previous === null ? passed : (previous === "true") !== passed;
     if (changed) this.dispatch("passed", { detail: { passed } });
-  }
-
-  /** True when the element sits entirely before the root's start (top) edge. */
-  #isBefore(entry: IntersectionObserverEntry): boolean {
-    // rootBounds is null for a cross-origin/removed root; fall back to the
-    // viewport origin.
-    const rootTop = entry.rootBounds?.top ?? 0;
-    return entry.boundingClientRect.bottom <= rootTop;
   }
 
   /** The configured `threshold`, clamped to the 0..1 the observer accepts. */

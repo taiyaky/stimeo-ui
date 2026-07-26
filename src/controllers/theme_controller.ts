@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { readLocalStorage, writeLocalStorage } from "../utils/safe_storage";
 
 /** The three selectable modes; `system` follows the OS `prefers-color-scheme`. */
 type ThemeMode = "light" | "dark" | "system";
@@ -203,20 +204,12 @@ export class ThemeController extends Controller<HTMLElement> {
 
   /** Reads a persisted, validated mode from `localStorage` (null when absent/blocked). */
   #readStored(): ThemeMode | null {
-    try {
-      const value = window.localStorage.getItem(this.storageKeyValue);
-      return isMode(value) ? value : null;
-    } catch {
-      return null;
-    }
+    const value = readLocalStorage(this.storageKeyValue);
+    return isMode(value) ? value : null;
   }
 
   /** Persists the mode, swallowing storage errors (private mode / quota). */
   #writeStored(mode: ThemeMode): void {
-    try {
-      window.localStorage.setItem(this.storageKeyValue, mode);
-    } catch {
-      /* storage unavailable — the in-DOM state hooks still apply this session */
-    }
+    writeLocalStorage(this.storageKeyValue, mode);
   }
 }

@@ -30,8 +30,9 @@ class FakeResizeObserver implements ResizeObserver {
     this.disconnected = true;
   }
 
-  /** Test helper: simulate a resize notification. */
-  trigger(): void {
+  /** Test helper: simulate a notification for an element still being observed. */
+  trigger(element?: Element): void {
+    if (element && !this.observed.has(element)) return;
     this.callback([], this);
   }
 }
@@ -91,6 +92,20 @@ describe("LayoutObserver", () => {
       window.dispatchEvent(new Event("resize"));
       expect(spy).not.toHaveBeenCalled();
     });
+
+    it("unobserveViewport leaves element resize observation active", () => {
+      const spy = vi.fn();
+      const observer = makeObserver(spy);
+      const element = document.createElement("div");
+      observer.observe(element);
+      observer.observeViewport();
+      observer.unobserveViewport();
+
+      window.dispatchEvent(new Event("resize"));
+      expect(spy).not.toHaveBeenCalled();
+      FakeResizeObserver.instances[0]?.trigger(element);
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("element resize", () => {
@@ -122,6 +137,22 @@ describe("LayoutObserver", () => {
       observer.unobserve(element);
 
       expect(FakeResizeObserver.instances[0]?.observed.has(element)).toBe(false);
+    });
+
+    it("unobserve leaves callbacks active for other observed elements", () => {
+      const spy = vi.fn();
+      const observer = makeObserver(spy);
+      const removed = document.createElement("div");
+      const remaining = document.createElement("div");
+      observer.observe(removed);
+      observer.observe(remaining);
+      observer.unobserve(removed);
+
+      const ro = FakeResizeObserver.instances[0];
+      ro?.trigger(removed);
+      expect(spy).not.toHaveBeenCalled();
+      ro?.trigger(remaining);
+      expect(spy).toHaveBeenCalledTimes(1);
     });
 
     it("disconnect tears down the ResizeObserver", () => {

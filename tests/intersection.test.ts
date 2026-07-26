@@ -20,7 +20,7 @@ import { delay, tick } from "./helpers/timing";
 type Entry = {
   isIntersecting: boolean;
   intersectionRatio: number;
-  boundingClientRect: { bottom: number };
+  boundingClientRect: { bottom: number; width: number; height: number };
   rootBounds: { top: number } | null;
 };
 
@@ -28,19 +28,26 @@ type Entry = {
 const visible = (ratio = 1): Entry => ({
   isIntersecting: true,
   intersectionRatio: ratio,
-  boundingClientRect: { bottom: 400 },
+  boundingClientRect: { bottom: 400, width: 200, height: 100 },
   rootBounds: { top: 0 },
 });
 const hiddenAfter = (): Entry => ({
   isIntersecting: false,
   intersectionRatio: 0,
-  boundingClientRect: { bottom: 900 },
+  boundingClientRect: { bottom: 900, width: 200, height: 100 },
   rootBounds: { top: 0 },
 });
 const hiddenBefore = (): Entry => ({
   isIntersecting: false,
   intersectionRatio: 0,
-  boundingClientRect: { bottom: -50 },
+  boundingClientRect: { bottom: -50, width: 200, height: 100 },
+  rootBounds: { top: 0 },
+});
+/** An unrendered element: no layout box, reported at the origin. */
+const unrendered = (): Entry => ({
+  isIntersecting: false,
+  intersectionRatio: 0,
+  boundingClientRect: { bottom: 0, width: 0, height: 0 },
   rootBounds: { top: 0 },
 });
 
@@ -255,6 +262,17 @@ describe("IntersectionController", () => {
       observerCallback?.([visible()]);
       await tick();
       expect(events.passed).toEqual([{ passed: true }, { passed: false }]);
+      expect(root().getAttribute("data-passed")).toBe("false");
+    });
+
+    it("does not report an unrendered element as passed (empty rect)", async () => {
+      // display:none / a hidden ancestor reports a 0x0 rect at the origin, whose
+      // `bottom === 0 <= rootBounds.top` would otherwise read as "scrolled past"
+      // for an element that never moved.
+      const events = await mount(defaultFixture);
+      observerCallback?.([unrendered()]);
+      await tick();
+      expect(events.passed).toEqual([]);
       expect(root().getAttribute("data-passed")).toBe("false");
     });
 

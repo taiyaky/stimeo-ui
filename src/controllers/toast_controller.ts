@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { maxTransitionTotalMs } from "../utils/transition_completion";
 
 const DELEGATED_EVENTS = ["click", "focusin", "focusout", "keydown", "mouseover", "mouseout"];
 
@@ -353,8 +354,7 @@ export class ToastController extends Controller<HTMLElement> {
       this.dispatch("dismiss", { detail: { item: element, reason } });
     };
 
-    const transitions = window.getComputedStyle(element).transitionDuration;
-    const duration = cssTimeToMs(transitions);
+    const duration = maxTransitionTotalMs(window.getComputedStyle(element));
     if (duration > 0) {
       this.#timers.set(finalize, duration);
     } else {
@@ -433,18 +433,4 @@ export class ToastController extends Controller<HTMLElement> {
     window.cancelAnimationFrame(handle);
     this.#rafHandles.delete(element);
   }
-}
-
-/**
- * Converts the first value of a CSS `transition-duration` string to milliseconds.
- * Browsers normalize computed `<time>` values to seconds (e.g. `0.2s`), but parse
- * `ms` defensively so a consumer's `ms` transition is not delayed 1000x.
- *
- * Pure (no `this`); exported so it can be unit-tested directly.
- */
-export function cssTimeToMs(value: string): number {
-  const first = value.split(",")[0]?.trim() ?? "";
-  const amount = Number.parseFloat(first);
-  if (Number.isNaN(amount)) return 0;
-  return first.endsWith("ms") ? amount : amount * 1000;
 }

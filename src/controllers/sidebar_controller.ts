@@ -1,25 +1,17 @@
 import { Controller } from "@hotwired/stimulus";
 import { FocusTrap } from "../utils/focus_trap";
+import { readLocalStorage, writeLocalStorage } from "../utils/safe_storage";
+import { TransitionCompletion } from "../utils/transition_completion";
 
 /** Current responsive mode, driven by a `min-width` media query. */
 type Mode = "inline" | "overlay";
-
-/** Parses a CSS `transition-duration` string to milliseconds (max of the list). */
-function maxTransitionMs(value: string): number {
-  const durations = value.split(",").map((part) => {
-    const trimmed = part.trim();
-    if (trimmed.endsWith("ms")) return Number.parseFloat(trimmed);
-    if (trimmed.endsWith("s")) return Number.parseFloat(trimmed) * 1000;
-    return 0;
-  });
-  return durations.length === 0 ? 0 : Math.max(...durations);
-}
 
 /**
  * Headless, accessible **responsive collapsible sidebar** behavior.
  *
  * Markup contract (identifier: `stimeo--sidebar`):
  *   <div data-controller="stimeo--sidebar"
+ *        data-action="turbo:before-cache@document->stimeo--sidebar#beforeCache"
  *        data-stimeo--sidebar-breakpoint-value="768"
  *        data-stimeo--sidebar-key-value="main-nav">
  *     <header>
@@ -67,7 +59,7 @@ export class SidebarController extends Controller<HTMLElement> {
     key: { type: String, default: "" },
     collapsed: { type: Boolean, default: false },
   };
-  static actions = ["close", "open", "toggle"] as const;
+  static actions = ["beforeCache", "close", "open", "toggle"] as const;
 
   declare readonly triggerTarget: HTMLElement;
   declare readonly panelTarget: HTMLElement;
@@ -80,8 +72,11 @@ export class SidebarController extends Controller<HTMLElement> {
   declare keyValue: string;
   declare collapsedValue: boolean;
 
+  /** Exact panel currently owned by the modal lifecycle (survives target churn safely). */
+  #activePanel: HTMLElement | null = null;
+
   /** Owns the overlay modal side effects; Escape closes, focus falls to trigger. */
-  readonly #trap = new FocusTrap(() => this.panelTarget, {
+  readonly #trap = new FocusTrap(() => this.#activePanel ?? this.panelTarget, {
     onEscape: () => this.close(),
     fallbackFocus: () => (this.hasTriggerTarget ? this.triggerTarget : null),
   });
@@ -92,20 +87,90 @@ export class SidebarController extends Controller<HTMLElement> {
   #collapsed = false;
   /** The matched media query (`min-width: breakpoint`), watched for mode changes. */
   #mql: MediaQueryList | null = null;
-  /** Pending `transitionend` hide listener, cancelled on reopen/teardown. */
-  #pendingHide: (() => void) | null = null;
+  /** Exact normalized query currently represented by the active media-query listener. */
+  #mqlQuery: string | null = null;
+  /** Owns the cancellable close-transition wait and its bounded fallback. */
+  readonly #transition = new TransitionCompletion();
+  /** Distinguishes dynamic target churn from callbacks around controller teardown. */
+  #connected = false;
 
   override connect(): void {
+    this.#connected = true;
+    this.#activePanel = this.hasPanelTarget ? this.panelTarget : null;
     this.#collapsed = this.#restoreCollapsed();
-    this.#mql = this.#matchBreakpoint();
+    this.#mqlQuery = this.#breakpointQuery;
+    this.#mql = this.#matchBreakpoint(this.#mqlQuery);
     this.#mql?.addEventListener("change", this.#onMediaChange);
     this.#applyMode(this.#computeMode());
   }
 
   override disconnect(): void {
+    this.#connected = false;
     this.#mql?.removeEventListener("change", this.#onMediaChange);
-    this.#cancelPendingHide();
+    this.#mql = null;
+    this.#mqlQuery = null;
+    this.#transition.cancel();
     this.#trap.deactivate({ restoreFocus: false });
+    this.#activePanel = null;
+  }
+
+  /** Adopts a panel target added by a Turbo morph after the controller connected. */
+  panelTargetConnected(panel: HTMLElement): void {
+    if (!this.#connected || (this.#activePanel?.isConnected && this.#activePanel !== panel)) return;
+    this.#adoptPanel(panel);
+  }
+
+  /** Closes and releases overlay side effects when the actively trapped panel disappears. */
+  panelTargetDisconnected(panel: HTMLElement): void {
+    if (panel !== this.#activePanel) return;
+    this.#transition.cancel();
+    this.#activePanel = null;
+    if (!this.#connected) return;
+
+    panel.setAttribute("data-state", "closed");
+    panel.hidden = true;
+    this.#hideBackdrop();
+    this.#setExpandedAttr(false);
+    this.#trap.deactivate();
+
+    // Handles morph implementations that add the replacement before removing
+    // the old target (its connected callback was intentionally ignored above).
+    if (this.hasPanelTarget) this.#adoptPanel(this.panelTarget);
+  }
+
+  /**
+   * Rebinds responsive observation when `breakpoint` changes at runtime.
+   *
+   * Stimulus calls value callbacks before `connect()`, so the connected guard
+   * prevents an eager subscription. Equivalent normalized queries retain the
+   * existing listener instead of allocating duplicate `MediaQueryList` objects.
+   */
+  breakpointValueChanged(): void {
+    if (!this.#connected) return;
+    const query = this.#breakpointQuery;
+    if (this.#mqlQuery === query) return;
+
+    this.#mql?.removeEventListener("change", this.#onMediaChange);
+    this.#mqlQuery = query;
+    this.#mql = this.#matchBreakpoint(query);
+    this.#mql?.addEventListener("change", this.#onMediaChange);
+    const next = this.#computeMode();
+    if (next !== this.#mode) this.#applyMode(next);
+  }
+
+  /**
+   * Sanitizes overlay markup before Turbo snapshots the page.
+   *
+   * Inline state is durable and remains untouched. Overlay state is transient:
+   * pending transitions are cancelled, controller-owned open attributes are
+   * closed immediately, and modal side effects are released without moving
+   * focus during navigation.
+   */
+  beforeCache(): void {
+    if (!this.#connected || !this.#isOverlay) return;
+    this.#transition.cancel();
+    this.#trap.deactivate({ restoreFocus: false });
+    this.#setOverlayClosedImmediate();
   }
 
   /** Toggles the panel: inline flips collapsed/expanded, overlay flips open/closed. */
@@ -137,17 +202,51 @@ export class SidebarController extends Controller<HTMLElement> {
     if (this.hasPanelTarget) this.panelTarget.setAttribute("data-mode", mode);
     if (mode === "inline") {
       // Drop any overlay residue, then render the persisted rail state.
-      this.#cancelPendingHide();
+      this.#transition.cancel();
       this.#trap.deactivate({ restoreFocus: false });
       if (this.hasPanelTarget) this.panelTarget.hidden = false;
       this.#hideBackdrop();
       this.#applyInlineState(this.#collapsed);
     } else {
       // Overlay always starts closed; never auto-open on a mode switch.
-      this.#cancelPendingHide();
+      this.#transition.cancel();
       this.#trap.deactivate({ restoreFocus: false });
       this.#setOverlayClosedImmediate();
     }
+  }
+
+  /** Reconciles a replacement panel with the current responsive mode and DOM state. */
+  #adoptPanel(panel: HTMLElement): void {
+    this.#transition.cancel();
+    const trapWasActive = this.#trap.active;
+    this.#activePanel = panel;
+    panel.setAttribute("data-mode", this.#mode);
+    if (this.#mode === "inline") {
+      panel.hidden = false;
+      panel.setAttribute("data-state", this.#collapsed ? "collapsed" : "expanded");
+      this.#hideBackdrop();
+      this.#setExpandedAttr(!this.#collapsed);
+      this.#trap.deactivate({ restoreFocus: false });
+      return;
+    }
+
+    if (panel.getAttribute("data-state") === "open") {
+      panel.hidden = false;
+      if (this.hasBackdropTarget) {
+        this.backdropTarget.setAttribute("data-state", "open");
+        this.backdropTarget.hidden = false;
+      }
+      this.#setExpandedAttr(true);
+      if (trapWasActive) this.#trap.deactivate({ restoreFocus: false });
+      this.#trap.activate();
+      return;
+    }
+
+    panel.setAttribute("data-state", "closed");
+    panel.hidden = true;
+    this.#hideBackdrop();
+    this.#setExpandedAttr(false);
+    this.#trap.deactivate();
   }
 
   readonly #onMediaChange = (event: MediaQueryListEvent): void => {
@@ -159,15 +258,16 @@ export class SidebarController extends Controller<HTMLElement> {
     return (this.#mql?.matches ?? true) ? "inline" : "overlay";
   }
 
-  #matchBreakpoint(): MediaQueryList | null {
+  #matchBreakpoint(query = this.#breakpointQuery): MediaQueryList | null {
     if (typeof window.matchMedia !== "function") return null;
-    return window.matchMedia(`(min-width: ${this.breakpointValue}px)`);
+    return window.matchMedia(query);
   }
 
   // --- Inline (rail) ---------------------------------------------------------
 
   /** Sets, reflects, and persists the inline collapsed preference. */
   #setCollapsed(collapsed: boolean): void {
+    if (collapsed === this.#collapsed) return;
     this.#collapsed = collapsed;
     this.#applyInlineState(collapsed);
     this.#persistCollapsed(collapsed);
@@ -186,7 +286,8 @@ export class SidebarController extends Controller<HTMLElement> {
   /** Opens the overlay: reveal it, commit a starting frame, then trap focus. */
   #openOverlay(): void {
     if (!this.hasPanelTarget || this.#isOverlayOpen) return;
-    this.#cancelPendingHide();
+    this.#transition.cancel();
+    this.#activePanel = this.panelTarget;
     this.panelTarget.hidden = false;
     if (this.hasBackdropTarget) this.backdropTarget.hidden = false;
     // Commit the closed (off-canvas) frame before flipping to open so the enter
@@ -221,29 +322,19 @@ export class SidebarController extends Controller<HTMLElement> {
 
   /**
    * Applies `hidden` once the close transition ends so the exit slide can play,
-   * then reverts the modal side effects. With no transition (0ms / reduced
-   * motion / unstyled) it runs synchronously rather than awaiting an event that
-   * would never fire.
+   * then reverts the modal side effects. The shared waiter completes
+   * synchronously for 0ms transitions and supplies a bounded fallback when the
+   * browser emits no terminal event.
    */
   #hideAfterTransition(): void {
     const panel = this.panelTarget;
-    const duration = maxTransitionMs(getComputedStyle(panel).transitionDuration);
-    if (duration === 0) {
-      this.#applyOverlayHidden();
-      return;
-    }
-    const onEnd = (event: TransitionEvent): void => {
-      if (event.target !== panel) return;
-      this.#cancelPendingHide();
-      this.#applyOverlayHidden();
-    };
-    this.#pendingHide = () => panel.removeEventListener("transitionend", onEnd);
-    panel.addEventListener("transitionend", onEnd);
+    this.#activePanel = panel;
+    this.#transition.wait(panel, () => this.#applyOverlayHidden(panel));
   }
 
   /** Hides the panel/backdrop and tears down the trap after the exit transition. */
-  #applyOverlayHidden(): void {
-    if (this.hasPanelTarget) this.panelTarget.hidden = true;
+  #applyOverlayHidden(panel: HTMLElement): void {
+    panel.hidden = true;
     this.#hideBackdrop();
     this.#trap.deactivate();
   }
@@ -252,11 +343,6 @@ export class SidebarController extends Controller<HTMLElement> {
     if (!this.hasBackdropTarget) return;
     this.backdropTarget.setAttribute("data-state", "closed");
     this.backdropTarget.hidden = true;
-  }
-
-  #cancelPendingHide(): void {
-    this.#pendingHide?.();
-    this.#pendingHide = null;
   }
 
   // --- Shared helpers --------------------------------------------------------
@@ -278,12 +364,9 @@ export class SidebarController extends Controller<HTMLElement> {
   #restoreCollapsed(): boolean {
     const key = this.#storageKey;
     if (key) {
-      try {
-        const stored = localStorage.getItem(key);
-        if (stored !== null) return stored === "1";
-      } catch {
-        // localStorage may be unavailable; fall through to the DOM / declared default.
-      }
+      // An unreadable storage reads as null and falls through to the DOM / declared default.
+      const stored = readLocalStorage(key);
+      if (stored !== null) return stored === "1";
     }
     const domState = this.hasPanelTarget ? this.panelTarget.getAttribute("data-state") : null;
     if (domState === "collapsed") return true;
@@ -295,15 +378,18 @@ export class SidebarController extends Controller<HTMLElement> {
   #persistCollapsed(collapsed: boolean): void {
     const key = this.#storageKey;
     if (!key) return;
-    try {
-      localStorage.setItem(key, collapsed ? "1" : "0");
-    } catch {
-      // Best-effort: ignore storage failures (private mode / quota).
-    }
+    writeLocalStorage(key, collapsed ? "1" : "0");
   }
 
   get #storageKey(): string {
     return this.keyValue ? `stimeo--sidebar:${this.keyValue}` : "";
+  }
+
+  /** Valid breakpoint CSS query, defaulting malformed or negative values to 768px. */
+  get #breakpointQuery(): string {
+    const value = this.breakpointValue;
+    const breakpoint = Number.isFinite(value) && value >= 0 ? value : 768;
+    return `(min-width: ${breakpoint}px)`;
   }
 
   get #isOverlay(): boolean {

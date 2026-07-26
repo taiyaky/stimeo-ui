@@ -44,6 +44,10 @@ export const structureRules: StructureRules = {
   "stimeo--conditional-fields": { requiredTargets: ["trigger", "region"] },
   "stimeo--confirm": { requiredTargets: ["dialog"] },
   "stimeo--context-menu": { requiredTargets: ["region", "menu", "item"] },
+  // No targets: the controller animates the authored text on its own element.
+  "stimeo--count-up": {},
+  // No required targets: every time slot and the completion status are optional.
+  "stimeo--countdown": {},
   "stimeo--currency-input": { requiredTargets: ["display", "field"] },
   "stimeo--data-grid": { requiredTargets: ["columnHeader", "row", "cell"] },
   "stimeo--date-range-picker": { requiredTargets: ["grid", "cell"] },
@@ -97,9 +101,13 @@ export const structureRules: StructureRules = {
   "stimeo--masonry": { requiredTargets: ["item"] },
   "stimeo--menu": { requiredTargets: ["trigger", "menu"] },
   "stimeo--menubar": { requiredTargets: ["top", "menu", "item"] },
+  // No required targets: value/ARIA/state live on the controller element.
+  "stimeo--meter": {},
   "stimeo--multi-select": { requiredTargets: ["input", "list", "tags"] },
   "stimeo--navigation-menu": { requiredTargets: ["trigger", "panel"] },
   "stimeo--nested-form": { requiredTargets: ["list", "template"] },
+  // No required targets: offline and online announcement channels are optional.
+  "stimeo--network-status": {},
   "stimeo--number-input": { requiredTargets: ["input"] },
   // No required targets: show/hide are both optional (the data-optimistic hook
   // and commit/rollback events work alone).
@@ -124,24 +132,38 @@ export const structureRules: StructureRules = {
   "stimeo--presence": {},
   // No targets: guards the controller element itself based on the global preview state.
   "stimeo--preview-guard": {},
+  // No required targets: value/ARIA/state live on the controller element.
+  "stimeo--progress": {},
   "stimeo--radio-group": { requiredTargets: ["radio"] },
   "stimeo--range-slider": { requiredTargets: ["track", "startThumb", "endThumb"] },
   "stimeo--rating": { requiredTargets: ["symbol"] },
+  // No targets: progress is measured and published from the controller element.
+  "stimeo--reading-progress": {},
   "stimeo--read-more": { requiredTargets: ["content", "trigger"] },
+  // No targets: the controller formats its own <time> element.
+  "stimeo--relative-time": {},
   // No required targets: it scans for `data-reset-*` directives within scope.
   "stimeo--reset-before-cache": {},
   "stimeo--resizable": { requiredTargets: ["primary", "secondary", "separator"] },
   "stimeo--roving": { requiredTargets: ["item"] },
   "stimeo--scroll-area": { requiredTargets: ["viewport"] },
+  // No targets: the controller persists its own scroll offsets.
+  "stimeo--scroll-restore": {},
   "stimeo--scroll-visibility": { requiredTargets: ["element"] },
   "stimeo--scrollspy": { requiredTargets: ["link"] },
   "stimeo--separator": {},
+  // Only `panel` is required; trigger and backdrop are optional guarded channels.
+  "stimeo--sidebar": { requiredTargets: ["panel"] },
+  // No required targets: placeholder and content are independently optional.
+  "stimeo--skeleton": {},
   "stimeo--slider": { requiredTargets: ["track", "thumb"] },
   // No required targets: the controller element is the header itself.
   "stimeo--smart-sticky-header": {},
   // `list` and `status` are optional (element fallback / silent mode); the items are
   // what a reorderable list genuinely cannot exist without.
   "stimeo--sortable": { requiredTargets: ["item"] },
+  // No required targets: indicator, region, and message are independently optional.
+  "stimeo--spinner": {},
   "stimeo--step-indicator": { requiredTargets: ["step"] },
   "stimeo--stepper": { requiredTargets: ["step"] },
   // No required targets: `content` is optional (defaults to the scroll container).
@@ -150,7 +172,7 @@ export const structureRules: StructureRules = {
   // No required targets: `submit` falls back to the form's native button[type=submit].
   "stimeo--submit-once": {},
   "stimeo--switch": {},
-  "stimeo--tabs": { requiredTargets: ["tab", "panel"] },
+  "stimeo--tabs": { requiredTargets: ["tab", "panel", "list"] },
   "stimeo--tags-input": { requiredTargets: ["input", "tags"] },
   // No required targets: the controller element is the <textarea>; it declares no targets.
   "stimeo--textarea-autosize": {},

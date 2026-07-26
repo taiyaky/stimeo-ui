@@ -12,9 +12,9 @@ import { tick } from "./helpers/timing";
  * for a single inline region — `aria-expanded` on the trigger plus `hidden` /
  * `data-state` on the content, asserted in happy-dom.
  *
- * happy-dom reports a zero `transition-duration`, so the close path applies
- * `hidden` synchronously (the transition branch is exercised separately by the
- * real-browser layer).
+ * happy-dom reports a zero `transition-duration`, so the default close path
+ * applies `hidden` synchronously. Transition-specific cases stub the complete
+ * computed property/duration/delay tuple.
  */
 
 describe("CollapsibleController", () => {
@@ -37,16 +37,27 @@ describe("CollapsibleController", () => {
   afterEach(() => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
+    vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   const trigger = () => query<HTMLButtonElement>("[data-stimeo--collapsible-target='trigger']");
   const content = () => query("[data-stimeo--collapsible-target='content']");
-
-  it("starts closed", () => {
-    expect(trigger().getAttribute("aria-expanded")).toBe("false");
-    expect(content().hidden).toBe(true);
-    expect(content().getAttribute("data-state")).toBe("closed");
-  });
+  const controller = () => {
+    const host = query("[data-controller='stimeo--collapsible']");
+    const instance = application.getControllerForElementAndIdentifier(host, "stimeo--collapsible");
+    if (!(instance instanceof CollapsibleController)) {
+      throw new Error("collapsible controller missing");
+    }
+    return instance;
+  };
+  const restart = async (markup: string) => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = markup;
+    application = Application.start();
+    application.register("stimeo--collapsible", CollapsibleController);
+    await tick();
+  };
 
   it("opens on trigger click: drops hidden, sets data-state and the height var", () => {
     trigger().click();
@@ -83,6 +94,20 @@ describe("CollapsibleController", () => {
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
     expect(content().hidden).toBe(false);
     expect(content().getAttribute("data-state")).toBe("open");
+  });
+
+  it("uses the false open default on a fresh render with no state attributes", async () => {
+    await restart(`
+      <div data-controller="stimeo--collapsible">
+        <button data-stimeo--collapsible-target="trigger"
+                data-action="stimeo--collapsible#toggle"
+                aria-controls="default-closed">Show</button>
+        <div id="default-closed" data-stimeo--collapsible-target="content">Body</div>
+      </div>`);
+
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(content().getAttribute("data-state")).toBe("closed");
+    expect(content().hidden).toBe(true);
   });
 
   it("stays closed on reconnect when the restored DOM reads closed (DOM wins over open Value)", async () => {
@@ -129,6 +154,35 @@ describe("CollapsibleController", () => {
     expect(content().getAttribute("data-state")).toBe("open");
   });
 
+  it("supports a content-only target by restoring and toggling its data-state", async () => {
+    await restart(`
+      <div data-controller="stimeo--collapsible">
+        <div data-stimeo--collapsible-target="content" data-state="open">Body</div>
+      </div>`);
+
+    expect(content().hidden).toBe(false);
+    controller().toggle();
+    expect(content().getAttribute("data-state")).toBe("closed");
+    expect(content().hidden).toBe(true);
+    controller().toggle();
+    expect(content().getAttribute("data-state")).toBe("open");
+    expect(content().hidden).toBe(false);
+  });
+
+  it("keeps a trigger-only target operable through the declared action", async () => {
+    await restart(`
+      <div data-controller="stimeo--collapsible">
+        <button data-stimeo--collapsible-target="trigger"
+                data-action="stimeo--collapsible#toggle"
+                aria-expanded="false">Toggle</button>
+      </div>`);
+
+    trigger().click();
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    trigger().click();
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+  });
+
   // Layer ① — machine-detectable a11y, asserted in both states. The page-level
   // `region` (landmark) rule is irrelevant to a headless component fragment.
   it("has no machine-detectable a11y violations in either state", async () => {
@@ -149,25 +203,35 @@ describe("CollapsibleController", () => {
     expect(after).toEqual(["button, Show details, expanded"]);
   });
 
-  // happy-dom reports an empty computed transition-duration, so the transition
-  // branch is forced by stubbing getComputedStyle. These lock the close
-  // lifecycle: hidden is deferred until transitionend, and a reopen mid-transition
-  // cancels the deferred hide.
+  // happy-dom reports empty computed transition fields, so these tests stub the
+  // complete property/duration/delay tuple that the shared waiter consumes.
   describe("with a non-zero transition", () => {
-    const stubDuration = (value: string) =>
-      vi
-        .spyOn(window, "getComputedStyle")
-        .mockReturnValue({ transitionDuration: value } as CSSStyleDeclaration);
+    const stubTransition = (duration: string, delay = "0s", property = "height") =>
+      vi.spyOn(window, "getComputedStyle").mockReturnValue({
+        transitionProperty: property,
+        transitionDuration: duration,
+        transitionDelay: delay,
+      } as CSSStyleDeclaration);
+
+    const finishTransition = (
+      element: HTMLElement = content(),
+      property = "height",
+      type: "transitionend" | "transitioncancel" = "transitionend",
+    ) => {
+      const event = new Event(type, { bubbles: true });
+      Object.defineProperty(event, "propertyName", { value: property });
+      element.dispatchEvent(event);
+    };
 
     it("defers hidden until transitionend, then applies it", () => {
-      const spy = stubDuration("0.2s");
+      const spy = stubTransition("0.2s");
       try {
         trigger().click(); // open
         trigger().click(); // close → transition pending
         expect(content().getAttribute("data-state")).toBe("closed");
         expect(content().hidden).toBe(false); // not hidden yet — waiting for the transition
 
-        content().dispatchEvent(new Event("transitionend"));
+        finishTransition();
         expect(content().hidden).toBe(true);
       } finally {
         spy.mockRestore();
@@ -175,14 +239,14 @@ describe("CollapsibleController", () => {
     });
 
     it("does not hide if reopened before the transition ends", () => {
-      const spy = stubDuration("0.2s");
+      const spy = stubTransition("0.2s");
       try {
         trigger().click(); // open
         trigger().click(); // close (pending)
         trigger().click(); // reopen before transitionend
         expect(content().getAttribute("data-state")).toBe("open");
 
-        content().dispatchEvent(new Event("transitionend")); // stale event
+        finishTransition(); // stale event
         expect(content().hidden).toBe(false);
       } finally {
         spy.mockRestore();
@@ -190,36 +254,127 @@ describe("CollapsibleController", () => {
     });
 
     it("parses a transition-duration given in milliseconds", () => {
-      const spy = stubDuration("200ms");
+      const spy = stubTransition("200ms");
       try {
         trigger().click();
         trigger().click();
         expect(content().hidden).toBe(false); // ms parsed as > 0, so still waiting
-        content().dispatchEvent(new Event("transitionend"));
+        finishTransition();
         expect(content().hidden).toBe(true);
       } finally {
         spy.mockRestore();
       }
     });
+
+    it("applies hidden through the bounded fallback when no terminal event fires", () => {
+      stubTransition("200ms", "50ms");
+      vi.useFakeTimers();
+      trigger().click();
+      trigger().click();
+
+      vi.advanceTimersByTime(299);
+      expect(content().hidden).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(content().hidden).toBe(true);
+    });
+
+    it("treats transitioncancel as a terminal event for the closing property", () => {
+      stubTransition("200ms");
+      trigger().click();
+      trigger().click();
+
+      finishTransition(content(), "height", "transitioncancel");
+
+      expect(content().getAttribute("data-state")).toBe("closed");
+      expect(content().hidden).toBe(true);
+    });
+
+    it("ignores descendant and undeclared-property transition events", () => {
+      stubTransition("200ms");
+      trigger().click();
+      trigger().click();
+      const child = document.createElement("span");
+      content().append(child);
+
+      finishTransition(child);
+      finishTransition(content(), "opacity");
+      expect(content().hidden).toBe(false);
+
+      finishTransition();
+      expect(content().hidden).toBe(true);
+    });
+
+    it("cancels the old wait and reconciles a closed replacement as hidden", async () => {
+      stubTransition("200ms");
+      vi.useFakeTimers();
+      trigger().click();
+      trigger().click();
+      const oldContent = content();
+      const replacement = oldContent.cloneNode(true) as HTMLElement;
+      oldContent.replaceWith(replacement);
+      await vi.advanceTimersByTimeAsync(0);
+
+      vi.advanceTimersByTime(250);
+      expect(oldContent.hidden).toBe(false);
+      expect(replacement.getAttribute("data-state")).toBe("closed");
+      expect(replacement.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("reconciles a replacement content target with the open state", async () => {
+      stubTransition("200ms");
+      vi.useFakeTimers();
+      trigger().click();
+      const oldContent = content();
+      const replacement = oldContent.cloneNode(true) as HTMLElement;
+      replacement.hidden = true;
+      replacement.setAttribute("data-state", "closed");
+      oldContent.replaceWith(replacement);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(replacement.getAttribute("data-state")).toBe("open");
+      expect(replacement.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("cancels a pending close when the Stimulus definition is unloaded", () => {
+      stubTransition("200ms");
+      vi.useFakeTimers();
+      trigger().click();
+      trigger().click();
+      const closingContent = content();
+
+      application.unload("stimeo--collapsible");
+      finishTransition(closingContent);
+      vi.advanceTimersByTime(250);
+      trigger().click();
+
+      expect(closingContent.getAttribute("data-state")).toBe("closed");
+      expect(closingContent.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+  });
+
+  it("reconciles a replacement trigger target with the open content state", async () => {
+    trigger().click();
+    const oldTrigger = trigger();
+    const replacement = oldTrigger.cloneNode(true) as HTMLButtonElement;
+    replacement.setAttribute("aria-expanded", "false");
+    oldTrigger.replaceWith(replacement);
+    await tick();
+
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    trigger().click();
+    expect(content().getAttribute("data-state")).toBe("closed");
   });
 
   it("is a safe no-op when the trigger/content targets are absent", async () => {
-    disconnectAndStopApplication(application);
-    document.body.innerHTML = `<div data-controller="stimeo--collapsible"></div>`;
-    application = Application.start();
-    application.register("stimeo--collapsible", CollapsibleController);
-    await tick();
+    await restart(`<div data-controller="stimeo--collapsible"></div>`);
 
-    const host = query("[data-controller='stimeo--collapsible']");
-    const instance = application.getControllerForElementAndIdentifier(
-      host,
-      "stimeo--collapsible",
-    ) as CollapsibleController;
-    expect(() => instance.toggle()).not.toThrow();
+    expect(() => controller().toggle()).not.toThrow();
   });
 
-  // Context teardown leaves the element inert (no toggle) and invokes the
-  // controller hook that removes any pending transitionend listener.
+  // Unloading the definition must also remove the declared action binding.
   it("becomes inert after disconnect", () => {
     application.unload("stimeo--collapsible");
     trigger().click();

@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { LayoutObserver } from "../utils/layout_observer";
+import { logicalScrollMetrics } from "../utils/logical_scroll";
 
 /** A CSS selector for natively focusable / author-focusable descendants. */
 const FOCUSABLE_SELECTOR = [
@@ -126,10 +127,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
       this.orientationValue === "horizontal" ||
       (this.orientationValue === "both" && vp.scrollHeight <= vp.clientHeight + EDGE_EPSILON);
 
-    const scrollPos = horizontalPrimary ? vp.scrollLeft : vp.scrollTop;
-    const maxScroll = horizontalPrimary
-      ? vp.scrollWidth - vp.clientWidth
-      : vp.scrollHeight - vp.clientHeight;
+    const { position: scrollPos, max: maxScroll } = logicalScrollMetrics(vp, horizontalPrimary);
 
     if (maxScroll <= EDGE_EPSILON) return { position: "start", progress: 0 };
 

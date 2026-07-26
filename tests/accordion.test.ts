@@ -20,13 +20,15 @@ describe("AccordionController", () => {
         <h3><button id="b1" data-stimeo--accordion-target="trigger"
                     data-action="stimeo--accordion#toggle keydown->stimeo--accordion#onKeydown"
                     aria-expanded="false" aria-controls="p1">One</button></h3>
-        <div id="p1" data-stimeo--accordion-target="panel" role="region"
-             aria-labelledby="b1" hidden>Panel one</div>
         <h3><button id="b2" data-stimeo--accordion-target="trigger"
                     data-action="stimeo--accordion#toggle keydown->stimeo--accordion#onKeydown"
                     aria-expanded="false" aria-controls="p2">Two</button></h3>
         <div id="p2" data-stimeo--accordion-target="panel" role="region"
              aria-labelledby="b2" hidden>Panel two</div>
+        <div id="p1" data-stimeo--accordion-target="panel" role="region"
+             aria-labelledby="b1" hidden>Panel one</div>
+        <button id="expand-all" data-action="stimeo--accordion#expandAll">Expand all</button>
+        <button id="collapse-all" data-action="stimeo--accordion#collapseAll">Collapse all</button>
       </div>`;
     application = Application.start();
     application.register("stimeo--accordion", AccordionController);
@@ -48,15 +50,17 @@ describe("AccordionController", () => {
     return element;
   };
 
-  it("starts with every panel collapsed", () => {
-    expect(panel("p1").hidden).toBe(true);
-    expect(panel("p2").hidden).toBe(true);
-  });
-
   it("expands the controlled panel on click", () => {
     triggers()[0]?.click();
     expect(triggers()[0]?.getAttribute("aria-expanded")).toBe("true");
     expect(panel("p1").hidden).toBe(false);
+    expect(panel("p2").hidden).toBe(true);
+  });
+
+  it("pairs triggers and panels by aria-controls rather than DOM position", () => {
+    triggers()[1]?.click();
+    expect(panel("p2").hidden).toBe(false);
+    expect(panel("p1").hidden).toBe(true);
   });
 
   it("allows multiple panels open at once", () => {
@@ -75,8 +79,14 @@ describe("AccordionController", () => {
 
   it("moves focus to the next header on ArrowDown", () => {
     triggers()[0]?.focus();
-    triggers()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    triggers()[0]?.dispatchEvent(event);
     expect(document.activeElement).toBe(triggers()[1]);
+    expect(event.defaultPrevented).toBe(true);
   });
 
   it("wraps to the first header from the last on ArrowDown", () => {
@@ -140,6 +150,9 @@ describe("AccordionController", () => {
     triggers()[0]?.focus();
     triggers()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
     expect(document.activeElement).toBe(triggers()[1]); // wrapped to last
+
+    triggers()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    expect(document.activeElement).toBe(triggers()[0]); // regular previous step
   });
 
   it("jumps to the first header on Home and the last on End", () => {
@@ -208,18 +221,9 @@ describe("AccordionController", () => {
     expect(panel("p1").hidden).toBe(true);
   });
 
-  const controller = () => {
-    const instance = application.getControllerForElementAndIdentifier(
-      root(),
-      "stimeo--accordion",
-    ) as AccordionController | null;
-    if (!instance) throw new Error("controller not found");
-    return instance;
-  };
-
   it("expandAll opens every panel regardless of prior state", () => {
     triggers()[0]?.click(); // p1 open, p2 closed — a mixed starting point
-    controller().expandAll();
+    document.getElementById("expand-all")?.click();
     expect(panel("p1").hidden).toBe(false);
     expect(panel("p2").hidden).toBe(false);
     expect(triggers()[0]?.getAttribute("aria-expanded")).toBe("true");
@@ -228,7 +232,7 @@ describe("AccordionController", () => {
 
   it("collapseAll closes every panel regardless of prior state", () => {
     triggers()[0]?.click(); // p1 open, p2 closed — a mixed starting point
-    controller().collapseAll();
+    document.getElementById("collapse-all")?.click();
     expect(panel("p1").hidden).toBe(true);
     expect(panel("p2").hidden).toBe(true);
     expect(triggers()[0]?.getAttribute("aria-expanded")).toBe("false");

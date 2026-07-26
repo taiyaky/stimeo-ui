@@ -13,20 +13,24 @@ import { tick } from "./helpers/timing";
  */
 
 const markup = (attrs = "") => `
-  <ol data-controller="stimeo--stepper" ${attrs}>
-    <li data-stimeo--stepper-target="step">
-      <button data-stimeo--stepper-index-param="0"
-              data-action="click->stimeo--stepper#goto">Account</button>
-    </li>
-    <li data-stimeo--stepper-target="step">
-      <button data-stimeo--stepper-index-param="1"
-              data-action="click->stimeo--stepper#goto">Profile</button>
-    </li>
-    <li data-stimeo--stepper-target="step">
-      <button data-stimeo--stepper-index-param="2"
-              data-action="click->stimeo--stepper#goto">Confirm</button>
-    </li>
-  </ol>`;
+  <div data-controller="stimeo--stepper" ${attrs}>
+    <ol>
+      <li data-stimeo--stepper-target="step">
+        <button data-stimeo--stepper-index-param="0"
+                data-action="click->stimeo--stepper#goto">Account</button>
+      </li>
+      <li data-stimeo--stepper-target="step">
+        <button data-stimeo--stepper-index-param="1"
+                data-action="click->stimeo--stepper#goto">Profile</button>
+      </li>
+      <li data-stimeo--stepper-target="step">
+        <button data-stimeo--stepper-index-param="2"
+                data-action="click->stimeo--stepper#goto">Confirm</button>
+      </li>
+    </ol>
+    <button id="previous" data-action="stimeo--stepper#prev">Previous</button>
+    <button id="next" data-action="stimeo--stepper#next">Next</button>
+  </div>`;
 
 describe("StepperController", () => {
   let application: Application;
@@ -57,28 +61,25 @@ describe("StepperController", () => {
     expect(currents()).toEqual(["step", null, null]);
   });
 
-  const controller = () =>
-    application.getControllerForElementAndIdentifier(root(), "stimeo--stepper") as unknown as {
-      next(): void;
-      prev(): void;
-    };
+  const previous = () => document.getElementById("previous") as HTMLButtonElement;
+  const next = () => document.getElementById("next") as HTMLButtonElement;
 
   it("advances and retreats with next/prev, completing passed steps", async () => {
     await start();
-    controller().next();
+    next().click();
     expect(states()).toEqual(["complete", "current", "upcoming"]);
     expect(currents()).toEqual([null, "step", null]);
-    controller().prev();
+    previous().click();
     expect(states()).toEqual(["current", "upcoming", "upcoming"]);
   });
 
   it("ignores moves past either end", async () => {
     await start();
-    controller().prev(); // already at the first step
+    previous().click(); // already at the first step
     expect(states()).toEqual(["current", "upcoming", "upcoming"]);
-    controller().next();
-    controller().next();
-    controller().next(); // already at the last step
+    next().click();
+    next().click();
+    next().click(); // already at the last step
     expect(states()).toEqual(["complete", "complete", "current"]);
   });
 
@@ -95,6 +96,56 @@ describe("StepperController", () => {
     expect(currents()).toEqual([null, null, "step"]);
   });
 
+  it("rejects a fractional goto param instead of rendering no current step", async () => {
+    await start();
+    buttons()[1]?.setAttribute("data-stimeo--stepper-index-param", "1.5");
+    buttons()[1]?.click();
+    expect(states()).toEqual(["current", "upcoming", "upcoming"]);
+    expect(currents()).toEqual(["step", null, null]);
+  });
+
+  it("ignores goto when the index param is missing or not numeric", async () => {
+    await start();
+    buttons()[1]?.removeAttribute("data-stimeo--stepper-index-param");
+    buttons()[1]?.click();
+    expect(states()).toEqual(["current", "upcoming", "upcoming"]);
+
+    buttons()[2]?.setAttribute("data-stimeo--stepper-index-param", "abc");
+    buttons()[2]?.click();
+    expect(states()).toEqual(["current", "upcoming", "upcoming"]);
+    expect(currents()).toEqual(["step", null, null]);
+  });
+
+  it("normalizes non-finite, fractional, and negative initial indexes", async () => {
+    await start('data-stimeo--stepper-index-value="NaN"');
+    expect(states()).toEqual(["current", "upcoming", "upcoming"]);
+    expect(root().getAttribute("data-stimeo--stepper-index-value")).toBe("0");
+
+    disconnectAndStopApplication(application);
+    await start('data-stimeo--stepper-index-value="1.9"');
+    expect(states()).toEqual(["complete", "current", "upcoming"]);
+    expect(root().getAttribute("data-stimeo--stepper-index-value")).toBe("1");
+
+    disconnectAndStopApplication(application);
+    await start('data-stimeo--stepper-index-value="-1"');
+    expect(states()).toEqual(["current", "upcoming", "upcoming"]);
+    expect(root().getAttribute("data-stimeo--stepper-index-value")).toBe("0");
+  });
+
+  it("re-renders when the index value changes at runtime", async () => {
+    await start();
+    const changes: CustomEvent[] = [];
+    root().addEventListener("stimeo--stepper:change", (event) => {
+      changes.push(event as CustomEvent);
+    });
+    root().setAttribute("data-stimeo--stepper-index-value", "2");
+    await tick();
+    expect(states()).toEqual(["complete", "complete", "current"]);
+    expect(currents()).toEqual([null, null, "step"]);
+    // A re-derivation from a Value write is not a move: `change` must not fire.
+    expect(changes).toEqual([]);
+  });
+
   it("blocks skipping ahead under linear (but allows going back)", async () => {
     await start('data-stimeo--stepper-linear-value="true"');
     buttons()[2]?.click(); // skip from 0 to 2 is blocked
@@ -107,14 +158,35 @@ describe("StepperController", () => {
 
   it("dispatches change with index, previous, and the step element", async () => {
     await start();
-    const details: Array<{ index: number; previous: number }> = [];
+    const details: Array<{ index: number; previous: number; step: HTMLElement }> = [];
     root().addEventListener("stimeo--stepper:change", (event) => {
-      const detail = (event as CustomEvent).detail;
-      details.push({ index: detail.index, previous: detail.previous });
-      expect(detail.step).toBe(steps()[detail.index]);
+      details.push(
+        (event as CustomEvent<{ index: number; previous: number; step: HTMLElement }>).detail,
+      );
     });
     buttons()[1]?.click();
-    expect(details).toEqual([{ index: 1, previous: 0 }]);
+    expect(details).toEqual([{ index: 1, previous: 0, step: steps()[1] }]);
+  });
+
+  it("does not dispatch change for no-op or blocked moves", async () => {
+    await start('data-stimeo--stepper-linear-value="true"');
+    const changes: CustomEvent[] = [];
+    root().addEventListener("stimeo--stepper:change", (event) => {
+      changes.push(event as CustomEvent);
+    });
+
+    buttons()[0]?.click(); // already current
+    previous().click(); // before the first step
+    buttons()[2]?.click(); // blocked by linear mode
+    expect(changes).toEqual([]);
+  });
+
+  it("becomes inert after the Stimulus binding is unloaded", async () => {
+    await start();
+    application.unload("stimeo--stepper");
+    next().click();
+    expect(states()).toEqual(["current", "upcoming", "upcoming"]);
+    expect(currents()).toEqual(["step", null, null]);
   });
 
   it("announces the current step on its button", async () => {

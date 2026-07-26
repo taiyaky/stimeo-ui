@@ -14,6 +14,29 @@
  * load) stays in each controller. The public `stimeo--intersection` controller
  * is its thin declarative face.
  */
+/**
+ * Whether `entry`'s target sits entirely before the root's **start (top)** edge —
+ * the "scrolled past the top" half of a non-intersecting entry, as opposed to
+ * "not reached yet" below the root.
+ *
+ * A target with no layout box (`display: none`, a `hidden` ancestor, a collapsed
+ * `<details>`) is reported with an **empty rect**, whose `bottom` of `0` would
+ * otherwise satisfy `bottom <= rootTop` for a viewport root and read as "passed"
+ * even though the target was never scrolled anywhere. An empty rect carries no
+ * position at all, so it is deliberately never "before the edge"; what a caller
+ * publishes for that case is its own policy (both consumers treat it as the
+ * neutral "not passed"/"not stuck", and the real rect that arrives once the
+ * target is laid out re-establishes the true state).
+ */
+export function isBeforeRootStart(entry: IntersectionObserverEntry): boolean {
+  const rect = entry.boundingClientRect;
+  if (rect.width === 0 && rect.height === 0) return false;
+  // rootBounds is null for a cross-origin/removed root; fall back to the
+  // viewport origin.
+  const rootTop = entry.rootBounds?.top ?? 0;
+  return rect.bottom <= rootTop;
+}
+
 export interface IntersectionWatchOptions {
   /**
    * The observation root. Pass an element (or `null` for the viewport) when
@@ -44,6 +67,11 @@ export class IntersectionWatcher {
    * (Re)creates the observer and observes `targets`. Returns `false` — leaving
    * the watcher inert — without `IntersectionObserver` support (very old
    * browsers; the caller's no-JS fallback stays in charge) or with no targets.
+   *
+   * @throws Whatever the platform throws for an invalid `rootMargin`/`threshold`
+   *   or a failing `observe()`. The exception is passed through unchanged, but
+   *   the watcher rolls back first: every target observed so far is released and
+   *   `active` stays `false`, so a caller that retries starts from a clean slate.
    */
   start(targets: Element | readonly Element[], options: IntersectionWatchOptions = {}): boolean {
     this.stop();
@@ -58,26 +86,47 @@ export class IntersectionWatcher {
           ? document.querySelector(options.rootSelector)
           : null;
 
-    this.#active = true;
-    this.#observer = new IntersectionObserver(
-      (entries) => {
-        if (this.#active) this.#onEntries(entries);
-      },
-      { root, rootMargin: options.rootMargin, threshold: options.threshold },
-    );
-    for (const target of list) this.#observer.observe(target);
-    return true;
+    let observer: IntersectionObserver | null = null;
+    try {
+      observer = new IntersectionObserver(
+        (entries) => {
+          // Identity matters across an immediate restart: the old observer can
+          // flush a queued batch after the new observer has made `active` true.
+          if (this.#active && this.#observer === observer) this.#onEntries(entries);
+        },
+        { root, rootMargin: options.rootMargin, threshold: options.threshold },
+      );
+      for (const target of list) observer.observe(target);
+      this.#observer = observer;
+      this.#active = true;
+      return true;
+    } catch (error) {
+      // A constructor or partial observe failure must not leave earlier targets
+      // observed or report an active watcher. Preserve the platform exception.
+      observer?.disconnect();
+      this.#observer = null;
+      this.#active = false;
+      throw error;
+    }
   }
 
   /**
    * Re-delivers `target`'s CURRENT intersection state: `IntersectionObserver`
    * only reports *changes*, but `observe()` always reports the present state,
    * so unobserve→observe turns "still intersecting" into a fresh callback.
+   *
+   * @throws Whatever `unobserve()`/`observe()` throws. The watcher is stopped
+   *   first, so it never stays live with a half-rearmed target.
    */
   rearm(target: Element): void {
     if (!this.#observer) return;
-    this.#observer.unobserve(target);
-    this.#observer.observe(target);
+    try {
+      this.#observer.unobserve(target);
+      this.#observer.observe(target);
+    } catch (error) {
+      this.stop();
+      throw error;
+    }
   }
 
   /** Severs the observer; late queued callbacks become no-ops via the guard. */

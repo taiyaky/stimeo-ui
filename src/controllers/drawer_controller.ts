@@ -1,19 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
 import { FocusTrap } from "../utils/focus_trap";
+import { TransitionCompletion } from "../utils/transition_completion";
 
 /** Edge a drawer slides from; reflected as `data-placement` for the consumer CSS. */
 type Placement = "left" | "right" | "top" | "bottom";
-
-/** Parses a CSS `transition-duration` string to milliseconds (max of the list). */
-function maxTransitionMs(value: string): number {
-  const durations = value.split(",").map((part) => {
-    const trimmed = part.trim();
-    if (trimmed.endsWith("ms")) return Number.parseFloat(trimmed);
-    if (trimmed.endsWith("s")) return Number.parseFloat(trimmed) * 1000;
-    return 0;
-  });
-  return durations.length === 0 ? 0 : Math.max(...durations);
-}
 
 /**
  * Headless, accessible **drawer / slide-over** behavior.
@@ -69,14 +59,19 @@ export class DrawerController extends Controller<HTMLElement> {
   declare placementValue: string;
   declare openValue: boolean;
 
+  /** Exact panel currently owned by the modal lifecycle (survives target churn safely). */
+  #activePanel: HTMLElement | null = null;
+
   /** Owns the modal side effects; Escape closes, focus falls back to the trigger. */
-  readonly #trap = new FocusTrap(() => this.panelTarget, {
+  readonly #trap = new FocusTrap(() => this.#activePanel ?? this.panelTarget, {
     onEscape: () => this.close(),
     fallbackFocus: () => (this.hasTriggerTarget ? this.triggerTarget : null),
   });
 
-  /** Pending `transitionend` hide listener, kept so it can be cancelled on reopen. */
-  #pendingHide: (() => void) | null = null;
+  /** Owns the cancellable close-transition wait and its bounded fallback. */
+  readonly #transition = new TransitionCompletion();
+  /** Distinguishes dynamic target churn from callbacks around controller teardown. */
+  #connected = false;
 
   /**
    * Reflects placement and establishes the initial open/closed state.
@@ -90,6 +85,8 @@ export class DrawerController extends Controller<HTMLElement> {
    * after a reconnect and must be re-activated.
    */
   override connect(): void {
+    this.#connected = true;
+    this.#activePanel = this.hasPanelTarget ? this.panelTarget : null;
     this.#reflectPlacement();
     const shouldOpen = this.#isOpen || this.openValue;
     this.#applyClosedState();
@@ -98,8 +95,37 @@ export class DrawerController extends Controller<HTMLElement> {
 
   /** Reverts the modal side effects and pending hide if torn down while open. */
   override disconnect(): void {
-    this.#cancelPendingHide();
+    this.#connected = false;
+    this.#transition.cancel();
     this.#trap.deactivate({ restoreFocus: false });
+    this.#activePanel = null;
+  }
+
+  /** Adopts a panel target added by a Turbo morph after the controller connected. */
+  panelTargetConnected(panel: HTMLElement): void {
+    if (!this.#connected || (this.#activePanel?.isConnected && this.#activePanel !== panel)) return;
+    this.#adoptPanel(panel);
+  }
+
+  /** Closes and releases modal side effects when the actively trapped panel disappears. */
+  panelTargetDisconnected(panel: HTMLElement): void {
+    if (panel !== this.#activePanel) return;
+    this.#transition.cancel();
+    this.#activePanel = null;
+    if (!this.#connected) return;
+
+    panel.setAttribute("data-state", "closed");
+    panel.hidden = true;
+    if (this.hasOverlayTarget) {
+      this.overlayTarget.setAttribute("data-state", "closed");
+      this.overlayTarget.hidden = true;
+    }
+    this.openValue = false;
+    this.#trap.deactivate();
+
+    // Handles morph implementations that add the replacement before removing
+    // the old target (its connected callback was intentionally ignored above).
+    if (this.hasPanelTarget) this.#adoptPanel(this.panelTarget);
   }
 
   /** Keeps `data-placement` in sync if the value changes at runtime. */
@@ -110,7 +136,8 @@ export class DrawerController extends Controller<HTMLElement> {
   /** Opens the drawer: reveals it, syncs `data-state`, traps focus. */
   open(): void {
     if (!this.hasPanelTarget || this.#isOpen) return;
-    this.#cancelPendingHide(); // Reveal the panel/overlay while still in their `data-state="closed"`
+    this.#transition.cancel(); // Reveal the panel/overlay while still in their `data-state="closed"`
+    this.#activePanel = this.panelTarget;
     // (off-screen) position so the browser has a rendered "from" frame.
     this.panelTarget.hidden = false;
     if (this.hasOverlayTarget) this.overlayTarget.hidden = false;
@@ -149,6 +176,34 @@ export class DrawerController extends Controller<HTMLElement> {
     if (this.hasPanelTarget) this.panelTarget.setAttribute("data-placement", this.#placement);
   }
 
+  /** Reconciles a replacement panel and companion overlay from its explicit DOM state. */
+  #adoptPanel(panel: HTMLElement): void {
+    this.#transition.cancel();
+    const trapWasActive = this.#trap.active;
+    this.#activePanel = panel;
+    panel.setAttribute("data-placement", this.#placement);
+    if (panel.getAttribute("data-state") === "open") {
+      panel.hidden = false;
+      if (this.hasOverlayTarget) {
+        this.overlayTarget.setAttribute("data-state", "open");
+        this.overlayTarget.hidden = false;
+      }
+      this.openValue = true;
+      if (trapWasActive) this.#trap.deactivate({ restoreFocus: false });
+      this.#trap.activate();
+      return;
+    }
+
+    panel.setAttribute("data-state", "closed");
+    panel.hidden = true;
+    if (this.hasOverlayTarget) {
+      this.overlayTarget.setAttribute("data-state", "closed");
+      this.overlayTarget.hidden = true;
+    }
+    this.openValue = false;
+    this.#trap.deactivate();
+  }
+
   /** Validated placement (`left`/`right`/`top`/`bottom`), defaulting to `right`. */
   get #placement(): Placement {
     const value = this.placementValue;
@@ -170,24 +225,13 @@ export class DrawerController extends Controller<HTMLElement> {
 
   /**
    * Applies `hidden` once the panel's close transition ends, so the exit slide
-   * can play. When the panel has no transition (the duration is `0`, as in tests
-   * or unstyled usage), it hides synchronously rather than waiting for an event
-   * that would never fire.
+   * can play. The shared waiter hides synchronously for 0ms transitions and
+   * supplies a bounded fallback when the browser emits no terminal event.
    */
   #hideAfterTransition(): void {
     const panel = this.panelTarget;
-    const duration = maxTransitionMs(getComputedStyle(panel).transitionDuration);
-    if (duration === 0) {
-      this.#applyHidden();
-      return;
-    }
-    const onEnd = (event: TransitionEvent): void => {
-      if (event.target !== panel) return;
-      this.#cancelPendingHide();
-      this.#applyHidden();
-    };
-    this.#pendingHide = () => panel.removeEventListener("transitionend", onEnd);
-    panel.addEventListener("transitionend", onEnd);
+    this.#activePanel = panel;
+    this.#transition.wait(panel, () => this.#applyHidden(panel));
   }
 
   /**
@@ -197,16 +241,10 @@ export class DrawerController extends Controller<HTMLElement> {
    * {@link FocusTrap} teardown to here — rather than at {@link close} time — keeps
    * the background unreachable and focus trapped for the whole exit animation.
    */
-  #applyHidden(): void {
-    if (this.hasPanelTarget) this.panelTarget.hidden = true;
+  #applyHidden(panel: HTMLElement): void {
+    panel.hidden = true;
     if (this.hasOverlayTarget) this.overlayTarget.hidden = true;
     this.#trap.deactivate();
-  }
-
-  /** Removes any pending `transitionend` hide listener. */
-  #cancelPendingHide(): void {
-    this.#pendingHide?.();
-    this.#pendingHide = null;
   }
 
   /** Whether the drawer is open (tracked via `data-state`, not `hidden`). */

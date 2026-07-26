@@ -94,6 +94,32 @@ describe("ScrollAreaController", () => {
     expect(root().style.getPropertyValue("--stimeo-scroll-progress")).toBe("1");
   });
 
+  it("reports logical progress from start to end in a horizontal RTL viewport", async () => {
+    await start(
+      markup().replace(
+        'data-stimeo--scroll-area-orientation-value="vertical"',
+        'data-stimeo--scroll-area-orientation-value="horizontal"',
+      ),
+    );
+    viewport().style.direction = "rtl";
+    for (const [key, value] of Object.entries({
+      scrollWidth: 800,
+      clientWidth: 200,
+      scrollLeft: -300,
+    })) {
+      Object.defineProperty(viewport(), key, { configurable: true, value });
+    }
+    window.dispatchEvent(new Event("resize"));
+
+    expect(root().getAttribute("data-scroll")).toBe("middle");
+    expect(root().style.getPropertyValue("--stimeo-scroll-progress")).toBe("0.5");
+
+    Object.defineProperty(viewport(), "scrollLeft", { configurable: true, value: -600 });
+    viewport().dispatchEvent(new Event("scroll"));
+    expect(root().getAttribute("data-scroll")).toBe("end");
+    expect(root().style.getPropertyValue("--stimeo-scroll-progress")).toBe("1");
+  });
+
   it("dispatches reach once per edge arrival", async () => {
     await start(markup());
     const edges: string[] = [];

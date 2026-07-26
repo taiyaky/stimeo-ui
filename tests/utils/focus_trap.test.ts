@@ -221,6 +221,34 @@ describe("FocusTrap", () => {
     expect(byId("background").inert).toBe(true);
   });
 
+  it("does not pull focus back when deactivate runs again after closing", () => {
+    // Controllers call deactivate() defensively from both close() and disconnect().
+    // The opener is still remembered after the first call, so a second one that
+    // reached the restore path would yank focus away from wherever the user moved.
+    byId("opener").focus();
+    const t = trap();
+    t.activate();
+    t.deactivate();
+    expect(document.activeElement).toBe(byId("opener"));
+
+    byId("last").focus();
+    t.deactivate();
+    expect(document.activeElement).toBe(byId("last"));
+  });
+
+  it("leaves a non-HTML background sibling untouched", () => {
+    // `inert` is an HTMLElement property; an SVG root at body level would only
+    // collect a stray expando and get tracked for a release that means nothing.
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    document.body.append(svg);
+    const t = trap();
+
+    t.activate();
+
+    expect(byId("background").inert).toBe(true);
+    expect((svg as unknown as { inert?: boolean }).inert).toBeUndefined();
+  });
+
   it("drops the keydown listener on deactivate", () => {
     let escapes = 0;
     const t = trap({ onEscape: () => escapes++ });

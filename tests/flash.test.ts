@@ -87,10 +87,14 @@ describe("FlashController", () => {
 
   it("auto-dismisses after the duration, animating via the leaving state", async () => {
     const real = window.getComputedStyle;
+    // Two leave properties: the longer one also carries a delay, so removal must
+    // wait max(50, 150 + 50) = 200ms — not the first duration value alone.
     window.getComputedStyle = ((el: Element) =>
       ({
         ...real(el),
-        transitionDuration: "0.2s",
+        transitionProperty: "opacity, transform",
+        transitionDuration: "0.05s, 0.15s",
+        transitionDelay: "0s, 0.05s",
       }) as CSSStyleDeclaration) as typeof getComputedStyle;
     try {
       const dismissed: string[] = [];
@@ -104,7 +108,10 @@ describe("FlashController", () => {
       expect(el.getAttribute("data-flash-state")).toBe("leaving");
       expect(el.isConnected).toBe(true);
 
-      vi.advanceTimersByTime(200);
+      vi.advanceTimersByTime(199);
+      expect(el.isConnected).toBe(true);
+
+      vi.advanceTimersByTime(1);
       expect(el.isConnected).toBe(false);
       expect(dismissed).toEqual(["timeout"]);
     } finally {

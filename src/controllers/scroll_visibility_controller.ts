@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { prefersReducedMotion } from "../utils/reduced_motion";
 
 /**
  * Headless **Scroll Visibility** behavior: shows or hides an element based on
@@ -91,7 +92,7 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
 
   /** Scrolls the source to the top and, optionally, moves focus to a safe target. */
   toTop(): void {
-    const behavior: ScrollBehavior = this.#prefersReducedMotion() ? "auto" : "smooth";
+    const behavior: ScrollBehavior = prefersReducedMotion() ? "auto" : "smooth";
     this.#scrollSource.scrollTo({ top: 0, behavior });
     if (this.focusSelectorValue) {
       const target = document.querySelector<HTMLElement>(this.focusSelectorValue);
@@ -144,12 +145,5 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
       return window.scrollY ?? window.pageYOffset ?? 0;
     }
     return (this.#scrollSource as HTMLElement).scrollTop;
-  }
-
-  #prefersReducedMotion(): boolean {
-    return (
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    );
   }
 }

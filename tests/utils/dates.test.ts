@@ -43,4 +43,12 @@ describe("dates util", () => {
     expect(parseISOMonthString("2026-13")).toBeNull();
     expect(parseISOMonthString("")).toBeNull();
   });
+
+  it("rejects a month string that does not match the shape at all", () => {
+    // Distinct from the out-of-range cases above: those still match the pattern,
+    // so only a non-matching string exercises the shape rejection. Without it the
+    // destructure of a null match would throw instead of returning null.
+    expect(parseISOMonthString("not-a-month")).toBeNull();
+    expect(parseISOMonthString("2026-6")).toBeNull();
+  });
 });

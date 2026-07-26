@@ -1,6 +1,6 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cssTimeToMs, ToastController } from "../src/controllers/toast_controller";
+import { ToastController } from "../src/controllers/toast_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -454,11 +454,31 @@ describe("ToastController", () => {
     expect(listener).toHaveBeenCalledOnce();
   });
 
-  it("parses CSS transition durations in seconds and milliseconds", () => {
-    expect(cssTimeToMs("0.2s")).toBe(200);
-    expect(cssTimeToMs("150ms")).toBe(150);
-    expect(cssTimeToMs("0.3s, 0.1s")).toBe(300);
-    expect(cssTimeToMs("")).toBe(0);
+  it("waits for the longest transition property including its delay before finalizing", () => {
+    vi.useFakeTimers();
+    const listener = vi.fn();
+    root().addEventListener("stimeo--toast:dismiss", listener);
+    triggerShow("Longest transition notification");
+    const toast = item();
+    // The leave animation spans two properties; the longer one also carries a
+    // delay, so removal must wait 100 + 60 = 160ms — not the first value (50ms).
+    // Stubbed (not inline styles) so emulator normalization of computed
+    // multi-value transition lists cannot skew the parsed timings.
+    vi.spyOn(window, "getComputedStyle").mockReturnValue({
+      transitionProperty: "opacity, transform",
+      transitionDuration: "50ms, 100ms",
+      transitionDelay: "0ms, 60ms",
+    } as CSSStyleDeclaration);
+
+    dismissButton(toast)?.click();
+    expect(toast.dataset.state).toBe("leaving");
+    vi.advanceTimersByTime(159);
+    expect(list().children.length).toBe(1);
+    expect(listener).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(list().children.length).toBe(0);
+    expect(listener).toHaveBeenCalledOnce();
   });
 
   it("has no machine-detectable a11y violations with a live toast present", async () => {

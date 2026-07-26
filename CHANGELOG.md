@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.2.1] - 2026-07-26
+
+Patch release from a review of the disclosure and layout components, plus a
+packaging fix. No breaking changes, but `stimeo check` now reports two markup
+requirements that existing pages may need to satisfy.
+
+### Added
+
+- sidebar: `beforeCache` action for Turbo page caching — wire
+  `data-action="turbo:before-cache@document->stimeo--sidebar#beforeCache"` to close
+  an open overlay and release its modal side effects before the snapshot is taken.
+- sidebar, stepper: the `breakpoint` and `index` values now take effect when
+  changed at runtime. An invalid `breakpoint` falls back to 768px.
+- Inspector: `stimeo check` verifies that the tabs `role="tablist"` element has an
+  accessible name.
+
+### Changed
+
+- tabs: the tablist container is now a required `list` target. Add
+  `data-stimeo--tabs-target="list"` to it, or `stimeo check` reports an error.
+  Runtime behavior is unchanged.
+- Inspector: `stimeo check` reports an error when `stimeo--sidebar` markup has no
+  `panel` target.
+
+### Fixed
+
+- package exports: 26 controllers — including sidebar, drawer, collapsible,
+  read-more, alert-dialog, carousel and tree-view — had no build output behind the
+  `./controllers/*` subpath their `package.json` `exports` declares, so
+  `import … from "stimeo-ui/controllers/<name>_controller"` failed to resolve in
+  0.2.0. Every controller in the catalog now ships one.
+- transition, flash, toast, sidebar, drawer, collapsible: animations now wait for
+  every declared transition property and its `transition-delay`, not just the
+  first duration. Multi-property and delayed animations are no longer cut short, a
+  cancelled transition settles immediately, and pseudo-element transitions no
+  longer end the wait early — so `hidden`, events, focus restore and scroll unlock
+  land at the right moment.
+- sidebar, drawer, collapsible: an interrupted close animation no longer leaves the
+  panel stuck open with the focus trap, background `inert` or scroll lock in place.
+- sidebar, drawer, collapsible, read-more, sticky-observer, overflow-indicator:
+  targets swapped in or added after connect (Turbo morph, lazily loaded Frames,
+  Streams) are now reconciled with the current state instead of keeping the value
+  they were rendered with.
+- overflow-indicator, scroll-area: horizontal position is read logically, so the
+  overflow attributes, the `scrollByPage` action, `data-scroll` and
+  `--stimeo-scroll-progress` behave correctly inside `dir="rtl"` containers.
+- overflow-indicator: reaching an edge while a page button has focus no longer
+  drops focus to the page body — the button stays focused and inert via
+  `aria-disabled`, becoming natively `disabled` only once blurred.
+- read-more: the toggle is no longer hidden while it holds keyboard focus when the
+  text starts to fit; overflow is re-checked on blur, on content changes, and when
+  media inside it finishes loading.
+- sticky-observer: `data-stuck="true"` is set only once the sentinel has actually
+  scrolled past the top edge — one that is merely out of view, or inside a hidden
+  container, no longer marks the element as stuck. Negative `offset` values are now
+  accepted.
+- intersection: an element with no layout box (hidden ancestor, collapsed
+  `<details>`) is no longer reported as scrolled past.
+
 ## [0.2.0] - 2026-07-22
 
 First release off the beta channel: `npm install stimeo-ui` now resolves

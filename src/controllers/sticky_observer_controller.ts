@@ -1,5 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
-import { IntersectionWatcher } from "../utils/intersection_watcher";
+import { IntersectionWatcher, isBeforeRootStart } from "../utils/intersection_watcher";
 
 /**
  * Headless **Sticky State Observer**: detects whether a `position: sticky`
@@ -19,14 +19,17 @@ import { IntersectionWatcher } from "../utils/intersection_watcher";
  *
  * When the sentinel scrolls out past the top of the viewport (or `rootSelector`
  * container), the sticky element is considered stuck and `data-stuck="true"` is
- * set; otherwise `false`. The `change` event fires on each transition.
+ * set; otherwise `false`. The observer's initial snapshot dispatches `change`
+ * once with the current state, including after a Turbo reconnect; subsequent
+ * notifications dispatch only when that state changes.
  *
  * @remarks
  * Behavior only — `position: sticky`, shadows, and shrink effects are the
  * consumer's CSS (`[data-stuck="true"] { … }`). `data-stuck` is a visual hook
- * only: it carries no ARIA role/state. `offset` feeds a negative top `rootMargin`
- * and must match the sticky element's CSS `top`. The observer is disconnected on
- * `disconnect()` (Turbo navigation included).
+ * only: it carries no ARIA role/state. `offset` is negated numerically for the
+ * top `rootMargin` (so negative offsets remain valid) and must match the sticky
+ * element's CSS `top`. The observer follows dynamic sentinel targets and value
+ * changes, and is disconnected on `disconnect()` (Turbo navigation included).
  */
 export class StickyObserverController extends Controller<HTMLElement> {
   static override targets = ["sentinel", "element"];
@@ -48,27 +51,79 @@ export class StickyObserverController extends Controller<HTMLElement> {
   readonly #watcher = new IntersectionWatcher((entries) => this.#onIntersect(entries));
   /** Last reported stuck state, so `change` fires only on transitions. */
   #stuck: boolean | null = null;
+  /** Target currently owned by the watcher, used to avoid duplicate restarts. */
+  #observedSentinel: HTMLElement | null = null;
+  #connected = false;
 
   #onIntersect(entries: IntersectionObserverEntry[]): void {
-    const entry = entries[entries.length - 1];
-    if (!entry) return;
-    // The sentinel sits above the sticky element; once it is no longer
-    // intersecting the (top-inset) root, the sticky element has stuck.
-    this.#setStuck(!entry.isIntersecting);
+    // Delivery can batch multiple transitions after a fast scroll. Process
+    // every snapshot in order so an above→visible pair is not collapsed.
+    for (const entry of entries) {
+      if (!this.#connected || !this.#watcher.active) return;
+      // A sentinel with no layout box (hidden tab panel, collapsed section, an
+      // undisplayed Turbo Frame) reports an empty rect that the shared edge test
+      // deliberately refuses, so an unrendered sticky element is never published
+      // as stuck; the state stays put until the sentinel is actually laid out.
+      this.#setStuck(!entry.isIntersecting && isBeforeRootStart(entry));
+    }
   }
 
   override connect(): void {
-    if (!this.hasSentinelTarget) return;
-    this.#watcher.start(this.sentinelTarget, {
-      rootSelector: this.rootSelectorValue,
-      rootMargin: `-${this.offsetValue}px 0px 0px 0px`,
-      threshold: [0],
-    });
+    this.#connected = true;
+    this.#stuck = null;
+    this.#syncObserver();
   }
 
   override disconnect(): void {
+    this.#connected = false;
     this.#watcher.stop();
+    this.#observedSentinel = null;
     this.#stuck = null;
+  }
+
+  /** Starts observation when a sentinel is inserted after connection. */
+  sentinelTargetConnected(): void {
+    if (this.#connected) this.#syncObserver();
+  }
+
+  /** Stops or transfers observation when the current sentinel is removed. */
+  sentinelTargetDisconnected(): void {
+    if (this.#connected) this.#syncObserver();
+  }
+
+  /** Reflects the last snapshot onto an element inserted after that snapshot. */
+  elementTargetConnected(element: HTMLElement): void {
+    if (this.#stuck !== null) {
+      element.setAttribute("data-stuck", this.#stuck ? "true" : "false");
+    }
+  }
+
+  /** Rebuilds the observer when Turbo morphs the configured root. */
+  rootSelectorValueChanged(): void {
+    if (this.#connected) this.#syncObserver(true);
+  }
+
+  /** Rebuilds the observer when Turbo morphs the configured top offset. */
+  offsetValueChanged(): void {
+    if (this.#connected) this.#syncObserver(true);
+  }
+
+  #syncObserver(force = false): void {
+    const sentinel = this.hasSentinelTarget ? this.sentinelTarget : null;
+    if (!force && sentinel === this.#observedSentinel && this.#watcher.active) return;
+
+    this.#watcher.stop();
+    this.#observedSentinel = null;
+    if (!sentinel) return;
+
+    const configuredOffset = this.offsetValue;
+    const offset = Number.isFinite(configuredOffset) ? configuredOffset : 0;
+    const started = this.#watcher.start(sentinel, {
+      rootSelector: this.rootSelectorValue,
+      rootMargin: `${-offset}px 0px 0px 0px`,
+      threshold: [0],
+    });
+    if (started) this.#observedSentinel = sentinel;
   }
 
   /** Reflects the stuck state onto the sticky element and emits `change`. */

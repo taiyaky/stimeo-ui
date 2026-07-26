@@ -6,6 +6,6 @@ module Stimeo
     # notation; a prerelease maps npm `-beta.N` ⇔ gem `.pre.beta.N` because
     # RubyGems forbids dashes). Bump both together — see RELEASING.md for
     # the synchronized release procedure.
-    VERSION = "0.2.0"
+    VERSION = "0.2.1"
   end
 end

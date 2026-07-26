@@ -378,8 +378,7 @@ export const a11yRules: A11yRules = {
     },
   ],
   // Tabs (APG): the controller manages aria-selected and roving tabindex, but
-  // the role of each tab and panel — and of the optional `list` target marking
-  // the tablist container — is authored.
+  // each role and the required tablist's accessible name are authored.
   "stimeo--tabs": [
     {
       target: "tab",
@@ -398,6 +397,11 @@ export const a11yRules: A11yRules = {
       attrs: ["role"],
       values: ["tablist"],
       suggestion: 'Add role="tablist" to the list target.',
+    },
+    {
+      target: "list",
+      attrs: ["aria-labelledby", "aria-label"],
+      suggestion: "Name the tablist via aria-labelledby or aria-label.",
     },
   ],
   // Tabbed carousel (APG): picker dots are tabs and slides are tabpanels with

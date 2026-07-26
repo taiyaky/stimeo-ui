@@ -6,13 +6,14 @@ import { Controller } from "@hotwired/stimulus";
  * Markup contract (identifier: `stimeo--accordion`):
  *   <div data-controller="stimeo--accordion">
  *     <h3>
- *       <button data-stimeo--accordion-target="trigger"
+ *       <button id="trigger-1"
+ *               data-stimeo--accordion-target="trigger"
  *               data-action="stimeo--accordion#toggle
  *                            keydown->stimeo--accordion#onKeydown"
  *               aria-expanded="false" aria-controls="panel-1">Section 1</button>
  *     </h3>
  *     <div id="panel-1" data-stimeo--accordion-target="panel"
- *          role="region" hidden>…</div>
+ *          role="region" aria-labelledby="trigger-1" hidden>…</div>
  *     <!-- repeat header/panel pairs -->
  *   </div>
  *

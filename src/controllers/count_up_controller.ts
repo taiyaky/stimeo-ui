@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { prefersReducedMotion } from "../utils/reduced_motion";
 
 /**
  * Headless **count-up**: animates a number from `from` up to the value already
@@ -80,7 +81,7 @@ export class CountUpController extends Controller<HTMLElement> {
     if (Number.isNaN(target)) return;
 
     // Reduced motion: no ticking, just the final value (WCAG 2.3.3).
-    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+    if (prefersReducedMotion()) {
       this.element.setAttribute("data-count-up-done", "true");
       this.dispatch("end", { detail: { value: target } });
       return;

@@ -19,9 +19,14 @@ const settle = () => delay(30);
 
 describe("ScrollVisibilityController", () => {
   let application: Application;
+  let reducedMotion = false;
 
   beforeEach(() => {
+    reducedMotion = false;
     vi.stubGlobal("scrollTo", vi.fn());
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("prefers-reduced-motion") && reducedMotion,
+    }));
     setScrollY(0);
   });
 
@@ -120,10 +125,17 @@ describe("ScrollVisibilityController", () => {
       </div>
       <main id="main">Content</main>`);
     element().click();
-    expect(window.scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 0 }));
+    expect(window.scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "smooth" });
     const main = document.getElementById("main") as HTMLElement;
     expect(main.getAttribute("tabindex")).toBe("-1");
     expect(document.activeElement).toBe(main);
+  });
+
+  it("scrolls instantly when reduced motion is requested", async () => {
+    reducedMotion = true;
+    await start(offsetMarkup);
+    element().click();
+    expect(window.scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "auto" });
   });
 
   it("stops reacting to scroll after disconnect", async () => {

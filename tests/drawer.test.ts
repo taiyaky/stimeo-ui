@@ -11,8 +11,9 @@ import { tick } from "./helpers/timing";
  * slide-over plumbing — `data-state` sync, `data-placement` reflection, deferred
  * `hidden`, focus trap, overlay-only backdrop close, and teardown reversal.
  *
- * happy-dom reports no transition duration, so the deferred `hidden` collapses to
- * synchronous hiding here; the real exit transition is exercised by the e2e layer.
+ * happy-dom reports no transition duration, so ordinary close assertions hide
+ * synchronously; dedicated cases stub the full transition tuple to exercise the
+ * deferred path, terminal events, fallback, and target replacement.
  */
 
 const markup = (placement = "right") => `
@@ -31,6 +32,34 @@ const markup = (placement = "right") => `
     </div>
   </div>`;
 
+const transitionStyle = (
+  property = "transform",
+  duration = "0.2s",
+  delay = "0s",
+): CSSStyleDeclaration =>
+  ({
+    transitionProperty: property,
+    transitionDuration: duration,
+    transitionDelay: delay,
+  }) as CSSStyleDeclaration;
+
+/** Creates the minimal Web Animations view exposed by a running CSS transition. */
+const runningTransition = (propertyName: string): CSSTransition =>
+  ({
+    playState: "running",
+    transitionProperty: propertyName,
+  }) as CSSTransition;
+
+const dispatchPanelTransition = (
+  panel: HTMLElement,
+  type: "transitionend" | "transitioncancel",
+  propertyName: string,
+): void => {
+  const event = new Event(type);
+  Object.defineProperty(event, "propertyName", { value: propertyName });
+  panel.dispatchEvent(event);
+};
+
 describe("DrawerController", () => {
   let application: Application;
 
@@ -45,6 +74,8 @@ describe("DrawerController", () => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     document.body.style.overflow = "";
+    vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   const trigger = () => document.getElementById("trigger") as HTMLButtonElement;
@@ -161,9 +192,7 @@ describe("DrawerController", () => {
 
   it("keeps the background inert and scroll locked until the close transition ends", () => {
     // Force a non-zero transition so hidden + modal teardown defer to transitionend.
-    const spy = vi
-      .spyOn(window, "getComputedStyle")
-      .mockReturnValue({ transitionDuration: "0.2s" } as CSSStyleDeclaration);
+    const spy = vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
     try {
       const background = document.getElementById("background") as HTMLElement;
       trigger().focus();
@@ -177,7 +206,7 @@ describe("DrawerController", () => {
       expect(background.inert).toBe(true);
       expect(document.body.style.overflow).toBe("hidden");
 
-      panel().dispatchEvent(new Event("transitionend")); // transition finishes
+      dispatchPanelTransition(panel(), "transitionend", "transform");
       expect(panel().hidden).toBe(true);
       expect(background.inert).toBe(false);
       expect(document.body.style.overflow).toBe("");
@@ -187,13 +216,29 @@ describe("DrawerController", () => {
     }
   });
 
+  it("waits for every transition property and safely completes when the longest is cancelled", () => {
+    vi.spyOn(window, "getComputedStyle").mockReturnValue(
+      transitionStyle("opacity, transform", "100ms, 200ms", "0ms, 100ms"),
+    );
+    const background = document.getElementById("background") as HTMLElement;
+    trigger().focus();
+    trigger().click();
+    document.getElementById("close")?.click();
+
+    dispatchPanelTransition(panel(), "transitionend", "opacity");
+    expect(panel().hidden).toBe(false);
+    expect(background.inert).toBe(true);
+    dispatchPanelTransition(panel(), "transitioncancel", "transform");
+    expect(panel().hidden).toBe(true);
+    expect(background.inert).toBe(false);
+    expect(document.body.style.overflow).toBe("");
+  });
+
   it("reopening during the close transition cancels the pending hide", () => {
     // open -> close (transition pending) -> reopen: the stale transitionend
     // listener must be dropped, or the old close would hide the freshly reopened
     // panel (and tear the modal down) when the exit transition finally ends.
-    const spy = vi
-      .spyOn(window, "getComputedStyle")
-      .mockReturnValue({ transitionDuration: "0.2s" } as CSSStyleDeclaration);
+    const spy = vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
     try {
       trigger().focus();
       trigger().click();
@@ -201,9 +246,45 @@ describe("DrawerController", () => {
       expect(panel().hidden).toBe(false); // mid-transition
       trigger().click(); // reopen cancels the pending hide
       expect(panel().getAttribute("data-state")).toBe("open");
-      panel().dispatchEvent(new Event("transitionend")); // old close's transition ends
+      dispatchPanelTransition(panel(), "transitionend", "transform");
       expect(panel().hidden).toBe(false); // still open, not hidden by the stale close
       expect(document.body.style.overflow).toBe("hidden"); // trap stayed active
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("ignores the previous phase's terminal event after reopening and closing again", () => {
+    // open -> close -> reopen -> close. The first close's `transitioncancel` is
+    // queued before the reopen but can be dispatched after the second close armed
+    // its own wait; settling on it would tear the modal down while the panel is
+    // still sliding out.
+    const spy = vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
+    let animations: Animation[] = [];
+    Object.defineProperty(panel(), "getAnimations", {
+      configurable: true,
+      value: () => animations,
+    });
+    try {
+      const background = document.getElementById("background") as HTMLElement;
+      trigger().focus();
+      trigger().click();
+      document.getElementById("close")?.click(); // first close -> pending hide
+      trigger().click(); // reopen drops it
+      animations = [runningTransition("transform")];
+      document.getElementById("close")?.click(); // second close arms its own wait
+
+      dispatchPanelTransition(panel(), "transitioncancel", "transform"); // stale, first close
+      expect(panel().hidden).toBe(false);
+      expect(background.inert).toBe(true);
+      expect(document.body.style.overflow).toBe("hidden");
+
+      animations = [];
+      dispatchPanelTransition(panel(), "transitionend", "transform");
+      expect(panel().hidden).toBe(true);
+      expect(background.inert).toBe(false);
+      expect(document.body.style.overflow).toBe("");
+      expect(document.activeElement).toBe(trigger());
     } finally {
       spy.mockRestore();
     }
@@ -213,9 +294,7 @@ describe("DrawerController", () => {
     // Turbo can tear the controller down while the exit transition is running:
     // the side effects must revert immediately, and the pending transitionend
     // listener must go with it (markup is left to Turbo, so no late mutation).
-    const spy = vi
-      .spyOn(window, "getComputedStyle")
-      .mockReturnValue({ transitionDuration: "0.2s" } as CSSStyleDeclaration);
+    const spy = vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
     try {
       const background = document.getElementById("background") as HTMLElement;
       const root = document.querySelector("[data-controller='stimeo--drawer']") as HTMLElement;
@@ -226,11 +305,54 @@ describe("DrawerController", () => {
       controller?.disconnect();
       expect(document.body.style.overflow).toBe("");
       expect(background.inert).toBe(false);
-      panel().dispatchEvent(new Event("transitionend")); // stale listener must be gone
+      dispatchPanelTransition(panel(), "transitionend", "transform");
       expect(panel().hidden).toBe(false); // no late hide after teardown
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it("finishes modal cleanup when a closing panel target is replaced", async () => {
+    vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
+    vi.useFakeTimers();
+    const background = document.getElementById("background") as HTMLElement;
+    trigger().focus();
+    trigger().click();
+    document.getElementById("close")?.click();
+    const oldPanel = panel();
+    const replacement = oldPanel.cloneNode(true) as HTMLElement;
+    oldPanel.replaceWith(replacement);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(panel()).toBe(replacement);
+    expect(replacement.getAttribute("data-state")).toBe("closed");
+    expect(replacement.hidden).toBe(true);
+    expect(overlay().hidden).toBe(true);
+    expect(document.body.style.overflow).toBe("");
+    expect(background.inert).toBe(false);
+    expect(document.activeElement).toBe(trigger());
+
+    vi.advanceTimersByTime(250);
+    expect(replacement.hidden).toBe(true);
+    expect(document.body.style.overflow).toBe("");
+  });
+
+  it("rebinds the modal lifecycle to an open replacement panel", async () => {
+    const background = document.getElementById("background") as HTMLElement;
+    trigger().focus();
+    trigger().click();
+    const oldPanel = panel();
+    const replacement = oldPanel.cloneNode(true) as HTMLElement;
+    oldPanel.replaceWith(replacement);
+    await tick();
+
+    expect(panel()).toBe(replacement);
+    expect(replacement.getAttribute("data-state")).toBe("open");
+    expect(replacement.hidden).toBe(false);
+    expect(overlay().hidden).toBe(false);
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(background.inert).toBe(true);
+    expect(document.activeElement).toBe(replacement.querySelector("#inside"));
   });
 
   it("neutralizes the modal side effects on turbo:before-cache while keeping the drawer open", () => {

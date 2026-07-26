@@ -25,6 +25,15 @@ describe("checkSource", () => {
       </ul>
     </div>`;
 
+  const validTabs = `
+    <div data-controller="stimeo--tabs">
+      <h2 id="tabs-title">Sections</h2>
+      <div role="tablist" aria-labelledby="tabs-title" data-stimeo--tabs-target="list">
+        <button role="tab" data-stimeo--tabs-target="tab">A</button>
+      </div>
+      <div role="tabpanel" data-stimeo--tabs-target="panel">A</div>
+    </div>`;
+
   it("reports no problems for well-formed markup", () => {
     expect(checkSource(validMenu, manifest)).toEqual([]);
   });
@@ -214,7 +223,7 @@ describe("checkSource", () => {
     it("flags each tab target missing its role", () => {
       const codeList = codes(`
         <div data-controller="stimeo--tabs">
-          <div role="tablist">
+          <div role="tablist" aria-label="Sections" data-stimeo--tabs-target="list">
             <button data-stimeo--tabs-target="tab">A</button>
             <button data-stimeo--tabs-target="tab">B</button>
           </div>
@@ -223,15 +232,18 @@ describe("checkSource", () => {
       expect(codeList.filter((c) => c === "missing-aria")).toHaveLength(2);
     });
 
+    it("requires a tablist name and accepts aria-label as an alternative", () => {
+      const unnamed = validTabs.replace(' aria-labelledby="tabs-title"', "");
+      const missing = checkSource(unnamed, manifest).filter((d) => d.code === "missing-aria");
+      expect(missing).toHaveLength(1);
+      expect(missing[0]?.suggestion).toBe("Name the tablist via aria-labelledby or aria-label.");
+
+      const labelled = validTabs.replace('aria-labelledby="tabs-title"', 'aria-label="Sections"');
+      expect(codes(labelled)).not.toContain("missing-aria");
+    });
+
     it("does not require ARIA the controller sets itself (no aria-selected)", () => {
-      const source = `
-        <div data-controller="stimeo--tabs">
-          <div role="tablist">
-            <button data-stimeo--tabs-target="tab" role="tab">A</button>
-          </div>
-          <div data-stimeo--tabs-target="panel" role="tabpanel">A</div>
-        </div>`;
-      expect(codes(source)).toEqual([]);
+      expect(codes(validTabs)).toEqual([]);
     });
 
     it("requires an id on every command palette option target", () => {
@@ -682,7 +694,8 @@ describe("checkSource", () => {
       it("skips ERB-generated reference values and ids", () => {
         const source = `
           <div data-controller="stimeo--tabs">
-            <div role="tablist" data-stimeo--tabs-target="list">
+            <div role="tablist" aria-label="Generated tabs"
+                 data-stimeo--tabs-target="list">
               <button role="tab" aria-controls="panel-<%= i %>"
                       data-stimeo--tabs-target="tab">A</button>
             </div>
@@ -696,7 +709,9 @@ describe("checkSource", () => {
       it("suppresses a listed code for the subtree and keeps others", () => {
         const bare = `
           <div data-controller="stimeo--tabs" data-stimeo-ignore="missing-aria">
-            <button data-stimeo--tabs-target="tab">A</button>
+            <div role="tablist" aria-label="Sections" data-stimeo--tabs-target="list">
+              <button data-stimeo--tabs-target="tab">A</button>
+            </div>
             <div data-stimeo--tabs-target="panel">A</div>
           </div>`;
         expect(codes(bare)).toEqual([]);

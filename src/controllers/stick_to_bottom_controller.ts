@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { prefersReducedMotion } from "../utils/reduced_motion";
 
 /** Counts the element nodes in an added-node list (text nodes are ignored). */
 const countElements = (nodes: NodeList): number => {
@@ -143,14 +144,7 @@ export class StickToBottomController extends Controller<HTMLElement> {
   }
 
   #behavior(): ScrollBehavior {
-    if (this.#prefersReducedMotion()) return "auto";
+    if (prefersReducedMotion()) return "auto";
     return this.behaviorValue === "smooth" ? "smooth" : "auto";
-  }
-
-  #prefersReducedMotion(): boolean {
-    return (
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    );
   }
 }

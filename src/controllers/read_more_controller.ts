@@ -22,7 +22,8 @@ import { LayoutObserver } from "../utils/layout_observer";
  * `aria-expanded` therefore signals the *visual* expansion, not content hidden
  * from AT. The controller's extra job is **overflow detection**: when the
  * content is not actually clamped (it fits), the toggle is `hidden` so no
- * pointless "read more" is offered. This is re-evaluated on resize.
+ * pointless "read more" is offered. Resizes, content changes, and target
+ * replacement re-evaluate it; hiding a focused toggle waits until blur.
  */
 export class ReadMoreController extends Controller<HTMLElement> {
   static override targets = ["content", "trigger"];
@@ -38,41 +39,64 @@ export class ReadMoreController extends Controller<HTMLElement> {
 
   declare collapsedValue: boolean;
 
-  /** Re-checks overflow when the content box or the viewport resizes. */
-  readonly #layout = new LayoutObserver(() => this.#evaluateOverflow());
+  #connected = false;
+  #collapsed = true;
+  #observedContent: HTMLElement | null = null;
+  #contentMutationObserver: MutationObserver | null = null;
+  #deferredHideTrigger: HTMLElement | null = null;
+
+  readonly #update = (): void => {
+    if (this.#connected) this.#evaluateOverflow();
+  };
+  readonly #layout = new LayoutObserver(this.#update);
+
+  readonly #onDeferredHideBlur = (): void => {
+    this.#clearDeferredHide();
+    this.#update();
+  };
 
   override connect(): void {
+    this.#connected = true;
     // The DOM is the source of truth on reconnect (Turbo cache restore / morph): an
     // explicit `data-state="expanded"`/`"collapsed"` is honored verbatim so a block
     // the user expanded *or* collapsed survives a back-navigation, even when the
     // declarative `collapsed` Value disagrees. The Value seeds only a genuinely fresh
     // render (no `data-state` yet). Mirrors `sidebar`'s `#restoreCollapsed`.
-    this.#reflect(this.#initialCollapsed());
-    this.#evaluateOverflow();
-    if (this.hasContentTarget) {
-      this.#layout.observe(this.contentTarget);
-      this.#layout.observeViewport();
-    }
+    this.#collapsed = this.#initialCollapsed();
+    this.#syncTargets();
   }
 
   override disconnect(): void {
+    this.#connected = false;
+    this.#stopObservingContent();
     this.#layout.disconnect();
+  }
+
+  contentTargetConnected(): void {
+    this.#syncTargets();
+  }
+
+  contentTargetDisconnected(): void {
+    this.#syncTargets();
+  }
+
+  triggerTargetConnected(): void {
+    this.#syncTargets();
+  }
+
+  triggerTargetDisconnected(trigger: HTMLElement): void {
+    if (this.#deferredHideTrigger === trigger) this.#clearDeferredHide();
+    this.#syncTargets();
   }
 
   /** Toggles between the collapsed (clamped) and expanded states. */
   toggle(): void {
-    this.#reflect(!this.#isCollapsed);
+    if (!this.#connected) return;
+    this.#collapsed = !this.#collapsed;
+    this.#reflect();
     this.#evaluateOverflow();
   }
 
-  /** Whether the content is currently collapsed (clamped). */
-  get #isCollapsed(): boolean {
-    return this.hasContentTarget
-      ? this.contentTarget.getAttribute("data-state") !== "expanded"
-      : this.collapsedValue;
-  }
-
-  /** Connect-time state: an explicit `data-state` wins, else the `collapsed` Value. */
   #initialCollapsed(): boolean {
     if (this.hasContentTarget) {
       const state = this.contentTarget.getAttribute("data-state");
@@ -82,30 +106,87 @@ export class ReadMoreController extends Controller<HTMLElement> {
     return this.collapsedValue;
   }
 
-  /** Writes the collapsed/expanded state onto the content and trigger. */
-  #reflect(collapsed: boolean): void {
+  #reflect(): void {
     if (this.hasContentTarget) {
-      this.contentTarget.setAttribute("data-state", collapsed ? "collapsed" : "expanded");
+      this.contentTarget.setAttribute("data-state", this.#collapsed ? "collapsed" : "expanded");
     }
     if (this.hasTriggerTarget) {
-      this.triggerTarget.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      this.triggerTarget.setAttribute("aria-expanded", this.#collapsed ? "false" : "true");
     }
   }
 
-  /**
-   * Shows the toggle only when it is useful: while expanded it is always shown
-   * (the user needs a way back), and while collapsed it is shown only if the
-   * text actually overflows its clamp (`scrollHeight > clientHeight`).
-   */
+  #syncTargets(): void {
+    if (!this.#connected) return;
+    this.#syncContentObservation();
+    this.#reflect();
+    this.#evaluateOverflow();
+  }
+
+  #syncContentObservation(): void {
+    const next = this.hasContentTarget ? this.contentTarget : null;
+    if (next === this.#observedContent) return;
+
+    this.#stopObservingContent();
+    if (!next) return;
+
+    this.#observedContent = next;
+    this.#layout.observe(next);
+    this.#layout.observeViewport();
+    next.addEventListener("load", this.#update, true);
+
+    if (typeof MutationObserver !== "undefined") {
+      this.#contentMutationObserver = new MutationObserver(this.#update);
+      this.#contentMutationObserver.observe(next, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    }
+  }
+
+  #stopObservingContent(): void {
+    this.#clearDeferredHide();
+    if (this.#observedContent) {
+      this.#layout.unobserve(this.#observedContent);
+      this.#observedContent.removeEventListener("load", this.#update, true);
+    }
+    this.#observedContent = null;
+    this.#contentMutationObserver?.disconnect();
+    this.#contentMutationObserver = null;
+    this.#layout.unobserveViewport();
+  }
+
+  #deferHide(trigger: HTMLElement): void {
+    if (this.#deferredHideTrigger === trigger) return;
+    this.#clearDeferredHide();
+    this.#deferredHideTrigger = trigger;
+    trigger.addEventListener("blur", this.#onDeferredHideBlur);
+  }
+
+  #clearDeferredHide(): void {
+    this.#deferredHideTrigger?.removeEventListener("blur", this.#onDeferredHideBlur);
+    this.#deferredHideTrigger = null;
+  }
+
   #evaluateOverflow(): void {
     if (!this.hasTriggerTarget || !this.hasContentTarget) return;
 
-    if (!this.#isCollapsed) {
-      this.triggerTarget.hidden = false;
+    const trigger = this.triggerTarget;
+    const content = this.contentTarget;
+    const useful = !this.#collapsed || content.scrollHeight > content.clientHeight;
+    if (useful) {
+      this.#clearDeferredHide();
+      trigger.hidden = false;
       return;
     }
-    const content = this.contentTarget;
-    const overflowing = content.scrollHeight > content.clientHeight;
-    this.triggerTarget.hidden = !overflowing;
+
+    if (document.activeElement === trigger) {
+      trigger.hidden = false;
+      this.#deferHide(trigger);
+      return;
+    }
+
+    this.#clearDeferredHide();
+    trigger.hidden = true;
   }
 }

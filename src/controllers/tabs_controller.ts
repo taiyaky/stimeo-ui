@@ -24,9 +24,9 @@ import { Controller } from "@hotwired/stimulus";
  * @remarks
  * Behavior only. State is exposed through `aria-selected`, roving `tabindex`
  * (`0` for the active tab, `-1` for the rest), and the panel `hidden` attribute;
- * the consumer owns all styling. The optional `list` target marks the tablist
+ * the consumer owns all styling. The required `list` target marks the tablist
  * container as part of the semantic contract — the Inspector requires its
- * `role="tablist"`; the controller performs no runtime work on it.
+ * role and accessible name; the controller performs no runtime work on it.
  *
  * Behavior provided:
  * - Click a tab to select it.
@@ -37,6 +37,7 @@ export class TabsController extends Controller<HTMLElement> {
   static override targets = ["tab", "panel", "list"];
   static actions = ["onKeydown", "select"] as const;
 
+  declare readonly listTarget: HTMLElement;
   declare readonly tabTargets: HTMLButtonElement[];
   declare readonly panelTargets: HTMLElement[];
 

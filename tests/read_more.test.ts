@@ -26,17 +26,31 @@ function stubOverflow(element: HTMLElement, overflowing: boolean): void {
 }
 
 describe("ReadMoreController", () => {
-  let application: Application;
+  let application: Application | undefined;
 
-  const start = async (overflowing: boolean) => {
+  const start = async (
+    overflowing: boolean,
+    options: {
+      state?: "collapsed" | "expanded" | null;
+      collapsedValue?: boolean;
+      contentHtml?: string;
+    } = {},
+  ) => {
+    const state = options.state === undefined ? "collapsed" : options.state;
+    const stateAttribute = state ? `data-state="${state}"` : "";
+    const valueAttribute =
+      options.collapsedValue === undefined
+        ? ""
+        : `data-stimeo--read-more-collapsed-value="${String(options.collapsedValue)}"`;
+    const ariaExpanded = state === "expanded" ? "true" : "false";
     document.body.innerHTML = `
-      <div data-controller="stimeo--read-more">
-        <p id="bio" data-stimeo--read-more-target="content" data-state="collapsed">
-          A long biography that may or may not exceed its clamp.
+      <div data-controller="stimeo--read-more" ${valueAttribute}>
+        <p id="bio" data-stimeo--read-more-target="content" ${stateAttribute}>
+          ${options.contentHtml ?? "A long biography that may or may not exceed its clamp."}
         </p>
         <button data-stimeo--read-more-target="trigger"
                 data-action="stimeo--read-more#toggle"
-                aria-expanded="false" aria-controls="bio" hidden>Read more</button>
+                aria-expanded="${ariaExpanded}" aria-controls="bio" hidden>Read more</button>
       </div>`;
     stubOverflow(byId("bio"), overflowing);
     application = Application.start();
@@ -45,7 +59,8 @@ describe("ReadMoreController", () => {
   };
 
   afterEach(() => {
-    disconnectAndStopApplication(application);
+    if (application) disconnectAndStopApplication(application);
+    application = undefined;
     document.body.innerHTML = "";
   });
 
@@ -76,24 +91,31 @@ describe("ReadMoreController", () => {
     expect(content().getAttribute("data-state")).toBe("collapsed");
   });
 
+  it("keeps the trigger visible while expanded even when the text does not overflow", async () => {
+    await start(false, { state: "expanded" });
+
+    expect(content().getAttribute("data-state")).toBe("expanded");
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(trigger().hidden).toBe(false);
+  });
+
+  it("seeds a fresh render as collapsed from the default Value", async () => {
+    await start(true, { state: null });
+
+    expect(content().getAttribute("data-state")).toBe("collapsed");
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("seeds a fresh render as expanded from collapsed=false", async () => {
+    await start(false, { state: null, collapsedValue: false });
+
+    expect(content().getAttribute("data-state")).toBe("expanded");
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(trigger().hidden).toBe(false);
+  });
+
   it("stays expanded on reconnect when the restored DOM reads expanded (DOM wins over Value)", async () => {
-    // Simulate a Turbo cache restore: the cached snapshot already reads expanded
-    // (data-state="expanded", aria-expanded="true") even though the declarative
-    // collapsed Value defaults to true. The DOM must win — connect must not
-    // re-clamp text the user had expanded.
-    document.body.innerHTML = `
-      <div data-controller="stimeo--read-more">
-        <p id="bio" data-stimeo--read-more-target="content" data-state="expanded">
-          A long biography that may or may not exceed its clamp.
-        </p>
-        <button data-stimeo--read-more-target="trigger"
-                data-action="stimeo--read-more#toggle"
-                aria-expanded="true" aria-controls="bio">Read more</button>
-      </div>`;
-    stubOverflow(byId("bio"), true);
-    application = Application.start();
-    application.register("stimeo--read-more", ReadMoreController);
-    await tick();
+    await start(true, { state: "expanded" });
 
     expect(content().getAttribute("data-state")).toBe("expanded");
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
@@ -101,25 +123,164 @@ describe("ReadMoreController", () => {
   });
 
   it("stays collapsed on reconnect when the DOM reads collapsed (DOM wins over collapsed=false)", async () => {
-    // Mirror case: an initially-expanded config (collapsed=false) must NOT re-expand
-    // text the user had collapsed before a Turbo cache restore (explicit
-    // data-state="collapsed"). The DOM wins over the disagreeing Value.
+    await start(true, { state: "collapsed", collapsedValue: false });
+
+    expect(content().getAttribute("data-state")).toBe("collapsed");
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("defers hiding a focused trigger until it blurs", async () => {
+    await start(true);
+    const button = trigger();
+    button.focus();
+    expect(document.activeElement).toBe(button);
+
+    stubOverflow(content(), false);
+    window.dispatchEvent(new Event("resize"));
+
+    expect(button.hidden).toBe(false);
+    expect(document.activeElement).toBe(button);
+
+    button.blur();
+    expect(button.hidden).toBe(true);
+  });
+
+  it("cancels a deferred hide when overflow returns before blur", async () => {
+    await start(true);
+    const button = trigger();
+    button.focus();
+    stubOverflow(content(), false);
+    window.dispatchEvent(new Event("resize"));
+    expect(button.hidden).toBe(false);
+
+    stubOverflow(content(), true);
+    window.dispatchEvent(new Event("resize"));
+    button.blur();
+
+    expect(button.hidden).toBe(false);
+  });
+
+  it("cancels a deferred hide when the user expands before blur", async () => {
+    await start(true);
+    const button = trigger();
+    button.focus();
+    stubOverflow(content(), false);
+    window.dispatchEvent(new Event("resize"));
+
+    button.click();
+    button.blur();
+
+    expect(content().getAttribute("data-state")).toBe("expanded");
+    expect(button.hidden).toBe(false);
+  });
+
+  it("re-evaluates same-box overflow after content mutations", async () => {
+    await start(false);
+    expect(trigger().hidden).toBe(true);
+
+    stubOverflow(content(), true);
+    content().textContent = "A longer biography inserted by a Turbo Stream.";
+    await tick();
+    expect(trigger().hidden).toBe(false);
+
+    stubOverflow(content(), false);
+    content().textContent = "Short.";
+    await tick();
+    expect(trigger().hidden).toBe(true);
+  });
+
+  it("re-evaluates overflow when descendant media loads", async () => {
+    await start(false, { contentHtml: `<img id="portrait" alt="" /> Biography.` });
+    expect(trigger().hidden).toBe(true);
+
+    stubOverflow(content(), true);
+    byId("portrait").dispatchEvent(new Event("load"));
+
+    expect(trigger().hidden).toBe(false);
+  });
+
+  it("re-evaluates overflow on viewport resize", async () => {
+    await start(false);
+    expect(trigger().hidden).toBe(true);
+
+    stubOverflow(content(), true);
+    window.dispatchEvent(new Event("resize"));
+    expect(trigger().hidden).toBe(false);
+
+    stubOverflow(content(), false);
+    window.dispatchEvent(new Event("resize"));
+    expect(trigger().hidden).toBe(true);
+  });
+
+  it("synchronizes targets added after connect from the retained logical state", async () => {
     document.body.innerHTML = `
-      <div data-controller="stimeo--read-more" data-stimeo--read-more-collapsed-value="false">
-        <p id="bio" data-stimeo--read-more-target="content" data-state="collapsed">
-          A long biography that may or may not exceed its clamp.
-        </p>
-        <button data-stimeo--read-more-target="trigger"
-                data-action="stimeo--read-more#toggle"
-                aria-expanded="false" aria-controls="bio">Read more</button>
-      </div>`;
-    stubOverflow(byId("bio"), true);
+      <div id="host" data-controller="stimeo--read-more"
+           data-stimeo--read-more-collapsed-value="false"></div>`;
     application = Application.start();
     application.register("stimeo--read-more", ReadMoreController);
     await tick();
 
-    expect(content().getAttribute("data-state")).toBe("collapsed");
-    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    const addedContent = document.createElement("p");
+    addedContent.id = "late-content";
+    addedContent.setAttribute("data-stimeo--read-more-target", "content");
+    addedContent.setAttribute("data-state", "collapsed");
+    stubOverflow(addedContent, false);
+    const addedTrigger = document.createElement("button");
+    addedTrigger.setAttribute("data-stimeo--read-more-target", "trigger");
+    addedTrigger.setAttribute("data-action", "stimeo--read-more#toggle");
+    addedTrigger.setAttribute("aria-expanded", "false");
+    addedTrigger.hidden = true;
+    byId("host").append(addedContent, addedTrigger);
+    await tick();
+
+    expect(addedContent.getAttribute("data-state")).toBe("expanded");
+    expect(addedTrigger.getAttribute("aria-expanded")).toBe("true");
+    expect(addedTrigger.hidden).toBe(false);
+  });
+
+  it("rebinds content observation after target replacement and ignores the old target", async () => {
+    await start(true);
+    const oldContent = content();
+    const replacement = document.createElement("p");
+    replacement.id = "replacement";
+    replacement.setAttribute("data-stimeo--read-more-target", "content");
+    replacement.setAttribute("data-state", "expanded");
+    stubOverflow(replacement, false);
+
+    oldContent.replaceWith(replacement);
+    await tick();
+
+    expect(replacement.getAttribute("data-state")).toBe("collapsed");
+    expect(trigger().hidden).toBe(true);
+
+    stubOverflow(replacement, true);
+    oldContent.textContent = "Detached content must no longer drive the controller.";
+    await tick();
+    expect(trigger().hidden).toBe(true);
+
+    replacement.textContent = "The replacement now overflows.";
+    await tick();
+    expect(trigger().hidden).toBe(false);
+  });
+
+  it("clears a deferred hide when the trigger target is replaced", async () => {
+    await start(true);
+    const oldTrigger = trigger();
+    oldTrigger.focus();
+    stubOverflow(content(), false);
+    window.dispatchEvent(new Event("resize"));
+    expect(oldTrigger.hidden).toBe(false);
+
+    const replacement = document.createElement("button");
+    replacement.setAttribute("data-stimeo--read-more-target", "trigger");
+    replacement.setAttribute("data-action", "stimeo--read-more#toggle");
+    oldTrigger.replaceWith(replacement);
+    await tick();
+    expect(replacement.hidden).toBe(true);
+
+    replacement.hidden = false;
+    oldTrigger.dispatchEvent(new FocusEvent("blur"));
+    expect(replacement.hidden).toBe(false);
   });
 
   it("has no machine-detectable a11y violations in either state", async () => {
@@ -140,11 +301,24 @@ describe("ReadMoreController", () => {
     expect(after).toEqual(["button, Read more, expanded"]);
   });
 
-  it("becomes inert after disconnect", async () => {
+  it("releases resize, mutation, load, and deferred-focus work after disconnect", async () => {
     await start(true);
-    application.unload("stimeo--read-more");
-    trigger().click();
-    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    const button = trigger();
+    button.focus();
+    stubOverflow(content(), false);
+    window.dispatchEvent(new Event("resize"));
+    expect(button.hidden).toBe(false);
+
+    application?.unload("stimeo--read-more");
+    content().textContent = "Short after disconnect.";
+    content().dispatchEvent(new Event("load"));
+    window.dispatchEvent(new Event("resize"));
+    button.blur();
+    await tick();
+
+    expect(button.hidden).toBe(false);
+    button.click();
+    expect(button.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("is a safe no-op when the content/trigger targets are absent", async () => {

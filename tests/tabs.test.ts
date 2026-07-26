@@ -17,7 +17,7 @@ describe("TabsController", () => {
   beforeEach(async () => {
     document.body.innerHTML = `
       <div data-controller="stimeo--tabs">
-        <div role="tablist">
+        <div role="tablist" aria-label="Example tabs" data-stimeo--tabs-target="list">
           <button role="tab" id="t1" aria-controls="p1"
                   data-stimeo--tabs-target="tab"
                   data-action="stimeo--tabs#select keydown->stimeo--tabs#onKeydown">One</button>
@@ -47,40 +47,120 @@ describe("TabsController", () => {
   const panels = () =>
     Array.from(document.querySelectorAll<HTMLElement>("[data-stimeo--tabs-target='panel']"));
 
-  it("selects the first tab by default with roving tabindex", () => {
-    expect(tabs()[0]?.getAttribute("aria-selected")).toBe("true");
-    expect(tabs()[0]?.tabIndex).toBe(0);
-    expect(tabs()[1]?.tabIndex).toBe(-1);
-    expect(panels()[0]?.hidden).toBe(false);
-    expect(panels()[1]?.hidden).toBe(true);
+  const tab = (index: number): HTMLButtonElement => {
+    const element = tabs()[index];
+    if (!element) throw new Error(`tab ${index} not found`);
+    return element;
+  };
+
+  const selection = () => tabs().map((element) => element.getAttribute("aria-selected"));
+  const tabIndexes = () => tabs().map((element) => element.tabIndex);
+  const panelVisibility = () => panels().map((element) => !element.hidden);
+
+  const pressKey = (element: HTMLElement, key: string): KeyboardEvent => {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    element.dispatchEvent(event);
+    return event;
+  };
+
+  it("selects the first tab by default and synchronizes every tab and panel", () => {
+    expect(selection()).toEqual(["true", "false", "false"]);
+    expect(tabIndexes()).toEqual([0, -1, -1]);
+    expect(panelVisibility()).toEqual([true, false, false]);
+  });
+
+  it("restores an authored preselection when the controller reconnects", async () => {
+    application.unload("stimeo--tabs");
+    tab(0).setAttribute("aria-selected", "false");
+    tab(1).setAttribute("aria-selected", "true");
+    tab(0).tabIndex = 0;
+    tab(1).tabIndex = -1;
+    panels()[0]?.removeAttribute("hidden");
+    panels()[1]?.setAttribute("hidden", "");
+
+    application.register("stimeo--tabs", TabsController);
+    await tick();
+
+    expect(selection()).toEqual(["false", "true", "false"]);
+    expect(tabIndexes()).toEqual([-1, 0, -1]);
+    expect(panelVisibility()).toEqual([false, true, false]);
   });
 
   it("selects a tab on click", () => {
-    tabs()[1]?.click();
-    expect(tabs()[1]?.getAttribute("aria-selected")).toBe("true");
-    expect(tabs()[0]?.getAttribute("aria-selected")).toBe("false");
-    expect(panels()[1]?.hidden).toBe(false);
+    tab(1).click();
+
+    expect(selection()).toEqual(["false", "true", "false"]);
+    expect(tabIndexes()).toEqual([-1, 0, -1]);
+    expect(panelVisibility()).toEqual([false, true, false]);
   });
 
   it("activates and focuses the next tab on ArrowRight", () => {
-    tabs()[0]?.focus();
-    tabs()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    expect(tabs()[1]?.getAttribute("aria-selected")).toBe("true");
-    expect(document.activeElement).toBe(tabs()[1]);
+    tab(0).focus();
+    const event = pressKey(tab(0), "ArrowRight");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(selection()).toEqual(["false", "true", "false"]);
+    expect(tabIndexes()).toEqual([-1, 0, -1]);
+    expect(panelVisibility()).toEqual([false, true, false]);
+    expect(document.activeElement).toBe(tab(1));
   });
 
   it("wraps to the first tab from the last on ArrowRight", () => {
-    tabs()[2]?.focus();
-    tabs()[2]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    expect(tabs()[0]?.getAttribute("aria-selected")).toBe("true");
+    tab(2).click();
+    tab(2).focus();
+    pressKey(tab(2), "ArrowRight");
+
+    expect(selection()).toEqual(["true", "false", "false"]);
+    expect(panelVisibility()).toEqual([true, false, false]);
+    expect(document.activeElement).toBe(tab(0));
   });
 
-  it("jumps to the last tab on End and the first on Home", () => {
-    tabs()[0]?.focus();
-    tabs()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
-    expect(tabs()[2]?.getAttribute("aria-selected")).toBe("true");
-    tabs()[2]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
-    expect(tabs()[0]?.getAttribute("aria-selected")).toBe("true");
+  it("activates and focuses the previous tab on ArrowLeft", () => {
+    tab(2).click();
+    tab(2).focus();
+    const event = pressKey(tab(2), "ArrowLeft");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(selection()).toEqual(["false", "true", "false"]);
+    expect(tabIndexes()).toEqual([-1, 0, -1]);
+    expect(panelVisibility()).toEqual([false, true, false]);
+    expect(document.activeElement).toBe(tab(1));
+  });
+
+  it("wraps to the last tab from the first on ArrowLeft", () => {
+    tab(0).focus();
+    pressKey(tab(0), "ArrowLeft");
+
+    expect(selection()).toEqual(["false", "false", "true"]);
+    expect(panelVisibility()).toEqual([false, false, true]);
+    expect(document.activeElement).toBe(tab(2));
+  });
+
+  it("moves selection, panel visibility, and focus with End and Home", () => {
+    tab(1).click();
+    tab(1).focus();
+    const endEvent = pressKey(tab(1), "End");
+
+    expect(endEvent.defaultPrevented).toBe(true);
+    expect(selection()).toEqual(["false", "false", "true"]);
+    expect(panelVisibility()).toEqual([false, false, true]);
+    expect(document.activeElement).toBe(tab(2));
+
+    const homeEvent = pressKey(tab(2), "Home");
+    expect(homeEvent.defaultPrevented).toBe(true);
+    expect(selection()).toEqual(["true", "false", "false"]);
+    expect(panelVisibility()).toEqual([true, false, false]);
+    expect(document.activeElement).toBe(tab(0));
+  });
+
+  it("does not intercept an unsupported key", () => {
+    tab(0).focus();
+    const event = pressKey(tab(0), "Tab");
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(selection()).toEqual(["true", "false", "false"]);
+    expect(panelVisibility()).toEqual([true, false, false]);
+    expect(document.activeElement).toBe(tab(0));
   });
 
   const root = () => {
@@ -100,23 +180,23 @@ describe("TabsController", () => {
   it("announces selection and roving order before and after arrow navigation", async () => {
     const before = await captureSpeech({ container: root(), steps: 5 });
     expect(before).toEqual([
-      "tablist, orientated horizontally",
+      "tablist, Example tabs, orientated horizontally",
       "tab, One, selected, 1 control, position 1, set size 3",
       "tab, Two, not selected, 1 control, position 2, set size 3",
       "tab, Three, not selected, 1 control, position 3, set size 3",
-      "end of tablist, orientated horizontally",
+      "end of tablist, Example tabs, orientated horizontally",
       "tabpanel, One",
     ]);
 
-    tabs()[0]?.focus();
-    tabs()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    tab(0).focus();
+    pressKey(tab(0), "ArrowRight");
     const after = await captureSpeech({ container: root(), steps: 5 });
     expect(after).toEqual([
-      "tablist, orientated horizontally",
+      "tablist, Example tabs, orientated horizontally",
       "tab, One, not selected, 1 control, position 1, set size 3",
       "tab, Two, selected, 1 control, position 2, set size 3",
       "tab, Three, not selected, 1 control, position 3, set size 3",
-      "end of tablist, orientated horizontally",
+      "end of tablist, Example tabs, orientated horizontally",
       "tabpanel, Two",
     ]);
   });
@@ -126,13 +206,14 @@ describe("TabsController", () => {
   // unloading its identifier must make the tabs inert.
   it("becomes inert after disconnect (no lingering side effects)", () => {
     application.unload("stimeo--tabs");
-    tabs()[1]?.click();
-    expect(tabs()[1]?.getAttribute("aria-selected")).toBe("false");
-    expect(tabs()[0]?.getAttribute("aria-selected")).toBe("true");
+    tab(1).click();
+    expect(selection()).toEqual(["true", "false", "false"]);
+    expect(panelVisibility()).toEqual([true, false, false]);
 
-    tabs()[0]?.focus();
-    tabs()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    expect(tabs()[1]?.getAttribute("aria-selected")).toBe("false");
-    expect(document.activeElement).toBe(tabs()[0]);
+    tab(0).focus();
+    const event = pressKey(tab(0), "ArrowRight");
+    expect(event.defaultPrevented).toBe(false);
+    expect(selection()).toEqual(["true", "false", "false"]);
+    expect(document.activeElement).toBe(tab(0));
   });
 });

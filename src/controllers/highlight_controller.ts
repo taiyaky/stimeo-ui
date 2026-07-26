@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { prefersReducedMotion } from "../utils/reduced_motion";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -72,7 +73,7 @@ export class HighlightController extends Controller<HTMLElement> {
   #highlight(el: HTMLElement): void {
     // Reduced motion: suppress the emphasis so the element just appears — no hook,
     // no timer, no events, nothing to transition.
-    if (this.#prefersReducedMotion()) return;
+    if (prefersReducedMotion()) return;
 
     el.setAttribute("data-highlight", "true");
     this.dispatch("start", { target: el, detail: { element: el } });
@@ -80,12 +81,5 @@ export class HighlightController extends Controller<HTMLElement> {
       el.removeAttribute("data-highlight");
       this.dispatch("end", { target: el, detail: { element: el } });
     }, this.durationValue);
-  }
-
-  #prefersReducedMotion(): boolean {
-    return (
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    );
   }
 }

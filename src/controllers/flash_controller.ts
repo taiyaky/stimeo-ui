@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { maxTransitionTotalMs } from "../utils/transition_completion";
 
 /** Flash types that map to an assertive `alert` (everything else is a polite `status`). */
 const ASSERTIVE_TYPES = new Set(["alert", "error"]);
@@ -225,12 +226,9 @@ export class FlashController extends Controller<HTMLElement> {
     }
   }
 
-  /** First `transition-duration` of `el` in ms (0 when none / unsupported). */
+  /** Maximum transition total (duration + delay) of `el` in ms (0 when none / unsupported). */
   #transitionMs(el: HTMLElement): number {
     if (typeof window.getComputedStyle !== "function") return 0;
-    const first = window.getComputedStyle(el).transitionDuration.split(",")[0]?.trim() ?? "";
-    const amount = Number.parseFloat(first);
-    if (Number.isNaN(amount)) return 0;
-    return first.endsWith("ms") ? amount : amount * 1000;
+    return maxTransitionTotalMs(window.getComputedStyle(el));
   }
 }
