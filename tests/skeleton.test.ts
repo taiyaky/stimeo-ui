@@ -115,7 +115,7 @@ describe("SkeletonController", () => {
     instance().ready();
     const el = content();
     // Invoke disconnect() directly for a deterministic teardown (no reliance on
-    // the async MutationObserver flush, which was environment-sensitive).
+    // the async MutationObserver flush, whose timing varies by environment).
     instance().disconnect();
     vi.advanceTimersByTime(400);
     // The cancelled timer must not reveal the content after teardown.
@@ -123,7 +123,7 @@ describe("SkeletonController", () => {
   });
 });
 
-/** Layer ① (axe) runs under real timers, independent of the timing behavior. */
+/** The axe audit runs under real timers, independent of the timing behavior. */
 describe("SkeletonController accessibility", () => {
   let application: Application;
 
@@ -155,8 +155,8 @@ describe("SkeletonController accessibility", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // Layer ③ — the decorative placeholder is aria-hidden, so the skeleton is never
-  // announced; once ready, the real content is exposed to the reader.
+  // The decorative placeholder is aria-hidden, so the skeleton is never announced;
+  // once ready, the real content is exposed to the reader.
   it("keeps the skeleton silent and announces the content once ready", async () => {
     document.body.innerHTML = `
       <main>

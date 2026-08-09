@@ -4,7 +4,7 @@ import { scrollOptionIntoView } from "../../src/utils/option_scroll";
 /**
  * Unit tests for {@link scrollOptionIntoView}. happy-dom has no layout, so the
  * rect/size INPUTS are modeled per case — this pins the delta logic (the only
- * thing the helper owns); real geometry belongs to the e2e lane.
+ * thing the helper owns); real geometry belongs to a real browser.
  */
 
 /** A list/option pair with modeled scroll metrics and rects. */

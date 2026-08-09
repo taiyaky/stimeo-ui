@@ -53,6 +53,7 @@ export class IntersectionWatcher {
   readonly #onEntries: (entries: IntersectionObserverEntry[]) => void;
   #observer: IntersectionObserver | null = null;
   #active = false;
+  #usingPlatformDefaults = false;
 
   constructor(onEntries: (entries: IntersectionObserverEntry[]) => void) {
     this.#onEntries = onEntries;
@@ -63,15 +64,23 @@ export class IntersectionWatcher {
     return this.#active;
   }
 
+  /** Whether the live observer discarded configured options after construction failed. */
+  get usingPlatformDefaults(): boolean {
+    return this.#usingPlatformDefaults;
+  }
+
   /**
    * (Re)creates the observer and observes `targets`. Returns `false` — leaving
    * the watcher inert — without `IntersectionObserver` support (very old
    * browsers; the caller's no-JS fallback stays in charge) or with no targets.
+   * If initial construction with the configured options fails, the watcher
+   * warns and retries once with the same root and platform defaults.
    *
-   * @throws Whatever the platform throws for an invalid `rootMargin`/`threshold`
-   *   or a failing `observe()`. The exception is passed through unchanged, but
-   *   the watcher rolls back first: every target observed so far is released and
-   *   `active` stays `false`, so a caller that retries starts from a clean slate.
+   * @throws The fallback constructor error if both construction attempts fail,
+   *   or whatever the platform throws from `observe()`. The exception is passed
+   *   through unchanged, but the watcher rolls back first: every target observed
+   *   so far is released and `active` stays `false`, so a caller that retries
+   *   starts from a clean slate.
    */
   start(targets: Element | readonly Element[], options: IntersectionWatchOptions = {}): boolean {
     this.stop();
@@ -88,14 +97,25 @@ export class IntersectionWatcher {
 
     let observer: IntersectionObserver | null = null;
     try {
-      observer = new IntersectionObserver(
-        (entries) => {
-          // Identity matters across an immediate restart: the old observer can
-          // flush a queued batch after the new observer has made `active` true.
-          if (this.#active && this.#observer === observer) this.#onEntries(entries);
-        },
-        { root, rootMargin: options.rootMargin, threshold: options.threshold },
-      );
+      const onEntries = (entries: IntersectionObserverEntry[]): void => {
+        // Identity matters across an immediate restart: the old observer can
+        // flush a queued batch after the new observer has made `active` true.
+        if (this.#active && this.#observer === observer) this.#onEntries(entries);
+      };
+      try {
+        observer = new IntersectionObserver(onEntries, {
+          root,
+          rootMargin: options.rootMargin,
+          threshold: options.threshold,
+        });
+      } catch (error) {
+        console.warn(
+          "Stimeo UI: IntersectionObserver could not be constructed with the configured options; retrying with platform defaults.",
+          error,
+        );
+        observer = new IntersectionObserver(onEntries, { root });
+        this.#usingPlatformDefaults = true;
+      }
       for (const target of list) observer.observe(target);
       this.#observer = observer;
       this.#active = true;
@@ -106,6 +126,7 @@ export class IntersectionWatcher {
       observer?.disconnect();
       this.#observer = null;
       this.#active = false;
+      this.#usingPlatformDefaults = false;
       throw error;
     }
   }
@@ -134,5 +155,6 @@ export class IntersectionWatcher {
     this.#active = false;
     this.#observer?.disconnect();
     this.#observer = null;
+    this.#usingPlatformDefaults = false;
   }
 }

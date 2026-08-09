@@ -3,7 +3,7 @@
     aria-activedescendant. Focus stays on the input and the active option is shown via
     aria-selected. On selection, data-value (or the text, if absent) is placed in the input. %>
 <div class="combobox" data-controller="stimeo--combobox">
-  <label class="combobox__label" for="fruit-input"><%= t(
+  <label id="fruit-label" class="combobox__label" for="fruit-input"><%= t(
     "components.combobox.demo.label"
   ) %></label>
   <input
@@ -25,6 +25,7 @@
     id="fruit-list"
     class="combobox__list"
     role="listbox"
+    aria-labelledby="fruit-label"
     data-stimeo--combobox-target="list"
     hidden>
     <li role="option" id="fruit-apple" class="combobox__option" data-value="Apple"

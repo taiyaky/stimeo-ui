@@ -7,8 +7,6 @@
 #     Needs npm >= 11.5.1 (installed below); provenance is automatic; no token.
 #   - gem `stimeo-ui` on rubygems.org (Trusted Publishers).
 # Both jobs use `id-token: write` (OIDC). npm provenance requires this repo PUBLIC.
-# (npm's first publish used a token because OIDC can't be pre-configured for a
-# not-yet-published package; from v0.1.0-alpha.1 onward it is tokenless.)
 name: Publish
 
 on:
@@ -21,7 +19,30 @@ permissions:
   id-token: write # required for npm provenance
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify release tag matches npm and gem versions
+        run: |
+          npm_version="$(node -p "require('./package.json').version")"
+          gem_version="$(sed -n 's/.*VERSION = "\([^"]*\)".*/\1/p' lib/stimeo/ui/version.rb)"
+          expected_gem_version="${npm_version/-/.pre.}"
+          test "$GITHUB_REF_TYPE" = "tag" || {
+            echo "Publish must run from a tag, got $GITHUB_REF_TYPE '$GITHUB_REF_NAME'." >&2
+            exit 1
+          }
+          test "$GITHUB_REF_NAME" = "v$npm_version" || {
+            echo "Tag '$GITHUB_REF_NAME' does not match npm version '$npm_version'." >&2
+            exit 1
+          }
+          test "$gem_version" = "$expected_gem_version" || {
+            echo "Gem version '$gem_version' does not match npm version '$npm_version'." >&2
+            exit 1
+          }
+
   npm:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -35,9 +56,18 @@ jobs:
       - run: npm install -g npm@11.5.1 # pinned: Trusted Publishing needs npm >= 11.5.1 (Node 22 ships npm 10)
       - run: bun install
       - run: bun run build # tsup → dist/ (DTS resolves: @floating-ui/dom is a devDep)
-      - run: npm publish --access public # stable ⇒ tagless publish lands on `latest`. A prerelease would need an explicit --tag (npm refuses a tagless prerelease publish). OIDC Trusted Publishing → tokenless; provenance automatic
+      - name: Publish npm (skip an already-published exact version)
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          published="$(npm view "stimeo-ui@$version" version 2>/dev/null || true)"
+          if [[ "$published" = "$version" ]]; then
+            echo "stimeo-ui $version already on npm — skipping publish (idempotent re-run)."
+          else
+            npm publish --access public
+          fi
 
   gem:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

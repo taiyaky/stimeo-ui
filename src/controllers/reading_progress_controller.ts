@@ -53,8 +53,8 @@ export class ReadingProgressController extends Controller<HTMLElement> {
   override connect(): void {
     this.#progress = -1;
     // Capture phase: element scrolls do not bubble, but they ARE observable at
-    // the window in capture — so an article inside an overflow container (like
-    // the catalog's own scroll pane) still drives the progress.
+    // the window in capture — so an article inside an overflow container still
+    // drives the progress.
     window.addEventListener("scroll", this.#onScroll, { passive: true, capture: true });
     window.addEventListener("resize", this.#onScroll, { passive: true });
     this.#measure();

@@ -409,7 +409,7 @@ describe("PresenceController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech-order regression ------------------------------------------------
 
   it("announces a joining peer through the count text and the roster list", async () => {
     await mount();

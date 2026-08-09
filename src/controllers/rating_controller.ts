@@ -1,4 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord } from "../utils/arrow_step";
+import { isRtl } from "../utils/logical_scroll";
 import { RovingTabindex } from "../utils/roving_tabindex";
 
 /**
@@ -96,16 +98,28 @@ export class RatingController extends Controller<HTMLElement> {
 
   /** Arrow/Home/End/Space keyboard control, clamped (no wrap). */
   onKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key must not ALSO change the rating —
+    // composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     if (this.readonlyValue) return;
     let next: number | null = null;
+    // Logical, not physical, for the horizontal pair only: the stars are an
+    // ordered row, so which one is "next" follows the writing direction.
+    //
+    // The shared `logicalArrowStep` is deliberately not used here. It encodes the
+    // list-order convention (`ArrowDown` = next), and this widget pairs the arrows
+    // by *value* instead — `ArrowUp` means "more" — so borrowing it would silently
+    // invert the vertical axis.
+    const rtl = isRtl(this.element);
     switch (event.key) {
       case "ArrowRight":
       case "ArrowUp":
-        next = this.valueValue + 1;
+        next = this.valueValue + (event.key === "ArrowRight" && rtl ? -1 : 1);
         break;
       case "ArrowLeft":
       case "ArrowDown":
-        next = this.valueValue - 1;
+        next = this.valueValue - (event.key === "ArrowLeft" && rtl ? -1 : 1);
         break;
       case "Home":
         next = this.#minValue;

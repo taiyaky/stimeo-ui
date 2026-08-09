@@ -176,6 +176,53 @@ describe("PopoverController", () => {
     expect(document.activeElement).not.toBe(trigger());
   });
 
+  it("stays open when a panel click handler removes the clicked node first", () => {
+    // The failure mode that decides the listener phase. On bubble,
+    // the inner handler runs first and detaches the node, so by the time the
+    // document listener runs `event.target` is outside the tree and
+    // `contains()` says "outside" — closing on what was an *inside* click.
+    // On capture the document observes it first, against the tree the user
+    // actually clicked. Menus that swap items on click hit this for real.
+    const item = document.createElement("button");
+    item.id = "self-removing";
+    item.textContent = "Remove me";
+    panel().append(item);
+    item.addEventListener("click", () => {
+      item.remove();
+    });
+    trigger().click();
+
+    item.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(panel().hidden).toBe(false);
+  });
+
+  it("hands off to a second popover when its trigger is clicked", async () => {
+    // The trade-off capture buys: `document` now sees the click
+    // before the trigger's own handler, so the open instance must let go *and*
+    // the new one must still open. Milder here than in the menu family — this
+    // controller's outside-click close does not restore focus, so nothing moves
+    // mid-dispatch — but "the second one never opens" is the same failure.
+    const second = document.createElement("div");
+    second.innerHTML = `
+      <div data-controller="stimeo--popover">
+        <button id="trigger2" data-stimeo--popover-target="trigger"
+                aria-haspopup="dialog" aria-expanded="false" aria-controls="pop2"
+                data-action="click->stimeo--popover#toggle">Second</button>
+        <div id="pop2" data-stimeo--popover-target="panel" role="dialog"
+             aria-label="Second" hidden><button>Inside two</button></div>
+      </div>`;
+    document.body.append(second);
+    await tick();
+    trigger().click();
+    expect(panel().hidden).toBe(false);
+
+    query("#trigger2").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(panel().hidden).toBe(true); // the first let go
+    expect(query("#pop2").hidden).toBe(false); // and the second still opened
+  });
+
   it("keeps open for label and non-focusable panel clicks after an indeterminate focusout", () => {
     trigger().click();
     const input = query<HTMLInputElement>("#field");

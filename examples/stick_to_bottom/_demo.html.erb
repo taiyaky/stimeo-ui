@@ -4,23 +4,36 @@
     the mutation a Turbo Stream broadcast would make — and the controller reacts. The jump
     button lives inside the log (a descendant, wired with a plain data-action) and CSS
     reveals it only while data-has-new. demo.js starts the log scrolled to the bottom. The
-    library only follows/flags and reflects data-pinned / data-has-new; demo.css owns the look. %>
+    library only follows/flags and reflects data-pinned / data-has-new; demo.css owns the look.
+
+    The log scrolls but its only control — the jump button — is hidden until there is
+    something to jump to, so most of the time a keyboard user cannot reach it at all
+    (WCAG 2.1.1). Rather than hand-write a tab stop, compose stimeo--scroll-area over it:
+    that controller exists for exactly this and gives the viewport tabindex="0" only while
+    it holds no rendered focusable content, so the tab stop appears and disappears in step
+    with the jump button instead of doubling up with it. It goes on a wrapper because
+    stick-to-bottom must sit on the scrolling element itself, and it takes the log as its
+    viewport target. role="region" comes free with the label below. %>
 <div class="stb-demo">
-  <div
-    class="stb-demo__log"
-    data-controller="stimeo--stick-to-bottom"
-    data-stimeo--stick-to-bottom-behavior-value="smooth">
-    <ul class="stb-demo__messages" data-stimeo--stick-to-bottom-target="content">
-      <% (1..8).each do |i| %>
-        <li><%= t("components.stick_to_bottom.demo.message") %> <%= i %></li>
-      <% end %>
-    </ul>
-    <button
-      type="button"
-      class="stb-demo__jump"
-      data-action="click->stimeo--stick-to-bottom#scrollToBottom">
-      <%= t("components.stick_to_bottom.demo.jump") %>
-    </button>
+  <div class="stb-demo__log-wrap" data-controller="stimeo--scroll-area">
+    <div
+      class="stb-demo__log"
+      data-controller="stimeo--stick-to-bottom"
+      data-stimeo--stick-to-bottom-behavior-value="smooth"
+      data-stimeo--scroll-area-target="viewport"
+      aria-label="<%= t("components.stick_to_bottom.demo.viewport_label") %>">
+      <ul class="stb-demo__messages" data-stimeo--stick-to-bottom-target="content">
+        <% (1..8).each do |i| %>
+          <li><%= t("components.stick_to_bottom.demo.message") %> <%= i %></li>
+        <% end %>
+      </ul>
+      <button
+        type="button"
+        class="stb-demo__jump"
+        data-action="click->stimeo--stick-to-bottom#scrollToBottom">
+        <%= t("components.stick_to_bottom.demo.jump") %>
+      </button>
+    </div>
   </div>
   <button
     type="button"

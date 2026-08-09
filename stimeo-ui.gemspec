@@ -26,6 +26,7 @@ Gem::Specification.new do |spec|
   spec.metadata["documentation_uri"] = "#{spec.homepage}/components"
   spec.metadata["rubygems_mfa_required"] = "true"
 
+
   # The gem distributes the prebuilt browser JS only — no .d.ts/.map (those stay
   # on npm for bundler users) and no dist/inspector/ (the Node CLI; the generator
   # excludes it from the vendor copy, so keep it out of the payload too). An

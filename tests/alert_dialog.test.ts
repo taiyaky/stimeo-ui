@@ -134,14 +134,14 @@ describe("AlertDialogController", () => {
     expect(background.inert).toBe(false);
   });
 
-  // Layer ① — machine-detectable a11y (asserted in the open/modal state).
+  // Machine-detectable a11y, asserted in the open/modal state.
   it("has no machine-detectable a11y violations while open (modal)", async () => {
     trigger().click();
     await expectNoA11yViolations(document.body);
   });
 
-  // Layer ③ — speech-order regression: role, name, modal state, and the
-  // describing message must enter the accessibility tree in order when open.
+  // Speech-order regression: role, name, modal state, and the describing
+  // message must enter the accessibility tree in order when open.
   it("announces the alertdialog role, name, and message in order when open", async () => {
     trigger().click();
     const phrases = await captureSpeech({ container: dialog(), steps: 4 });

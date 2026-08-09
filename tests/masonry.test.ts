@@ -94,8 +94,8 @@ describe("MasonryController", () => {
 
   it("stops observing on disconnect (no relayout after teardown)", async () => {
     await start(3, 800);
-    // Invoke disconnect() directly (as the spinner teardown test does) rather than
-    // racing the document MutationObserver that normally drives context teardown.
+    // Invoke disconnect() directly rather than racing the document MutationObserver
+    // that normally drives context teardown.
     const controller = application.getControllerForElementAndIdentifier(
       root(),
       "stimeo--masonry",
@@ -138,8 +138,8 @@ describe("MasonryController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — the layout helper must not inject semantics: a screen reader still
-  // reads the items in DOM order, so visual packing never desyncs reading order.
+  // The layout helper must not inject semantics: a screen reader still reads the
+  // items in DOM order, so visual packing never desyncs reading order.
   it("announces the items in DOM order (no reordering of semantics)", async () => {
     await start(3, 800);
     const phrases = await captureSpeech({ container: root(), steps: 2 });

@@ -42,7 +42,7 @@ export interface FocusTrapOptions {
    * is resolved by the shared {@link EscapeLayer}: an Escape already consumed
    * by an inner handler is ignored, and among active layers the most recently
    * activated claiming one owns the press. The resolver consumes the event
-   * before invoking the callback (the shared layered-Escape contract).
+   * before invoking the callback.
    */
   onEscape?: () => void;
   /**

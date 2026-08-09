@@ -266,8 +266,8 @@ describe("OverflowIndicatorController", () => {
     layout({ scrollLeft: 700, scrollWidth: 1000, clientWidth: 300 });
     expect(pending.getAttribute("aria-disabled")).toBe("true");
 
-    // The spec requires the controller-owned pending state to be released on
-    // disconnect, so a cached snapshot never keeps a half-disabled button.
+    // The controller-owned pending state is released on disconnect, so a cached
+    // snapshot never keeps a half-disabled button.
     application.unload("stimeo--overflow-indicator");
     await tick();
 
@@ -319,8 +319,8 @@ describe("OverflowIndicatorController", () => {
   });
 
   it("is a safe no-op without a viewport target", async () => {
-    // Inspector requires the viewport target, but a degraded / mid-morph DOM must
-    // not throw: update() and scrollByPage() simply do nothing.
+    // The markup contract requires the viewport target, but a degraded / mid-morph
+    // DOM must not throw: update() and scrollByPage() simply do nothing.
     document.body.innerHTML = `
       <div data-controller="stimeo--overflow-indicator">
         <button type="button" id="lonely"
@@ -381,7 +381,7 @@ describe("OverflowIndicatorController", () => {
     const scrollBy = vi.fn();
     viewport().scrollBy = scrollBy;
     button("end").click();
-    expect(scrollBy).toHaveBeenCalledWith({ left: 300, behavior: "auto" });
+    expect(scrollBy).toHaveBeenCalledWith({ left: 300, behavior: "instant" });
   });
 
   it("uses logical start/end geometry and physical scroll direction in RTL", async () => {
@@ -427,9 +427,9 @@ describe("OverflowIndicatorController", () => {
     const scrollBy = vi.fn();
     viewport().scrollBy = scrollBy;
     button("end").click();
-    expect(scrollBy).toHaveBeenCalledWith({ top: 300, behavior: "auto" });
+    expect(scrollBy).toHaveBeenCalledWith({ top: 300, behavior: "instant" });
     button("start").click();
-    expect(scrollBy).toHaveBeenLastCalledWith({ top: -300, behavior: "auto" });
+    expect(scrollBy).toHaveBeenLastCalledWith({ top: -300, behavior: "instant" });
   });
 
   it("never re-enables an author-disabled page button (owns only its own disabled)", async () => {
@@ -626,7 +626,7 @@ describe("OverflowIndicatorController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech order -----------------------------------------------------------
 
   it("announces the page buttons and the named scroll region in order", async () => {
     await start();

@@ -8,20 +8,19 @@ import type { DemoSource } from "../src/inspector/examples";
  *
  * Shared by `scripts/postbuild.ts` (build-time generation) and the
  * integration contract in `tests/inspector/examples.test.ts`, so both walk
- * the tree identically. Two roots exist because the public mirror does not
- * ship the playground: the dev monorepo reads the catalog sidecars in place,
- * while the mirror sync copies the core sidecars (premium demos stay
- * private) to `examples/` in the public tree.
+ * the tree identically. Two roots exist: the sidecars live under `playground/`
+ * when that directory is present and under `examples/` otherwise, and
+ * {@link resolveDemosRoot} picks whichever exists.
  */
 
-/** Demo sidecar root in the dev monorepo (the playground catalog). */
+/** Demo sidecar root under `playground/`, when that directory is present. */
 export const DEV_DEMOS_DIR = join("playground", "app", "views", "components", "demos");
-/** Demo sidecar root in the public mirror (core demos copied by the sync). */
+/** Demo sidecar root used when `playground/` is absent. */
 export const PUBLIC_DEMOS_DIR = "examples";
 
 /**
- * Resolves the repo-relative demo root for the tree at `root` (dev playground
- * first, then the public-mirror copy).
+ * Resolves the repo-relative demo root for the tree at `root`, preferring
+ * {@link DEV_DEMOS_DIR} and falling back to {@link PUBLIC_DEMOS_DIR}.
  *
  * @throws Error when neither root exists — the example index cannot be built
  *   without a demo supply, so callers must fail loudly.

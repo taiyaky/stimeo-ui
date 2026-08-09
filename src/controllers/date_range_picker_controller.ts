@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import {
   parseISODateString,
   parseISOMonthString,
@@ -59,6 +60,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   static events = ["change"] as const;
 
   declare readonly gridTarget: HTMLElement;
+  declare readonly hasGridTarget: boolean;
   declare readonly monthLabelTarget: HTMLElement;
   declare readonly cellTargets: HTMLElement[];
   declare readonly statusTarget: HTMLElement;
@@ -95,6 +97,10 @@ export class DateRangePickerController extends Controller<HTMLElement> {
       parseISODateString(this.#startDate) ?? this.#clampToBounds(new Date()) ?? new Date();
     this.#focusedDate = anchor;
     this.#viewMonth = toISOMonthString(anchor);
+    // Two cells carry `aria-selected="true"` whenever a range is confirmed, so the
+    // grid has to say that more than one is selectable — otherwise a single-select
+    // grid is claiming two selections.
+    if (this.hasGridTarget) this.gridTarget.setAttribute("aria-multiselectable", "true");
     this.#render();
   }
 
@@ -175,6 +181,10 @@ export class DateRangePickerController extends Controller<HTMLElement> {
 
   /** Grid keyboard navigation, selection (Enter/Space), and Escape-to-cancel. */
   onKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key must not ALSO move the
+    // grid focus or choose a date — composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const cell = this.#cellFrom(event.target);
     if (!cell) return;
     const dateStr = cell.getAttribute("data-date");
@@ -187,9 +197,10 @@ export class DateRangePickerController extends Controller<HTMLElement> {
       return;
     }
     if (event.key === "Escape") {
-      // Layered-Escape rule 1: leave a press an inner handler already owned;
-      // a press during IME composition steers the conversion, not the range.
-      if (this.#pendingStart && !event.defaultPrevented && !event.isComposing) {
+      // A press an inner handler already owned is yielded at the top of this
+      // handler. What is checked here is the IME half: a press during a
+      // composition steers the conversion, not the range.
+      if (this.#pendingStart && !event.isComposing) {
         event.preventDefault();
         this.#pendingStart = "";
         this.#previewDate = "";
@@ -199,7 +210,10 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     }
 
     let next: Date | null = null;
-    switch (event.key) {
+    // Logical, not physical. The key is normalised rather than the
+    // delta negated: these two branches are not mirror images — their guards
+    // differ — so swapping the key keeps each guard with its own direction.
+    switch (logicalArrowKey(event.key, this.element)) {
       case "ArrowLeft":
         next = addDays(date, -1);
         break;
@@ -328,8 +342,16 @@ export class DateRangePickerController extends Controller<HTMLElement> {
       el.toggleAttribute("data-range-start", isStart);
       el.toggleAttribute("data-range-end", isEnd);
       el.toggleAttribute("data-in-range", inside);
-      // AT hears only the two confirmed/pending endpoints as "selected".
-      el.setAttribute("aria-selected", String(isStart || isEnd));
+      // Selection is what the user committed, never what the pointer is hovering:
+      // `aria-selected` marks the two confirmed endpoints only. The preview lives
+      // in the `data-*` trio above, which styling reads and AT does not.
+      el.setAttribute(
+        "aria-selected",
+        String(
+          (!!this.#startDate && iso === this.#startDate) ||
+            (!!this.#endDate && iso === this.#endDate),
+        ),
+      );
     }
   }
 

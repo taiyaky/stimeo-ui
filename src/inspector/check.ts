@@ -11,12 +11,16 @@ import { type ElementNode, type ParsedAttr, parseHtml, walk } from "./html_parse
 import {
   type A11yAlternative,
   type A11yRequirement,
+  type ContentCondition,
   DIAGNOSTIC_CODES,
   type Diagnostic,
   type DiagnosticCode,
   type DiagnosticFix,
   type DiagnosticSeverity,
+  type DocumentCondition,
+  type ElementCondition,
   type Manifest,
+  type ValueCondition,
 } from "./types";
 
 /**
@@ -31,12 +35,18 @@ import {
  *   controller scope, and targets must have an owning controller.
  * - **Stage 3 (accessibility):** ARIA the controller relies on but does not set
  *   itself (e.g. a dialog's `role`/`aria-modal`/name) must be present on the
- *   relevant target, with the expected value (alternative groups via `or`).
- *   Three sibling passes extend it: **keyboard prerequisites** (declared
- *   targets must be focusable), **managed-aria** (author-futile attributes the
- *   controller owns draw warnings), and **idref resolution** (ARIA reference
- *   attributes on scope/target elements must point at an id declared in the
- *   same file — a *warning*, since a reference may legitimately cross a
+ *   relevant target, with the expected value (alternative groups via `or`), and
+ *   optionally only in one configuration of the controller's own value.
+ *   Sibling passes extend it: **keyboard prerequisites** (declared targets must
+ *   be focusable), **managed-aria** (author-futile attributes the controller
+ *   owns draw warnings), **composition** (value alignment with a co-located
+ *   companion), **required companions** (a delegated-to controller must be
+ *   present at all), **target declarations** (markup carrying a pattern's role
+ *   must be a declared target — the one rule family that reads
+ *   attribute → target rather than the reverse), **cardinality** (set-level
+ *   count bounds per scope or container), and **idref resolution** (ARIA
+ *   reference attributes on scope/target elements must point at an id declared
+ *   in the same file — a *warning*, since a reference may legitimately cross a
  *   partial boundary the checker cannot see).
  * - **Stage 4 (fix suggestions):** diagnostics carry a `suggestion` — the
  *   nearest known name for a likely typo, or the exact ARIA to add.
@@ -82,6 +92,28 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
     const { valueStart, valueEnd } = attr;
     if (valueStart === undefined || valueEnd === undefined) return false;
     return erbRanges.some(([start, end]) => start < valueEnd && end > valueStart);
+  };
+
+  /**
+   * Whether a rule's self-value condition holds for this scope, reading the
+   * host's **effective** value (the authored attribute, or the rule's declared
+   * default when absent). An unconditional rule always holds.
+   *
+   * Returns `null` when the host value is ERB-generated: the condition is then
+   * undecidable, and the caller skips the rule rather than guessing at which
+   * configuration the page will render in.
+   */
+  const conditionHolds = (
+    scope: ElementNode,
+    identifier: string,
+    when: ValueCondition | undefined,
+  ): boolean | null => {
+    if (!when) return true;
+    const hostAttr = scope.attrs.find(
+      (a) => a.name === `data-${identifier}-${dasherize(when.value)}-value`,
+    );
+    if (hostAttr && isDynamicValue(hostAttr)) return null;
+    return when.equals.includes(hostAttr ? hostAttr.value.trim() : when.default);
   };
 
   /** True when `node` or an ancestor opts out of `code` via the ignore attr. */
@@ -146,7 +178,93 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
     else byName.set(target, [el]);
   };
 
+  /**
+   * Whether a rule's content condition holds for one element: how many of a
+   * target the element itself holds. Unlike {@link conditionHolds} — which asks
+   * about the scope's configuration — this is per element, so sibling targets
+   * are judged independently. An unconditional rule always holds.
+   *
+   * Targets are counted from their declarations, so an ERB-generated target
+   * *name* leaves an element uncounted. That biases the count downward, the
+   * same direction the rest of the engine takes: the stage-2 required-target
+   * check already reports such markup, so the miscount is not silent.
+   */
+  const contentHolds = (
+    scope: ElementNode,
+    identifier: string,
+    element: ElementNode,
+    condition: ContentCondition | undefined,
+  ): boolean => {
+    if (!condition) return true;
+    const nodes = targetNodes.get(scope)?.get(identifier)?.get(condition.target) ?? [];
+    let held = 0;
+    for (const node of nodes) if (isWithin(node, element)) held += 1;
+    if (condition.min !== undefined && held < condition.min) return false;
+    if (condition.max !== undefined && held > condition.max) return false;
+    return true;
+  };
+
+  /**
+   * Whether the element's own tag leaves a requirement armed. A tag that names
+   * the role natively — `<table>`/`<caption>`, `<fieldset>`/`<legend>`,
+   * `<input>`/`<label for>` — disarms it, because the author has a correct
+   * spelling that carries no ARIA at all and flagging it would be a false
+   * positive. Unconditional requirements always hold.
+   */
+  const elementHolds = (element: ElementNode, condition: ElementCondition | undefined): boolean =>
+    !condition?.exceptTags.includes(element.tag);
+
+  /**
+   * How many elements in this file carry each role, tallied during the walk
+   * below. It backs {@link DocumentCondition}, whose question — "is there more
+   * than one of these?" — no per-element or per-scope view can answer.
+   *
+   * ERB-generated role values are left out: `role="<%= … %>"` could render as
+   * anything, and counting it would escalate a requirement on a guess. Missing
+   * one therefore under-counts, which can only *fail* to escalate — never
+   * escalate wrongly.
+   */
+  const roleTally = new Map<string, number>();
+
+  /**
+   * The same tally restricted to Tab-reachable elements, for the conditions
+   * ARIA qualifies by focusability. Kept as a second map rather than a filter
+   * at query time because the walk is the only place the elements are in hand.
+   */
+  const focusableRoleTally = new Map<string, number>();
+
+  /** Whether a file-level condition holds; absent conditions never escalate. */
+  const documentHolds = (condition: DocumentCondition | undefined): boolean => {
+    if (condition === undefined) return false;
+    const tally = condition.focusable ? focusableRoleTally : roleTally;
+    return (tally.get(condition.role) ?? 0) >= condition.atLeast;
+  };
+
+  /**
+   * Attribute names any target-declaration rule matches on (e.g. `role`).
+   * Collected up front so the reverse-direction pass can work from a single
+   * shortlist gathered during this walk, instead of re-walking the tree once
+   * per scope and rule.
+   */
+  const declarationAttrs = new Set<string>();
+  for (const controller of Object.values(known)) {
+    for (const rule of controller.targetDeclarations) declarationAttrs.add(rule.attr);
+  }
+  /** Elements carrying at least one {@link declarationAttrs} attribute. */
+  const declarationCandidates: ElementNode[] = [];
+
   walk(tree, (node) => {
+    if (declarationAttrs.size > 0 && node.attrs.some((a) => declarationAttrs.has(a.name))) {
+      declarationCandidates.push(node);
+    }
+    const roleAttr = node.attrs.find((a) => a.name === "role");
+    if (roleAttr && !isDynamicValue(roleAttr)) {
+      const role = roleAttr.value.trim();
+      roleTally.set(role, (roleTally.get(role) ?? 0) + 1);
+      if (isFocusable(node, "tab")) {
+        focusableRoleTally.set(role, (focusableRoleTally.get(role) ?? 0) + 1);
+      }
+    }
     for (const attr of node.attrs) {
       // --- suppression declaration: data-stimeo-ignore ---------------------
       if (attr.name === IGNORE_ATTR) {
@@ -234,7 +352,13 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           );
           continue;
         }
-        const targetName = attr.value.trim();
+        // Neutralization blanks the ERB tag in place, so a partly generated
+        // name reads as its literal remnant (`<%= p %>item` → "item"). Taking
+        // that reading would both silence the spelling check and register a
+        // target the runtime never resolves — the same fabrication the
+        // cardinality count avoids. Undecidable, exactly like a fully generated
+        // name, whose blanked value already falls through the guards below.
+        const targetName = isDynamicValue(attr) ? "" : attr.value.trim();
         if (targetName.length > 0 && !controller.targets.includes(targetName)) {
           const best = nearestName(targetName, controller.targets);
           report(
@@ -346,11 +470,38 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
     }
   }
 
+  // --- Stage 2: conditional targets per scope ------------------------------
+  // A feature that is opt-in but incomplete without its whole set. Judged from the
+  // *presence* set rather than the element set: the question is only whether the
+  // author declared the target anywhere in this scope.
+  for (const { node, identifier } of scopes) {
+    const controller = known[identifier];
+    if (!controller) continue;
+    const present = presence.get(node)?.get(identifier) ?? new Set<string>();
+    for (const rule of controller.conditionalTargets) {
+      if (!present.has(rule.whenPresent)) continue;
+      const missing = rule.require.filter((target) => !present.has(target));
+      if (missing.length === 0) continue;
+      report(
+        node,
+        "missing-conditional-target",
+        "error",
+        `"${identifier}" has a "${rule.whenPresent}" target, which also requires ${list(missing)}.`,
+        node,
+        rule.suggestion,
+      );
+    }
+  }
+
   // --- Stage 3: accessibility (ARIA) per scope -----------------------------
   for (const { node, identifier } of scopes) {
     const controller = known[identifier];
     if (!controller) continue;
     for (const req of controller.a11y) {
+      // A conditional requirement only exists in the configuration it names —
+      // outside it the attribute is not merely optional but wrong, so an
+      // undecidable or unmet condition must skip the requirement entirely.
+      if (conditionHolds(node, identifier, req.when) !== true) continue;
       // The root scope ("") is the controller element; otherwise the target's
       // own element(s). Targets that are absent are stage 2's concern, not ours
       // — we only judge accessibility of markup that is actually present.
@@ -358,8 +509,22 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
         req.target === ""
           ? [node]
           : (targetNodes.get(node)?.get(identifier)?.get(req.target) ?? []);
+      // A file-level precondition arms the requirement at all; without it the
+      // markup is complete as written, so nothing below should run.
+      if (req.whenDocument && !documentHolds(req.whenDocument)) continue;
+      // Escalation is a property of the file, not of any one element, so it is
+      // resolved once per requirement rather than per element.
+      const severity: DiagnosticSeverity = documentHolds(req.escalateWhen)
+        ? "error"
+        : (req.severity ?? "error");
       for (const el of elements) {
-        checkA11y(report, el, identifier, req);
+        // Contents are judged per element: two sibling menus of one menubar can
+        // legitimately disagree about whether the requirement applies to them.
+        if (!contentHolds(node, identifier, el, req.whenContains)) continue;
+        // So is the tag: one file can spell the same role both natively and
+        // with a div, and only the div needs the author to supply a name.
+        if (!elementHolds(el, req.whenElement)) continue;
+        checkA11y(report, el, identifier, req, severity);
       }
     }
   }
@@ -419,6 +584,45 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
     }
   }
 
+  // --- Stage 3: attributes forbidden by the surrounding markup -------------
+  // The pass above reports attributes the *controller* owns; this one reports
+  // attributes the author owns that contradict what is around them — required
+  // in one configuration of the element's contents and wrong in the other.
+  // Warning severity, because one file at one instant cannot tell a stale
+  // declaration from a genuinely in-progress one.
+  for (const { node, identifier } of scopes) {
+    const controller = known[identifier];
+    if (!controller) continue;
+    for (const rule of controller.forbiddenAria) {
+      const elements =
+        rule.target === ""
+          ? [node]
+          : (targetNodes.get(node)?.get(identifier)?.get(rule.target) ?? []);
+      const where = rule.target === "" ? "scope element" : `"${rule.target}" target`;
+      for (const el of elements) {
+        if (!contentHolds(node, identifier, el, rule.whenContains)) continue;
+        for (const name of rule.attrs) {
+          const attr = el.attrs.find((a) => a.name === name);
+          if (!attr) continue;
+          // An ERB-generated value could render to anything, so a rule that
+          // names specific values cannot decide it. A rule forbidding the
+          // attribute outright still can: presence is static.
+          if (rule.values && (isDynamicValue(attr) || !rule.values.includes(attr.value.trim()))) {
+            continue;
+          }
+          report(
+            el,
+            "forbidden-aria",
+            "warning",
+            `${name} on the ${where} of "${identifier}" contradicts the markup around it.`,
+            attr,
+            rule.suggestion,
+          );
+        }
+      }
+    }
+  }
+
   // --- Stage 3: cross-controller composition values ------------------------
   // Value-alignment contracts between a host controller and a co-located
   // companion (e.g. sortable's sort axis vs roving's orientation). Both sides
@@ -438,14 +642,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
         rule.target === "" ? [node] : (targeted ?? (rule.fallbackToScope ? [node] : []));
       const where = rule.target === "" || !targeted ? "scope element" : `"${rule.target}" target`;
       const when = rule.when;
-      if (when) {
-        const hostAttr = node.attrs.find(
-          (a) => a.name === `data-${identifier}-${dasherize(when.value)}-value`,
-        );
-        if (hostAttr && isDynamicValue(hostAttr)) continue;
-        const hostEffective = hostAttr ? hostAttr.value.trim() : when.default;
-        if (!when.equals.includes(hostEffective)) continue;
-      }
+      if (conditionHolds(node, identifier, when) !== true) continue;
       const hostContext = when ? ` (${when.value} ${list(when.equals)})` : "";
       for (const el of elements) {
         const declared = el.attrs.find((a) => a.name === "data-controller");
@@ -478,6 +675,158 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
             canonical !== undefined
               ? valueFix(coAttr, canonical, `Set ${coAttrName} to "${canonical}"`)
               : undefined,
+          );
+        }
+      }
+    }
+  }
+
+  // --- Stage 3: required companion controllers -----------------------------
+  // The mirror image of the composition pass: that one guards *how* a
+  // co-located companion is configured and stays silent when it was never
+  // added, which is right for optional compositions and blind to the mandatory
+  // ones. Here the companion carries behavior the host never implements, so its
+  // absence is the failure — reported on the element that should have declared
+  // it. An ERB-generated `data-controller` is undecidable and skipped.
+  for (const { node, identifier } of scopes) {
+    const controller = known[identifier];
+    if (!controller) continue;
+    for (const rule of controller.companions) {
+      const elements =
+        rule.target === ""
+          ? [node]
+          : (targetNodes.get(node)?.get(identifier)?.get(rule.target) ?? []);
+      const where = rule.target === "" ? "scope element" : `"${rule.target}" target`;
+      for (const el of elements) {
+        const declared = el.attrs.find((a) => a.name === "data-controller");
+        if (declared && isDynamicValue(declared)) continue;
+        if (declared && controllerIdentifiers(declared.value).includes(rule.controller)) continue;
+        report(
+          el,
+          "missing-companion",
+          "error",
+          `The ${where} of "${identifier}" must also declare "${rule.controller}" in data-controller.`,
+          declared ?? el,
+          rule.suggestion,
+          // Appending to an existing list is unambiguous; creating the
+          // attribute from nothing is an insertion the anchor cannot express.
+          declared
+            ? valueFix(
+                declared,
+                `${declared.value.trim()} ${rule.controller}`.trim(),
+                `Add "${rule.controller}" to data-controller`,
+              )
+            : undefined,
+        );
+      }
+    }
+  }
+
+  // --- Stage 3: reverse-direction target declarations ----------------------
+  // Elements that wear the pattern's role but were never declared as a target.
+  // Every forward rule reads the controller's target set, so this is the one
+  // failure they structurally cannot see: to them the element does not exist,
+  // while assistive technology announces it as part of the widget. Ownership
+  // goes to the *nearest* enclosing controller of the same identifier, so
+  // nested instances judge only their own subtree.
+  for (const { node, identifier } of scopes) {
+    const controller = known[identifier];
+    if (!controller) continue;
+    if (controller.targetDeclarations.length === 0) continue;
+    const targetAttrName = `data-${identifier}-target`;
+    for (const rule of controller.targetDeclarations) {
+      for (const el of declarationCandidates) {
+        const marker = el.attrs.find((a) => a.name === rule.attr);
+        if (!marker || isDynamicValue(marker)) continue;
+        const value = marker.value.trim();
+        if (value.length === 0) continue;
+        if (rule.values && !rule.values.includes(value)) continue;
+        if (findOwner(el, identifier) !== node) continue;
+        const declaredAs = el.attrs.find((a) => a.name === targetAttrName);
+        if (declaredAs && !isDynamicValue(declaredAs) && declaredAs.value.trim() === rule.target) {
+          continue;
+        }
+        if (declaredAs && isDynamicValue(declaredAs)) continue;
+        report(
+          el,
+          "undeclared-target",
+          "error",
+          `${rule.attr}="${value}" inside "${identifier}" is not declared as its "${rule.target}" target, so the controller never manages it.`,
+          marker,
+          rule.suggestion,
+        );
+      }
+    }
+  }
+
+  // --- Stage 3: set-level cardinality --------------------------------------
+  // Counts, not per-element judgements: "exactly one trigger in this wrapper",
+  // "at most one selected option". Both failures are silent at runtime — the
+  // first extra element is either ignored forever or normalized away on connect
+  // — so the authored source is the only place the mistake is still visible.
+  // Counting follows the runtime's own ownership rule: the Stimulus target set.
+  for (const { node, identifier } of scopes) {
+    const controller = known[identifier];
+    if (!controller) continue;
+    for (const rule of controller.cardinality) {
+      if (conditionHolds(node, identifier, rule.when) !== true) continue;
+      const byName = targetNodes.get(node)?.get(identifier);
+      const counted = byName?.get(rule.target) ?? [];
+      const containers = rule.within === "" ? [node] : (byName?.get(rule.within) ?? []);
+      const what = describeCounted(rule.target, rule.attr, rule.values);
+      const where = rule.within === "" ? "controller scope" : `"${rule.within}" target`;
+      for (const container of containers) {
+        // Counted by their *literal* markup. A rule that pins specific values
+        // skips any ERB-touched one: neutralization blanks the tag in place, so
+        // reading what is left would take `<%= prefix %>true` for a literal
+        // "true" and invent a match the rendering may never produce. Dropping
+        // it under-counts instead, which can only hide a violation, never
+        // fabricate one. A rule that merely requires the attribute counts it
+        // either way, and correctly so: presence is static even when the value
+        // is not. Either way the literal elements stand on their own, so a
+        // definite over-count among them is still reported rather than waved
+        // off as undecidable — `aria-selected="<%= … %>"` is ordinary Rails,
+        // and letting one sibling switch the whole rule off would leave it
+        // firing on almost no real markup.
+        const matched: Array<{ el: ElementNode; at: Anchor }> = [];
+        for (const el of counted) {
+          if (!isWithin(el, container)) continue;
+          if (rule.attr === undefined) {
+            matched.push({ el, at: el });
+            continue;
+          }
+          const attr = el.attrs.find((a) => a.name === rule.attr);
+          if (!attr) continue;
+          if (rule.values && (isDynamicValue(attr) || !rule.values.includes(attr.value.trim()))) {
+            continue;
+          }
+          matched.push({ el, at: attr });
+        }
+        if (rule.max !== undefined && matched.length > rule.max) {
+          // Anchored on the elements *past* the limit: the ones the runtime
+          // drops. The first `max` are the selection the page will actually
+          // show, so pointing at them would name the wrong markup.
+          for (const { el, at } of matched.slice(rule.max)) {
+            report(
+              el,
+              "cardinality-violation",
+              "error",
+              `"${identifier}" allows at most ${rule.max} ${what} per ${where}, but found ${matched.length}.`,
+              at,
+              rule.suggestion,
+            );
+          }
+        }
+        if (rule.min !== undefined && matched.length < rule.min) {
+          // Nothing to point at when the count is short, so the container is
+          // the anchor — it is also the element the author has to fix.
+          report(
+            container,
+            "cardinality-violation",
+            "error",
+            `"${identifier}" requires at least ${rule.min} ${what} per ${where}, but found ${matched.length}.`,
+            container,
+            rule.suggestion,
           );
         }
       }
@@ -559,12 +908,20 @@ type Reporter = (
  * that is valid in one group must not be flagged just because another group
  * lists a different set. Distinct attributes still stand alone, so an authored
  * `aria-live="off"` is flagged even next to a valid `role="status"`.
+ *
+ * `severity` applies to the **missing** case only. A present attribute holding
+ * a value the rule rejects stays an `error` whatever level the requirement
+ * carries: the author demonstrably meant to satisfy the rule and got it wrong,
+ * which is a definite defect, not the "could be clearer" the recommended level
+ * describes. This is the same reasoning that reports an invalid value even when
+ * another `or` group is already satisfied.
  */
 function checkA11y(
   report: Reporter,
   el: ElementNode,
   identifier: string,
   req: A11yRequirement,
+  severity: DiagnosticSeverity,
 ): void {
   const groups: readonly A11yAlternative[] = [
     { attrs: req.attrs, values: req.values },
@@ -599,11 +956,14 @@ function checkA11y(
   }
 
   if (!anyPresent) {
+    // The verb tracks the level: saying "requires" for ARIA's *recommended*
+    // names would misreport the contract in the one line most readers act on.
+    const verb = severity === "warning" ? "recommends" : "requires";
     report(
       el,
       "missing-aria",
-      "error",
-      `"${identifier}" requires ${describeAttrs([...allowedByAttr.keys()])} on its ${where}.`,
+      severity,
+      `"${identifier}" ${verb} ${describeAttrs([...allowedByAttr.keys()])} on its ${where}.`,
       el,
       req.suggestion,
     );
@@ -627,6 +987,31 @@ function checkA11y(
         : undefined,
     );
   }
+}
+
+/** Whether `node` is `container` itself or lives inside it. */
+function isWithin(node: ElementNode, container: ElementNode): boolean {
+  let current: ElementNode | null = node;
+  while (current) {
+    if (current === container) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+/**
+ * Names what a cardinality rule counts, e.g. `"option" targets with
+ * aria-selected="true"` — so the diagnostic says which subset the number
+ * refers to rather than leaving the reader to infer it from the bound.
+ */
+function describeCounted(
+  target: string,
+  attr: string | undefined,
+  values: readonly string[] | undefined,
+): string {
+  if (attr === undefined) return `"${target}" targets`;
+  const constrained = values && values.length > 0 ? ` set to ${list(values)}` : "";
+  return `"${target}" targets with ${attr}${constrained}`;
 }
 
 /** Tags focusable without an authored `tabindex` (input handled separately). */

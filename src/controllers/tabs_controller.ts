@@ -1,4 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord } from "../utils/arrow_step";
+import { isRtl } from "../utils/logical_scroll";
 
 /**
  * Headless, accessible tabs behavior.
@@ -25,8 +27,9 @@ import { Controller } from "@hotwired/stimulus";
  * Behavior only. State is exposed through `aria-selected`, roving `tabindex`
  * (`0` for the active tab, `-1` for the rest), and the panel `hidden` attribute;
  * the consumer owns all styling. The required `list` target marks the tablist
- * container as part of the semantic contract — the Inspector requires its
- * role and accessible name; the controller performs no runtime work on it.
+ * container as part of the semantic contract — that container carries
+ * `role="tablist"` and an accessible name; the controller performs no runtime
+ * work on it.
  *
  * Behavior provided:
  * - Click a tab to select it.
@@ -41,7 +44,14 @@ export class TabsController extends Controller<HTMLElement> {
   declare readonly tabTargets: HTMLButtonElement[];
   declare readonly panelTargets: HTMLElement[];
 
-  /** Selects the initially active tab (the pre-selected one, else the first). */
+  /**
+   * Selects the initially active tab: the pre-selected one, else the first.
+   *
+   * `findIndex` makes this first-wins when the author marked several — the first
+   * in DOM order is the only deterministic reading of "which one did they mean" —
+   * and `#selectIndex` then writes an explicit value onto every tab, so a
+   * forgotten `aria-selected` cannot leave a tab looking unselectable.
+   */
   override connect(): void {
     const preselected = this.tabTargets.findIndex(
       (tab) => tab.getAttribute("aria-selected") === "true",
@@ -57,17 +67,28 @@ export class TabsController extends Controller<HTMLElement> {
 
   /** Implements arrow/Home/End navigation with automatic activation. */
   onKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key (a grabbed drag handle, a
+    // nested menu) must not ALSO act on it — composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const tabs = this.tabTargets;
     const currentIndex = tabs.indexOf(event.currentTarget as HTMLButtonElement);
     if (currentIndex === -1) return;
 
     let nextIndex: number | null = null;
+    // Logical, not physical. APG defines these as "next / previous control", and
+    // says a vertical arrangement swaps in Down/Up for the same meaning — so the
+    // pair is one axis's spelling of an order, and the order reverses with the
+    // writing direction. Read from the controller element: the container is what
+    // lays the items out, and a child may carry its own `dir` (an LTR input
+    // inside an RTL form is ordinary authoring).
+    const step = isRtl(this.element) ? -1 : 1;
     switch (event.key) {
       case "ArrowRight":
-        nextIndex = (currentIndex + 1) % tabs.length;
+        nextIndex = (currentIndex + step + tabs.length) % tabs.length;
         break;
       case "ArrowLeft":
-        nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+        nextIndex = (currentIndex - step + tabs.length) % tabs.length;
         break;
       case "Home":
         nextIndex = 0;

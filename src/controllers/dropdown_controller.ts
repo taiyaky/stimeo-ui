@@ -27,8 +27,7 @@ import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
  *   menu is a layer on the shared {@link EscapeLayer} stack; it claims a press
  *   only while focus is inside the controller or fell to the body (a click on
  *   non-focusable menu content), so a press aimed at another layer never closes
- *   the menu or steals focus, and one keypress closes exactly one layer (the
- *   shared layered-Escape contract).
+ *   the menu or steals focus, and one keypress closes exactly one layer.
  * - A click outside the controller element closes the menu.
  */
 export class DropdownController extends Controller<HTMLElement> {

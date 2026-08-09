@@ -47,7 +47,7 @@ type Mode = "inline" | "overlay";
  * between an inline collapsed rail (still in the DOM) and an overlay closed panel
  * (`hidden`/off-canvas). The `role="dialog"` semantics are intentionally **not**
  * applied — the sidebar stays an `<aside>`/`<nav>` landmark and only borrows the
- * modal *behavior* (cf. drawer's note on `<aside role="dialog">` conflicts).
+ * modal *behavior*, because `role="dialog"` would replace that landmark.
  * The collapsed preference persists across Turbo navigations and full reloads;
  * the transient overlay-open state never persists, so "back/forward" never
  * restores a stuck-open menu.
@@ -291,7 +291,7 @@ export class SidebarController extends Controller<HTMLElement> {
     this.panelTarget.hidden = false;
     if (this.hasBackdropTarget) this.backdropTarget.hidden = false;
     // Commit the closed (off-canvas) frame before flipping to open so the enter
-    // transition has a starting frame to animate (cf. drawer).
+    // transition has a starting frame to animate.
     void this.panelTarget.offsetWidth;
     this.#setOverlayState("open");
     this.#setExpandedAttr(true);

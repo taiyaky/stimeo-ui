@@ -1,4 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord } from "../utils/arrow_step";
+import { TabindexLoan } from "../utils/tabindex_loan";
 
 /**
  * Headless, highly accessible Window Splitter / Resizable panes logic.
@@ -23,7 +25,9 @@ import { Controller } from "@hotwired/stimulus";
  *   even when pointers quickly stray outside the separator area.
  * - Auto-clamped flex-percentage updates with bounds safety.
  * - Smooth step keyboard adjustments for Arrow keys based on vertical/horizontal orientation.
- * - Root-level CSS custom property `--stimeo--resizable-fraction` (0..1) to drive presentation styles.
+ * - Root-level CSS custom property `--stimeo--resizable-fraction` (0..1) driving
+ *   presentation styles.
+ * - `F6` cycles focus through the panes, which the pattern lists as optional.
  *
  * @remarks
  * Behavior only. The controller adjusts the CSS custom property on the root element,
@@ -52,21 +56,62 @@ export class ResizableController extends Controller<HTMLElement> {
   declare stepValue: number;
   declare valueValue: number;
 
-  /** Track previously held value before collapse toggles. */
+  /** The value held before the current collapse, restored when toggling back. */
   #valueBeforeCollapse = 50;
 
   /** Aborts in-progress pointer-drag listeners when the drag ends or on teardown. */
   #dragAbort: AbortController | null = null;
 
+  /** `tabindex` lent to a pane so `F6` can put focus on it; panes carry none. */
+  readonly #paneTabindex = new TabindexLoan();
+
+  /** Releases the pane cycle listener bound in {@link connect}. */
+  #cycleAbort: AbortController | null = null;
+
   override connect(): void {
     this.#clampAndSync();
+    // Bound on the root rather than the panes so the cycle continues once focus
+    // has left the separator — the panes hold consumer markup and the next F6
+    // arrives from inside one of them.
+    this.#cycleAbort = new AbortController();
+    this.element.addEventListener("keydown", this.#onCycleKeydown, {
+      signal: this.#cycleAbort.signal,
+    });
   }
 
   /** Cancels any active pointer drag so listeners never leak past disconnect. */
   override disconnect(): void {
     this.#dragAbort?.abort();
     this.#dragAbort = null;
+    this.#cycleAbort?.abort();
+    this.#cycleAbort = null;
+    this.#paneTabindex.returnAll();
   }
+
+  /** Moves focus to the next pane on `F6`, wrapping; entering at the first one. */
+  readonly #onCycleKeydown = (event: KeyboardEvent): void => {
+    if (event.key !== "F6") return;
+    // A descendant widget that already claimed the key must not ALSO cycle the
+    // panes; this listener sees consumer markup, so composition depends on it.
+    if (event.defaultPrevented) return;
+    // The pattern binds a bare F6 only. A chorded one is the browser's or the
+    // OS's (Ctrl+F6 cycles frames in several browsers).
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+
+    const panes: HTMLElement[] = [];
+    if (this.hasPrimaryTarget) panes.push(this.primaryTarget);
+    if (this.hasSecondaryTarget) panes.push(this.secondaryTarget);
+    if (panes.length === 0) return;
+
+    const target = event.target as Node | null;
+    const current = panes.findIndex((pane) => target instanceof Node && pane.contains(target));
+    const next = panes[(current + 1) % panes.length];
+    if (!next) return;
+
+    event.preventDefault();
+    this.#paneTabindex.lend(next);
+    next.focus();
+  };
 
   /**
    * Stimulus lifecycle callback when the valueValue changes.
@@ -101,6 +146,7 @@ export class ResizableController extends Controller<HTMLElement> {
 
   /** Keydown adjustments for ArrowUp/Down/Left/Right and Home/End. */
   onKeydown(event: KeyboardEvent): void {
+    if (isReservedArrowChord(event)) return;
     if (!this.hasSeparatorTarget) return;
 
     const orientation = this.separatorTarget.getAttribute("aria-orientation") || "vertical";

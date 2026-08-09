@@ -8,9 +8,10 @@ import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
- * Behavioral tests for {@link SeparatorController}: the APG Separator semantics
- * for a decorative divider, plus the optional focusable/value-bearing variant's
- * `aria-valuenow` sync and arrow-key adjustment.
+ * Behavioral tests for {@link SeparatorController}: the `separator` role
+ * semantics for a decorative divider, plus the Window Splitter side of the
+ * optional focusable/value-bearing variant — `aria-valuenow` sync and
+ * arrow-key adjustment on the axis the orientation selects.
  */
 
 describe("SeparatorController", () => {
@@ -100,6 +101,20 @@ describe("SeparatorController", () => {
       });
       key("ArrowRight");
       expect(value).toBe(51);
+    });
+
+    it("leaves a modified arrow to the browser", () => {
+      // A chorded arrow is the browser's (history back/forward and the like), so
+      // the separator neither consumes the key nor moves its value.
+      const chord = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        altKey: true,
+        cancelable: true,
+      });
+      separator().dispatchEvent(chord);
+
+      expect(chord.defaultPrevented).toBe(false);
+      expect(separator().getAttribute("aria-valuenow")).toBe("50");
     });
 
     it("prevents default on a handled key", () => {

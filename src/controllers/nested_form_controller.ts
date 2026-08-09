@@ -28,11 +28,10 @@ import { Controller } from "@hotwired/stimulus";
  * (inserted nodes + each `_destroy` hidden input); there is no module-scope index
  * counter, so the controller stays idempotent across Turbo swaps. Remove buttons
  * are handled by **delegation** on the container, so dynamically-added rows work
- * without per-row `data-action` (see `stimulus-lifecycle-turbo`). Adding a row moves
- * focus to its first control and removing returns focus to a neighbor (WCAG 2.2
- * 2.4.3); count changes are announced through the shared `stimeo--announcer`
- * (WCAG 2.2 4.1.3) when `announce` + `countMessage` are set. The delegated listener
- * is removed on `disconnect()`.
+ * without per-row `data-action`. Adding a row moves focus to its first control and
+ * removing returns focus to a neighbor (WCAG 2.2 2.4.3); count changes are announced
+ * through the shared `stimeo--announcer` (WCAG 2.2 4.1.3) when `announce` +
+ * `countMessage` are set. The delegated listener is removed on `disconnect()`.
  */
 export class NestedFormController extends Controller<HTMLElement> {
   static override targets = ["list", "template", "add", "remove", "destroyFlag"];

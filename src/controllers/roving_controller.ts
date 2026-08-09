@@ -1,4 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord } from "../utils/arrow_step";
+import { isRtl } from "../utils/logical_scroll";
 import { RovingTabindex, type RovingWrap, rovingMove } from "../utils/roving_tabindex";
 
 /**
@@ -72,6 +74,7 @@ export class RovingController extends Controller<HTMLElement> {
     // `stimeo--pointer-drag` handle consuming arrows to move an item) must not
     // ALSO move the roving focus — composition depends on this yield.
     if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const items = this.itemTargets;
     const current = this.#indexOf(event.target);
     if (current === -1) return;
@@ -82,10 +85,21 @@ export class RovingController extends Controller<HTMLElement> {
     const horizontal = orientation === "horizontal" || orientation === "both";
     const vertical = orientation === "vertical" || orientation === "both";
 
+    // Logical, not physical. APG defines these as "next / previous
+    // control", and says a vertical arrangement swaps in Down/Up for the same
+    // meaning — so the pair is one axis's spelling of an order, and the order
+    // reverses with the writing direction. Read from the controller element: the
+    // container is what lays the items out, and a child may carry its own `dir`
+    // (an LTR input inside an RTL form is ordinary authoring).
+    // Only the horizontal pair reverses; `orientation="both"` keeps Down/Up as-is.
+    const rtl = horizontal && isRtl(this.element);
+    const forwardKey = rtl ? "ArrowLeft" : "ArrowRight";
+    const backwardKey = rtl ? "ArrowRight" : "ArrowLeft";
+
     let next: number;
-    if ((horizontal && event.key === "ArrowRight") || (vertical && event.key === "ArrowDown")) {
+    if ((horizontal && event.key === forwardKey) || (vertical && event.key === "ArrowDown")) {
       next = rovingMove(current, length, 1, wrap);
-    } else if ((horizontal && event.key === "ArrowLeft") || (vertical && event.key === "ArrowUp")) {
+    } else if ((horizontal && event.key === backwardKey) || (vertical && event.key === "ArrowUp")) {
       next = rovingMove(current, length, -1, wrap);
     } else if (this.homeEndValue && event.key === "Home") {
       next = 0;

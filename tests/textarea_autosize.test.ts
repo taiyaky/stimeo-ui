@@ -9,8 +9,8 @@ import { tick } from "./helpers/timing";
 /**
  * Behavioral tests for {@link TextareaAutosizeController}. happy-dom does not lay
  * out, so `scrollHeight` and `getComputedStyle` are mocked to deterministic line
- * metrics; the clamping math, hooks, and events are unit-tested here, and the real
- * geometry (actual growth on type) is covered by the browser e2e harness.
+ * metrics; the clamping math, hooks, and events are unit-tested here. The real
+ * geometry (actual growth on type) needs a real browser and is not asserted here.
  */
 
 const LINE = 20; // mocked line-height in px

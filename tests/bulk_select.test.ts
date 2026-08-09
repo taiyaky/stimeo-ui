@@ -220,8 +220,8 @@ describe("BulkSelectController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // Layer ③ — the count must actually be announced through the bar's live region,
-  // not merely written to the DOM: freeze the role + count in spoken order.
+  // The count must actually be announced through the bar's live region, not
+  // merely written to the DOM: freeze the role + count in spoken order.
   it("announces the selection count through the bar's live region", async () => {
     await start(MARKUP());
     setChecked(itemAt(0), true);

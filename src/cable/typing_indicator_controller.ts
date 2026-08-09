@@ -3,14 +3,14 @@ import { SafeTimeout } from "../utils/safe_timeout";
 import { type ConfirmedCableSubscription, createConfirmedSubscription } from "./consumer";
 
 /**
- * Headless **typing indicator** — the first *server-bound* behavior: a
- * controller whose state lives on the server stream, not in client
- * memory. Typing in the composer throttle-broadcasts a `typing` signal over an
- * Action Cable channel; received signals from *other* clients render "X is
- * typing…" into a `status` live region and auto-clear after `timeout` ms of
- * silence. The whole behavior is HTML + a broadcast — no app JS, no client
- * store, no reconciler. Ships in the opt-in `stimeo-ui/cable` subpath
- * (`@rails/actioncable` optional peer); the core stays zero-dep.
+ * Headless **typing indicator** — a *server-bound* behavior: a controller whose
+ * state lives on the server stream, not in client memory. Typing in the composer
+ * throttle-broadcasts a `typing` signal over an Action Cable channel; received
+ * signals from *other* clients render "X is typing…" into a `status` live region
+ * and auto-clear after `timeout` ms of silence. The whole behavior is HTML + a
+ * broadcast — no app JS, no client store, no reconciler. Ships in the opt-in
+ * `stimeo-ui/cable` subpath (`@rails/actioncable` optional peer); the core stays
+ * zero-dep.
  *
  * Markup contract (identifier: `stimeo--typing-indicator`):
  *   <div data-controller="stimeo--typing-indicator"
@@ -86,7 +86,7 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
     if (this.hasStatusTarget) this.statusTarget.textContent = "";
 
     // Delegated on the container so the composer needs no per-input data-action
-    // (and swapped/appended inputs keep working — lifecycle Rule A′).
+    // (and swapped/appended inputs keep working).
     this.element.addEventListener("input", this.#onInput);
     if (this.channelValue) {
       // Confirmation tracking (connected / disconnected / rejected) lives in

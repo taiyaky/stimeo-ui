@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { RovingTabindex } from "../utils/roving_tabindex";
 
@@ -99,6 +100,10 @@ export class TagsInputController extends Controller<HTMLElement> {
 
   /** Commits on `Enter`/delimiter and deletes the last tag on empty `Backspace`. */
   onKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key must not ALSO commit a tag
+    // or reach into the chips — composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     // Ignore keys fired during IME composition: the `Enter` that confirms a
     // candidate (and arrows that move within it) must not commit/navigate the
     // chip list. Controller-owned lifecycle state covers confirming events that
@@ -117,7 +122,8 @@ export class TagsInputController extends Controller<HTMLElement> {
       }
       return;
     }
-    if (event.key === "ArrowLeft" && this.inputTarget.value === "") {
+    // Same normalisation as the chip handler below, read from the same element.
+    if (logicalArrowKey(event.key, this.element) === "ArrowLeft" && this.inputTarget.value === "") {
       const buttons = this.#removeButtons;
       if (buttons.length > 0) {
         event.preventDefault();
@@ -195,12 +201,23 @@ export class TagsInputController extends Controller<HTMLElement> {
 
   /** Handles arrow navigation and deletion within the chip list (delegated). */
   readonly #onTagKeydown = (event: KeyboardEvent): void => {
+    // A descendant widget that already claimed the key must not ALSO move the
+    // chip focus — composition depends on this yield. Chips render from the
+    // consumer's template, so an arbitrary widget can live inside one.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const button = (event.target as HTMLElement).closest("button");
     if (!button) return;
     const buttons = this.#removeButtons;
     const index = buttons.indexOf(button);
     if (index === -1) return;
-    switch (event.key) {
+    // Logical, not physical. The key is normalised rather than a new case added:
+    // the two horizontal branches are not mirror images — only one guards its
+    // edge, and the other hands focus back to the input — so swapping the key
+    // keeps each branch, guards and all, with its own direction. Both handlers
+    // read the same element on purpose; probing the focused child would let the
+    // input and the chips disagree at the boundary between them.
+    switch (logicalArrowKey(event.key, this.element)) {
       case "ArrowLeft":
         if (index > 0) {
           event.preventDefault();

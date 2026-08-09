@@ -34,12 +34,11 @@ const countElements = (nodes: NodeList): number => {
  * `scrollToBottom` action after such inserts.
  *
  * Behavior only — it does not add content (Turbo Stream / the consumer does) and is the
- * minimal follow primitive, not a full chat UI (no virtualization / message input). It is
- * the lightweight member of the scroll family. State is derived from the scroll position
- * each pass (no module-scope state), so `connect()` re-syncs after a Turbo Stream insert;
- * `behavior` falls back to `auto` under reduced motion; auto-scroll never moves focus; the
- * observer and the passive scroll listener are released on `disconnect()` (Turbo
- * navigation included).
+ * minimal follow primitive, not a full chat UI (no virtualization / message input). State
+ * is derived from the scroll position each pass (no module-scope state), so `connect()`
+ * re-syncs after a Turbo Stream insert; reduced motion forces an instant jump
+ * independently of consumer CSS; auto-scroll never moves focus; the observer and the
+ * passive scroll listener are released on `disconnect()` (Turbo navigation included).
  */
 export class StickToBottomController extends Controller<HTMLElement> {
   static override targets = ["content"];
@@ -64,7 +63,7 @@ export class StickToBottomController extends Controller<HTMLElement> {
   override connect(): void {
     this.#pinned = this.#isPinned();
     // Re-sync the hooks from the current geometry — a Turbo cache restore may bring back a
-    // stale data-pinned / data-has-new that no longer matches the scroll position.
+    // stale data-pinned / data-has-new that disagrees with the current scroll position.
     this.#reflectPinned();
 
     this.element.addEventListener("scroll", this.#onScroll, { passive: true });
@@ -143,8 +142,9 @@ export class StickToBottomController extends Controller<HTMLElement> {
     return this.hasContentTarget ? this.contentTarget : this.element;
   }
 
+  /** Forces reduced-motion jumps while preserving the configured normal behavior. */
   #behavior(): ScrollBehavior {
-    if (prefersReducedMotion()) return "auto";
+    if (prefersReducedMotion()) return "instant";
     return this.behaviorValue === "smooth" ? "smooth" : "auto";
   }
 }

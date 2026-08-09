@@ -54,7 +54,7 @@ export class SpinnerController extends Controller<HTMLElement> {
   #delayTimerId: number | null = null;
   /** Pending min-duration hide timer id, or `null` when none is scheduled. */
   #hideTimerId: number | null = null;
-  /** Epoch ms when the spinner became visible, used to enforce `minDuration`. */
+  /** Epoch ms when the spinner became visible; `minDuration` is measured from it. */
   #shownAt = 0;
 
   override connect(): void {

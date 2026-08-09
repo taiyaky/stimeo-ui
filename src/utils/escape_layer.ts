@@ -19,10 +19,10 @@
  * The shared listener runs in the document bubble phase and honors
  * `event.defaultPrevented`, so an element-level widget handler that consumes
  * Escape first (an editor cancelling its edit, a combobox closing its list)
- * always wins over every registered layer — the deepest-first half of the
- * shared layered-Escape contract. A keydown that is part of an IME composition
- * (`event.isComposing`) cancels the composition, never a layer, and is ignored
- * here for every layer at once.
+ * always wins over every registered layer — the deepest handler resolves the
+ * press. A keydown that is part of an IME composition (`event.isComposing`)
+ * cancels the composition, never a layer, and is ignored here for every layer
+ * at once.
  *
  * A WeakMap keeps documents collectible; the listener is installed only while
  * a document's stack is non-empty, and controller lifecycle hooks guarantee

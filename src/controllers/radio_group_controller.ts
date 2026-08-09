@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
 
 /**
@@ -60,18 +61,23 @@ export class RadioGroupController extends Controller<HTMLElement> {
 
   /** Arrow/Home/End/Space navigation with selection-follows-focus. */
   onKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key must not ALSO move the selection —
+    // composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const current = this.radioTargets.indexOf(event.currentTarget as HTMLElement);
     if (current === -1) return;
 
     let next: number | null = null;
+    // Logical, not physical. The helper reverses only the horizontal
+    // pair, so folding Down/Up into the same branch stays correct.
+    const step = logicalArrowStep(event.key, this.element);
     switch (event.key) {
       case "ArrowDown":
       case "ArrowRight":
-        next = rovingMove(current, this.radioTargets.length, 1, "wrap");
-        break;
       case "ArrowUp":
       case "ArrowLeft":
-        next = rovingMove(current, this.radioTargets.length, -1, "wrap");
+        next = rovingMove(current, this.radioTargets.length, step, "wrap");
         break;
       case "Home":
         next = 0;

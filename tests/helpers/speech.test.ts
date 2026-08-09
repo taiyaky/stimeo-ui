@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { captureSpeech } from "./speech";
 
 /**
- * Self-tests for the layer ③ speech-order helper: it must capture the ordered
- * announcement sequence (role + accessible name) and reliably stop the reader.
+ * Self-tests for the speech-order helper: it must capture the ordered announcement
+ * sequence (role + accessible name) and reliably stop the reader.
  */
 describe("speech helper", () => {
   afterEach(() => {

@@ -157,7 +157,7 @@ describe("HighlightController", () => {
     expect(li.getAttribute("data-highlight")).toBe("true");
     li.remove();
     await flush();
-    // The removal timer was cleared, so the (now detached) node keeps no stale work.
+    // Disconnect clears the removal timer, so the detached node keeps no stale work.
     vi.advanceTimersByTime(2000);
     expect(li.getAttribute("data-highlight")).toBe("true");
   });

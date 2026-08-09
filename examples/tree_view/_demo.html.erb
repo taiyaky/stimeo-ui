@@ -3,7 +3,13 @@
     visible items; ArrowRight / ArrowLeft expand/collapse and move between parent/child;
     Home/End, typeahead, and Enter/Space select a single item. The library handles roving,
     aria-expanded / aria-selected sync, and toggling each group's hidden. Across the whole
-    tree only one treeitem is tabindex=0. %>
+    tree only one treeitem is tabindex=0.
+    The chevron is an optional pointer affordance wired to the toggle action. It stays
+    tabindex="-1" (the tree remains a single Tab stop) and aria-hidden (the item itself
+    already announces its expanded state); clicking it expands/collapses without selecting,
+    because the tree never consumes events raised inside a nested control. The toggle action
+    hands focus to the row afterwards, so focus never rests on this decorative button and
+    the arrow keys keep working right after a click. %>
 <ul class="tree-view" data-controller="stimeo--tree-view" role="tree"
     aria-label="<%= t('components.tree_view.demo.label') %>">
   <li
@@ -14,6 +20,8 @@
     tabindex="0"
     data-stimeo--tree-view-target="item"
     data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+    <button type="button" class="tree-view__chevron" tabindex="-1" aria-hidden="true"
+            data-action="click->stimeo--tree-view#toggle"></button>
     <span class="tree-view__label">app</span>
     <ul class="tree-view__group" role="group" data-stimeo--tree-view-target="group">
       <li
@@ -24,6 +32,8 @@
         tabindex="-1"
         data-stimeo--tree-view-target="item"
         data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+        <button type="button" class="tree-view__chevron" tabindex="-1" aria-hidden="true"
+                data-action="click->stimeo--tree-view#toggle"></button>
         <span class="tree-view__label">controllers</span>
         <ul class="tree-view__group" role="group" data-stimeo--tree-view-target="group" hidden>
           <li class="tree-view__item" role="treeitem" aria-selected="false" tabindex="-1"

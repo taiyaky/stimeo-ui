@@ -39,7 +39,7 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  *   stack, so `Escape` dismisses it even when a hover (not focus) triggered it and
  *   focus is elsewhere. The resolver ignores an Escape already consumed by an
  *   inner handler and lets the most recently shown layer own the press, so one
- *   keypress closes exactly one layer (the shared layered-Escape contract).
+ *   keypress closes exactly one layer.
  * - Visibility flips `hidden` and `data-state` (`open`/`closed`); the
  *   `aria-describedby` reference is always preserved.
  * - Opt-in **dismiss on scroll** (`closeOnScroll`): while shown, scrolling a tracked

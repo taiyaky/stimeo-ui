@@ -42,8 +42,8 @@ export interface CableConsumer {
  * The shared consumer. Deliberately module-scoped: an Action Cable consumer is
  * *connection infrastructure* (one websocket per app, the Rails
  * `channels/consumer.js` convention), not UI state — it must survive Turbo
- * navigations, so the "no module-scope mutable state" lifecycle rule (which is
- * about DOM-rebuildable state) intentionally does not apply to it.
+ * navigations, so it is deliberately not rebuilt per `connect()` the way
+ * DOM-derived state is.
  */
 let sharedConsumer: CableConsumer | null = null;
 

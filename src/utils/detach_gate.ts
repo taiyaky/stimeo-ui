@@ -37,10 +37,9 @@
  *   controllers keep their state on an ambiguous disconnect and tear down only
  *   on {@link DetachGate.isDetached}.
  *
- * Event convention for probe consumers (pinned by `pointer_drag_controller.ts`
- * and its teardown contract): teardown into a dead (detached) tree is silent —
- * consumers restore from their own `connect()`; a detach that keeps the tree
- * alive must end an in-flight session with a `cancel` event, or composing
+ * Event convention for probe consumers: teardown into a dead (detached) tree is
+ * silent — consumers restore from their own `connect()`; a detach that keeps the
+ * tree alive must end an in-flight session with a `cancel` event, or composing
  * consumers strand their session bookkeeping.
  */
 

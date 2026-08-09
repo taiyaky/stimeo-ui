@@ -129,7 +129,7 @@ describe("ReadingProgressController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech-order regression ------------------------------------------------
 
   it("keeps the announcement order unchanged while the progress moves", async () => {
     await mount();

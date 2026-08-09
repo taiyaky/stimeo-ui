@@ -178,12 +178,12 @@ export class PersistController extends Controller<HTMLElement> {
 
   /**
    * Persistable fields paired with a stable storage key. Uniquely-named fields key
-   * by their name (unchanged, backward-compatible). Repeated same-name fields
-   * (e.g. a `tags[]` checkbox group or array text inputs) are disambiguated by
-   * DOM-order occurrence — the first keeps its plain `name` (backward-
-   * compatible), later ones get a NUL-separated index suffix — so each is stored and
-   * restored individually instead of the last one clobbering the rest. Radios are
-   * the exception: a group intentionally shares one key (one value per name).
+   * by their name. Repeated same-name fields (e.g. a `tags[]` checkbox group or
+   * array text inputs) are disambiguated by DOM-order occurrence — the first keeps
+   * its plain `name`, later ones get a NUL-separated index suffix — so each is
+   * stored and restored individually instead of the last one clobbering the rest.
+   * Radios are the exception: a group intentionally shares one key (one value per
+   * name).
    */
   #fieldEntries(): Array<{ field: PersistField; key: string }> {
     const entries: Array<{ field: PersistField; key: string }> = [];

@@ -10,8 +10,8 @@ import { tick } from "./helpers/timing";
  * Behavioral tests for {@link StickToBottomController}. happy-dom has no layout, so the
  * scroll geometry is stubbed and `scrollTo` is mocked: pinned detection, follow-on-append
  * while pinned, the has-new flag + event while unpinned, scroll-driven re-pin, the
- * scrollToBottom action, reduced-motion behavior, and teardown. Real scrolling is covered
- * by the e2e layer.
+ * scrollToBottom action, reduced-motion behavior, and teardown. Real scrolling needs a
+ * real browser and is not asserted here.
  */
 
 let originalMatchMedia: typeof window.matchMedia;
@@ -156,7 +156,7 @@ describe("StickToBottomController", () => {
     expect(box().getAttribute("data-pinned")).toBe("true");
   });
 
-  it("forces auto behavior under reduced motion", async () => {
+  it("forces instant behavior under reduced motion", async () => {
     setReducedMotion(true);
     setup('data-stimeo--stick-to-bottom-behavior-value="smooth"');
     setGeom(1000, 400, 600); // pinned
@@ -164,7 +164,7 @@ describe("StickToBottomController", () => {
     box().scrollTo = vi.fn();
     Object.defineProperty(box(), "scrollHeight", { configurable: true, value: 1100 });
     await appendChild();
-    expect(box().scrollTo).toHaveBeenCalledWith({ top: 1100, behavior: "auto" });
+    expect(box().scrollTo).toHaveBeenCalledWith({ top: 1100, behavior: "instant" });
   });
 
   it("stops observing and listening on disconnect", async () => {

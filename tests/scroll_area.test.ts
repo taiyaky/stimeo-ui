@@ -83,6 +83,123 @@ describe("ScrollAreaController", () => {
     expect(viewport().hasAttribute("tabindex")).toBe(false);
   });
 
+  it("takes the tab stop when its only control is not rendered", async () => {
+    // A button revealed on demand (a "jump to bottom" that appears only when there is
+    // something to jump to) still matches the focusable selector while `display: none`.
+    // Counting it would leave the viewport unreachable by keyboard for exactly as long
+    // as it has nothing else to offer.
+    await start(markup('<button type="button" id="jump" style="display:none">Jump</button>'));
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+  });
+
+  it("ignores a control inside a hidden subtree", async () => {
+    await start(markup('<div hidden><button type="button">Buried</button></div>'));
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+  });
+
+  it("hands the tab stop back when a hidden control is revealed", async () => {
+    await start(markup('<button type="button" id="jump" style="display:none">Jump</button>'));
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+
+    // Revealing it fires no resize and no scroll, so only the content observer can
+    // notice: the viewport now has its own tab stop and must not add a second one.
+    (document.getElementById("jump") as HTMLElement).style.display = "";
+    await tick();
+
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+    expect(viewport().hasAttribute("role")).toBe(false);
+  });
+
+  it("follows a control revealed by a state hook on the viewport itself", async () => {
+    // The real shape this exists for: `[data-has-new] .jump { display: block }`. The
+    // button's own attributes never change — only an ancestor's do — so an attribute
+    // filter scoped to the control could not see it.
+    await start(
+      `<div data-controller="stimeo--scroll-area">
+         <div data-stimeo--scroll-area-target="viewport" aria-label="Log output">
+           <style>.jump { display: none; } [data-has-new] .jump { display: block; }</style>
+           <button type="button" class="jump">Jump</button>
+         </div>
+       </div>`,
+    );
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+
+    viewport().setAttribute("data-has-new", "true");
+    await tick();
+
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("takes the tab stop back when the control is removed again", async () => {
+    await start(markup('<button type="button" id="jump">Jump</button>'));
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+
+    (document.getElementById("jump") as HTMLElement).remove();
+    await tick();
+
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+  });
+
+  it("re-measures overflow when a content change removes both the control and the scroll", async () => {
+    // The hazard the content observer carries: it decides reachability, so it has
+    // to decide it against the *current* geometry. A fixed-height viewport whose content
+    // shrinks fires no resize and no scroll, so a cached overflow value stays stale — and
+    // the tab stop would be handed to a box that no longer scrolls.
+    await start(markup('<button type="button" id="jump">Jump</button>'));
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(viewport().hasAttribute("tabindex")).toBe(false); // its own control holds the stop
+
+    (document.getElementById("jump") as HTMLElement).remove();
+    Object.defineProperty(viewport(), "scrollHeight", { configurable: true, value: 150 });
+    await tick();
+
+    expect(root().getAttribute("data-overflow")).toBe("false");
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+    expect(viewport().hasAttribute("role")).toBe(false);
+  });
+
+  it("takes the tab stop when a content change adds scroll and removes the control", async () => {
+    // The mirror image, so the fix cannot be "never add on mutation".
+    await start(markup('<button type="button" id="jump">Jump</button>'));
+    layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+
+    (document.getElementById("jump") as HTMLElement).remove();
+    Object.defineProperty(viewport(), "scrollHeight", { configurable: true, value: 800 });
+    await tick();
+
+    expect(root().getAttribute("data-overflow")).toBe("true");
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+  });
+
+  it("stops re-checking the content once disconnected", async () => {
+    // The control is visible to begin with, so the viewport holds no tab stop. Hiding it
+    // *after* teardown is the mutation a live observer would answer by adding one — which
+    // is what makes this case detect a missing `#content.disconnect()`. Doing it the other
+    // way round (revealing a control) cannot: the correct answer there is "no tab stop"
+    // either way, so a leaked observer would agree with a torn-down one.
+    await start(markup('<button type="button" id="jump">Jump</button>'));
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--scroll-area",
+    ) as { disconnect(): void } | null;
+    controller?.disconnect();
+
+    (document.getElementById("jump") as HTMLElement).style.display = "none";
+    await tick();
+
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+    expect(viewport().hasAttribute("role")).toBe(false);
+  });
+
   it("reports middle and end positions with progress", async () => {
     await start(markup());
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 300 });
@@ -185,7 +302,7 @@ describe("ScrollAreaController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech-order regression ------------------------------------------------
 
   it("announces the scroll region by its name once it overflows", async () => {
     await start(markup("<p>only content</p>"));

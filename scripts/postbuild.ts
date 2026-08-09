@@ -21,10 +21,9 @@ import { collectDemoSources } from "./demo_sources";
  *      verifies its Core coverage, and keeps the installed CLI on the exact
  *      version it ships with.
  *   3. Generates the bundled example index (`examples.json`) from the demo
- *      sidecars (`collectDemoSources` resolves the supply: the playground
- *      catalog in the dev monorepo, `examples/` in the public mirror);
- *      `buildExamplesIndex` fails the build when a demo and the manifest
- *      drift or an example stops passing the checker.
+ *      sidecars (`collectDemoSources` resolves their root); `buildExamplesIndex`
+ *      fails the build when a demo and the manifest drift or an example stops
+ *      passing the checker.
  *   4. Prepends a Node shebang to the CLI and marks it executable so the
  *      `stimeo` / `stimeo-ui` bins run directly.
  *

@@ -143,9 +143,9 @@ describe("SpinnerController", () => {
     await start('data-stimeo--spinner-delay-value="150"');
     instance().start();
     const el = indicator();
-    // Invoke disconnect() directly (as number-input's teardown test does) rather
-    // than removing the element and flushing Stimulus' async MutationObserver —
-    // that flush timing was environment-sensitive (esp. under coverage).
+    // Invoke disconnect() directly rather than removing the element and flushing
+    // Stimulus' async MutationObserver — that flush timing varies by environment
+    // (especially under coverage).
     instance().disconnect();
     vi.advanceTimersByTime(300);
     // The pending show timer was cleared; nothing flips the indicator to loading.
@@ -154,8 +154,8 @@ describe("SpinnerController", () => {
 });
 
 /**
- * Layer ① (axe) and layer ③ (speech-order) checks run under real timers so the
- * virtual screen reader's own async work is not stalled by fake timers.
+ * The axe audit and the speech-order checks run under real timers so the virtual
+ * screen reader's own async work is not stalled by fake timers.
  */
 describe("SpinnerController accessibility", () => {
   let application: Application;

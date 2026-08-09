@@ -1,7 +1,7 @@
 import type { CompositionRules } from "./types";
 
 /**
- * Hand-written **composition rules** (Inspector stage 3, schema v5).
+ * Hand-written **composition rules** (Inspector stage 3).
  *
  * Multi-controller compositions carry value-alignment contracts that no
  * single-controller rule can express: the correct value of one controller
@@ -12,8 +12,8 @@ import type { CompositionRules } from "./types";
  * Rules fire only when the companion controller is actually co-located —
  * composing at all stays the author's choice. Effective values are compared
  * (authored attribute, or the declared default when absent); the `default`
- * fields duplicate the controllers' `static values` defaults and are
- * drift-guarded by `tests/inspector/manifest.test.ts`.
+ * fields duplicate the controllers' `static values` defaults, and a manifest
+ * test guards them against drift.
  */
 export const compositionRules: CompositionRules = {
   // Sortable's keyboard contract hangs on two axis alignments. Both

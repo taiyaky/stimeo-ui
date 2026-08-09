@@ -13,12 +13,22 @@
   <p class="separator-demo__text"><%= t("components.separator.demo.after") %></p>
 
   <div class="separator-demo__split">
-    <div class="separator-demo__pane"><%= t("components.separator.demo.left") %></div>
+    <%# The primary pane: demo.css sizes this one from --separator-split, so the
+        value the splitter reports is this pane's size. A vertical splitter can
+        only take the left pane as primary, because ArrowRight both moves the
+        handle right and increases the value. %>
+    <div class="separator-demo__pane" id="separator-demo-primary">
+      <%= t("components.separator.demo.left") %>
+    </div>
     <div
       class="separator separator--vertical"
       role="separator"
       tabindex="0"
-      aria-label="<%= t('components.separator.demo.handle') %>"
+      <%# The pattern names the splitter after the primary pane, and that pane
+          carries its own visible text, so it is referenced instead of writing a
+          separate label. %>
+      aria-labelledby="separator-demo-primary"
+      aria-controls="separator-demo-primary"
       aria-orientation="vertical"
       aria-valuemin="20"
       aria-valuemax="80"
@@ -40,7 +50,8 @@
       class="separator separator--horizontal-handle"
       role="separator"
       tabindex="0"
-      aria-label="<%= t('components.separator.demo.handle_horizontal') %>"
+      aria-labelledby="separator-demo-primary-stacked"
+      aria-controls="separator-demo-primary-stacked"
       aria-orientation="horizontal"
       aria-valuemin="20"
       aria-valuemax="80"
@@ -49,6 +60,11 @@
       data-stimeo--separator-focusable-value="true"
       data-stimeo--separator-step-value="5"
       data-action="keydown->stimeo--separator#onKeydown"></div>
-    <div class="separator-demo__pane"><%= t("components.separator.demo.bottom") %></div>
+    <%# The primary pane here is the bottom one: demo.css sizes the last child
+        from --separator-split, which is what lets ArrowUp both move the handle
+        up and increase the value. %>
+    <div class="separator-demo__pane" id="separator-demo-primary-stacked">
+      <%= t("components.separator.demo.bottom") %>
+    </div>
   </div>
 </div>

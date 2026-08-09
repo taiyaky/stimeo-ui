@@ -1,6 +1,6 @@
 /**
- * Numeric coercion shared by the value-bearing status controllers (progress,
- * meter).
+ * Numeric coercion shared by the value-bearing controllers (progress, meter,
+ * color-picker).
  *
  * Stimulus already coerces numeric action params to numbers, but a value can also
  * arrive as a string — via a `*:set` CustomEvent `detail`, or an action param

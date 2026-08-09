@@ -95,8 +95,8 @@ export class FormFieldController extends Controller<HTMLElement> {
       error.hidden = (error.textContent ?? "").trim() === "";
     }
     // setError is an explicit invalid request: mark invalid even when the field
-    // has no error region (structure rules require only `control`), so the DOM
-    // invalid state never disagrees with the dispatched `valid: false`.
+    // has no error region (only `control` is required), so the DOM invalid state
+    // never disagrees with the dispatched `valid: false`.
     this.#reflect(true);
     this.dispatch("validate", { detail: { valid: false, message: this.#shownMessage() } });
     if (this.focusOnErrorValue && this.hasControlTarget) {

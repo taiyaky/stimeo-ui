@@ -345,7 +345,7 @@ export class FormValidationController extends Controller<HTMLFormElement> {
       );
       this.#ownedCustomError.add(control);
     } else if (this.#ownedCustomError.has(control)) {
-      // Only clear the custom error we previously set; leave a consumer's intact.
+      // Only clear the custom error this controller set; leave a consumer's intact.
       this.#ownedCustomError.delete(control);
       control.setCustomValidity("");
     }
@@ -366,7 +366,7 @@ export class FormValidationController extends Controller<HTMLFormElement> {
 
   /**
    * Where focus should land for an invalid control. A visible control is focused
-   * directly (status quo for native fields and radios). A validatable mirror
+   * directly — the case for native fields and radios. A validatable mirror
    * (the `hidden` attribute) cannot receive focus, so focus is delegated to the
    * visible widget: the owning field's `control` target when it is itself
    * focusable, else its first focusable descendant (e.g. a roving-tabindex

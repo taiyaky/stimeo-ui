@@ -36,10 +36,10 @@ const portalState = new WeakMap<Element, { node: HTMLElement; placeholder: Comme
  * and the teleported node is restored/removed rather than orphaned under `body`. The
  * move is idempotent (guarded by the placeholder) and reversed on `disconnect()` (Turbo
  * navigation included). The "in-page move vs real detach" split on `disconnect()` is
- * `DetachGate` (`src/utils/detach_gate.ts`); in the `content` form the source element
- * may even leave a scoped application's observed root and the content is still
- * restored, while the no-`content` form teleporting itself out of the observed root is
- * fire-and-forget by design (see `disconnect()`).
+ * {@link DetachGate}; in the `content` form the source element may even leave a
+ * scoped application's observed root and the content is still restored, while the
+ * no-`content` form teleporting itself out of the observed root is fire-and-forget
+ * by design (see `disconnect()`).
  */
 export class PortalController extends Controller<HTMLElement> {
   static override targets = ["content"];

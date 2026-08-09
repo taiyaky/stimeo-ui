@@ -2,11 +2,16 @@ import { describe, expect, it } from "vitest";
 import { cableControllers } from "../../src/cable";
 import { stimeoControllers } from "../../src/index";
 import { a11yRules } from "../../src/inspector/a11y_rules";
+import { cardinalityRules } from "../../src/inspector/cardinality_rules";
+import { companionRules } from "../../src/inspector/companion_rules";
 import { compositionRules } from "../../src/inspector/composition_rules";
+import { forbiddenAriaRules } from "../../src/inspector/forbidden_aria_rules";
 import { keyboardRules } from "../../src/inspector/keyboard_rules";
 import { managedAriaRules } from "../../src/inspector/managed_aria_rules";
 import { buildManifest, SCHEMA_VERSION } from "../../src/inspector/manifest";
 import { structureRules } from "../../src/inspector/structure_rules";
+import { targetDeclarationRules } from "../../src/inspector/target_declaration_rules";
+import type { ContentCondition, ValueCondition } from "../../src/inspector/types";
 import { positioningControllers } from "../../src/positioning";
 
 /** Tests for the reflection-based manifest generator. */
@@ -16,6 +21,10 @@ describe("buildManifest", () => {
   // cable (server-bound) controllers (so `stimeo check` recognizes e.g.
   // stimeo--anchored and stimeo--typing-indicator).
   const allControllers = { ...stimeoControllers, ...positioningControllers, ...cableControllers };
+
+  /** A controller's declared `static values` default, read without instantiating. */
+  const valueDefault = (ctor: unknown, name: string): unknown =>
+    (ctor as { values?: Record<string, { default?: unknown }> }).values?.[name]?.default;
 
   it("stamps schema and package versions", () => {
     expect(manifest.schemaVersion).toBe(SCHEMA_VERSION);
@@ -99,7 +108,13 @@ describe("buildManifest", () => {
       manifest.controllers["stimeo--tabs"]?.a11y.map(
         (requirement) => `${requirement.target}:${requirement.attrs.join("/")}`,
       ),
-    ).toEqual(["tab:role", "panel:role", "list:role", "list:aria-labelledby/aria-label"]);
+    ).toEqual([
+      "tab:role",
+      "panel:role",
+      "list:role",
+      "list:aria-labelledby/aria-label",
+      "panel:aria-labelledby/aria-label",
+    ]);
     // switch sets its own ARIA, so it carries no authoring requirements.
     expect(manifest.controllers["stimeo--switch"]?.a11y).toEqual([]);
   });
@@ -137,6 +152,9 @@ describe("buildManifest", () => {
     const combobox = manifest.controllers["stimeo--combobox"]?.managedAria ?? [];
     expect(combobox.map((rule) => `${rule.target}:${rule.attrs.join("/")}`)).toEqual([
       "input:aria-activedescendant",
+      // On a combobox `aria-selected` marks the *active candidate*, which the
+      // controller overwrites on connect — the committed value lives in the input.
+      "option:aria-selected",
     ]);
     expect(manifest.controllers["stimeo--switch"]?.managedAria).toEqual([]);
   });
@@ -194,8 +212,6 @@ describe("buildManifest", () => {
     // engine needs them to judge *absent* attributes); this pins them to the
     // implementation so a changed controller default cannot silently rot the
     // rule — the drift the rules exist to prevent.
-    const valueDefault = (ctor: unknown, name: string): unknown =>
-      (ctor as { values?: Record<string, { default?: unknown }> }).values?.[name]?.default;
     for (const [hostId, rules] of Object.entries(compositionRules)) {
       const host = allControllers[hostId as keyof typeof allControllers];
       expect(host, `unknown host ${hostId}`).toBeDefined();
@@ -204,6 +220,247 @@ describe("buildManifest", () => {
         expect(companion, `unknown companion ${rule.coController}`).toBeDefined();
         if (rule.when) expect(valueDefault(host, rule.when.value)).toBe(rule.when.default);
         expect(valueDefault(companion, rule.require.value)).toBe(rule.require.default);
+      }
+    }
+  });
+
+  it("merges hand-written companion rules, defaulting to [] when undeclared", () => {
+    const overflow = manifest.controllers["stimeo--overflow-menu"]?.companions ?? [];
+    expect(overflow.map((rule) => `${rule.target}:${rule.controller}`)).toEqual([
+      "more:stimeo--menu",
+    ]);
+    expect(manifest.controllers["stimeo--switch"]?.companions).toEqual([]);
+  });
+
+  it("merges hand-written target-declaration rules, defaulting to [] when undeclared", () => {
+    const tree = manifest.controllers["stimeo--tree-view"]?.targetDeclarations ?? [];
+    expect(tree.map((rule) => `${rule.attr}=${rule.values?.join("|")}→${rule.target}`)).toEqual([
+      "role=treeitem→item",
+    ]);
+    expect(manifest.controllers["stimeo--switch"]?.targetDeclarations).toEqual([]);
+  });
+
+  it("merges hand-written cardinality rules, defaulting to [] when undeclared", () => {
+    const nav = manifest.controllers["stimeo--navigation-menu"]?.cardinality ?? [];
+    expect(nav.map((rule) => `${rule.within}:${rule.target}:${rule.min}-${rule.max}`)).toEqual([
+      "hoverArea:trigger:1-1",
+    ]);
+    const listbox = manifest.controllers["stimeo--listbox"]?.cardinality ?? [];
+    expect(listbox.map((rule) => `${rule.target}:${rule.attr}:${rule.max}`)).toEqual([
+      "option:aria-selected:1",
+    ]);
+    expect(manifest.controllers["stimeo--switch"]?.cardinality).toEqual([]);
+  });
+
+  it("only writes companion / target-declaration / cardinality rules for known controllers", () => {
+    for (const id of [
+      ...Object.keys(companionRules),
+      ...Object.keys(targetDeclarationRules),
+      ...Object.keys(cardinalityRules),
+    ]) {
+      expect(stimeoControllers).toHaveProperty(id);
+    }
+  });
+
+  it("declares companion / target-declaration / cardinality rules both sides understand", () => {
+    for (const entry of Object.values(manifest.controllers)) {
+      for (const rule of entry.companions) {
+        if (rule.target !== "") expect(entry.targets).toContain(rule.target);
+        expect(manifest.controllers).toHaveProperty(rule.controller);
+        expect(rule.suggestion.length).toBeGreaterThan(0);
+      }
+      for (const rule of entry.targetDeclarations) {
+        expect(entry.targets).toContain(rule.target);
+        expect(rule.attr.length).toBeGreaterThan(0);
+        expect(rule.suggestion.length).toBeGreaterThan(0);
+      }
+      for (const rule of entry.cardinality) {
+        expect(entry.targets).toContain(rule.target);
+        if (rule.within !== "") expect(entry.targets).toContain(rule.within);
+        // A bound-less rule would parse and evaluate to nothing at all, so the
+        // schema's independently-optional min/max needs this floor.
+        expect(rule.min !== undefined || rule.max !== undefined).toBe(true);
+        expect(rule.suggestion.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("keeps every value condition's default in sync with the controllers' static values", () => {
+    // Conditions duplicate the host's `static values` default because the engine
+    // needs it to judge an *absent* attribute. A changed controller default
+    // would otherwise silently arm the rule against the configuration it was
+    // written to exempt — the same drift the composition guard above prevents,
+    // now that three rule families carry conditions.
+    const conditions: Array<[string, ValueCondition]> = [];
+    for (const [id, rules] of Object.entries(a11yRules)) {
+      for (const rule of rules) if (rule.when) conditions.push([id, rule.when]);
+    }
+    for (const [id, rules] of Object.entries(cardinalityRules)) {
+      for (const rule of rules) if (rule.when) conditions.push([id, rule.when]);
+    }
+    expect(conditions.length).toBeGreaterThan(0);
+    for (const [id, when] of conditions) {
+      const host = allControllers[id as keyof typeof allControllers];
+      expect(host, `unknown host ${id}`).toBeDefined();
+      expect(manifest.controllers[id]?.values).toContain(when.value);
+      expect(when.equals.length).toBeGreaterThan(0);
+      expect(valueDefault(host, when.value)).toBe(when.default);
+    }
+  });
+
+  it("merges hand-written forbidden-aria rules, defaulting to [] when undeclared", () => {
+    const menubar = manifest.controllers["stimeo--menubar"]?.forbiddenAria ?? [];
+    expect(
+      menubar.map((rule) => `${rule.target}:${rule.attrs.join("/")}=${rule.values?.join("|")}`),
+    ).toEqual(["menu:aria-busy=true"]);
+    expect(manifest.controllers["stimeo--switch"]?.forbiddenAria).toEqual([]);
+  });
+
+  it("only writes forbidden-aria rules for known controllers", () => {
+    for (const id of Object.keys(forbiddenAriaRules)) {
+      expect(stimeoControllers).toHaveProperty(id);
+    }
+  });
+
+  it("keeps forbidden-aria out of the attributes the controller manages itself", () => {
+    // The two families are opposites in *why* the attribute should go, so an
+    // attribute in both would be self-contradictory: managed means the author
+    // can never usefully write it, forbidden means the author owns it and it is
+    // required in the other configuration.
+    for (const entry of Object.values(manifest.controllers)) {
+      const managed = new Set(entry.managedAria.flatMap((rule) => rule.attrs));
+      for (const rule of entry.forbiddenAria) {
+        if (rule.target !== "") expect(entry.targets).toContain(rule.target);
+        expect(rule.attrs.length).toBeGreaterThan(0);
+        expect(rule.suggestion.length).toBeGreaterThan(0);
+        for (const attr of rule.attrs) expect(managed.has(attr)).toBe(false);
+      }
+    }
+  });
+
+  it("declares content conditions on targets the controller understands", () => {
+    // Content conditions count a target *inside* the element the rule applies
+    // to, so a stale target name would silently arm the rule on every element
+    // (the count would always be 0) instead of failing loudly.
+    const conditions: Array<[string, ContentCondition]> = [];
+    for (const [id, entry] of Object.entries(manifest.controllers)) {
+      for (const rule of entry.a11y)
+        if (rule.whenContains) conditions.push([id, rule.whenContains]);
+      for (const rule of entry.forbiddenAria) {
+        if (rule.whenContains) conditions.push([id, rule.whenContains]);
+      }
+    }
+    expect(conditions.length).toBeGreaterThan(0);
+    for (const [id, condition] of conditions) {
+      expect(manifest.controllers[id]?.targets).toContain(condition.target);
+      // A bound-less condition would hold for every element, arming the rule
+      // unconditionally — which is a different family's job.
+      expect(condition.min !== undefined || condition.max !== undefined).toBe(true);
+    }
+  });
+
+  it("spells the requirement level only where it differs from the default", () => {
+    // `severity` defaults to "error", so an explicit "error" is a no-op that
+    // would drift out of sync with the default the day it changed. Only the
+    // recommended level is ever written out.
+    const levelled = Object.values(manifest.controllers).flatMap((entry) =>
+      entry.a11y.filter((rule) => rule.severity !== undefined),
+    );
+    expect(levelled.length).toBeGreaterThan(0);
+    for (const rule of levelled) expect(rule.severity).toBe("warning");
+  });
+
+  it("declares element conditions with lowercase tags and no empty exemption", () => {
+    // The engine compares against the parser's lowercased tag, so an uppercase
+    // entry would silently never match and quietly disarm nothing.
+    const conditions = Object.values(manifest.controllers).flatMap((entry) =>
+      entry.a11y.flatMap((rule) => (rule.whenElement ? [rule.whenElement] : [])),
+    );
+    expect(conditions.length).toBeGreaterThan(0);
+    for (const condition of conditions) {
+      expect(condition.exceptTags.length).toBeGreaterThan(0);
+      for (const tag of condition.exceptTags) expect(tag).toBe(tag.toLowerCase());
+    }
+  });
+
+  it("declares file-level conditions that a single element cannot already satisfy", () => {
+    // `atLeast: 1` is met by the very element under test, so the condition
+    // would be unconditional — a rule wanting that should simply omit it.
+    // A rule carrying both would also be incoherent: one arms, one escalates.
+    const rules = Object.values(manifest.controllers).flatMap((entry) => entry.a11y);
+    const conditions = rules.flatMap((rule) =>
+      [rule.whenDocument, rule.escalateWhen].filter((c) => c !== undefined),
+    );
+    expect(conditions.length).toBeGreaterThan(0);
+    for (const condition of conditions) expect(condition.atLeast).toBeGreaterThanOrEqual(2);
+    for (const rule of rules) {
+      expect(rule.whenDocument !== undefined && rule.escalateWhen !== undefined).toBe(false);
+    }
+  });
+
+  it("names every target it requires an ARIA-name-required role on", () => {
+    // The rules are a hand-written table, so a gap — a role whose name ARIA
+    // requires, demanded without the name — appears the moment someone adds a
+    // controller and copies only the role rule. This pins the pairing itself
+    // rather than one controller at a time.
+    const NAME_REQUIRED = new Set([
+      "alertdialog",
+      "combobox",
+      "dialog",
+      "grid",
+      "listbox",
+      "meter",
+      "progressbar",
+      "radiogroup",
+      "slider",
+      "spinbutton",
+      "tabpanel",
+      "tree",
+    ]);
+    const gaps: string[] = [];
+    for (const [id, entry] of Object.entries(manifest.controllers)) {
+      for (const rule of entry.a11y) {
+        const requiresNamedRole =
+          rule.attrs.includes("role") && (rule.values ?? []).some((v) => NAME_REQUIRED.has(v));
+        if (!requiresNamedRole) continue;
+        const named = entry.a11y.some(
+          (other) =>
+            other.target === rule.target &&
+            other.attrs.some((attr) => attr === "aria-label" || attr === "aria-labelledby"),
+        );
+        if (!named) gaps.push(`${id} → ${rule.target || "(scope)"}: ${rule.values?.join("/")}`);
+      }
+    }
+    expect(gaps).toEqual([]);
+  });
+
+  it("declares conditional targets that name real, optional targets", () => {
+    // Both halves have to be targets the controller actually understands, and the
+    // trigger must be *optional* — if it were in requiredTargets the rule would
+    // fire unconditionally, which is the thing `requiredTargets` already does.
+    for (const [id, entry] of Object.entries(manifest.controllers)) {
+      for (const rule of entry.conditionalTargets) {
+        expect(entry.targets, `${id}: whenPresent`).toContain(rule.whenPresent);
+        expect(entry.requiredTargets, `${id}: whenPresent must be optional`).not.toContain(
+          rule.whenPresent,
+        );
+        expect(rule.require.length, `${id}: require must not be empty`).toBeGreaterThan(0);
+        for (const target of rule.require) {
+          expect(entry.targets, `${id}: require`).toContain(target);
+          expect(entry.requiredTargets, `${id}: require must be optional`).not.toContain(target);
+          expect(target, `${id}: must not require itself`).not.toBe(rule.whenPresent);
+        }
+      }
+    }
+  });
+
+  it("escalates only rules that start below the level they escalate to", () => {
+    // Escalation raises the level to "error"; a rule already at "error" would
+    // gain nothing and the condition would be dead weight the reader has to
+    // reason about.
+    for (const entry of Object.values(manifest.controllers)) {
+      for (const rule of entry.a11y) {
+        if (rule.escalateWhen) expect(rule.severity).toBe("warning");
       }
     }
   });

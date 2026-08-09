@@ -226,7 +226,7 @@ export class ToastController extends Controller<HTMLElement> {
   /** Dismisses the focused toast when Escape is pressed. */
   onKeydown(event: KeyboardEvent): void {
     if (event.key === "Escape") {
-      // Layered-Escape rule 1: leave a press an inner handler already owned.
+      // Leave a press an inner handler already owned.
       // A press during IME composition (a text field inside the toast) cancels
       // the conversion, never the toast.
       if (event.defaultPrevented || event.isComposing) return;
@@ -365,11 +365,10 @@ export class ToastController extends Controller<HTMLElement> {
   /**
    * Removes the oldest toasts when the list exceeds `maxValue`.
    *
-   * Public (not `#private`) as a deterministic test seam: enforcement normally
-   * runs from `itemTargetConnected`, a Stimulus callback that fires via a
-   * MutationObserver — which happy-dom does not reliably deliver — so the unit
-   * tests invoke it directly. It is therefore listed in the contract guard's
-   * NON_ACTION_ALLOWLIST (it is not a user-wired action).
+   * Public (not `#private`) as a deterministic seam: enforcement normally runs
+   * from `itemTargetConnected`, a Stimulus callback delivered through a
+   * MutationObserver, which a DOM-only environment does not reliably fire — so
+   * it can also be invoked directly. It is not a user-wired action.
    */
   enforceMaxLimit(): void {
     const currentItems = this.itemTargets;

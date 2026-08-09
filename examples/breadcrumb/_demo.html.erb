@@ -2,39 +2,72 @@
     The APG structure (nav + ol + aria-current="page") lives in the markup; the
     library only handles the responsive behavior of collapsing middle items into a
     "…" disclosure button when width runs short. Separators are drawn by demo.css's
-    ::after. %>
-<nav
-  class="breadcrumb"
-  data-controller="stimeo--breadcrumb"
-  aria-label="<%= t("components.breadcrumb.demo.label") %>">
-  <ol class="breadcrumb__list" data-stimeo--breadcrumb-target="list">
-    <li class="breadcrumb__item">
-      <a href="#"><%= t("components.breadcrumb.demo.home") %></a>
-    </li>
-    <li class="breadcrumb__item" data-stimeo--breadcrumb-target="ellipsis" hidden>
-      <button
-        type="button"
-        class="breadcrumb__ellipsis"
-        aria-expanded="false"
-        aria-controls="breadcrumb-collapsed"
-        aria-label="<%= t("components.breadcrumb.demo.expand") %>"
-        data-stimeo--breadcrumb-target="trigger"
-        data-action="click->stimeo--breadcrumb#toggle">…</button>
-    </li>
-    <li
-      class="breadcrumb__item"
-      id="breadcrumb-collapsed"
-      data-stimeo--breadcrumb-target="collapsible">
-      <a href="#"><%= t("components.breadcrumb.demo.section") %></a>
-    </li>
-    <li class="breadcrumb__item" data-stimeo--breadcrumb-target="collapsible">
-      <a href="#"><%= t("components.breadcrumb.demo.subsection") %></a>
-    </li>
-    <li class="breadcrumb__item" data-stimeo--breadcrumb-target="collapsible">
-      <a href="#"><%= t("components.breadcrumb.demo.category") %></a>
-    </li>
-    <li class="breadcrumb__item">
-      <a href="#" aria-current="page"><%= t("components.breadcrumb.demo.current") %></a>
-    </li>
-  </ol>
-</nav>
+    ::after. aria-controls lists the id of *every* item the button collapses, so the
+    control relationship is complete rather than pointing at the first one only.
+
+    About the href values — this part is demo scaffolding, not a pattern to copy. A real
+    breadcrumb links to real paths and wants Turbo to handle them; replace the hrefs and
+    drop the data-turbo attribute when you copy this.
+
+    A catalog demo has nowhere real to go, and the usual placeholder `href="#"` is worse
+    than useless here: Turbo reads it as a visit to the current page, re-renders the body
+    from the server's HTML, and the trail you just expanded snaps shut (then flashes open
+    from the cached snapshot on the way back). Pointing at a same-page fragment only
+    helps on the first press — once the URL carries that hash, the next press is a
+    same-URL visit again and resets just the same, which is measurable in the browser.
+    So the demo opts out of Turbo for this subtree (data-turbo is inherited, so one
+    attribute covers every link): the browser then treats them as what they are, a scroll
+    to an element in this document, and the controller's state is never torn down. %>
+<div id="breadcrumb-demo" class="breadcrumb-demo" data-turbo="false">
+  <%# The trail collapses only when it does not fit, so the demo needs a width it can
+      lose. Widen it past the full trail and nothing collapses and nothing scrolls;
+      narrow it and the middle items bank behind the "…". %>
+  <label class="demo-width-control">
+    <span><%= t("components.breadcrumb.demo.width") %></span>
+    <input type="range" min="220" max="640" value="352" data-breadcrumb-demo-width>
+  </label>
+
+  <nav
+    class="breadcrumb"
+    data-controller="stimeo--breadcrumb"
+    aria-label="<%= t("components.breadcrumb.demo.label") %>">
+    <ol class="breadcrumb__list" data-stimeo--breadcrumb-target="list">
+      <li class="breadcrumb__item">
+        <a href="#breadcrumb-demo"><%= t("components.breadcrumb.demo.home") %></a>
+      </li>
+      <li class="breadcrumb__item" data-stimeo--breadcrumb-target="ellipsis" hidden>
+        <button
+          type="button"
+          class="breadcrumb__ellipsis"
+          aria-expanded="false"
+          aria-controls="breadcrumb-collapsed-1 breadcrumb-collapsed-2 breadcrumb-collapsed-3"
+          aria-label="<%= t("components.breadcrumb.demo.expand") %>"
+          data-stimeo--breadcrumb-target="trigger"
+          data-action="click->stimeo--breadcrumb#toggle">…</button>
+      </li>
+      <li
+        class="breadcrumb__item"
+        id="breadcrumb-collapsed-1"
+        data-stimeo--breadcrumb-target="collapsible">
+        <a href="#breadcrumb-demo"><%= t("components.breadcrumb.demo.section") %></a>
+      </li>
+      <li
+        class="breadcrumb__item"
+        id="breadcrumb-collapsed-2"
+        data-stimeo--breadcrumb-target="collapsible">
+        <a href="#breadcrumb-demo"><%= t("components.breadcrumb.demo.subsection") %></a>
+      </li>
+      <li
+        class="breadcrumb__item"
+        id="breadcrumb-collapsed-3"
+        data-stimeo--breadcrumb-target="collapsible">
+        <a href="#breadcrumb-demo"><%= t("components.breadcrumb.demo.category") %></a>
+      </li>
+      <li class="breadcrumb__item">
+        <a href="#breadcrumb-demo" aria-current="page">
+          <%= t("components.breadcrumb.demo.current") %>
+        </a>
+      </li>
+    </ol>
+  </nav>
+</div>

@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord } from "../utils/arrow_step";
 import { DetachGate } from "../utils/detach_gate";
 
 /** How a drag session was initiated; surfaced in every event detail. */
@@ -60,9 +61,8 @@ interface KeyboardSession {
  * survive), commits the offset on drop and restores it on cancel — the exact
  * boilerplate every simple consumer would otherwise re-write. With `follow` the
  * element's inline `translate` belongs to this controller (`connect()` re-reads
- * a previously committed `<x>px <y>px` offset, so Turbo restores stay
- * consistent). ARIA
- * 1.1 deprecated `aria-grabbed`/`aria-dropeffect`, so the grabbed state is
+ * a committed `<x>px <y>px` offset, so Turbo restores stay consistent). ARIA 1.1
+ * deprecated `aria-grabbed`/`aria-dropeffect`, so the grabbed state is
  * published as `data-grabbed` and the *meaning* of a drag must be announced by
  * the consumer (pair with `stimeo--announcer`). `touch-action` on the handles is
  * derived from `axis` (marker-guarded, authored values win) so the page does not
@@ -123,7 +123,7 @@ export class PointerDragController extends Controller<HTMLElement> {
       this.#followBase = this.#parseFollowBase();
     }
     // Delegated on the container so dynamically added handles need no per-element
-    // data-action (stimulus-lifecycle-turbo Rule A′).
+    // data-action.
     this.element.addEventListener("pointerdown", this.#onPointerDown);
     this.element.addEventListener("keydown", this.#onKeydown);
     if (!this.hasHandleTarget) this.#prepareHandle(this.element);
@@ -281,11 +281,22 @@ export class PointerDragController extends Controller<HTMLElement> {
     const handle = this.#handleFor(event.target);
     if (!handle) return;
 
+    // A descendant widget that already claimed the key (a nested roving list, a
+    // segmented field inside the handle) must not ALSO drive the drag —
+    // composition depends on this yield. This controller is the "grabbed drag
+    // handle" that the other yields name as the widget they defer to, so it owes
+    // the same courtesy downward.
+    if (event.defaultPrevented) return;
+    // A chorded arrow belongs to the browser. "Someone already consumed it"
+    // outranks that, so it is checked after the yield above.
+    if (isReservedArrowChord(event)) return;
+
     // Escape cancels whichever session is live (pointer drag or keyboard grab).
     if (event.key === "Escape") {
-      // Layered-Escape rule 1: leave a press an inner handler already owned;
-      // a press during IME composition steers the conversion, not the drag.
-      if (event.defaultPrevented || event.isComposing) return;
+      // A press an inner handler already owned is yielded at the top of this
+      // handler. What is checked here is the IME half: a press during a
+      // composition steers the conversion, not the drag.
+      if (event.isComposing) return;
       if (this.#pointer?.started) {
         const { pointerType } = this.#pointer;
         this.#teardownSessions();

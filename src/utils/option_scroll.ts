@@ -10,8 +10,8 @@
  * It adjusts the LIST's own `scrollTop` only — deliberately not
  * `scrollIntoView({ block: "nearest" })`, which may also scroll ancestor
  * scrolling boxes (the page) when a floating popup pokes past a viewport
- * edge, desyncing anchored/marker-composed placements. (Command-palette keeps
- * its `scrollIntoView` because its page is scroll-locked behind the modal;
+ * edge, desyncing anchored/marker-composed placements. (Command-palette uses
+ * `scrollIntoView` because its page is scroll-locked behind the modal;
  * page-floating popups must use this helper instead.)
  */
 

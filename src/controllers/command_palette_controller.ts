@@ -1,6 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
+import { syncActiveOption } from "../utils/active_option";
+import { isReservedArrowChord } from "../utils/arrow_step";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { FocusTrap } from "../utils/focus_trap";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
 /**
  * Headless, highly accessible Command Palette behavior.
@@ -76,8 +79,13 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   declare hotkeyValue: string;
   declare openValue: boolean;
 
-  /** The index of the currently active option within the visible subset. */
-  #activeIndex = -1;
+  /** Stable ID of the active option; the live target is resolved before every use. */
+  #activeId: string | null = null;
+  /** Visible/selectable target ID order captured for removal fallback. */
+  #activeOrder: string[] = [];
+  #connected = false;
+  /** Collapses one mutation batch of target callbacks into a single pass. */
+  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileActive());
 
   /** Owns IME lifecycle state; confirmed text re-filters an open palette once. */
   readonly #composition = new CompositionTracker({
@@ -114,10 +122,14 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     const shouldOpen = this.#isOpen || this.openValue;
     this.#resetToClosedState();
     if (shouldOpen) this.open();
+    this.#connected = true;
+    this.#reconcile.activate();
   }
 
   /** Tears down the global hotkey listener and reverts the modal side effects. */
   override disconnect(): void {
+    this.#connected = false;
+    this.#reconcile.cancel();
     document.removeEventListener("keydown", this.#onGlobalKeydown);
     this.#composition.disconnect();
     this.#trap.deactivate({ restoreFocus: false });
@@ -127,11 +139,26 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   /** Initializes semantics for an option added before or after the controller connects. */
   optionTargetConnected(option: HTMLElement): void {
     this.#syncOptionSemanticsFor(option);
+    // A newly-arrived option starts inactive. Set explicitly rather than relying
+    // on the semantics sync, which does not own `aria-selected` — an option added
+    // mid-session would otherwise carry whatever the author wrote, and a stray
+    // `"true"` would read as a second active one until the next move.
+    option.setAttribute("aria-selected", "false");
+    option.removeAttribute("data-active");
+    if (this.#connected) this.#queueOptionReconciliation();
+  }
+
+  /** Clears active residue on the old node and reconciles the surviving targets. */
+  optionTargetDisconnected(option: HTMLElement): void {
+    option.setAttribute("aria-selected", "false");
+    option.removeAttribute("data-active");
+    if (this.#connected) this.#queueOptionReconciliation();
   }
 
   /** Tracks an input added initially or after connect without extra consumer actions. */
   inputTargetConnected(input: HTMLInputElement): void {
     this.#composition.observe(input);
+    if (this.#connected) this.#queueOptionReconciliation();
   }
 
   /** Removes controller-owned listeners when the input target is replaced or removed. */
@@ -172,8 +199,9 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     if (!this.hasInputTarget || this.#composition.isComposing(event)) return;
     this.#syncOptionSemantics();
     const query = this.inputTarget.value.trim().toLowerCase();
-    // Disabled options (e.g. group headings) may still be shown, but they do not
-    // count toward the empty state and are never navigable/selectable.
+    // `data-disabled` options (e.g. group headings) may still be shown, but they
+    // do not count toward the empty state and are never navigable. An authored
+    // `aria-disabled` counts and is navigable — only its activation is refused.
     let hasSelectableMatch = false;
 
     for (const option of this.optionTargets) {
@@ -184,7 +212,9 @@ export class CommandPaletteController extends Controller<HTMLElement> {
 
       if (matches) {
         option.removeAttribute("hidden");
-        if (!this.#isDisabled(option)) hasSelectableMatch = true;
+        // A match the user can see counts, even when it cannot be run: hiding the
+        // list behind an empty state would deny that the command exists at all.
+        if (this.#isNavigable(option)) hasSelectableMatch = true;
       } else {
         option.setAttribute("hidden", "true");
       }
@@ -202,9 +232,10 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     const target = event.currentTarget as HTMLElement | null;
     if (!target) return;
     const option = target.closest("[role='option']") as HTMLElement | null;
-    if (option) this.#syncOptionSemanticsFor(option);
+    if (!option || !this.optionTargets.includes(option)) return;
+    this.#syncOptionSemanticsFor(option);
     // Ignore clicks on disabled options (e.g. group headings) so they never fire select.
-    if (option && !this.#isDisabled(option)) {
+    if (!option.hasAttribute("hidden") && !this.#isDisabled(option)) {
       this.#confirmSelection(option);
     }
   }
@@ -221,9 +252,14 @@ export class CommandPaletteController extends Controller<HTMLElement> {
    * focus — not only the input.
    */
   onKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key (a grabbed drag handle, a
+    // nested menu) must not ALSO act on it — composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     // Composition-confirming Enter must stay with the IME instead of selecting a
     // command. Controller-owned lifecycle state covers events that omit isComposing.
     if (this.#composition.isComposing(event) || !this.#isOpen) return;
+    this.#reconcileActive();
 
     switch (event.key) {
       case "ArrowDown":
@@ -244,7 +280,9 @@ export class CommandPaletteController extends Controller<HTMLElement> {
         break;
       case "Enter": {
         event.preventDefault();
-        const activeOption = this.#visibleOptions[this.#activeIndex];
+        const visible = this.#visibleOptions;
+        const activeIndex = this.#findActiveIndex(visible);
+        const activeOption = activeIndex < 0 ? undefined : visible[activeIndex];
         if (activeOption) this.#confirmSelection(activeOption);
         break;
       }
@@ -255,7 +293,7 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     const visible = this.#visibleOptions;
     if (visible.length === 0) return;
 
-    let newIndex = this.#activeIndex + direction;
+    let newIndex = this.#findActiveIndex(visible) + direction;
     if (newIndex >= visible.length) newIndex = 0;
     if (newIndex < 0) newIndex = visible.length - 1;
 
@@ -266,18 +304,23 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     this.#syncOptionSemantics();
     const visible = this.#visibleOptions;
     const activeOption = visible[index] ?? null;
-    this.#activeIndex = activeOption ? index : -1;
 
+    syncActiveOption(this.optionTargets, activeOption);
+    // `data-active` is a styling hook, not ARIA, so it stays here. It carries the
+    // literal value `"true"` (not a bare attribute) because the reconciliation
+    // path compares against it, so `toggleAttribute` — which writes `""` — would
+    // change what a same-id replacement reads back.
     for (const option of this.optionTargets) {
-      option.setAttribute("aria-selected", "false");
-      option.removeAttribute("data-active");
+      if (option === activeOption) option.setAttribute("data-active", "true");
+      else option.removeAttribute("data-active");
     }
 
     if (activeOption) {
-      activeOption.setAttribute("aria-selected", "true");
-      activeOption.setAttribute("data-active", "true");
       activeOption.scrollIntoView({ block: "nearest" });
     }
+
+    this.#activeId = activeOption?.id || null;
+    this.#activeOrder = activeOption ? visible.map((option) => option.id).filter(Boolean) : [];
 
     if (this.hasInputTarget) {
       if (activeOption?.id) {
@@ -288,7 +331,97 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     }
   }
 
+  /** Re-resolves active identity and component-specific fallback against live targets. */
+  #reconcileActive(): void {
+    if (!this.#isOpen) {
+      this.#setActiveIndex(-1);
+      this.#reflectEmptyState();
+      return;
+    }
+
+    const visible = this.#visibleOptions;
+    const currentIndex = this.#findActiveIndex(visible);
+    if (currentIndex >= 0) {
+      const active = visible[currentIndex] ?? null;
+      const options = this.optionTargets;
+      const marked = options.filter((option) => option.hasAttribute("data-active"));
+      const selected = options.filter((option) => option.getAttribute("aria-selected") === "true");
+      const stateMatches =
+        this.#activeId === (active?.id || null) &&
+        marked.length === 1 &&
+        marked[0] === active &&
+        selected.length === 1 &&
+        selected[0] === active &&
+        (!this.hasInputTarget ||
+          this.inputTarget.getAttribute("aria-activedescendant") === (active?.id || null));
+
+      if (stateMatches) {
+        // Refresh the fallback order after target churn without invoking
+        // scrollIntoView for an option whose active state is already coherent.
+        this.#activeOrder = visible.map((option) => option.id).filter(Boolean);
+      } else {
+        this.#setActiveIndex(currentIndex);
+      }
+      this.#reflectEmptyState();
+      return;
+    }
+
+    const activeId =
+      (this.hasInputTarget ? this.inputTarget.getAttribute("aria-activedescendant") : null) ??
+      this.#activeId;
+    this.#setActiveIndex(activeId ? this.#findFallbackIndex(visible, activeId) : -1);
+    this.#reflectEmptyState();
+  }
+
+  /** Resolves stable ID first, then active markers for the existing ID-less case. */
+  #findActiveIndex(options: readonly HTMLElement[]): number {
+    const activeId =
+      (this.hasInputTarget ? this.inputTarget.getAttribute("aria-activedescendant") : null) ??
+      this.#activeId;
+    if (activeId) return options.findIndex((option) => option.id === activeId);
+    return options.findIndex(
+      (option) =>
+        option.hasAttribute("data-active") || option.getAttribute("aria-selected") === "true",
+    );
+  }
+
+  /** Chooses a surviving former successor, then predecessor, from selectable targets only. */
+  #findFallbackIndex(options: readonly HTMLElement[], activeId: string): number {
+    const oldIndex = this.#activeOrder.indexOf(activeId);
+    if (oldIndex < 0) return -1;
+    const indexesById = new Map(options.map((option, index) => [option.id, index]));
+    for (let index = oldIndex + 1; index < this.#activeOrder.length; index += 1) {
+      const fallback = indexesById.get(this.#activeOrder[index] ?? "");
+      if (fallback !== undefined) return fallback;
+    }
+    for (let index = oldIndex - 1; index >= 0; index -= 1) {
+      const fallback = indexesById.get(this.#activeOrder[index] ?? "");
+      if (fallback !== undefined) return fallback;
+    }
+    return -1;
+  }
+
+  /** Reflects whether any visible, navigable command remains. */
+  #reflectEmptyState(): void {
+    if (this.hasEmptyTarget) this.emptyTarget.hidden = this.#visibleOptions.length > 0;
+  }
+
+  /** Coalesces all target callbacks from one MutationObserver batch. */
+  #queueOptionReconciliation(): void {
+    this.#reconcile.schedule();
+  }
+
+  /**
+   * Runs `option`: dispatches `select` and closes.
+   *
+   * **Activation is refused here, not at the call sites.** Every path that runs a
+   * command funnels through this method, so one check covers keyboard, pointer,
+   * and anything added later. Per-call-site guards would leave `aria-disabled`
+   * options — which stay within the keyboard's reach — runnable from whichever
+   * path forgets to consult the predicate.
+   */
   #confirmSelection(option: HTMLElement): void {
+    if (this.#isDisabled(option)) return;
     const value = option.dataset.value || option.textContent || "";
     this.dispatch("select", { detail: { value, option } });
     this.close();
@@ -300,17 +433,38 @@ export class CommandPaletteController extends Controller<HTMLElement> {
       option.removeAttribute("hidden");
     }
     const hasSelectableOption = this.#visibleOptions.length > 0;
-    if (this.hasEmptyTarget) this.emptyTarget.hidden = hasSelectableOption;
+    this.#reflectEmptyState();
     this.#setActiveIndex(hasSelectableOption ? 0 : -1);
   }
 
   get #visibleOptions(): HTMLElement[] {
-    // Only options that are both shown and not disabled are navigable/selectable.
+    // Shown and navigable. Activation is refused separately, in
+    // `#confirmSelection`, so an `aria-disabled` command belongs in this set.
     return this.optionTargets.filter(
-      (option) => !option.hasAttribute("hidden") && !this.#isDisabled(option),
+      (option) => !option.hasAttribute("hidden") && this.#isNavigable(option),
     );
   }
 
+  /**
+   * Whether virtual focus may land on `option`.
+   *
+   * Only `data-disabled` disqualifies. That attribute is this controller's own —
+   * authors reach for it to mark a row that is not a destination at all, such as
+   * a group heading — so it can mean "skip entirely" without contradicting ARIA.
+   *
+   * **`aria-disabled` does not disqualify.** It marks a command that must stay
+   * *discoverable*: `aria-activedescendant` names it, so a reader announces it as
+   * unavailable rather than hiding its existence. Virtual focus does
+   * not change that — pointing `aria-activedescendant` at a disabled option is
+   * ordinary ARIA. Keeping the two attributes distinct is what leaves both
+   * meanings expressible; collapsing them would take "show it, say it is
+   * unavailable, do not run it" away from consumers.
+   */
+  #isNavigable(option: HTMLElement): boolean {
+    return option.dataset.disabled !== "true";
+  }
+
+  /** Whether activating `option` may run. Suppressed for either disabled marker. */
   #isDisabled(option: HTMLElement): boolean {
     return option.dataset.disabled === "true" || option.getAttribute("aria-disabled") === "true";
   }
@@ -320,9 +474,23 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     for (const option of this.optionTargets) this.#syncOptionSemanticsFor(option);
   }
 
-  /** Reflects `data-disabled` to ARIA without losing a pre-existing authored value. */
+  /**
+   * Reflects `data-disabled` to ARIA without losing a pre-existing authored value,
+   * and puts `aria-selected` back to its baseline.
+   *
+   * Here `aria-selected` marks the *active* option, not a committed choice — the
+   * palette runs a command and keeps nothing selected — so an authored value is
+   * meaningless and is overwritten rather than preserved. Every caller either
+   * establishes the active option straight after (`filter`, `#setActiveIndex`) or
+   * is handling an option that cannot be the active one yet
+   * (`optionTargetConnected`).
+   */
   #syncOptionSemanticsFor(option: HTMLElement): void {
-    if (!option.hasAttribute("aria-selected")) option.setAttribute("aria-selected", "false");
+    // `aria-selected` is deliberately NOT written here. This runs over every
+    // option on each active move, so clearing unconditionally would re-dirty the
+    // whole set microseconds before `syncActiveOption` diffs it — the O(n) writes
+    // the shared helper exists to avoid. Ownership of that attribute belongs to
+    // the active-option sync alone; this method owns the disabled semantics.
 
     const originalAttribute = CommandPaletteController.#ORIGINAL_ARIA_DISABLED;
     const originalValue = option.getAttribute(originalAttribute);
@@ -387,8 +555,18 @@ export class CommandPaletteController extends Controller<HTMLElement> {
 
   /** Resets transient open state so reconnect starts from a predictable closed snapshot. */
   #resetToClosedState(): void {
-    this.#activeIndex = -1;
+    this.#activeId = null;
+    this.#activeOrder = [];
     this.openValue = false;
+
+    // Nothing is active once the palette is closed, so the options have to say so
+    // too. Clearing only the input's `aria-activedescendant` would leave the last
+    // active option reading `aria-selected="true"` with `data-active` still on it
+    // for the rest of the session, and ride that stale pair into Turbo's cache.
+    for (const option of this.optionTargets) {
+      option.setAttribute("aria-selected", "false");
+      option.removeAttribute("data-active");
+    }
 
     if (this.hasDialogTarget) {
       this.dialogTarget.hidden = true;

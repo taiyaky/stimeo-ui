@@ -11,7 +11,7 @@
   data-stimeo--drawer-placement-value="right">
   <button
     type="button"
-    class="drawer__trigger"
+    class="demo-trigger"
     data-stimeo--drawer-target="trigger"
     data-action="click->stimeo--drawer#open">
     <%= t("components.drawer.demo.open_button") %>
@@ -36,7 +36,10 @@
         <%= t("components.drawer.demo.title") %>
       </h3>
       <p><%= t("components.drawer.demo.body") %></p>
-      <button type="button" class="drawer__close" data-action="click->stimeo--drawer#close">
+      <button
+        type="button"
+        class="demo-trigger drawer__close"
+        data-action="click->stimeo--drawer#close">
         <%= t("components.drawer.demo.close") %>
       </button>
     </div>

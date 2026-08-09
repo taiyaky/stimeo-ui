@@ -5,31 +5,40 @@ import type { Manifest } from "./types";
  * Loading and shape-validation of `manifest.json` files, shared by every
  * consumer that reads a manifest from disk: the CLI (the copy bundled next to
  * `cli_bin.js`), the VS Code extension (a workspace's installed copy or its
- * bundled snapshot), and any future server (MCP) doing the same. Keeping the
- * guard in one place means a corrupt or cross-version manifest degrades the
- * same way everywhere instead of crashing one surface and passing another.
+ * bundled snapshot), and the MCP server. Keeping the guard in one place means a
+ * corrupt or cross-version manifest degrades the same way everywhere instead of
+ * crashing one surface and passing another.
  */
 
-/** Array-typed fields the schema-v5 engine iterates on every controller entry. */
+/**
+ * Array-typed fields the engine iterates on every controller entry. Fields
+ * nested *inside* an a11y requirement need no entry here — they ride along as
+ * parsed JSON and are never iterated blindly.
+ */
 const CONTROLLER_ARRAY_FIELDS = [
   "targets",
   "values",
   "actions",
   "events",
   "requiredTargets",
+  "conditionalTargets",
   "a11y",
   "keyboard",
   "managedAria",
   "compositions",
+  "companions",
+  "targetDeclarations",
+  "cardinality",
+  "forbiddenAria",
 ] as const;
 
 /**
  * Structural guard for a parsed manifest. A reader bundles the engine of one
- * schema version but may load a manifest written by another (e.g. an app
- * installing a package whose manifest predates `keyboard`/`managedAria`), and
- * the engine iterates those arrays unconditionally — an unvalidated manifest
- * would crash every check instead of failing cleanly. Shape-based rather than
- * a strict `schemaVersion` equality so additive future versions keep working.
+ * schema version but may load a manifest written by another — an installed copy
+ * missing a field this engine iterates unconditionally — and an unvalidated
+ * manifest would crash every check instead of failing cleanly. Shape-based
+ * rather than a strict `schemaVersion` equality so additive versions keep
+ * working.
  */
 export function isCompatibleManifest(value: unknown): value is Manifest {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;

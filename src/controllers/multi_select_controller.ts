@@ -1,8 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { ensureId } from "../utils/aria_ids";
+import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { CompositionTracker } from "../utils/composition_tracker";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { scrollOptionIntoView } from "../utils/option_scroll";
 import { RovingTabindex } from "../utils/roving_tabindex";
+import { TabindexLoan } from "../utils/tabindex_loan";
 
 /**
  * Headless, accessible multi-select combobox with chips.
@@ -50,8 +53,8 @@ import { RovingTabindex } from "../utils/roving_tabindex";
  *   inputs (default name `options[]`), so the selection submits with a normal
  *   form and no consumer JS — parity with {@link TagsInputController}. An optional
  *   `form` value sets the hidden inputs' `form` attribute, associating them with a
- *   `<form>` by id even when the picker lives outside it. Purely additive: with no
- *   `fields` target the behavior is unchanged.
+ *   `<form>` by id even when the picker lives outside it. Without a `fields`
+ *   target the hidden inputs are simply not written.
  */
 export class MultiSelectController extends Controller<HTMLElement> {
   static override targets = [
@@ -92,8 +95,14 @@ export class MultiSelectController extends Controller<HTMLElement> {
   declare formValue: string;
   declare readonly hasFormValue: boolean;
 
-  /** The active option (tracked via `aria-activedescendant`), or null. */
-  #activeOption: HTMLElement | null = null;
+  /** Stable id of the active option; the current target is resolved from the DOM. */
+  #activeOptionId: string | null = null;
+  /** Whether the root borrowed a tab stop to catch focus, so teardown can undo it. */
+  readonly #tabindex = new TabindexLoan();
+  /** Prevents initial/teardown target callbacks from mutating authored DOM. */
+  #connected = false;
+  /** Collapses one batch of target callbacks into a single final-DOM reconciliation. */
+  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileOptions());
   /** Absorbs the browser's redundant final input after compositionend. */
   #ignorePostCompositionInput = false;
   /** Owns IME lifecycle state; confirmed text emits one filter result. */
@@ -117,37 +126,127 @@ export class MultiSelectController extends Controller<HTMLElement> {
   /** Starts closed, syncs chips for any pre-selected options, and listens out. */
   override connect(): void {
     if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
+    this.#normalizeSelection();
     this.close();
     if (this.hasTagsTarget) {
       this.tagsTarget.addEventListener("keydown", this.#onTagKeydown);
       this.tagsTarget.addEventListener("click", this.#onTagClick);
-      // Rebuild chips idempotently: a Turbo Drive cache restore or morph can
-      // re-connect with chips already in the DOM, so clear them before deriving
-      // afresh from the selected options to avoid duplicate chips.
-      for (const tag of this.tagTargets) tag.remove();
-      for (const option of this.#selectedOptions) this.#appendTag(option);
-      if (this.#removeButtons.length > 0) this.#roving.setActive(0);
+      this.#rebuildTags();
     }
     // Seed the hidden fields from any pre-selected options so the form submits
     // the initial selection without an interaction.
     this.#syncFields();
-    document.addEventListener("click", this.#onOutsideClick);
+    document.addEventListener("click", this.#onOutsideClick, true);
+    this.#connected = true;
+    this.#reconcile.activate();
+  }
+
+  /**
+   * Derives the chips from the selected options, idempotently: a Turbo Drive cache
+   * restore or morph can re-connect with chips already in the DOM, so they are
+   * cleared before deriving afresh to avoid duplicates.
+   */
+  #rebuildTags(): void {
+    if (!this.hasTagsTarget) return;
+    for (const tag of this.tagTargets) tag.remove();
+    for (const option of this.#selectedOptions) this.#appendTag(option);
+    if (this.#removeButtons.length > 0) this.#roving.setActive(0);
   }
 
   /** Tears down document and chip listeners on disconnect (Turbo included). */
   override disconnect(): void {
+    this.#connected = false;
+    this.#reconcile.cancel();
     this.#composition.disconnect();
     this.#ignorePostCompositionInput = false;
     if (this.hasTagsTarget) {
       this.tagsTarget.removeEventListener("keydown", this.#onTagKeydown);
       this.tagsTarget.removeEventListener("click", this.#onTagClick);
     }
-    document.removeEventListener("click", this.#onOutsideClick);
+    document.removeEventListener("click", this.#onOutsideClick, true);
+    this.#releaseTabindex();
   }
 
-  /** Tracks an input added initially or after connect. */
+  /** Reconciles active state after an option target is added at runtime. */
+  optionTargetConnected(): void {
+    this.#scheduleOptionReconcile();
+  }
+
+  /** Cleans a removed target and reconciles active state against the surviving DOM. */
+  optionTargetDisconnected(option: HTMLElement): void {
+    if (!this.#connected) return;
+    // `#setActive` can only scan current targets; clean the old node explicitly in
+    // case a Turbo morph reuses it elsewhere.
+    option.removeAttribute("data-active");
+    this.#scheduleOptionReconcile();
+  }
+
+  /** Schedules one reconciliation after all callbacks in the mutation batch. */
+  #scheduleOptionReconcile(): void {
+    this.#reconcile.schedule();
+  }
+
+  /**
+   * Keeps a surviving/same-id active target, otherwise falls back to the first
+   * visible one — and brings the derived state back in line with the new option set.
+   *
+   * The baseline pass fills in any missing `aria-selected`, and the chips and
+   * hidden fields are re-derived from it, because the options are the truth source
+   * for the selection. The chips are rebuilt **only when the selected value set
+   * actually moved**: the rebuild removes and recreates every chip, so running it
+   * for an unrelated option would drop focus from a chip's remove button to
+   * `<body>`, losing the keyboard user's place for something that did not concern
+   * them.
+   */
+  #reconcileOptions(): void {
+    const visible = this.#visibleOptions;
+    const active = this.#activeOption;
+    const next = this.#isClosed ? null : active && !active.hidden ? active : (visible[0] ?? null);
+    this.#setActive(next);
+    this.#reflectEmpty();
+
+    this.#normalizeSelection();
+    const selected = this.#selectedOptions;
+    // Compared as a set, not a sequence: the chips are in selection order while
+    // the options are in DOM order, so an index-wise comparison reports a change
+    // for every selection the user made out of DOM order and rebuilds forever.
+    const nextValues = selected.map((option) => this.#optionValue(option)).sort();
+    const tagValues = this.tagTargets.map((tag) => tag.dataset.value ?? "").sort();
+    const unchanged =
+      nextValues.length === tagValues.length &&
+      nextValues.every((value, index) => value === tagValues[index]);
+    if (unchanged) this.#refreshTagLabels(selected);
+    else this.#rebuildTags();
+    this.#syncFields();
+  }
+
+  /**
+   * Gives every option an explicit `aria-selected`, without changing which ones
+   * the author chose. An absent value means "not selectable" in ARIA, so a
+   * forgotten attribute hides a selectable option. Several `true` is the normal
+   * case here — the list is `aria-multiselectable` — so nothing is dropped.
+   */
+  #normalizeSelection(): void {
+    for (const option of this.optionTargets) {
+      if (option.getAttribute("aria-selected") !== "true") {
+        option.setAttribute("aria-selected", "false");
+      }
+    }
+  }
+
+  /**
+   * Tracks an input added initially or after connect, and makes it describe the
+   * widget that is actually on screen: a swapped-in input arrives with the
+   * authored ARIA of a fresh node while this controller still holds the popup
+   * state, and the open path cannot repair that (it seeds an active option only
+   * when there is none), so a live list would go unannounced.
+   */
   inputTargetConnected(input: HTMLInputElement): void {
     this.#composition.observe(input);
+    input.setAttribute("aria-expanded", String(!this.#isClosed));
+    const active = this.#activeOption;
+    if (active) input.setAttribute("aria-activedescendant", ensureId(active, "stimeo-ms-opt"));
+    else input.removeAttribute("aria-activedescendant");
   }
 
   /** Removes composition listeners when the active input is replaced or removed. */
@@ -170,35 +269,66 @@ export class MultiSelectController extends Controller<HTMLElement> {
     }
     this.open();
     const visible = this.#visibleOptions;
-    this.element.toggleAttribute("data-stimeo--multi-select-empty", visible.length === 0);
+    this.#reflectEmpty();
     this.#setActive(visible[0] ?? null);
     this.dispatch("filter", { detail: { query } });
   }
 
-  /** Opens the list and activates the first visible option when none is active. */
+  /**
+   * Opens the list and activates the first visible option when none is active.
+   *
+   * Needs the input, which owns `aria-expanded` and `aria-activedescendant`: a
+   * list shown without one is a popup no assistive technology is told about. So
+   * opening is skipped entirely, where {@link close} still closes.
+   */
   open(): void {
-    if (!this.hasListTarget) return;
+    if (!this.hasListTarget || !this.hasInputTarget) return;
     this.listTarget.hidden = false;
     this.inputTarget.setAttribute("aria-expanded", "true");
     if (!this.#activeOption) this.#setActive(this.#visibleOptions[0] ?? null);
   }
 
-  /** Closes the list and clears the active option. */
+  /**
+   * Closes the list and clears the active option.
+   *
+   * Survives a missing input in both directions. `connect()` calls this second,
+   * so dereferencing the input here would throw before the chips, the roving
+   * seed, the chip listeners, the hidden fields and the outside-click listener —
+   * and Stimulus keeps the controller alive after that throw, so none of them
+   * would ever run and the selection would silently stop submitting. An input
+   * removed while the list is open must still let it come down *and* forget its
+   * active option, so only the `aria-expanded` write is guarded.
+   */
   close(): void {
     if (!this.hasListTarget) return;
     this.listTarget.hidden = true;
-    this.inputTarget.setAttribute("aria-expanded", "false");
     this.#setActive(null);
+    if (!this.hasInputTarget) return;
+    this.inputTarget.setAttribute("aria-expanded", "false");
   }
 
   /** Routes input keyboard interaction per the multi-select combobox model. */
   onKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key must not ALSO open the
+    // list or move the active option — composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     // Ignore keys fired during IME composition: the `Enter` that confirms a
     // candidate (and arrows that move within it) must not select an option or
     // navigate the chip list. Controller-owned lifecycle state covers confirming
     // events that omit the standard per-event signal.
     if (this.#composition.isComposing(event)) return;
-    switch (event.key) {
+    // Target callbacks are MutationObserver-driven. Resolve a replacement now, or
+    // clear a removed id now, so a synchronously dispatched key cannot commit a
+    // detached node before the callback gets its turn.
+    this.#reconcileActiveForInteraction();
+    // Logical, not physical. The key is normalised rather than a new case added:
+    // the two horizontal branches are not mirror images — only one guards its
+    // edge, and the other hands focus back to the input — so swapping the key
+    // keeps each branch, guards and all, with its own direction. Both handlers
+    // read the same element on purpose; probing the focused child would let the
+    // input and the chips disagree at the boundary between them.
+    switch (logicalArrowKey(event.key, this.element)) {
       case "ArrowDown":
         event.preventDefault();
         if (this.#isClosed) this.open();
@@ -223,18 +353,20 @@ export class MultiSelectController extends Controller<HTMLElement> {
         }
         break;
       }
-      case "Enter":
-        if (!this.#isClosed && this.#activeOption) {
+      case "Enter": {
+        const active = this.#activeOption;
+        if (!this.#isClosed && active) {
           event.preventDefault();
-          this.#toggleSelection(this.#activeOption);
+          this.#toggleSelection(active);
         }
         break;
+      }
       case "Escape":
-        // Layered-Escape contract: leave a press an inner handler already
-        // owned (rule 1), and consume only while owning a dismissable state —
-        // with the list already closed the press stays free for the shared
-        // resolver, so an enclosing dialog still closes from a focused input.
-        if (event.defaultPrevented || this.#isClosed) break;
+        // A press an inner handler already owned is yielded at the top of this
+        // handler. Escape is consumed only while the list is open: with it closed
+        // the press stays free for the shared resolver, so an enclosing dialog
+        // still closes from a focused input.
+        if (this.#isClosed) break;
         event.preventDefault();
         this.close();
         break;
@@ -270,9 +402,55 @@ export class MultiSelectController extends Controller<HTMLElement> {
    */
   toggleOption(event: Event): void {
     const option = (event.currentTarget as HTMLElement).closest<HTMLElement>('[role="option"]');
-    if (!option) return;
+    if (!option || !this.optionTargets.includes(option)) return;
     this.#toggleSelection(option);
-    this.inputTarget.focus();
+    this.#focusInput();
+  }
+
+  /**
+   * Re-homes focus to the input, or leaves it where it is when there is none.
+   *
+   * All three callers run *after* an option or a chip already took focus, and all
+   * three are reachable without an input — options and chips carry their own
+   * `data-action`. Throwing here would leave the chip removed but focus stranded
+   * on a detached button.
+   */
+  #focusInput(): void {
+    if (this.hasInputTarget) this.inputTarget.focus();
+  }
+
+  /**
+   * Re-homes focus after the last chip was removed: to the input, else the root.
+   *
+   * Unlike the other {@link #focusInput} callers, the element that held focus has
+   * just left the DOM, so "leave it alone" is not an option — the browser already
+   * dropped it to `<body>`. The root borrows a `tabindex="-1"` just-in-time (not a
+   * Tab stop, handed back on teardown). Focus that landed on a real element is
+   * left alone, so a chip removed out of band never steals it.
+   */
+  #focusAfterLastTag(): void {
+    if (this.hasInputTarget) {
+      this.inputTarget.focus();
+      return;
+    }
+    const doc = this.element.ownerDocument;
+    const active = doc.activeElement;
+    // Anything else still holding focus keeps it; only `<body>`, the root element
+    // and a detached node mean the browser had nowhere to put it.
+    if (active && active !== doc.body && active !== doc.documentElement && active.isConnected) {
+      return;
+    }
+    this.#tabindex.lend(this.element);
+    this.element.focus();
+  }
+
+  /**
+   * Returns the borrowed tab stop. Owning the borrow is not enough — the value
+   * has to still be the one this instance wrote, since a consumer that changed it
+   * afterwards owns it now.
+   */
+  #releaseTabindex(): void {
+    this.#tabindex.returnAll();
   }
 
   /**
@@ -293,7 +471,8 @@ export class MultiSelectController extends Controller<HTMLElement> {
     const visible = this.#visibleOptions;
     if (visible.length === 0) return;
     const current = this.#activeOption ? visible.indexOf(this.#activeOption) : -1;
-    const next = (current + delta + visible.length) % visible.length;
+    const candidate = current === -1 ? (delta > 0 ? 0 : visible.length - 1) : current + delta;
+    const next = (candidate + visible.length) % visible.length;
     this.#setActive(visible[next] ?? null);
   }
 
@@ -313,6 +492,34 @@ export class MultiSelectController extends Controller<HTMLElement> {
     this.#refreshRoving();
     this.#syncFields();
     this.dispatch("change", { detail: { values: this.#values } });
+  }
+
+  /**
+   * Re-reads each chip's label from its option, in place.
+   *
+   * The value order alone does not say the chips are still correct: a server can
+   * re-render the same candidate with a new label ("Apple" → "Green Apple"), and
+   * the chip text and its `Remove {label}` name are both derived from the option.
+   * Updating them here keeps the rebuild — which would drop focus — for the case
+   * that actually needs it, a changed selection.
+   */
+  #refreshTagLabels(selected: readonly HTMLElement[]): void {
+    // Paired by value rather than by position: the chips are in selection order
+    // and the options in DOM order, so the two lists hold the same values in
+    // different places and an index-wise pairing would relabel the wrong chip.
+    const options = new Map(selected.map((option) => [this.#optionValue(option), option]));
+    for (const tag of this.tagTargets) {
+      const option = options.get(tag.dataset.value ?? "");
+      if (!option) continue;
+      const text = this.#optionLabel(option);
+      const label = tag.querySelector<HTMLElement>('[data-multi-select-slot="label"]');
+      if (label && label.textContent !== text) label.textContent = text;
+      const button = tag.querySelector("button");
+      const name = `Remove ${text}`;
+      if (button && button.getAttribute("aria-label") !== name) {
+        button.setAttribute("aria-label", name);
+      }
+    }
   }
 
   /** Builds one chip from the template for `option`. */
@@ -357,7 +564,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
     const remaining = this.#removeButtons;
     if (remaining.length === 0) {
-      this.inputTarget.focus();
+      this.#focusAfterLastTag();
     } else {
       this.#roving.setActive(Math.min(index, remaining.length - 1), { focus: true });
     }
@@ -365,12 +572,23 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Arrow navigation and deletion within the chip list (delegated). */
   readonly #onTagKeydown = (event: KeyboardEvent): void => {
+    // A descendant widget that already claimed the key must not ALSO move the
+    // chip focus — composition depends on this yield. Chips render from the
+    // consumer's template, so an arbitrary widget can live inside one.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const button = (event.target as HTMLElement).closest("button");
     if (!button) return;
     const buttons = this.#removeButtons;
     const index = buttons.indexOf(button);
     if (index === -1) return;
-    switch (event.key) {
+    // Logical, not physical. The key is normalised rather than a new case added:
+    // the two horizontal branches are not mirror images — only one guards its
+    // edge, and the other hands focus back to the input — so swapping the key
+    // keeps each branch, guards and all, with its own direction. Both handlers
+    // read the same element on purpose; probing the focused child would let the
+    // input and the chips disagree at the boundary between them.
+    switch (logicalArrowKey(event.key, this.element)) {
       case "ArrowLeft":
         if (index > 0) {
           event.preventDefault();
@@ -380,7 +598,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
       case "ArrowRight":
         event.preventDefault();
         if (index < buttons.length - 1) this.#roving.setActive(index + 1, { focus: true });
-        else this.inputTarget.focus();
+        else this.#focusInput();
         break;
       case "Delete":
       case "Backspace":
@@ -395,26 +613,56 @@ export class MultiSelectController extends Controller<HTMLElement> {
   /**
    * Marks `option` active via `data-active` and the input's
    * `aria-activedescendant` (the attribute is removed, not emptied, when null).
+   *
+   * The state half runs even with no input, so a `close()` that cannot touch ARIA
+   * still clears it: {@link open} seeds an active option only when there is none,
+   * so a stale one makes the next open skip the seeding and a replacement input
+   * gets no `aria-activedescendant` at all.
    */
   #setActive(option: HTMLElement | null): void {
-    this.#activeOption = option;
+    const activeId = option ? ensureId(option, "stimeo-ms-opt") : null;
+    this.#activeOptionId = activeId;
     for (const candidate of this.optionTargets) {
       candidate.toggleAttribute("data-active", candidate === option);
     }
-    if (option) {
-      this.inputTarget.setAttribute("aria-activedescendant", ensureId(option, "stimeo-ms-opt"));
-      // Virtual focus never triggers the browser's native focus-scrolling, so a
-      // scrollable list must follow the active option itself (list-only scroll).
-      if (this.hasListTarget) scrollOptionIntoView(this.listTarget, option);
+    // Virtual focus never triggers the browser's native focus-scrolling, so a
+    // scrollable list must follow the active option itself (list-only scroll).
+    if (option && this.hasListTarget) scrollOptionIntoView(this.listTarget, option);
+    if (!this.hasInputTarget) return;
+    if (activeId !== null) {
+      this.inputTarget.setAttribute("aria-activedescendant", activeId);
     } else {
       this.inputTarget.removeAttribute("aria-activedescendant");
     }
   }
 
+  /** Repairs only active identity before a key; the fallback waits for the target callback. */
+  #reconcileActiveForInteraction(): void {
+    const activeId = this.#activeOptionId;
+    if (activeId === null) return;
+    const resolved = this.#activeOption;
+    const active = resolved && !resolved.hidden ? resolved : null;
+    const marked = this.optionTargets.filter((candidate) => candidate.hasAttribute("data-active"));
+    const idref = this.hasInputTarget
+      ? this.inputTarget.getAttribute("aria-activedescendant")
+      : null;
+    if (!active || marked.length !== 1 || marked[0] !== active || idref !== activeId) {
+      this.#setActive(active);
+    }
+  }
+
+  /** Reflects whether the open list currently has no visible option targets. */
+  #reflectEmpty(): void {
+    this.element.toggleAttribute(
+      "data-stimeo--multi-select-empty",
+      !this.#isClosed && this.#visibleOptions.length === 0,
+    );
+  }
+
   /**
    * Mirrors the selected values into named hidden inputs under the `fields`
    * target so the selection submits with a normal form (parity with tags-input).
-   * No-ops without a `fields` target, keeping the control back-compat. When the
+   * No-ops without a `fields` target. When the
    * `form` value is set, each input gets a matching `form` attribute so the picker
    * can submit with a `<form>` it lives outside of.
    */
@@ -461,6 +709,13 @@ export class MultiSelectController extends Controller<HTMLElement> {
   /** Options not hidden by the current filter. */
   get #visibleOptions(): HTMLElement[] {
     return this.optionTargets.filter((option) => !option.hidden);
+  }
+
+  /** Current active target resolved by stable id, never a detached node reference. */
+  get #activeOption(): HTMLElement | null {
+    const activeId = this.#activeOptionId;
+    if (activeId === null) return null;
+    return this.optionTargets.find((option) => option.id === activeId) ?? null;
   }
 
   /** Options currently selected. */

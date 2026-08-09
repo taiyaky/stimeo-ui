@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { prefersReducedMotion } from "../utils/reduced_motion";
+import { TabindexLoan } from "../utils/tabindex_loan";
 
 /**
  * Headless **Scroll Visibility** behavior: shows or hides an element based on
@@ -31,9 +32,12 @@ import { prefersReducedMotion } from "../utils/reduced_motion";
  * Behavior only — the look and any transition are the consumer's CSS. The scroll
  * listener is `passive`, coalesced through `requestAnimationFrame`, and removed on
  * `disconnect()` (Turbo navigation included). `toTop` honors
- * `prefers-reduced-motion` by falling back to an instant jump, and can move focus
- * to a `focusSelector` target (given `tabindex="-1"` if needed) to keep keyboard
- * users oriented after the scroll.
+ * `prefers-reduced-motion` by forcing an instant jump independently of the
+ * consumer's CSS `scroll-behavior`, and can move focus to a `focusSelector`
+ * target (given `tabindex="-1"` if needed) to keep keyboard users oriented
+ * after the scroll. A live disconnect removes only a `tabindex="-1"` this
+ * controller instance added; authored tabindex values remain. This teardown does
+ * not claim to rewrite a Turbo cache snapshot that was cloned before disconnect.
  */
 export class ScrollVisibilityController extends Controller<HTMLElement> {
   static override targets = ["element"];
@@ -54,7 +58,7 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
   declare focusSelectorValue: string;
   declare rootValue: string;
 
-  /** Pending rAF id used to coalesce scroll bursts into one measurement. */
+  /** Pending rAF id that coalesces scroll bursts into one measurement. */
   #rafId: number | null = null;
   /** Previous scroll position, for `direction` mode delta detection. */
   #lastScrollY = 0;
@@ -65,6 +69,8 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
    * the window. Captured on connect so teardown detaches from the same source.
    */
   #scrollSource: HTMLElement | Window = window;
+  /** Focus targets this instance lent a `tabindex` to. */
+  readonly #tabindex = new TabindexLoan();
 
   readonly #onScroll = (): void => {
     if (this.#rafId !== null) return;
@@ -87,17 +93,18 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
       cancelAnimationFrame(this.#rafId);
       this.#rafId = null;
     }
+    this.#tabindex.returnAll();
     this.#visible = null;
   }
 
   /** Scrolls the source to the top and, optionally, moves focus to a safe target. */
   toTop(): void {
-    const behavior: ScrollBehavior = prefersReducedMotion() ? "auto" : "smooth";
+    const behavior: ScrollBehavior = prefersReducedMotion() ? "instant" : "smooth";
     this.#scrollSource.scrollTo({ top: 0, behavior });
     if (this.focusSelectorValue) {
       const target = document.querySelector<HTMLElement>(this.focusSelectorValue);
       if (target) {
-        if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+        this.#tabindex.lend(target);
         target.focus();
       }
     }

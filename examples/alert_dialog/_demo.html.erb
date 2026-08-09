@@ -7,7 +7,7 @@
 <div class="alert-dialog" data-controller="stimeo--alert-dialog">
   <button
     type="button"
-    class="alert-dialog__trigger"
+    class="demo-trigger"
     data-stimeo--alert-dialog-target="trigger"
     data-action="click->stimeo--alert-dialog#open">
     <%= t("components.alert_dialog.demo.open_button") %>
@@ -50,13 +50,14 @@
         <%# Default focus goes to the least-destructive action: Cancel. %>
         <button
           type="button"
+          class="demo-trigger"
           data-stimeo--alert-dialog-target="initialFocus"
           data-action="click->stimeo--alert-dialog#cancel">
           <%= t("components.alert_dialog.demo.cancel") %>
         </button>
         <button
           type="button"
-          class="alert-dialog__danger"
+          class="demo-trigger alert-dialog__danger"
           data-action="click->stimeo--alert-dialog#confirm">
           <%= t("components.alert_dialog.demo.confirm") %>
         </button>

@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { BlurDeferral } from "../utils/blur_deferral";
 import { LayoutObserver } from "../utils/layout_observer";
 
 /**
@@ -43,17 +44,16 @@ export class ReadMoreController extends Controller<HTMLElement> {
   #collapsed = true;
   #observedContent: HTMLElement | null = null;
   #contentMutationObserver: MutationObserver | null = null;
-  #deferredHideTrigger: HTMLElement | null = null;
 
   readonly #update = (): void => {
     if (this.#connected) this.#evaluateOverflow();
   };
   readonly #layout = new LayoutObserver(this.#update);
 
-  readonly #onDeferredHideBlur = (): void => {
-    this.#clearDeferredHide();
+  /** Holds the trigger's hide back while it has focus; re-evaluates on blur. */
+  readonly #deferredHide = new BlurDeferral(() => {
     this.#update();
-  };
+  });
 
   override connect(): void {
     this.#connected = true;
@@ -85,7 +85,7 @@ export class ReadMoreController extends Controller<HTMLElement> {
   }
 
   triggerTargetDisconnected(trigger: HTMLElement): void {
-    if (this.#deferredHideTrigger === trigger) this.#clearDeferredHide();
+    this.#deferredHide.release(trigger);
     this.#syncTargets();
   }
 
@@ -145,7 +145,7 @@ export class ReadMoreController extends Controller<HTMLElement> {
   }
 
   #stopObservingContent(): void {
-    this.#clearDeferredHide();
+    this.#deferredHide.releaseAll();
     if (this.#observedContent) {
       this.#layout.unobserve(this.#observedContent);
       this.#observedContent.removeEventListener("load", this.#update, true);
@@ -156,18 +156,6 @@ export class ReadMoreController extends Controller<HTMLElement> {
     this.#layout.unobserveViewport();
   }
 
-  #deferHide(trigger: HTMLElement): void {
-    if (this.#deferredHideTrigger === trigger) return;
-    this.#clearDeferredHide();
-    this.#deferredHideTrigger = trigger;
-    trigger.addEventListener("blur", this.#onDeferredHideBlur);
-  }
-
-  #clearDeferredHide(): void {
-    this.#deferredHideTrigger?.removeEventListener("blur", this.#onDeferredHideBlur);
-    this.#deferredHideTrigger = null;
-  }
-
   #evaluateOverflow(): void {
     if (!this.hasTriggerTarget || !this.hasContentTarget) return;
 
@@ -175,18 +163,18 @@ export class ReadMoreController extends Controller<HTMLElement> {
     const content = this.contentTarget;
     const useful = !this.#collapsed || content.scrollHeight > content.clientHeight;
     if (useful) {
-      this.#clearDeferredHide();
+      this.#deferredHide.releaseAll();
       trigger.hidden = false;
       return;
     }
 
     if (document.activeElement === trigger) {
       trigger.hidden = false;
-      this.#deferHide(trigger);
+      this.#deferredHide.deferOnly(trigger);
       return;
     }
 
-    this.#clearDeferredHide();
+    this.#deferredHide.releaseAll();
     trigger.hidden = true;
   }
 }

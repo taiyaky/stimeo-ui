@@ -98,9 +98,9 @@ describe("DirectUploadController", () => {
     expect(status().textContent).toBe("a.png uploaded");
   });
 
-  // Layer ③ — speech-order regression: completion is announced in the polite
-  // status live region.
-  it("announces upload completion in its live region (layer ③)", async () => {
+  // Speech-order regression: completion is announced in the polite status live
+  // region.
+  it("announces upload completion in its live region", async () => {
     await mount();
     fire("direct-upload:initialize", { id: 1, file: { name: "a.png" } });
     fire("direct-upload:end", { id: 1 });

@@ -290,6 +290,51 @@ describe("PointerDragController", () => {
       expect(handle().hasAttribute("data-grabbed")).toBe(false);
     });
 
+    it("yields a key a descendant widget already consumed", async () => {
+      // Other widgets yield to a grabbed drag handle, so the handle owes the
+      // same courtesy downward. A nested roving list or segmented field inside
+      // the handle consumes its own arrows; the drag must not ALSO step.
+      const events = await mount(defaultFixture);
+      key(" ");
+      expect(events.start).toHaveLength(1);
+
+      const inner = document.createElement("span");
+      handle().append(inner);
+      inner.addEventListener("keydown", (event) => event.preventDefault());
+      const claimed = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      const notCanceled = inner.dispatchEvent(claimed);
+
+      expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+      expect(events.move).toHaveLength(0);
+    });
+
+    it("leaves a modified arrow to the browser while grabbed", async () => {
+      // A chorded arrow belongs to the browser (history navigation and friends):
+      // the grab neither consumes it nor accumulates a delta.
+      const events = await mount(defaultFixture);
+      key(" ");
+      expect(events.start).toHaveLength(1);
+
+      const chord = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+        altKey: true,
+      });
+      handle().dispatchEvent(chord);
+
+      expect(chord.defaultPrevented).toBe(false);
+      expect(events.move).toHaveLength(0);
+      expect(root().getAttribute("data-grabbed")).toBe("true"); // the grab survives
+
+      key("ArrowRight"); // a bare arrow still moves
+      expect(events.move).toHaveLength(1);
+    });
+
     it("grabs and drops with Enter too", async () => {
       const events = await mount(defaultFixture);
       key("Enter");
@@ -794,7 +839,7 @@ describe("PointerDragController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech-order regression ------------------------------------------------
 
   it("keeps the announcement stable across a keyboard grab (data hooks only)", async () => {
     await mount(defaultFixture);

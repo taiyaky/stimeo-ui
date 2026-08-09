@@ -25,8 +25,8 @@ const BUTTON_BUSY_LABEL = "data-submit-once-busy-label";
  *
  * Zero wiring for Turbo forms: `connect()` subscribes to `turbo:submit-start`
  * itself (symmetric with the `turbo:submit-end` it already listens for), so no
- * `data-action` is required. The public {@link start} action is kept for back-compat
- * and for **non-Turbo** forms, where you bind it to the native event yourself:
+ * `data-action` is required. The public {@link start} action stays available for
+ * **non-Turbo** forms, where you bind it to the native event yourself:
  * `data-action="submit->stimeo--submit-once#start"`. Re-entrancy is guarded — once
  * busy, a second `start` (auto + manual, or a duplicate event) no-ops.
  *

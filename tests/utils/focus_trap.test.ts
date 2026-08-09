@@ -286,7 +286,7 @@ describe("FocusTrap", () => {
   });
 
   it("re-activates against a clean baseline after a before-cache deactivation", () => {
-    // The restore cycle regression: without the before-cache hook the cached
+    // The restore cycle hazard: without the before-cache hook the cached
     // body[style] feeds "hidden" back into activate() as the baseline, and
     // deactivate() then "restores" the lock forever.
     const t = trap();

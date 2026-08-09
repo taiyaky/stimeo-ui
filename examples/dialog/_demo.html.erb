@@ -5,7 +5,7 @@
 <div class="dialog" data-controller="stimeo--dialog">
   <button
     type="button"
-    class="dialog__trigger"
+    class="demo-trigger"
     data-stimeo--dialog-target="trigger"
     data-action="click->stimeo--dialog#open">
     <%= t("components.dialog.demo.open_button") %>
@@ -27,10 +27,16 @@
       ) %></h3>
       <p><%= t("components.dialog.demo.confirm_desc") %></p>
       <div class="dialog__actions">
-        <button type="button" data-action="click->stimeo--dialog#close"><%= t(
+        <button
+          type="button"
+          class="demo-trigger"
+          data-action="click->stimeo--dialog#close"><%= t(
           "components.dialog.demo.cancel"
         ) %></button>
-        <button type="button" data-action="click->stimeo--dialog#close"><%= t(
+        <button
+          type="button"
+          class="demo-trigger demo-trigger--primary"
+          data-action="click->stimeo--dialog#close"><%= t(
           "components.dialog.demo.ok"
         ) %></button>
       </div>

@@ -34,7 +34,7 @@ const examples: ExamplesIndex = {
   schemaVersion: 1,
   examples: {
     "stimeo--menu": {
-      file: "playground/app/views/components/demos/menu/_demo.html.erb",
+      file: "app/views/components/demos/menu/_demo.html.erb",
       source: validMenu,
     },
   },
@@ -176,7 +176,7 @@ describe("runExampleTool", () => {
   it("returns the bundled example with its provenance and guidance", () => {
     const result = runExampleTool(examples, { id: "stimeo--menu" });
     expect(result.id).toBe("stimeo--menu");
-    expect(result.file).toBe("playground/app/views/components/demos/menu/_demo.html.erb");
+    expect(result.file).toBe("app/views/components/demos/menu/_demo.html.erb");
     expect(result.source).toContain('data-controller="stimeo--menu"');
     expect(result.guidance).toBe(EXAMPLE_GUIDANCE);
   });
@@ -234,6 +234,42 @@ describe("callTool", () => {
     for (const descriptor of TOOL_DESCRIPTORS) {
       expect(descriptor.inputSchema.type).toBe("object");
       expect(descriptor.description.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("keeps the discovery keywords every tool description needs to be searchable", () => {
+    // A client routes on the text this server ships, so these words are part
+    // of the contract rather than decoration. The stakes are highest under
+    // deferred loading, where definitions stay out of context until a search
+    // asks for them and a query matching nothing comes back empty rather than
+    // as an error (the tool searches that do this match names, descriptions,
+    // argument names, and argument descriptions). A description that loses the
+    // words a request is phrased in then leaves that tool unused for it — a
+    // silent failure no other test would catch. Pinned per tool (not across
+    // the set) so a query in any one of these words can reach all four.
+    for (const descriptor of TOOL_DESCRIPTORS) {
+      const description = descriptor.description.toLowerCase();
+      // The exact words the TSDoc on `TOOL_DESCRIPTORS` promises — not stems.
+      // "accessib" would also pass on a description that only says
+      // "accessibility", which is not what that contract states.
+      for (const keyword of ["rails", "stimulus", "accessible", "component"]) {
+        expect(description, `${descriptor.name} description lost "${keyword}"`).toContain(keyword);
+      }
+    }
+  });
+
+  it("keeps the component-name list on stimeo_catalog, the discovery entry point", () => {
+    // Tier 2 of the description contract: the enumeration lives on the tool a
+    // component-name query should land on, instead of being repeated across all
+    // four (clients truncate descriptions — 2KB each in the tightest known one —
+    // so padding them costs reach elsewhere). This pins the list's presence here
+    // and deliberately does not assert its absence elsewhere — that would fail
+    // the moment another description legitimately names a component.
+    const catalog = TOOL_DESCRIPTORS.find((descriptor) => descriptor.name === "stimeo_catalog");
+    expect(catalog).toBeDefined();
+    const description = catalog?.description.toLowerCase() ?? "";
+    for (const component of ["dialog", "drawer", "tabs", "accordion", "combobox", "toast"]) {
+      expect(description, `stimeo_catalog description lost "${component}"`).toContain(component);
     }
   });
 

@@ -201,9 +201,9 @@ describe("PasswordStrengthController", () => {
     expect(out.textContent).toBe(""); // never written
   });
 
-  // Layer ③ — speech-order regression: the strength label is announced in the
-  // polite live region after the debounce.
-  it("announces the strength label in its live region (layer ③)", async () => {
+  // Speech-order regression: the strength label is announced in the polite live
+  // region after the debounce.
+  it("announces the strength label in its live region", async () => {
     await start();
     type("Sup3rStr0ng!");
     await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);

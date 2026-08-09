@@ -631,9 +631,9 @@ describe("SidebarController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // Layer ③ — speech-order regression: the trigger announces its expanded state,
-  // and toggling it flips the announcement to collapsed.
-  it("announces the trigger's expanded/collapsed state (layer ③)", async () => {
+  // Speech-order regression: the trigger announces its expanded state, and
+  // toggling it flips the announcement to collapsed.
+  it("announces the trigger's expanded/collapsed state", async () => {
     await start();
     const expanded = await captureSpeech({ container: trigger(), steps: 0 });
     expect(expanded).toEqual(["button, Menu, expanded"]);

@@ -172,7 +172,7 @@ describe("CountUpController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech-order regression -----------------------------------------------
 
   it("announces the authored value mid-run (aria-label), never the intermediate numbers", async () => {
     await mount();

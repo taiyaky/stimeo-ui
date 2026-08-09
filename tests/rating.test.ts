@@ -69,6 +69,49 @@ describe("RatingController", () => {
   const key = (index: number, k: string) =>
     symbols()[index]?.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
 
+  it("reverses the horizontal arrows under RTL, leaving the value pair alone", async () => {
+    // Logical direction: APG describes the horizontal pair as "next / previous",
+    // so it reverses with the writing direction. `dir="rtl"` is the authoring
+    // contract, but happy-dom does not resolve it into the computed style, so the
+    // direction is set as an inline style instead. This widget pairs the arrows
+    // by *value* — `ArrowUp` means "more" — so the vertical pair must not follow
+    // the writing direction.
+    await start();
+    root().style.direction = "rtl";
+    const before = Number(field().value);
+
+    key(before - 1, "ArrowLeft"); // "next star" under RTL
+    expect(Number(field().value)).toBe(before + 1);
+
+    key(before, "ArrowRight"); // "previous star"
+    expect(Number(field().value)).toBe(before);
+
+    key(before - 1, "ArrowUp"); // still "more", regardless of direction
+    expect(Number(field().value)).toBe(before + 1);
+  });
+
+  it("yields a key a descendant widget already consumed", async () => {
+    // A composed widget that claims the key must not ALSO change the rating —
+    // composition depends on this yield.
+    await start();
+    symbols()[0]?.focus();
+    const before = field().value;
+    const inner = document.createElement("span");
+    symbols()[0]?.append(inner);
+    inner.addEventListener("keydown", (event) => event.preventDefault());
+
+    const claimed = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    const notCanceled = inner.dispatchEvent(claimed);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(field().value).toBe(before);
+    expect(document.activeElement).toBe(symbols()[0]);
+  });
+
   it("reflects the initial value, roving, fill range, and field", async () => {
     await start();
     expect(checked()).toEqual(["false", "true", "false"]);
@@ -95,6 +138,23 @@ describe("RatingController", () => {
     // Focus returns to the first symbol, which becomes the Tab entry point.
     expect(tabindexes()).toEqual([0, -1, -1]);
     expect(document.activeElement).toBe(symbols()[0]);
+  });
+
+  it("leaves a modified arrow to the browser", async () => {
+    // A chorded arrow belongs to the browser (history navigation and friends):
+    // the scale neither consumes it nor changes the rating.
+    await start();
+    const chord = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+      altKey: true,
+    });
+    symbols()[1]?.dispatchEvent(chord);
+
+    expect(chord.defaultPrevented).toBe(false);
+    expect(field().value).toBe("2");
+    expect(checked()).toEqual(["false", "true", "false"]);
   });
 
   it("increments/decrements with arrows and clamps at the bounds", async () => {

@@ -116,6 +116,45 @@ describe("EditableController", () => {
     expect(document.activeElement).toBe(display());
   });
 
+  it("yields an Enter a descendant widget already consumed", async () => {
+    // The Enter commit path yields to a descendant that already claimed the key,
+    // so a completion popup confirming its candidate does not also end the edit.
+    // The claim comes from a capture-phase handler because the binding is on the
+    // INPUT, which has no children.
+    await mount();
+    display().click();
+    input().value = "Still editing";
+    root().addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
+
+    const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    const notCanceled = input().dispatchEvent(event);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(root().dataset.mode).toBe("editing");
+    expect(display().textContent).toBe("Original");
+  });
+
+  it("leaves an Escape an inner handler already owned", async () => {
+    // The deepest handler that claims the press owns it, and this controller
+    // yields in its Escape branch. Without that yield a nested overlay — a
+    // combobox popup inside the edit row closing on its own Escape — would also
+    // cancel the whole edit.
+    //
+    // The claim comes from a capture-phase handler because the only binding is
+    // `keydown->…#onKeydown` on the INPUT, which has no children.
+    await mount();
+    display().click();
+    input().value = "Kept";
+    root().addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
+
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    const notCanceled = input().dispatchEvent(event);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(root().dataset.mode).toBe("editing");
+    expect(input().value).toBe("Kept");
+  });
+
   it("keeps editing when Escape cancels an IME conversion", async () => {
     await mount();
     display().click();

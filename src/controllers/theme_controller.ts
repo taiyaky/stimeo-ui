@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
 import { readLocalStorage, writeLocalStorage } from "../utils/safe_storage";
 
 /** The three selectable modes; `system` follows the OS `prefers-color-scheme`. */
@@ -43,7 +44,7 @@ const isMode = (value: unknown): value is ThemeMode =>
  * `aria-checked` + roving tabindex (APG radio) or the single button's `aria-pressed`
  * in sync, and never moves focus. The `prefers-color-scheme` listener is attached on
  * `connect()` and removed on `disconnect()` (Turbo included). FOUC avoidance for the
- * very first paint is an inline `<head>` snippet (documented), not this controller.
+ * very first paint is an inline `<head>` snippet, not this controller.
  */
 export class ThemeController extends Controller<HTMLElement> {
   static override targets = ["option"];
@@ -78,6 +79,10 @@ export class ThemeController extends Controller<HTMLElement> {
 
   /** Arrow/Home/End navigation for the radiogroup (APG radio pattern). */
   readonly #onKeydown = (event: KeyboardEvent): void => {
+    // A descendant widget that already claimed the key (a grabbed drag handle, a
+    // nested menu) must not ALSO act on it — composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     // Resolved once per keydown: every `optionTargets` access re-queries the scope.
     const options = this.optionTargets;
     if (options.length === 0) return;
@@ -87,14 +92,16 @@ export class ThemeController extends Controller<HTMLElement> {
 
     const last = options.length - 1;
     let next = current;
+    // Logical, not physical. The helper reverses only the horizontal pair, so
+    // folding Down/Up into the same branch stays correct.
+    const step = logicalArrowStep(event.key, this.element);
     switch (event.key) {
       case "ArrowDown":
       case "ArrowRight":
-        next = current === last ? 0 : current + 1;
-        break;
       case "ArrowUp":
       case "ArrowLeft":
-        next = current === 0 ? last : current - 1;
+        next =
+          step === 1 ? (current === last ? 0 : current + 1) : current === 0 ? last : current - 1;
         break;
       case "Home":
         next = 0;

@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 
 /** A time segment kind, as declared by `data-segment` on each spinbutton. */
 type SegmentKind = "hour" | "minute" | "second" | "meridiem";
@@ -79,13 +80,18 @@ export class TimePickerController extends Controller<HTMLElement> {
 
   /** Handles stepping, inter-segment focus moves, jumps, and direct entry. */
   onKeydown(event: KeyboardEvent): void {
+    if (isReservedArrowChord(event)) return;
     const segment = (event.target as HTMLElement | null)?.closest<HTMLElement>(
       "[data-stimeo--time-picker-target='segment']",
     );
     const kind = segment ? this.#kindOf(segment) : null;
     if (!segment || !kind) return;
+    // Logical, not physical, for the horizontal pair: the segments form an
+    // ordered row laid out inline, so a right-to-left writing direction mirrors
+    // them. `ArrowUp` / `ArrowDown` change the *value* and pass through
+    // untouched — `logicalArrowKey` only ever rewrites the horizontal pair.
 
-    switch (event.key) {
+    switch (logicalArrowKey(event.key, this.element)) {
       case "ArrowUp":
         event.preventDefault();
         this.#step(kind, this.#delta(kind));

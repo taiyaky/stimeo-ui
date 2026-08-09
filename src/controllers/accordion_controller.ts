@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord } from "../utils/arrow_step";
 
 /**
  * Headless, accessible accordion behavior.
@@ -83,6 +84,10 @@ export class AccordionController extends Controller<HTMLElement> {
    * `.focus()` lands on nothing and navigation appears to stall.
    */
   onKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key (a grabbed drag handle, a
+    // nested menu) must not ALSO act on it — composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const current = event.currentTarget as HTMLButtonElement;
     if (this.triggerTargets.indexOf(current) === -1) return;
 

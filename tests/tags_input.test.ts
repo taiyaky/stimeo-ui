@@ -75,6 +75,28 @@ describe("TagsInputController", () => {
     input().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
   };
 
+  it("reverses the horizontal arrows under RTL, in the input and across the chips", async () => {
+    // Logical direction: the chips are an ordered row, and the input
+    // sits at its logical end, so the key that reaches back into the chips
+    // reverses too. Both handlers read the same element on purpose.
+    await mount();
+    const root = document.querySelector("[data-controller='stimeo--tags-input']") as HTMLElement;
+    root.style.direction = "rtl";
+    type("React", "Enter");
+    type("Rails", "Enter");
+    expect(buttons().length).toBe(2);
+    input().value = "";
+
+    input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(document.activeElement).toBe(buttons()[1]); // reaches back into the chips
+
+    buttons()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(document.activeElement).toBe(buttons()[0]); // "previous chip"
+
+    buttons()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(document.activeElement).toBe(buttons()[0]); // guarded at the first chip
+  });
+
   it("commits a tag on Enter and clears the input", async () => {
     await mount();
     type("React", "Enter");
@@ -191,6 +213,88 @@ describe("TagsInputController", () => {
     expect(document.activeElement).toBe(buttons()[1]);
     buttons()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
     expect(document.activeElement).toBe(input()); // past the end -> input
+  });
+
+  it("leaves a modified arrow to the browser (Alt+Left/Right is history navigation)", async () => {
+    // A modified arrow belongs to the browser, not the widget: the empty input
+    // does not reach back into the chips.
+    await mount();
+    type("React", "Enter");
+    type("Vue", "Enter");
+    input().value = "";
+    input().focus();
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowLeft",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    input().dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(input());
+    expect(buttons()[1]?.tabIndex).toBe(-1); // the roving stop stayed on the first chip
+  });
+
+  it("yields an input key an enclosing widget already consumed", async () => {
+    // The claim comes from a capture-phase handler because the binding is on the
+    // INPUT, which has no children. The chip strip is guarded separately; this
+    // is the input side.
+    await mount();
+    const root = document.querySelector("[data-controller='stimeo--tags-input']") as HTMLElement;
+    root.addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
+    input().value = "React";
+
+    const claimed = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    const notCanceled = input().dispatchEvent(claimed);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(tags()).toHaveLength(0); // no tag committed
+  });
+
+  it("leaves a modified chip arrow to the browser (Alt+Left/Right is history navigation)", async () => {
+    // A modified arrow belongs to the browser, not the widget: the chip strip
+    // neither consumes it nor moves its single Tab stop.
+    await mount();
+    type("React", "Enter");
+    type("Vue", "Enter");
+    const first = buttons()[0] as HTMLButtonElement;
+    first.focus();
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    first.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(first);
+    expect(first.tabIndex).toBe(0); // the roving stop did not move
+  });
+
+  it("yields a chip key a descendant widget already consumed", async () => {
+    // Chips render from the consumer's template, so an arbitrary widget can live
+    // inside one. A key it claimed must not ALSO move the chip focus.
+    await mount();
+    type("React", "Enter");
+    type("Vue", "Enter");
+    const inner = document.createElement("span");
+    buttons()[0]?.append(inner);
+    inner.addEventListener("keydown", (event) => event.preventDefault());
+    buttons()[0]?.focus();
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    const notCanceled = inner.dispatchEvent(event);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(document.activeElement).toBe(buttons()[0]);
   });
 
   it("deletes the focused chip with Delete", async () => {

@@ -68,6 +68,27 @@ describe("TimePickerController", () => {
   const key = (el: HTMLElement, k: string) =>
     el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
 
+  it("reverses the horizontal arrows under RTL, leaving the value pair alone", async () => {
+    // Logical direction. `dir="rtl"` is the authoring contract, but happy-dom
+    // does not resolve it into the computed style, so the direction is set as an
+    // inline style instead.
+    // The segments lay out as an inline row, so RTL mirrors them and "next
+    // segment" is to the left. `ArrowUp` / `ArrowDown`
+    // change the value and must not follow the direction.
+    await mount24();
+    root().style.direction = "rtl";
+    const before = field().value;
+
+    key(seg("hour"), "ArrowLeft"); // "next segment" under RTL
+    expect(document.activeElement).toBe(seg("minute"));
+
+    key(seg("minute"), "ArrowRight"); // "previous segment"
+    expect(document.activeElement).toBe(seg("hour"));
+
+    key(seg("hour"), "ArrowUp"); // still "more", regardless of direction
+    expect(field().value).not.toBe(before);
+  });
+
   it("seeds segments and composes the initial field on connect", async () => {
     await mount24();
     expect(seg("hour").getAttribute("aria-valuetext")).toBe("09");
@@ -130,6 +151,25 @@ describe("TimePickerController", () => {
     expect(document.activeElement).toBe(seg("minute"));
     key(seg("minute"), "ArrowLeft");
     expect(document.activeElement).toBe(seg("hour"));
+  });
+
+  it("leaves a modified arrow to the browser", async () => {
+    // A modified arrow belongs to the browser, not the widget: the segment is
+    // neither stepped nor is the composed field touched.
+    await mount24();
+    seg("minute").focus();
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    seg("minute").dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(seg("minute").getAttribute("aria-valuenow")).toBe("30");
+    expect(field().value).toBe("09:30");
   });
 
   it("jumps to the segment bounds on Home/End", async () => {
@@ -215,8 +255,8 @@ describe("TimePickerController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — speech-order regression for a single segment: pins the spinbutton
-  // role, the accessible name, and the zero-padded value text.
+  // Speech-order regression for a single segment: pins the spinbutton role, the
+  // accessible name, and the zero-padded value text.
   it("announces the spinbutton role, name, and value text for a segment", async () => {
     await mount24();
     const spoken = await captureSpeech({ container: seg("hour"), steps: 0 });

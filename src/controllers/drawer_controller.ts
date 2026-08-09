@@ -136,9 +136,10 @@ export class DrawerController extends Controller<HTMLElement> {
   /** Opens the drawer: reveals it, syncs `data-state`, traps focus. */
   open(): void {
     if (!this.hasPanelTarget || this.#isOpen) return;
-    this.#transition.cancel(); // Reveal the panel/overlay while still in their `data-state="closed"`
+    this.#transition.cancel();
     this.#activePanel = this.panelTarget;
-    // (off-screen) position so the browser has a rendered "from" frame.
+    // Reveal the panel/overlay while they are still in their `data-state="closed"`
+    // (off-screen) position, so the browser has a rendered "from" frame.
     this.panelTarget.hidden = false;
     if (this.hasOverlayTarget) this.overlayTarget.hidden = false;
     // Force a reflow to commit that closed frame before flipping to "open"; without

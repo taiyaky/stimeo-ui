@@ -77,8 +77,8 @@ export class LocalTimeController extends Controller<HTMLElement> {
   }
 
   /**
-   * Reads a timezone-less date-time as UTC — the documented input contract —
-   * since `Date.parse` would otherwise interpret e.g. `"2026-06-08T12:30:00"` in
+   * Reads a timezone-less date-time as UTC — the input contract of this
+   * controller — since `Date.parse` would otherwise read `"2026-06-08T12:30:00"` in
    * the *runtime's* local zone, contradicting "the server emits UTC". Values that
    * already carry `Z` or a `±hh:mm` offset (and bare `YYYY-MM-DD` dates, already
    * parsed as UTC) are returned unchanged.

@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord } from "../utils/arrow_step";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { SafeTimeout } from "../utils/safe_timeout";
 
@@ -51,13 +52,14 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * - `Escape` closes and restores focus to the region. While open the menu is a
  *   layer on the shared {@link EscapeLayer} stack; it claims a press only while
  *   focus is inside the controller or fell to the body, so one keypress closes
- *   exactly one layer (the shared layered-Escape contract). `Tab` lets the
- *   browser move focus first, then closes on the next task. An outside click or
- *   context-menu invocation closes without stealing focus from its destination.
+ *   exactly one layer. `Tab` lets the browser move focus first, then closes on
+ *   the next task. An outside click or context-menu invocation closes without
+ *   stealing focus from its destination.
  *
- * Roving focus skips items that are not navigable — `hidden`, natively
- * `disabled`, or `aria-disabled="true"` — so the keyboard never lands focus on an
- * inert command (matching `stimeo--menu` / `stimeo--command-palette`).
+ * Roving focus skips `hidden` and natively `disabled` items. An
+ * `aria-disabled="true"` item stays reachable by arrow keys — APG marks that
+ * attribute precisely for controls that must remain discoverable — while its
+ * activation is suppressed, so it announces itself and does nothing.
  */
 export class ContextMenuController extends Controller<HTMLElement> {
   static override targets = ["region", "menu", "item"];
@@ -78,8 +80,8 @@ export class ContextMenuController extends Controller<HTMLElement> {
   override connect(): void {
     this.#closeMenu();
     this.element.addEventListener("click", this.#onItemClickCapture, true);
-    document.addEventListener("click", this.#onOutsidePointer);
-    document.addEventListener("contextmenu", this.#onOutsidePointer);
+    document.addEventListener("click", this.#onOutsidePointer, true);
+    document.addEventListener("contextmenu", this.#onOutsidePointer, true);
   }
 
   /** Releases the listeners, stack membership, and pending Tab-close task. */
@@ -87,8 +89,8 @@ export class ContextMenuController extends Controller<HTMLElement> {
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
     this.element.removeEventListener("click", this.#onItemClickCapture, true);
-    document.removeEventListener("click", this.#onOutsidePointer);
-    document.removeEventListener("contextmenu", this.#onOutsidePointer);
+    document.removeEventListener("click", this.#onOutsidePointer, true);
+    document.removeEventListener("contextmenu", this.#onOutsidePointer, true);
   }
 
   /**
@@ -102,6 +104,9 @@ export class ContextMenuController extends Controller<HTMLElement> {
 
   /** Keyboard entry on the region: `Shift+F10` / `ContextMenu` open at center. */
   onRegionKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key (a grabbed drag handle, a
+    // nested menu) must not ALSO act on it — composition depends on this yield.
+    if (event.defaultPrevented) return;
     const isContextKey = event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey);
     if (!isContextKey) return;
     event.preventDefault();
@@ -113,6 +118,10 @@ export class ContextMenuController extends Controller<HTMLElement> {
 
   /** Roving focus and closing keys inside the menu. */
   onItemKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key (a grabbed drag handle, a
+    // nested menu) must not ALSO act on it — composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const items = this.#navigableItems;
     const currentIndex = items.indexOf(event.currentTarget as HTMLButtonElement);
 
@@ -185,7 +194,13 @@ export class ContextMenuController extends Controller<HTMLElement> {
     if (this.hasRegionTarget) this.regionTarget.focus();
   }
 
-  /** Closes when a click or context-menu invocation lands outside this instance. */
+  /**
+   * Closes when a click or context-menu invocation lands outside this instance.
+   * Both subscriptions observe in the capture phase, so the target is judged
+   * against the tree the user actually pressed even when a consumer handler
+   * detaches it, and application code that stops bubbling cannot leave the menu
+   * open.
+   */
   readonly #onOutsidePointer = (event: MouseEvent): void => {
     if (this.#isOpen && !this.element.contains(event.target as Node)) this.#closeMenu();
   };
@@ -205,19 +220,26 @@ export class ContextMenuController extends Controller<HTMLElement> {
     event.stopImmediatePropagation();
   };
 
-  /** Menu items eligible for roving focus (excludes disabled / hidden). */
+  /** Menu items eligible for roving focus (excludes hidden / natively disabled). */
   get #navigableItems(): HTMLButtonElement[] {
     return this.itemTargets.filter((item) => this.#isNavigable(item));
   }
 
   /**
-   * An item can take roving focus unless it is `hidden`, `aria-disabled="true"`,
-   * or a natively `disabled` form control. CSS-only visibility is not detectable
-   * here and is the consumer's responsibility.
+   * An item can take roving focus unless it is `hidden` or a natively `disabled`
+   * form control. CSS-only visibility is not detectable here and is the
+   * consumer's responsibility.
+   *
+   * **`aria-disabled="true"` stays reachable.** APG separates the two attributes
+   * by intent: `disabled` is for controls whose existence can be inferred from a
+   * neighbour (a greyed Next next to a Prev), while `aria-disabled` marks a
+   * control that must stay *discoverable* — and it names menu items as the
+   * example. Skipping it would hide the command's existence from a keyboard user
+   * entirely. Activation is suppressed separately, so the item announces itself
+   * and does nothing.
    */
   #isNavigable(item: HTMLButtonElement): boolean {
     if (item.hasAttribute("hidden")) return false;
-    if (item.getAttribute("aria-disabled") === "true") return false;
     return !item.disabled;
   }
 

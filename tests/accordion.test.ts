@@ -50,6 +50,22 @@ describe("AccordionController", () => {
     return element;
   };
 
+  it("yields a key a descendant widget already consumed", () => {
+    // A composed widget that claims the key must not ALSO act on it —
+    // composition depends on this yield.
+    const first = triggers()[0] as HTMLElement;
+    first.focus();
+    const inner = document.createElement("span");
+    first.append(inner);
+    inner.addEventListener("keydown", (event) => event.preventDefault());
+
+    inner.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+    );
+
+    expect(document.activeElement).toBe(first);
+  });
+
   it("expands the controlled panel on click", () => {
     triggers()[0]?.click();
     expect(triggers()[0]?.getAttribute("aria-expanded")).toBe("true");
@@ -101,15 +117,15 @@ describe("AccordionController", () => {
     return element;
   };
 
-  // Layer ① — machine-detectable a11y, asserted with a panel expanded so the
-  // visible (non-hidden) region is part of the audited tree.
+  // Machine-detectable a11y, asserted with a panel expanded so the visible
+  // (non-hidden) region is part of the audited tree.
   it("has no machine-detectable a11y violations when a panel is open", async () => {
     triggers()[0]?.click();
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — speech-order regression: the header must announce its expanded
-  // state, and that state must flip in the spoken phrase on toggle.
+  // Speech-order regression: the header must announce its expanded state, and
+  // that state must flip in the spoken phrase on toggle.
   it("announces the header's expanded state before and after a toggle", async () => {
     const collapsed = await captureSpeech({ container: root(), steps: 2 });
     expect(collapsed).toEqual([
@@ -165,9 +181,9 @@ describe("AccordionController", () => {
   });
 
   it("skips headers hidden in a collapsed subtree during arrow navigation", async () => {
-    // Mirrors the catalog's filter + accordion composition: each header sits in a
-    // section a filter can hide. Arrow nav must jump over the hidden middle one
-    // rather than calling .focus() on an unperceivable header (focus would stall).
+    // A filter + accordion composition: each header sits in a section a filter can
+    // hide. Arrow nav must jump over the hidden middle one rather than calling
+    // .focus() on an unperceivable header (focus would stall).
     disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <div data-controller="stimeo--accordion">
@@ -202,6 +218,22 @@ describe("AccordionController", () => {
     h1.focus();
     h1.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
     expect(document.activeElement).toBe(h3);
+  });
+
+  it("leaves a modified arrow to the browser", () => {
+    // Alt+Arrow is a browser binding: the accordion neither moves the header
+    // focus nor calls preventDefault().
+    triggers()[0]?.focus();
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    triggers()[0]?.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(triggers()[0]);
   });
 
   it("ignores other keys (no focus move, not prevented)", () => {

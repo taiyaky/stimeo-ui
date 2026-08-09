@@ -19,11 +19,17 @@
       disconnect (save) → connect (restore) cycle, mirroring a Turbo navigation. %>
   <div class="scroll-restore-demo__cols" data-scroll-restore-slot>
     <div class="scroll-restore-demo__col">
-      <p class="scroll-restore-demo__label"><%= t(
+      <p class="scroll-restore-demo__label" id="scroll-restore-with-label"><%= t(
         "components.scroll_restore.demo.with_label"
       ) %></p>
+      <%# Scrolls, but every child is plain <li> text: without a tab stop the list is
+          unreachable by keyboard (WCAG 2.1.1). Named by the label above rather than a new
+          string, so the two boxes stay distinguishable to a screen reader. %>
       <div
         class="scroll-restore-demo__box"
+        tabindex="0"
+        role="region"
+        aria-labelledby="scroll-restore-with-label"
         data-controller="stimeo--scroll-restore"
         data-stimeo--scroll-restore-key-value="catalog-demo">
         <ol class="scroll-restore-demo__list">
@@ -37,10 +43,14 @@
     </div>
 
     <div class="scroll-restore-demo__col">
-      <p class="scroll-restore-demo__label"><%= t(
+      <p class="scroll-restore-demo__label" id="scroll-restore-without-label"><%= t(
         "components.scroll_restore.demo.without_label"
       ) %></p>
-      <div class="scroll-restore-demo__box">
+      <div
+        class="scroll-restore-demo__box"
+        tabindex="0"
+        role="region"
+        aria-labelledby="scroll-restore-without-label">
         <ol class="scroll-restore-demo__list">
           <% (1..20).each do |n| %>
             <li class="scroll-restore-demo__row"><%= t(

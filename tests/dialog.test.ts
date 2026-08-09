@@ -106,17 +106,17 @@ describe("DialogController", () => {
     expect(background.inert).toBe(false);
   });
 
-  // Layer ① — machine-detectable a11y (asserted in the open/modal state, the
-  // interesting accessibility tree for this widget).
+  // Machine-detectable a11y, asserted in the open/modal state — the interesting
+  // accessibility tree for this widget.
   it("has no machine-detectable a11y violations while open (modal)", async () => {
     trigger().click();
     expect(dialog().hidden).toBe(false);
     await expectNoA11yViolations(document.body);
   });
 
-  // Layer ③ — speech-order regression. Captured before AND after the open state
-  // change: the modal dialog and its contents only enter the accessibility tree
-  // once it is shown, so the whole ordered phrase array pins role/name/state.
+  // Speech-order regression. Captured before AND after the open state change:
+  // the modal dialog and its contents only enter the accessibility tree once it
+  // is shown, so the whole ordered phrase array pins role/name/state.
   it("does not announce the dialog while closed", async () => {
     const root = document.querySelector("[data-controller='stimeo--dialog']") as HTMLElement;
     const phrases = await captureSpeech({ container: root, steps: 1 });
@@ -140,9 +140,8 @@ describe("DialogController", () => {
   // even though it leaves the markup as-is. A surviving listener would still act
   // on the detached controller, so Escape closing the dialog would surface the
   // leak. Invoked directly to avoid happy-dom's flaky async MutationObserver
-  // lifecycle (see scrollspy/resizable suites). This single test covers the whole
-  // disconnect contract — both the side-effect restoration (scroll/inert) and the
-  // listener removal — so there is no separate "restore on disconnect" test.
+  // lifecycle. This single case covers the whole disconnect contract — both the
+  // side-effect restoration (scroll/inert) and the listener removal.
   it("releases the global keydown listener and modal side effects on disconnect", () => {
     const background = document.getElementById("background") as HTMLElement;
     const root = document.querySelector("[data-controller='stimeo--dialog']") as HTMLElement;

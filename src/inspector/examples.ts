@@ -5,13 +5,11 @@ import type { Manifest } from "./types";
  * Bundled example index for the MCP server (`stimeo_example` tool and
  * `stimeo://examples/*` resources).
  *
- * The examples are the official catalog's demo sidecars — the exact markup
- * shown verbatim in each demo's code tab and copy-pasted by users, so they
- * are the closest thing the project has to "verified reference markup".
- * `scripts/postbuild.ts` walks them at build time (`scripts/demo_sources.ts`
- * resolves the supply: the playground catalog in the dev monorepo,
- * `examples/` in the public mirror) and serializes the result of
- * {@link buildExamplesIndex} into `dist/inspector/examples.json`, next to
+ * The examples are the demo sidecars shipped with the library — the exact
+ * markup users copy — so they are the closest thing the project has to
+ * "verified reference markup". `scripts/postbuild.ts` walks them at build time
+ * (`scripts/demo_sources.ts` locates the demo tree) and serializes the result
+ * of {@link buildExamplesIndex} into `dist/inspector/examples.json`, next to
  * `manifest.json`.
  *
  * {@link buildExamplesIndex} is pure so the mapping and the verification gate
@@ -21,11 +19,11 @@ import type { Manifest } from "./types";
 /** Format version of `examples.json` (bumped on breaking shape changes). */
 export const EXAMPLES_SCHEMA_VERSION = 1;
 
-/** One bundled example: the demo markup shown verbatim in the catalog. */
+/** One bundled example: the demo markup shipped for a single controller. */
 export interface ExampleEntry {
   /**
-   * Repo-relative provenance: `playground/.../demos/menu/_demo.html.erb` in
-   * the dev monorepo, `examples/menu/_demo.html.erb` in the public mirror.
+   * Repo-relative path the example was read from, e.g.
+   * `examples/menu/_demo.html.erb`.
    */
   readonly file: string;
   /** The HTML/ERB source. */
@@ -41,7 +39,7 @@ export interface ExamplesIndex {
 
 /** One demo sidecar as discovered on disk by the build script. */
 export interface DemoSource {
-  /** Demo directory basename (snake_case), e.g. `inline_combobox`. */
+  /** Demo directory basename (snake_case), e.g. `tree_view`. */
   readonly dir: string;
   /** Repo-relative path of the `_demo.html.erb` file. */
   readonly file: string;
@@ -73,7 +71,7 @@ export const PENDING_DEMO_CONTROLLERS: ReadonlySet<string> = new Set([]);
  *
  * 1. **Bijection with the manifest.** Every demo dir must map to a known
  *    controller and every controller must have a demo — a mismatch on either
- *    side means the catalog and the library drifted, and the build must fail
+ *    side means the demos and the library drifted, and the build must fail
  *    loudly rather than silently ship a hole. The only exception is the
  *    explicit `pendingDemos` allowlist ({@link PENDING_DEMO_CONTROLLERS}):
  *    a documented "demo not built yet" deferral, kept honest by the reverse

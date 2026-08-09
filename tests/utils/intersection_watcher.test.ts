@@ -29,11 +29,15 @@ const installObserver = ({
   constructorError,
   constructorErrorAt,
   observeErrorAt,
+  rejectInvalidOptions = false,
+  onConstruct,
 }: {
   constructorError?: Error;
-  /** 1-based construction that fails; omitted = every construction fails. */
-  constructorErrorAt?: number;
+  /** 1-based constructions that fail; omitted = every construction fails. */
+  constructorErrorAt?: number | readonly number[];
   observeErrorAt?: number;
+  rejectInvalidOptions?: boolean;
+  onConstruct?: (options: IntersectionObserverInit | undefined) => void;
 } = {}): ObserverRecord[] => {
   const records: ObserverRecord[] = [];
   let constructions = 0;
@@ -47,11 +51,23 @@ const installObserver = ({
       options?: IntersectionObserverInit,
     ) {
       constructions += 1;
-      if (
-        constructorError &&
-        (constructorErrorAt === undefined || constructions === constructorErrorAt)
-      ) {
+      onConstruct?.(options);
+      const failsAt = Array.isArray(constructorErrorAt)
+        ? constructorErrorAt.includes(constructions)
+        : constructorErrorAt === undefined || constructions === constructorErrorAt;
+      if (constructorError && failsAt) {
         throw constructorError;
+      }
+      const thresholds = Array.isArray(options?.threshold)
+        ? options.threshold
+        : options?.threshold === undefined
+          ? []
+          : [options.threshold];
+      if (
+        rejectInvalidOptions &&
+        (options?.rootMargin === "200" || thresholds.some((value) => value < 0 || value > 1))
+      ) {
+        throw new SyntaxError("invalid IntersectionObserver options");
       }
       this.#record = {
         callback,
@@ -85,6 +101,7 @@ const installObserver = ({
 describe("IntersectionWatcher", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     document.body.innerHTML = "";
   });
 
@@ -124,6 +141,7 @@ describe("IntersectionWatcher", () => {
       threshold: [0, 0.5],
     });
     expect(watcher.active).toBe(true);
+    expect(watcher.usingPlatformDefaults).toBe(false);
   });
 
   it("honors an explicit viewport root instead of resolving rootSelector", () => {
@@ -180,20 +198,85 @@ describe("IntersectionWatcher", () => {
 
     expect(records[0]?.disconnectCount).toBe(1);
     expect(watcher.active).toBe(false);
+    expect(watcher.usingPlatformDefaults).toBe(false);
     expect(onEntries).not.toHaveBeenCalled();
   });
 
-  it("remains inactive and rethrows an observer constructor failure", () => {
-    const failure = new Error("constructor failed");
-    installObserver({ constructorError: failure });
+  it("retries invalid options once with platform defaults while preserving the root", () => {
+    const onConstruct = vi.fn();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const records = installObserver({ rejectInvalidOptions: true, onConstruct });
+    const target = document.createElement("div");
+    const root = document.createElement("div");
+    const onEntries = vi.fn();
+    const watcher = new IntersectionWatcher(onEntries);
+
+    expect(watcher.start(target, { root, rootMargin: "200", threshold: [0, 0.5] })).toBe(true);
+
+    expect(onConstruct).toHaveBeenCalledTimes(2);
+    expect(onConstruct).toHaveBeenNthCalledWith(1, {
+      root,
+      rootMargin: "200",
+      threshold: [0, 0.5],
+    });
+    expect(onConstruct).toHaveBeenNthCalledWith(2, { root });
+    expect(records).toHaveLength(1);
+    expect(records[0]?.options).toEqual({ root });
+    expect(records[0]?.observed).toEqual([target]);
+    expect(watcher.active).toBe(true);
+    expect(watcher.usingPlatformDefaults).toBe(true);
+    expect(warning).toHaveBeenCalledOnce();
+
+    records[0]?.callback([entryFor(target)]);
+    expect(onEntries).toHaveBeenCalledOnce();
+
+    watcher.stop();
+    expect(watcher.usingPlatformDefaults).toBe(false);
+  });
+
+  it("drops an invalid threshold when retrying with platform defaults", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const records = installObserver({ rejectInvalidOptions: true });
+    const target = document.createElement("div");
     const watcher = new IntersectionWatcher(() => {});
 
-    expect(() => watcher.start(document.createElement("div"))).toThrow(failure);
+    expect(watcher.start(target, { threshold: 2 })).toBe(true);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]?.options).toEqual({ root: null });
+    expect(records[0]?.observed).toEqual([target]);
+    expect(watcher.active).toBe(true);
+    expect(watcher.usingPlatformDefaults).toBe(true);
+    expect(warning).toHaveBeenCalledOnce();
+  });
+
+  it("remains inactive and rethrows when the fallback constructor also fails", () => {
+    const firstFailure = new Error("invalid options");
+    const fallbackFailure = new Error("fallback failed");
+    const onConstruct = vi.fn();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let constructions = 0;
+    class IntersectionObserverMock {
+      constructor() {
+        constructions += 1;
+        onConstruct();
+        throw constructions === 1 ? firstFailure : fallbackFailure;
+      }
+    }
+    vi.stubGlobal("IntersectionObserver", IntersectionObserverMock);
+    const watcher = new IntersectionWatcher(() => {});
+
+    expect(() => watcher.start(document.createElement("div"))).toThrow(fallbackFailure);
+    expect(onConstruct).toHaveBeenCalledTimes(2);
+    expect(warning).toHaveBeenCalledOnce();
     expect(watcher.active).toBe(false);
+    expect(watcher.usingPlatformDefaults).toBe(false);
   });
 
   it("disconnects partial observation and rethrows an observe failure", () => {
-    const records = installObserver({ observeErrorAt: 2 });
+    const onConstruct = vi.fn();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const records = installObserver({ observeErrorAt: 2, onConstruct });
     const first = document.createElement("div");
     const second = document.createElement("div");
     const onEntries = vi.fn();
@@ -204,14 +287,19 @@ describe("IntersectionWatcher", () => {
 
     expect(records[0]?.observed).toEqual([first]);
     expect(records[0]?.disconnectCount).toBe(1);
+    expect(onConstruct).toHaveBeenCalledOnce();
+    expect(warning).not.toHaveBeenCalled();
     expect(watcher.active).toBe(false);
     expect(onEntries).not.toHaveBeenCalled();
   });
 
   it("releases the live observer when a restart fails to construct", () => {
+    const onConstruct = vi.fn();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const records = installObserver({
       constructorError: new Error("constructor failed"),
-      constructorErrorAt: 2,
+      constructorErrorAt: [2, 3],
+      onConstruct,
     });
     const first = document.createElement("div");
     const second = document.createElement("div");
@@ -225,6 +313,8 @@ describe("IntersectionWatcher", () => {
     // once and can no longer reach the consumer: a watcher that deferred its
     // cleanup to the catch block would leak the old observation instead.
     expect(records).toHaveLength(1);
+    expect(onConstruct).toHaveBeenCalledTimes(3);
+    expect(warning).toHaveBeenCalledOnce();
     expect(records[0]?.disconnectCount).toBe(1);
     expect(watcher.active).toBe(false);
     records[0]?.callback([entryFor(first)]);

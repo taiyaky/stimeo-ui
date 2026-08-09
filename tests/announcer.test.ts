@@ -192,7 +192,7 @@ describe("AnnouncerController", () => {
     expect(root().querySelector("[aria-live]")).toBeNull();
   });
 
-  // Layer ③ — the announced text must reach the live region's accessible name.
+  // The announced text must reach the live region's accessible name.
   it("announces the message text through the live region", async () => {
     await start(`data-stimeo--announcer-clear-after-value="0"`);
     announce({ message: "Profile saved" });

@@ -157,9 +157,9 @@ describe("EmptyStateController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — speech-order regression: the empty message sits in a polite live
-  // region the controller marks up when the list is empty.
-  it("announces the empty live region when there are no items (layer ③)", async () => {
+  // Speech-order regression: the empty message sits in a polite live region the
+  // controller marks up when the list is empty.
+  it("announces the empty live region when there are no items", async () => {
     await mount("");
     const speech = await captureSpeech({ container: empty(), steps: 1 });
     expect(speech).toEqual(["paragraph", "No items"]);

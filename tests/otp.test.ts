@@ -50,6 +50,26 @@ describe("OtpController", () => {
     document.body.innerHTML = "";
   });
 
+  it("reverses the horizontal arrows under RTL", async () => {
+    // Logical direction. `dir="rtl"` is the authoring contract, but happy-dom does
+    // not resolve it into the computed style, so the direction is set on the style
+    // directly. The two branches guard different bounds (`index > 0` on one side,
+    // `index < length - 1` on the other), so this also pins each guard to its own
+    // direction.
+    const fields = document.querySelectorAll(".field") as NodeListOf<HTMLInputElement>;
+    (document.getElementById("otp") as HTMLElement).style.direction = "rtl";
+    fields[0]?.focus();
+
+    fields[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    expect(document.activeElement).toBe(fields[1]); // "next field" under RTL
+
+    fields[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(document.activeElement).toBe(fields[0]); // "previous field"
+
+    fields[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(document.activeElement).toBe(fields[0]); // guarded at the first field
+  });
+
   it("auto-advances focus upon valid numeric inputs and filters letters", async () => {
     const fields = document.querySelectorAll(".field") as NodeListOf<HTMLInputElement>;
     const valueEl = document.getElementById("otp-value") as HTMLInputElement;
@@ -114,6 +134,25 @@ describe("OtpController", () => {
     expect(fields[0]?.value).toBe("");
     expect(fields[0]?.getAttribute("data-filled")).toBeNull();
     expect(valueEl.value).toBe("");
+  });
+
+  it("leaves a modified arrow to the browser", async () => {
+    // A chorded arrow belongs to the browser or the OS, so the fields must neither
+    // consume the press nor move focus to the next digit.
+    const fields = document.querySelectorAll(".field") as NodeListOf<HTMLInputElement>;
+    fields[0]?.focus();
+
+    const chord = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    fields[0]?.dispatchEvent(chord);
+    await tick();
+
+    expect(chord.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(fields[0]);
   });
 
   it("handles ArrowKeys and Home/End focus stepping", async () => {
@@ -258,14 +297,14 @@ describe("OtpController", () => {
     expect(document.activeElement).toBe(fields[1]);
   });
 
-  // --- Layer ① machine a11y ---
+  // --- Machine-detectable a11y ---
 
   it("has no machine-detectable a11y violations", async () => {
     const root = document.getElementById("otp") as HTMLElement;
     await expectNoA11yViolations(root);
   });
 
-  // --- Layer ③ speech-order regression ---
+  // --- Speech order ---
 
   it("announces group and field roles/names in order", async () => {
     const root = document.getElementById("otp") as HTMLElement;
@@ -280,7 +319,7 @@ describe("OtpController", () => {
     ]);
   });
 
-  // --- Disconnect teardown regression ---
+  // --- Disconnect teardown ---
 
   it("properly disconnects all per-field listeners without errors", async () => {
     const fields = document.querySelectorAll(".field") as NodeListOf<HTMLInputElement>;

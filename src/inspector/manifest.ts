@@ -2,26 +2,22 @@ import { cableControllers } from "../cable";
 import { stimeoControllers } from "../index";
 import { positioningControllers } from "../positioning";
 import { a11yRules } from "./a11y_rules";
+import { cardinalityRules } from "./cardinality_rules";
+import { companionRules } from "./companion_rules";
 import { compositionRules } from "./composition_rules";
+import { forbiddenAriaRules } from "./forbidden_aria_rules";
 import { keyboardRules } from "./keyboard_rules";
 import { managedAriaRules } from "./managed_aria_rules";
 import { structureRules } from "./structure_rules";
+import { targetDeclarationRules } from "./target_declaration_rules";
 import type { ControllerManifest, Manifest } from "./types";
 
 /**
- * Current manifest *format* version. Bump on breaking schema changes.
- *
- * v2 adds `actions` and `events` to every controller entry (the public
- * action/event surface, declared via `static actions` / `static events`).
- * v3 adds `a11y` — the stage-3 accessibility requirements the consumer's markup
- * must satisfy.
- * v4 adds `or` alternatives to a11y requirements, plus `keyboard` (authored
- * focusability prerequisites) and `managedAria` (author-futile attributes,
- * reported as warnings) to every controller entry.
- * v5 adds `compositions` — conditional cross-controller value-alignment rules
- * (e.g. sortable's sort axis vs a co-located roving's `orientation`).
+ * Current manifest *format* version, stamped onto every generated manifest as
+ * `schemaVersion`. Bump on breaking schema changes; a reader compares it with
+ * the shape its own engine knows how to consume.
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 8;
 
 /**
  * Minimal structural view of a Stimulus controller class, exposing only the
@@ -85,10 +81,15 @@ export function buildManifest(packageVersion: string): Manifest {
       actions: [...(reflect.actions ?? [])],
       events: [...(reflect.events ?? [])],
       requiredTargets: [...(rule?.requiredTargets ?? [])],
+      conditionalTargets: [...(rule?.conditionalTargets ?? [])],
       a11y: [...(allA11yRules[identifier] ?? [])],
       keyboard: [...(keyboardRules[identifier] ?? [])],
       managedAria: [...(allManagedAriaRules[identifier] ?? [])],
       compositions: [...(compositionRules[identifier] ?? [])],
+      companions: [...(companionRules[identifier] ?? [])],
+      targetDeclarations: [...(targetDeclarationRules[identifier] ?? [])],
+      cardinality: [...(cardinalityRules[identifier] ?? [])],
+      forbiddenAria: [...(forbiddenAriaRules[identifier] ?? [])],
     };
   }
 

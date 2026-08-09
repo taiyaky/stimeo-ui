@@ -104,6 +104,28 @@ describe("DateRangePickerController", () => {
   const key = (el: HTMLElement, k: string) =>
     el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
 
+  it("reverses the horizontal arrows under RTL, leaving the week jump alone", async () => {
+    // Logical direction. `dir="rtl"` is the authoring contract, but happy-dom
+    // does not resolve it into the computed style, so the direction is set
+    // inline instead.
+    await mount();
+    const root = document.querySelector(
+      "[data-controller='stimeo--date-range-picker']",
+    ) as HTMLElement;
+    root.style.direction = "rtl";
+    const from = cell("2026-06-12");
+    from.focus();
+
+    key(from, "ArrowRight"); // "previous day" under RTL
+    expect(document.activeElement).toBe(cell("2026-06-11"));
+
+    key(cell("2026-06-11"), "ArrowLeft"); // "next day"
+    expect(document.activeElement).toBe(cell("2026-06-12"));
+
+    key(cell("2026-06-12"), "ArrowUp"); // -7 days regardless of direction
+    expect(document.activeElement).toBe(cell("2026-06-05"));
+  });
+
   it("renders the confirmed range: ends selected, inner cells in range", async () => {
     await mount();
     expect(cell("2026-06-10").getAttribute("aria-selected")).toBe("true");
@@ -114,6 +136,35 @@ describe("DateRangePickerController", () => {
     expect(cell("2026-06-15").getAttribute("aria-selected")).toBe("false");
     // Boundaries are excluded from the inner-range hook.
     expect(cell("2026-06-10").hasAttribute("data-in-range")).toBe(false);
+  });
+
+  it("yields a grid key a descendant widget already consumed", async () => {
+    // A widget inside a gridcell that claims Enter must not ALSO commit a range
+    // endpoint.
+    //
+    // The claimed press is the SECOND one: the first `#choose` only parks a
+    // pending start and leaves the fields untouched, so asserting on them after
+    // one press cannot tell the guard apart from no guard.
+    await mount();
+    const detail: Array<{ start: string; end: string }> = [];
+    root().addEventListener("stimeo--date-range-picker:change", (e) => {
+      detail.push((e as CustomEvent).detail);
+    });
+    click("2026-06-05"); // pending start
+
+    const inner = document.createElement("span");
+    cell("2026-06-08").append(inner);
+    inner.addEventListener("keydown", (event) => event.preventDefault());
+    const claimed = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    const notCanceled = inner.dispatchEvent(claimed);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(detail).toEqual([]); // the range must not confirm
+    expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(true); // still pending
   });
 
   it("selects a fresh range over two clicks and dispatches change", async () => {
@@ -150,6 +201,37 @@ describe("DateRangePickerController", () => {
     expect(cell("2026-06-09").hasAttribute("data-range-end")).toBe(true);
   });
 
+  it("does not tell assistive tech that a previewed cell is selected", async () => {
+    // The preview is a pointer affordance, not a choice. Announcing the hovered
+    // day as "selected" tells a screen-reader user the range is already set —
+    // and the pending start is not committed either. Both live in `data-*`.
+    await mount();
+    click("2026-06-05"); // pending start
+    hover("2026-06-09");
+
+    expect(cell("2026-06-05").getAttribute("aria-selected")).toBe("false");
+    expect(cell("2026-06-09").getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("marks the confirmed endpoints, and only those, as selected", async () => {
+    await mount();
+    click("2026-06-05");
+    click("2026-06-08");
+
+    expect(cell("2026-06-05").getAttribute("aria-selected")).toBe("true");
+    expect(cell("2026-06-08").getAttribute("aria-selected")).toBe("true");
+    expect(cell("2026-06-07").getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("declares the grid multi-selectable, since a range marks two cells", async () => {
+    await mount();
+    const grid = document.querySelector(
+      "[data-stimeo--date-range-picker-target='grid']",
+    ) as HTMLElement;
+
+    expect(grid.getAttribute("aria-multiselectable")).toBe("true");
+  });
+
   it("cancels an in-progress selection on Escape, restoring the confirmed range", async () => {
     await mount();
     click("2026-06-05"); // pending start replaces preview
@@ -169,6 +251,27 @@ describe("DateRangePickerController", () => {
       new KeyboardEvent("keydown", { key: "Escape", bubbles: true, isComposing: true }),
     );
     expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(true);
+  });
+
+  it("leaves a modified arrow to the browser", async () => {
+    // A chorded arrow belongs to the browser (history back/forward), not the grid:
+    // the press is neither cancelled nor allowed to move the roving tab stop.
+    // The local `key` helper builds a non-cancelable event, which could not report
+    // a claim either way, so the event is built here.
+    await mount();
+    expect(cell("2026-06-10").getAttribute("tabindex")).toBe("0");
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    cell("2026-06-10").dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(cell("2026-06-10").getAttribute("tabindex")).toBe("0");
+    expect(cell("2026-06-11").getAttribute("tabindex")).toBe("-1");
   });
 
   it("moves roving focus with the arrow keys", async () => {
@@ -334,9 +437,9 @@ describe("DateRangePickerController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — speech-order regression scoped to a range endpoint. Pins the
-  // gridcell role, the accessible name (the day number), and the selected state
-  // so a lost role/name or a dropped aria-selected surfaces as a diff.
+  // Speech-order regression scoped to a range endpoint. Pins the gridcell role,
+  // the accessible name (the day number), and the selected state so a lost
+  // role/name or a dropped aria-selected surfaces as a diff.
   it("announces the endpoint cell's role, name, and selected state", async () => {
     await mount();
     const spoken = await captureSpeech({ container: cell("2026-06-10"), steps: 0 });

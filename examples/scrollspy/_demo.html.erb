@@ -1,7 +1,11 @@
 <%# Markup for the scrollspy (table-of-contents scroll tracking) demo.
-    stimeo--scrollspy provides intersection monitoring via IntersectionObserver and
-    nearest-to-top-trigger detection, and automatically sets and manages
-    aria-current="location" on the active link. %>
+    stimeo--scrollspy watches the sections with IntersectionObserver and marks the one whose
+    top edge sits closest to the trigger line: offset px (20 here) below the top of the
+    scroll root, which is the .scrollspy-demo__content container rather than the viewport.
+    Intersecting sections win; when none intersects, the closest tracked section keeps the
+    highlight, so the table of contents never goes blank. The library sets
+    aria-current="location" on the matching link and takes only that value back from the
+    others, so an aria-current you set yourself survives. %>
 <div class="scrollspy-demo">
   <nav
     class="scrollspy-demo__nav"
@@ -37,7 +41,16 @@
     </a>
   </nav>
 
-  <div class="scrollspy-demo__content">
+  <%# The content area scrolls but holds no focusable element of its own, so it needs an
+      explicit tab stop or keyboard-only users cannot scroll it (WCAG 2.1.1; Safari does not
+      make overflow containers implicitly focusable). role="region" is safe to add here
+      because the label below gives it an accessible name. %>
+  <div
+    class="scrollspy-demo__content"
+    tabindex="0"
+    role="region"
+    aria-label="<%= t("components.scrollspy.demo.viewport_label") %>"
+  >
     <section id="toc-intro" class="scrollspy-demo__section">
       <h2><%= t("components.scrollspy.demo.intro_title") %></h2>
       <p><%= t("components.scrollspy.demo.intro_body") %></p>

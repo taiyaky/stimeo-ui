@@ -147,7 +147,7 @@ describe("NetworkStatusController", () => {
     expect(el.hidden).toBe(true);
   });
 
-  // Layer ③ — going offline must announce the alert text through its live region.
+  // Going offline must announce the alert text through its live region.
   it("announces the offline alert through the live region", async () => {
     await start();
     window.dispatchEvent(new Event("offline"));

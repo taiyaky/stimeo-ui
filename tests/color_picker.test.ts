@@ -72,6 +72,21 @@ describe("ColorPickerController", () => {
   const press = (el: HTMLElement, key: string) =>
     el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
 
+  /** A hue-only picker whose range attributes are supplied verbatim by the case. */
+  const startWithHueRange = async (range: string) => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--color-picker" data-stimeo--color-picker-value-value="#ff0000">
+        <div role="slider" aria-label="Hue" data-channel="hue" tabindex="0" ${range}
+             data-stimeo--color-picker-target="slider"
+             data-action="keydown->stimeo--color-picker#onKeydown"></div>
+        <input type="text" aria-label="Hex color" data-stimeo--color-picker-target="hex"
+               data-action="change->stimeo--color-picker#onHexInput" />
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--color-picker", ColorPickerController);
+    await tick();
+  };
+
   it("seeds every channel and surface from the initial hex value", async () => {
     await start('data-stimeo--color-picker-value-value="#ff0000"');
     expect(slider("hue").getAttribute("aria-valuenow")).toBe("0");
@@ -97,12 +112,48 @@ describe("ColorPickerController", () => {
     expect(hex().value).toBe("#ff0400");
   });
 
+  it("leaves a modified arrow to the browser", async () => {
+    // Alt+Arrow is a browser binding: the slider neither steps its channel nor
+    // calls preventDefault().
+    await start('data-stimeo--color-picker-value-value="#ff0000"');
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    slider("hue").dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(slider("hue").getAttribute("aria-valuenow")).toBe("0");
+    expect(hex().value).toBe("#ff0000");
+  });
+
   it("jumps to channel bounds with Home and End", async () => {
     await start('data-stimeo--color-picker-value-value="#ff0000"');
     press(slider("hue"), "End");
     expect(slider("hue").getAttribute("aria-valuenow")).toBe("360");
     press(slider("hue"), "Home");
     expect(slider("hue").getAttribute("aria-valuenow")).toBe("0");
+  });
+
+  it("falls back to the channel range when a slider omits aria-valuemin/max", async () => {
+    await startWithHueRange("");
+    press(slider("hue"), "End");
+    expect(slider("hue").getAttribute("aria-valuenow")).toBe("360");
+    // Clamping still applies against the fallback maximum.
+    press(slider("hue"), "ArrowRight");
+    expect(slider("hue").getAttribute("aria-valuenow")).toBe("360");
+    press(slider("hue"), "Home");
+    expect(slider("hue").getAttribute("aria-valuenow")).toBe("0");
+  });
+
+  it("falls back to the channel range when aria-valuemax is blank", async () => {
+    // A blank attribute coerces to 0 just like an absent one, so presence alone
+    // cannot decide whether the author supplied a bound.
+    await startWithHueRange('aria-valuemin="" aria-valuemax=""');
+    press(slider("hue"), "End");
+    expect(slider("hue").getAttribute("aria-valuenow")).toBe("360");
   });
 
   it("moves by a larger step on PageUp/PageDown", async () => {
@@ -208,8 +259,61 @@ describe("ColorPickerController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — speech-order regression: each channel announces its slider role,
-  // name, bounds, and value text, so a dropped role/name surfaces as a diff.
+  // A gradient written `to right` does not mirror, so nothing may follow the
+  // writing direction unless the consumer says their tracks do. `dir="rtl"` is
+  // the authoring contract, but happy-dom does not resolve it into the computed
+  // style, so the direction is set as an inline style instead.
+  describe("writing direction", () => {
+    const pressHue = (clientX: number) => {
+      const hue = slider("hue");
+      hue.getBoundingClientRect = () => new DOMRect(0, 0, 360, 10);
+      hue.dispatchEvent(new PointerEvent("pointerdown", { clientX, bubbles: true }));
+    };
+
+    it("ignores RTL when the tracks were not declared logical", async () => {
+      await start('data-stimeo--color-picker-value-value="#000000"');
+      root().style.direction = "rtl";
+
+      pressHue(180);
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("180");
+
+      press(slider("hue"), "ArrowLeft");
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("179");
+    });
+
+    it("reads the pointer from the right edge on logical tracks under RTL", async () => {
+      await start(
+        'data-stimeo--color-picker-value-value="#000000" data-stimeo--color-picker-logical-track-value="true"',
+      );
+      root().style.direction = "rtl";
+
+      pressHue(180);
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("180");
+
+      pressHue(0);
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("360");
+    });
+
+    it("trades the horizontal arrows on logical tracks under RTL", async () => {
+      await start(
+        'data-stimeo--color-picker-value-value="#000000" data-stimeo--color-picker-logical-track-value="true"',
+      );
+      root().style.direction = "rtl";
+
+      press(slider("hue"), "ArrowLeft");
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("1");
+
+      press(slider("hue"), "ArrowRight");
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("0");
+
+      // The vertical pair names an axis the writing direction does not mirror.
+      press(slider("hue"), "ArrowUp");
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("1");
+    });
+  });
+
+  // Speech-order regression: each channel announces its slider role, name,
+  // bounds, and value text, so a dropped role/name surfaces as a diff.
   it("announces the hue slider role, name, and value text", async () => {
     await start('data-stimeo--color-picker-value-value="#ff0000"');
     const phrases = await captureSpeech({ container: slider("hue"), steps: 0 });

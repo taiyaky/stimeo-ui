@@ -1,6 +1,25 @@
 import { Controller } from "@hotwired/stimulus";
-import { parseISODateString, parseISOMonthString, toISODateString } from "../utils/dates";
+import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import {
+  parseISODateString,
+  parseISOMonthString,
+  toISODateString,
+  toISOMonthString,
+} from "../utils/dates";
 import { SafeTimeout } from "../utils/safe_timeout";
+
+/**
+ * Marks an `aria-disabled` this controller wrote, so a re-paint takes back only
+ * its own. A consumer marks holidays and booked days with the same attribute;
+ * without the marker a paint would clear their intent.
+ *
+ * The marker is scoped to the date the cell currently shows, not to the cell: the
+ * 42 cells are recycled every month, so a value that outlived its date would
+ * disable a different day. A consumer that marks specific dates applies them once
+ * for the month the grid opens on, then re-applies after
+ * `stimeo--calendar:monthchange`, which reports a move to a different month.
+ */
+const OWNED_DISABLED = "data-stimeo--calendar-owns-disabled";
 
 /**
  * Headless, highly accessible calendar grid behavior.
@@ -68,6 +87,14 @@ export class CalendarController extends Controller<HTMLElement> {
    */
   #focusTimer = new SafeTimeout();
 
+  /**
+   * The painted month the last `monthchange` reported, or `null` before the first
+   * paint. Settling on the initial month — whether it comes from the attribute or
+   * is derived here — is the grid describing itself, not a navigation, so it must
+   * not reach a listener that refetches inventory or pushes history.
+   */
+  #announcedMonth: string | null = null;
+
   override connect(): void {
     // Initialize monthValue to current month if not provided
     if (!this.monthValue) {
@@ -94,7 +121,6 @@ export class CalendarController extends Controller<HTMLElement> {
     if (!this.monthValue) return;
     this.#syncFocusedDateWithMonth();
     this.render();
-    this.dispatch("monthchange", { detail: { month: this.monthValue } });
   }
 
   /**
@@ -125,9 +151,9 @@ export class CalendarController extends Controller<HTMLElement> {
 
   /** Handles day selection when a gridcell is clicked. */
   selectByClick(event: MouseEvent): void {
-    const target = event.target as HTMLElement | null;
-    if (!target) return;
-    const dayElement = target.closest("[data-stimeo--calendar-target='day']") as HTMLElement | null;
+    const dayElement = (event.target as HTMLElement | null)?.closest<HTMLElement>(
+      "[data-stimeo--calendar-target='day']",
+    );
     if (!dayElement) return;
 
     this.selectDayElement(dayElement);
@@ -135,20 +161,27 @@ export class CalendarController extends Controller<HTMLElement> {
 
   /** Handles grid cell keyboard navigation and triggers selection. */
   onKeydown(event: KeyboardEvent): void {
-    const target = event.target as HTMLElement | null;
-    if (!target) return;
-    const dayElement = target.closest("[data-stimeo--calendar-target='day']") as HTMLElement | null;
+    // A widget that already claimed the key (a nested control, an enclosing
+    // composite) must not ALSO move the roving focus or select a day.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
+    const dayElement = (event.target as HTMLElement | null)?.closest<HTMLElement>(
+      "[data-stimeo--calendar-target='day']",
+    );
     if (!dayElement) return;
 
-    const dateStr = dayElement.getAttribute("data-date");
-    if (!dateStr) return;
-    const date = parseISODateString(dateStr);
+    // A cell the paint never reached carries no `data-date`, and an empty string
+    // parses to null — one exit covers both.
+    const date = parseISODateString(dayElement.getAttribute("data-date") ?? "");
     if (!date) return;
 
     let handled = true;
     let nextDate = new Date(date);
 
-    switch (event.key) {
+    // Logical, not physical. The key is normalised rather than the
+    // delta negated: these two branches are not mirror images — their guards
+    // differ — so swapping the key keeps each guard with its own direction.
+    switch (logicalArrowKey(event.key, this.element)) {
       case "ArrowLeft":
         nextDate.setDate(nextDate.getDate() - 1);
         break;
@@ -183,6 +216,12 @@ export class CalendarController extends Controller<HTMLElement> {
         break;
       case "t":
       case "T": {
+        // A single printable key must not be claimed out of a modifier chord:
+        // Ctrl/Cmd/Alt+T belongs to the browser, not to the grid.
+        if (event.ctrlKey || event.metaKey || event.altKey) {
+          handled = false;
+          break;
+        }
         const now = new Date();
         nextDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
         break;
@@ -203,33 +242,65 @@ export class CalendarController extends Controller<HTMLElement> {
     }
   }
 
-  /** Renders the grid days and updates the month/year label. */
-  render(): void {
+  /**
+   * First day of the month the grid paints: the `month` Value when it parses,
+   * otherwise the focused date's month.
+   *
+   * A malformed `month` falls back instead of stopping the paint: every cell
+   * keeps its `aria-selected` and the grid keeps its tab stop, so a Value typo
+   * still leaves the grid reachable by Tab and the author can see what they
+   * typed. Every consumer of "which month is on screen" reads it from here, so
+   * the paint and the `monthchange` report cannot name different months.
+   */
+  #paintedMonthStart(): Date {
     const monthInfo = parseISOMonthString(this.monthValue);
-    if (!monthInfo) return;
+    return monthInfo
+      ? new Date(monthInfo.year, monthInfo.month - 1, 1)
+      : new Date(this.focusedDate.getFullYear(), this.focusedDate.getMonth(), 1);
+  }
 
-    const { year, month } = monthInfo;
+  /**
+   * Renders the grid days and updates the month/year label, then reports the
+   * painted month once it differs from the one already announced.
+   *
+   * The report belongs to the paint, not to the `month` Value: the Value is only
+   * one of the things that decide the month on screen. While a malformed `month`
+   * falls back, changing `selected` and selecting a neighbouring month's cell
+   * move the painted month too, and both repaint from here. Reading the report
+   * off the paint keeps the event naming the month the grid shows, in the
+   * `YYYY-MM` the detail contract promises, whichever route repainted.
+   */
+  render(): void {
+    const monthStart = this.#paintedMonthStart();
+    const year = monthStart.getFullYear();
+    const month = monthStart.getMonth() + 1;
 
     // Update label with localized month/year
     if (this.hasLabelTarget) {
       const lang = document.documentElement.lang || "en";
-      const labelDate = new Date(year, month - 1, 1);
       const formatter = new Intl.DateTimeFormat(lang, { month: "long", year: "numeric" });
-      this.labelTarget.textContent = formatter.format(labelDate);
+      this.labelTarget.textContent = formatter.format(monthStart);
     }
 
     const days = this.#calculateGridDays(year, month);
     const dayElements = this.dayTargets;
 
-    // Iterate through pre-allocated day targets and bind state
-    for (let i = 0; i < 42; i++) {
-      const el = dayElements[i];
+    // Driven by the dates, so every iteration has one. A short `day` target set
+    // is the consumer's markup contradicting the documented 42 cells: paint the
+    // ones that exist rather than dropping the grid out of the tab order.
+    for (const [index, date] of days.entries()) {
+      const el = dayElements[index];
       if (!el) continue;
 
-      const date = days[i];
-      if (!date) continue;
-
       const dateStr = toISODateString(date);
+      // The 42 cells are recycled across months, so an `aria-disabled` the
+      // consumer wrote describes the date the cell showed before this paint.
+      // Carrying it over would silently disable an unrelated day, so a date change
+      // resets the attribute to whatever this render decides below.
+      if (el.getAttribute("data-date") !== dateStr) {
+        el.removeAttribute("aria-disabled");
+        el.removeAttribute(OWNED_DISABLED);
+      }
       el.setAttribute("data-date", dateStr);
       el.textContent = String(date.getDate());
 
@@ -249,13 +320,38 @@ export class CalendarController extends Controller<HTMLElement> {
       const isFocused = toISODateString(this.focusedDate) === dateStr;
       el.setAttribute("tabindex", isFocused ? "0" : "-1");
 
-      // min/max limits
+      // min/max limits. Only the value this controller wrote comes back off: a
+      // consumer marks holidays and booked days with the same attribute, and
+      // clearing it on every paint would silently throw their intent away.
       const isDisabled = this.#isDateOutOfBounds(dateStr);
       if (isDisabled) {
+        if (!el.hasAttribute("aria-disabled")) el.setAttribute(OWNED_DISABLED, "");
         el.setAttribute("aria-disabled", "true");
-      } else {
+      } else if (el.hasAttribute(OWNED_DISABLED)) {
         el.removeAttribute("aria-disabled");
+        el.removeAttribute(OWNED_DISABLED);
       }
+    }
+
+    // Roving contract: exactly one focusable cell, always. `focusedDate` can sit
+    // outside the rendered range — `selected` names a day in another month, and
+    // nothing forces the two Values to agree — in which case no cell matched
+    // above and the grid would be unreachable by Tab. Fall back to the first day
+    // of the shown month so there is always a way in; arrow navigation reads the
+    // date off the focused cell, so it continues from wherever the tab stop is.
+    if (!dayElements.some((el) => el.getAttribute("tabindex") === "0")) {
+      const fallback =
+        dayElements.find((el) => el.getAttribute("data-outside") === "false") ?? dayElements[0];
+      fallback?.setAttribute("tabindex", "0");
+    }
+
+    // Post-paint, so a listener that re-marks holidays and booked days sees the
+    // cells of the month it is being told about.
+    const painted = toISOMonthString(monthStart);
+    const previous = this.#announcedMonth;
+    this.#announcedMonth = painted;
+    if (previous !== null && previous !== painted) {
+      this.dispatch("monthchange", { detail: { month: painted } });
     }
   }
 
@@ -269,7 +365,7 @@ export class CalendarController extends Controller<HTMLElement> {
     // Reflect the selection synchronously (move roving focus to the selected day and
     // repaint aria-selected) instead of waiting on the async value observer, so a
     // click or Enter updates the grid in the same tick — consistent with how the
-    // navigation handler re-renders directly. selectedValueChanged remains for
+    // navigation handler re-renders directly. `selectedValueChanged` covers
     // external (consumer-driven) value changes.
     const selected = parseISODateString(dateStr);
     if (selected) this.focusedDate = selected;

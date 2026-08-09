@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isRtl } from "../utils/logical_scroll";
 
 /** A reorder in flight: one item picked up by pointer or keyboard. */
 interface SortSession {
@@ -46,7 +47,9 @@ interface SortSession {
  *
  * Pointer flow: dragging an item live-moves it whenever the pointer crosses a
  * sibling's midpoint (per `orientation`). Keyboard flow: each synthetic
- * `pointer-drag` move steps the item one position. Dropping dispatches
+ * `pointer-drag` move steps the item one position. A horizontal list under
+ * `dir="rtl"` reverses both, since DOM order then runs right-to-left while
+ * `pointer-drag` reports physical coordinates. Dropping dispatches
  * `reorder` (`{ item, from, to }`, zero-based) when the position changed;
  * Escape / `pointercancel` restores the pickup position. Every step is mirrored
  * into the `status` live region (localizable via `data-grabbed` / `data-moved`
@@ -153,6 +156,12 @@ export class SortableController extends Controller<HTMLElement> {
    * Keyboard stepping: `pointer-drag` reports *cumulative* synthetic deltas, so
    * the difference from the last consumed value is one arrow press — its sign is
    * the direction. Cross-axis arrows never change the primary delta (no move).
+   *
+   * The sign is physical (`ArrowRight` is always `+dx`), so a right-to-left row
+   * has to invert it: there, moving the item rightward means moving it *earlier*
+   * in the DOM. Skipping this would also split the two halves of one keypress —
+   * `roving` already moves focus logically, so the same arrow would send the
+   * focus and the grabbed item opposite ways.
    */
   #stepFromKeyboard(session: SortSession, detail: Record<string, number | string>): void {
     const primary = Number(this.#isVertical ? detail.dy : detail.dx) || 0;
@@ -162,7 +171,8 @@ export class SortableController extends Controller<HTMLElement> {
 
     const items = this.#items();
     const index = items.indexOf(session.item);
-    const next = Math.max(0, Math.min(index + (delta > 0 ? 1 : -1), items.length - 1));
+    const step = (delta > 0 ? 1 : -1) * (this.#isReversed ? -1 : 1);
+    const next = Math.max(0, Math.min(index + step, items.length - 1));
     if (next === index) return;
     this.#moveTo(session.item, next);
     this.#announce("moved", session.item);
@@ -180,11 +190,20 @@ export class SortableController extends Controller<HTMLElement> {
 
     let laidOut = false;
     let target = 0;
+    // `target` counts the siblings that precede the pointer *in DOM order*, and
+    // the two agree only while DOM order runs the same way as the coordinate. In
+    // a right-to-left row it runs the other way, so the comparison flips;
+    // leaving it physical would mix two orderings into one number and drop the
+    // item at a slot the pointer never crossed. Resolved once: it cannot change
+    // mid-loop, and reading it per sibling would re-run `getComputedStyle` on
+    // every pointermove.
+    const reversed = this.#isReversed;
     for (const other of others) {
       const rect = other.getBoundingClientRect();
       if (rect.width > 0 || rect.height > 0) laidOut = true;
       const midpoint = this.#isVertical ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
-      if (pointer > midpoint) target += 1;
+      const precedes = reversed ? pointer < midpoint : pointer > midpoint;
+      if (precedes) target += 1;
     }
     if (!laidOut) return;
 
@@ -215,7 +234,7 @@ export class SortableController extends Controller<HTMLElement> {
    * Mirrors a step into the `status` live region. Copy is localizable through
    * `data-grabbed` / `data-moved` / `data-dropped` / `data-canceled` templates on
    * the status element (`%{name}` / `%{position}` / `%{total}` placeholders);
-   * terse English is the fallback (the library's shared status-channel design).
+   * terse English is the fallback.
    */
   #announce(key: "grabbed" | "moved" | "dropped" | "canceled", item: HTMLElement): void {
     if (!this.hasStatusTarget) return;
@@ -266,5 +285,21 @@ export class SortableController extends Controller<HTMLElement> {
 
   get #isVertical(): boolean {
     return this.orientationValue !== "horizontal";
+  }
+
+  /**
+   * Whether DOM order runs opposite to the primary coordinate — true only for a
+   * horizontal row under `dir="rtl"`, where the first item sits at the largest
+   * `x`. Both drag paths reach this controller in physical terms (`pointer-drag`
+   * documents its deltas as physical and hands RTL to its consumer, which is
+   * this controller), so both have to be mapped back onto DOM order here.
+   *
+   * Read from the list, the element that lays the items out — never from the
+   * dragged item, which may carry its own `dir`. The list inherits the computed
+   * direction, so authoring `dir` on the root works too. A vertical list is
+   * unaffected: writing direction does not mirror the block axis.
+   */
+  get #isReversed(): boolean {
+    return !this.#isVertical && isRtl(this.#list);
   }
 }

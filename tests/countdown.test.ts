@@ -204,9 +204,9 @@ describe("CountdownController", () => {
     await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
     vi.advanceTimersByTime(3000);
     expect(slot("seconds").textContent).toBe("07");
-    // Resetting a *running* timer must re-arm the interval, not render once and freeze.
-    // Regression: teardownInterval() left data-state="running", so the follow-up start()
-    // no-op'd and the display stuck at the reset value while the clock kept advancing.
+    // Resetting a *running* timer must re-arm the interval, not render once and
+    // freeze: reset tears the interval down, so the run state has to leave
+    // "running" for the follow-up start() to take effect.
     instance().reset();
     expect(root().getAttribute("data-state")).toBe("running");
     expect(slot("seconds").textContent).toBe("07");
@@ -250,8 +250,8 @@ describe("CountdownController", () => {
   it("clears the interval on disconnect", async () => {
     await start('data-stimeo--countdown-deadline-value="2026-06-06T00:01:00Z"');
     const secondsEl = slot("seconds");
-    // Invoke disconnect() directly for a deterministic teardown (no reliance on
-    // the async MutationObserver flush, which was environment-sensitive).
+    // Invoke disconnect() directly for a deterministic teardown, without relying
+    // on the async MutationObserver flush.
     instance().disconnect();
     vi.advanceTimersByTime(5000);
     // No tick should mutate the slot past its initial value after teardown.
@@ -260,9 +260,9 @@ describe("CountdownController", () => {
 });
 
 /**
- * Layer ① (axe) and layer ③ (speech-order) run under real timers so the virtual
- * screen reader's async work is not stalled by fake timers. A far-future deadline
- * keeps the (1s) interval from firing during the short test.
+ * The axe audit and the speech-order capture run under real timers so the
+ * virtual screen reader's async work is not stalled by fake timers. A far-future
+ * deadline keeps the (1s) interval from firing during the short test.
  */
 describe("CountdownController accessibility", () => {
   let application: Application;

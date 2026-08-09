@@ -35,6 +35,72 @@ describe("ResizableController", () => {
     document.body.innerHTML = "";
   });
 
+  describe("F6 pane cycling", () => {
+    const root = () => document.getElementById("resizable") as HTMLElement;
+    const primary = () => document.getElementById("pane-1") as HTMLElement;
+    const secondary = () =>
+      document.querySelector("[data-stimeo--resizable-target='secondary']") as HTMLElement;
+    const f6 = (from: HTMLElement, init: KeyboardEventInit = {}) => {
+      const event = new KeyboardEvent("keydown", {
+        key: "F6",
+        bubbles: true,
+        cancelable: true,
+        ...init,
+      });
+      from.dispatchEvent(event);
+      return event;
+    };
+
+    it("enters at the first pane and wraps through the panes", () => {
+      const splitter = document.getElementById("splitter") as HTMLElement;
+      splitter.focus();
+
+      // Focus outside both panes enters the cycle at the first one.
+      expect(f6(splitter).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(primary());
+
+      f6(primary());
+      expect(document.activeElement).toBe(secondary());
+
+      f6(secondary());
+      expect(document.activeElement).toBe(primary());
+    });
+
+    it("lends the pane a tabindex and takes it back on disconnect", () => {
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--resizable",
+      ) as ResizableController;
+      // Panes are consumer containers, so the loan is what makes them focusable.
+      expect(primary().hasAttribute("tabindex")).toBe(false);
+
+      f6(document.getElementById("splitter") as HTMLElement);
+      expect(primary().getAttribute("tabindex")).toBe("-1");
+
+      controller.disconnect();
+      expect(primary().hasAttribute("tabindex")).toBe(false);
+    });
+
+    it("yields a key a descendant widget already consumed", () => {
+      const splitter = document.getElementById("splitter") as HTMLElement;
+      splitter.focus();
+      const event = new KeyboardEvent("keydown", { key: "F6", bubbles: true, cancelable: true });
+      event.preventDefault();
+      splitter.dispatchEvent(event);
+
+      expect(document.activeElement).toBe(splitter);
+    });
+
+    it("leaves a chorded F6 to the browser", () => {
+      const splitter = document.getElementById("splitter") as HTMLElement;
+      splitter.focus();
+
+      const event = f6(splitter, { ctrlKey: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(splitter);
+    });
+  });
+
   it("initializes ARIA properties and CSS custom properties", () => {
     const root = document.getElementById("resizable") as HTMLElement;
     const splitter = document.getElementById("splitter") as HTMLElement;
@@ -45,16 +111,16 @@ describe("ResizableController", () => {
     expect(splitter.getAttribute("aria-valuemax")).toBe("80");
   });
 
-  // Layer ① — machine-detectable a11y.
+  // Machine-detectable a11y.
   it("has no machine-detectable a11y violations", async () => {
     const root = document.getElementById("resizable") as HTMLElement;
     await expectNoA11yViolations(root);
   });
 
-  // Layer ③ — speech-order regression. The separator announces its state
-  // (`role="separator"` + aria-valuenow), so capturing the phrase before and
-  // after a keyboard step pins role, accessible name, bounds, and the announced
-  // value; a lost role/name or a stale value surfaces as a diff.
+  // Speech-order regression. The separator announces its state (`role="separator"`
+  // + aria-valuenow), so capturing the phrase before and after a keyboard step
+  // pins role, accessible name, bounds, and the announced value; a lost role/name
+  // or a stale value surfaces as a diff.
   it("announces the separator role, name, bounds, and value before and after a step", async () => {
     const splitter = document.getElementById("splitter") as HTMLElement;
 
@@ -98,6 +164,32 @@ describe("ResizableController", () => {
     // Should clamp value 95 to max 80
     expect(root.style.getPropertyValue("--stimeo--resizable-fraction")).toBe("0.8");
     expect(splitter.getAttribute("aria-valuenow")).toBe("80");
+  });
+
+  it("leaves a modified arrow to the browser", async () => {
+    const root = document.getElementById("resizable") as HTMLElement;
+    const splitter = document.getElementById("splitter") as HTMLElement;
+
+    const changeHandler = vi.fn();
+    root.addEventListener("stimeo--resizable:change", changeHandler);
+
+    splitter.focus();
+
+    // A chorded arrow is the browser's (history back/forward and the like), so
+    // the splitter neither consumes the key nor moves its value.
+    const chord = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    splitter.dispatchEvent(chord);
+    await tick();
+
+    expect(chord.defaultPrevented).toBe(false);
+    expect(splitter.getAttribute("aria-valuenow")).toBe("50");
+    expect(root.style.getPropertyValue("--stimeo--resizable-fraction")).toBe("0.5");
+    expect(changeHandler).not.toHaveBeenCalled();
   });
 
   it("keyboard navigation adjusts size and fires change event", async () => {

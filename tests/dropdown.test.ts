@@ -279,7 +279,7 @@ describe("DropdownController", () => {
     expect(secondMenu.id).not.toBe(menu().id);
   });
 
-  // --- Layer ① machine a11y ---
+  // --- Machine-detectable a11y ---
 
   it("has no machine-detectable a11y violations while closed", async () => {
     await expectNoA11yViolations(root());
@@ -291,7 +291,7 @@ describe("DropdownController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // --- Layer ③ speech-order regression ---
+  // --- Speech-order regression ---
 
   it("announces trigger and disclosed content in order when open", async () => {
     trigger().click();

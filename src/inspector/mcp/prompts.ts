@@ -2,8 +2,8 @@
  * Prompt definitions for the `stimeo mcp` server (`prompts/list` /
  * `prompts/get`).
  *
- * Prompts are user-invokable workflow templates (surfaced as slash commands
- * in Claude Code, for example) that bake in the correct tool sequence —
+ * Prompts are user-invokable workflow templates (clients commonly surface them
+ * as slash commands) that bake in the correct tool sequence —
  * discover via `stimeo_catalog`, pull the contract via `stimeo_controller`,
  * reference `stimeo_example`, and validate with `stimeo_check` before
  * presenting — so the calling model does not have to rediscover the workflow

@@ -18,8 +18,8 @@ interface Peer {
 const BEACON_THROTTLE_MS = 2000;
 
 /**
- * Headless **presence** — the second *server-bound* behavior: online
- * dots / a "who's viewing this" stack, bound to an Action Cable channel. Like
+ * Headless **presence** — a *server-bound* behavior: online dots / a
+ * "who's viewing this" stack, bound to an Action Cable channel. Like
  * `stimeo--typing-indicator`, the server stays a trivial rebroadcast channel
  * with **zero presence state**: every client heartbeats an `appear` beacon
  * (`{ id, name }`), and each client expires peers it has not heard from for

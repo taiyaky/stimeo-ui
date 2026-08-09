@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 
 /** Cycle order for a sortable column header's `aria-sort`. */
 const SORT_CYCLE = ["none", "ascending", "descending"] as const;
@@ -66,11 +67,29 @@ export class DataGridController extends Controller<HTMLElement> {
   declare readonly cellTargets: HTMLElement[];
   declare selectionValue: string;
 
-  /** Establishes a single tab stop across all navigable cells/headers. */
+  /** Gates the row callback so it does not re-walk every row once per authored row on mount. */
+  #connected = false;
+
+  /**
+   * Establishes a single tab stop across all navigable cells/headers and brings
+   * the rows to their baseline.
+   *
+   * Normalizing here rather than leaving it to {@link selectionValueChanged}
+   * guarantees exactly one pass per mount: a re-attached element reuses its
+   * cached Stimulus context, whose value observer already knows the `selection`
+   * attribute, so the Value callback does not fire a second time.
+   */
   override connect(): void {
     const cells = this.#navigableCells();
     const active = cells.find((cell) => cell.tabIndex === 0) ?? cells[0];
     this.#setActiveCell(active, { focus: false });
+    this.#normalizeSelection();
+    this.#connected = true;
+  }
+
+  /** Reopens the row callback for the next mount. */
+  override disconnect(): void {
+    this.#connected = false;
   }
 
   /**
@@ -80,6 +99,51 @@ export class DataGridController extends Controller<HTMLElement> {
    */
   selectionValueChanged(): void {
     this.#syncSelectable();
+    this.#normalizeSelection();
+  }
+
+  /**
+   * Re-establishes the row baseline for a row added after connect.
+   *
+   * Each pass walks every row, and Stimulus reports the authored rows one by one
+   * before `connect()`, so the mount is gated to keep it linear in the row count
+   * rather than quadratic; `connect()` runs the single baseline pass instead.
+   */
+  rowTargetConnected(): void {
+    if (!this.#connected) return;
+    this.#normalizeSelection();
+  }
+
+  /**
+   * Brings the authored rows to the shape the APG requires, without changing
+   * which rows the author chose.
+   *
+   * Every selectable row gets an explicit value — an absent `aria-selected` means
+   * "not selectable" in ARIA, so a forgotten attribute hides a selectable row —
+   * and a single-select grid keeps at most one `true`, first in DOM order.
+   * A grid that declares `selection="none"` has no selectable rows, so the
+   * attribute is removed rather than written: in ARIA its absence is what "not
+   * selectable" looks like.
+   */
+  #normalizeSelection(): void {
+    const rows = this.rowTargets;
+    if (this.selectionValue === "none") {
+      // Reclaim, do not merely skip: a grid that *became* unselectable would
+      // otherwise keep announcing rows as selected while the logic refuses to
+      // change them. In ARIA the absence of the attribute is what "not
+      // selectable" looks like, so the rows have to lose it outright.
+      for (const row of rows) row.removeAttribute("aria-selected");
+      return;
+    }
+    const single = this.selectionValue === "single";
+    const first = rows.find((row) => row.getAttribute("aria-selected") === "true");
+    for (const row of rows) {
+      if (single) {
+        row.setAttribute("aria-selected", row === first ? "true" : "false");
+      } else if (row.getAttribute("aria-selected") !== "true") {
+        row.setAttribute("aria-selected", "false");
+      }
+    }
   }
 
   /**
@@ -113,12 +177,19 @@ export class DataGridController extends Controller<HTMLElement> {
 
   /** Toggles selection of the row owning the event target. Bound optionally. */
   toggleSelect(event: Event): void {
+    // The pointer path guards on `selection="none"` exactly as the keyboard path
+    // does, so a grid that declares itself unselectable never grows selected rows.
+    if (this.selectionValue === "none") return;
     const row = (event.currentTarget as HTMLElement).closest<HTMLElement>("[role='row']");
     if (row && this.rowTargets.includes(row)) this.#toggleRow(row);
   }
 
   /** Grid navigation + sort/select activation. Bound to cells and headers. */
   onKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key (a grabbed drag handle, a
+    // nested menu) must not ALSO act on it — composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const cell = event.currentTarget as HTMLElement;
     const matrix = this.#matrix();
     const position = this.#locate(matrix, cell);
@@ -127,7 +198,10 @@ export class DataGridController extends Controller<HTMLElement> {
     const rowCells = matrix[row] ?? [];
 
     let target: HTMLElement | undefined;
-    switch (event.key) {
+    // Logical, not physical. The key is normalised rather than the
+    // delta negated: these two branches are not mirror images — their guards
+    // differ — so swapping the key keeps each guard with its own direction.
+    switch (logicalArrowKey(event.key, this.element)) {
       case "ArrowRight":
         target = this.#cellInRow(matrix, row, col + 1);
         break;
@@ -186,8 +260,13 @@ export class DataGridController extends Controller<HTMLElement> {
   /** Toggles a row's `aria-selected`, honoring single vs. multiple selection. */
   #toggleRow(row: HTMLElement): void {
     const selected = row.getAttribute("aria-selected") === "true";
-    if (this.selectionValue === "single" && !selected) {
-      for (const other of this.rowTargets) other.setAttribute("aria-selected", "false");
+    // Enforce single-ness on every toggle, not only when turning a row on:
+    // switching one *off* would otherwise leave a second `true` behind, and
+    // nothing else clears it for the rest of the session.
+    if (this.selectionValue === "single") {
+      for (const other of this.rowTargets) {
+        if (other !== row) other.setAttribute("aria-selected", "false");
+      }
     }
     row.setAttribute("aria-selected", selected ? "false" : "true");
 

@@ -63,6 +63,35 @@ describe("TabsController", () => {
     return event;
   };
 
+  it("reverses the horizontal arrows under RTL", () => {
+    // Logical direction: APG describes these as "next / previous", so the pair
+    // reverses with the writing direction. `dir="rtl"` is the authoring contract,
+    // but happy-dom does not resolve it into the computed style, so the direction
+    // is set as an inline style instead.
+    (tab(0).closest("[data-controller]") as HTMLElement).style.direction = "rtl";
+
+    pressKey(tab(0), "ArrowLeft"); // "next" under RTL
+    expect(selection()).toEqual(["false", "true", "false"]);
+
+    pressKey(tab(1), "ArrowRight"); // "previous"
+    expect(selection()).toEqual(["true", "false", "false"]);
+  });
+
+  it("yields a key a descendant widget already consumed", () => {
+    // A composed widget inside a tab that claims the key must not ALSO move the
+    // tab selection — composition depends on this yield.
+    const first = tabs()[0] as HTMLElement;
+    first.focus();
+    const inner = document.createElement("span");
+    first.append(inner);
+    inner.addEventListener("keydown", (event) => event.preventDefault());
+
+    pressKey(inner, "ArrowRight");
+
+    expect(document.activeElement).toBe(first);
+    expect(selection()).toEqual(["true", "false", "false"]);
+  });
+
   it("selects the first tab by default and synchronizes every tab and panel", () => {
     expect(selection()).toEqual(["true", "false", "false"]);
     expect(tabIndexes()).toEqual([0, -1, -1]);
@@ -153,6 +182,23 @@ describe("TabsController", () => {
     expect(document.activeElement).toBe(tab(0));
   });
 
+  it("leaves a modified arrow to the browser (Alt+Left/Right is history navigation)", () => {
+    // A modified arrow belongs to the browser, not the widget: nothing is
+    // consumed and no selection moves.
+    tab(0).focus();
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    tab(0).dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(selection()).toEqual(["true", "false", "false"]);
+    expect(document.activeElement).toBe(tab(0));
+  });
+
   it("does not intercept an unsupported key", () => {
     tab(0).focus();
     const event = pressKey(tab(0), "Tab");
@@ -169,14 +215,14 @@ describe("TabsController", () => {
     return element;
   };
 
-  // Layer ① — machine-detectable a11y in the connected (first tab selected) state.
+  // Machine-detectable a11y in the connected (first tab selected) state.
   it("has no machine-detectable a11y violations", async () => {
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — speech-order regression: roving selection must move with arrow
-  // navigation. The whole ordered tablist + active panel announcement is pinned so
-  // a lost role, a flipped aria-selected, or a desynced panel surfaces as a diff.
+  // Speech-order regression: roving selection must move with arrow navigation.
+  // The whole ordered tablist + active panel announcement is pinned so a lost
+  // role, a flipped aria-selected, or a desynced panel surfaces as a diff.
   it("announces selection and roving order before and after arrow navigation", async () => {
     const before = await captureSpeech({ container: root(), steps: 5 });
     expect(before).toEqual([
@@ -215,5 +261,46 @@ describe("TabsController", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(selection()).toEqual(["true", "false", "false"]);
     expect(document.activeElement).toBe(tab(0));
+  });
+
+  describe("the authored initial selection", () => {
+    /** Re-mounts the same three tabs with `selected` carrying `aria-selected="true"`. */
+    const remount = async (selected: readonly number[]) => {
+      disconnectAndStopApplication(application);
+      const buttons = [1, 2, 3]
+        .map(
+          (n, i) => `
+          <button role="tab" id="t${n}" aria-controls="p${n}"
+                  ${selected.includes(i) ? 'aria-selected="true"' : ""}
+                  data-stimeo--tabs-target="tab"
+                  data-action="stimeo--tabs#select keydown->stimeo--tabs#onKeydown">Tab ${n}</button>`,
+        )
+        .join("");
+      document.body.innerHTML = `
+        <div data-controller="stimeo--tabs">
+          <div role="tablist" aria-label="Example tabs" data-stimeo--tabs-target="list">${buttons}</div>
+          <div role="tabpanel" id="p1" aria-labelledby="t1" data-stimeo--tabs-target="panel">One</div>
+          <div role="tabpanel" id="p2" aria-labelledby="t2" data-stimeo--tabs-target="panel">Two</div>
+          <div role="tabpanel" id="p3" aria-labelledby="t3" data-stimeo--tabs-target="panel">Three</div>
+        </div>`;
+      application = Application.start();
+      application.register("stimeo--tabs", TabsController);
+      await tick();
+    };
+    const states = () => tabs().map((t) => t.getAttribute("aria-selected"));
+
+    it("keeps the first of several pre-selected tabs", async () => {
+      // first-wins (`findIndex`): the first in DOM order is the only
+      // deterministic reading of "which one did the author mean".
+      await remount([1, 2]);
+
+      expect(states()).toEqual(["false", "true", "false"]);
+    });
+
+    it("gives every tab an explicit value when none is pre-selected", async () => {
+      await remount([]);
+
+      expect(states()).toEqual(["true", "false", "false"]);
+    });
   });
 });

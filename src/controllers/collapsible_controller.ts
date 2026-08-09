@@ -127,8 +127,8 @@ export class CollapsibleController extends Controller<HTMLElement> {
 
   /**
    * Drives the disclosure to `open`, syncing the trigger's `aria-expanded` and
-   * the content's `hidden` / `data-state` / height variable in the order the
-   * spec requires.
+   * the content's `hidden` / `data-state` / height variable in an order where
+   * `hidden` never blocks measurement or the transition.
    *
    * @param open - Target state.
    * @param waitForCloseTransition - When `false` (initial `connect`) the close

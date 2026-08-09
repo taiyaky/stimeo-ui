@@ -14,37 +14,44 @@ import { runMcpServer } from "./mcp/server";
  */
 const argv = process.argv.slice(2);
 
+// A reader that stops early (`| head`) or a disappearing MCP client closes our
+// stdout pipe. Node's own EPIPE handling already tears the stream down quietly,
+// so this is a belt-and-braces guard that keeps the exit code deliberate; it is
+// registered before any command runs so the resident server, `--help`, and every
+// run-to-completion report are covered by one rule.
+process.stdout.on("error", (error: NodeJS.ErrnoException) => {
+  process.exit(error.code === "EPIPE" ? 0 : 1);
+});
+
 if (argv[0] === "mcp") {
   if (argv.includes("--help") || argv.includes("-h")) {
-    process.exit(runCli(["--help"]));
+    process.exitCode = runCli(["--help"]);
+  } else {
+    runMcpServer({
+      input: process.stdin,
+      write: (line) => {
+        process.stdout.write(`${line}\n`);
+      },
+      load: () => ({ manifest: loadManifest(), examples: loadExamplesIndex() }),
+      logError: (message) => {
+        process.stderr.write(`stimeo mcp: ${message}\n`);
+      },
+    }).then(
+      // Set the exit code instead of calling process.exit so any buffered
+      // stdout responses are flushed before the process ends.
+      () => {
+        process.exitCode = 0;
+      },
+      (error: unknown) => {
+        process.stderr.write(
+          `stimeo mcp: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+        process.exitCode = 1;
+      },
+    );
   }
-  // A disappearing client closes our stdout pipe; exit quietly on EPIPE
-  // instead of crashing with an unhandled stream error.
-  process.stdout.on("error", (error: NodeJS.ErrnoException) => {
-    process.exit(error.code === "EPIPE" ? 0 : 1);
-  });
-  runMcpServer({
-    input: process.stdin,
-    write: (line) => {
-      process.stdout.write(`${line}\n`);
-    },
-    load: () => ({ manifest: loadManifest(), examples: loadExamplesIndex() }),
-    logError: (message) => {
-      process.stderr.write(`stimeo mcp: ${message}\n`);
-    },
-  }).then(
-    // Set the exit code instead of calling process.exit so any buffered
-    // stdout responses are flushed before the process ends.
-    () => {
-      process.exitCode = 0;
-    },
-    (error: unknown) => {
-      process.stderr.write(
-        `stimeo mcp: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-      process.exitCode = 1;
-    },
-  );
 } else {
-  process.exit(runCli(argv));
+  // Let Node leave naturally so a large JSON catalog/check report reaches a
+  // pipe before the process exits; process.exit() can discard buffered stdout.
+  process.exitCode = runCli(argv);
 }

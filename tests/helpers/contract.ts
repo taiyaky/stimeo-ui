@@ -14,14 +14,12 @@ import { describe, expect, it } from "vitest";
  *    a new public action a contributor forgot to declare). This is only sound
  *    because the controllers use ECMAScript `#private` — true privates are
  *    absent from `Object.getOwnPropertyNames(prototype)`, so the public surface
- *    *can* be reflected. (Under TypeScript `private`, internal helpers stayed on
- *    the prototype and were indistinguishable from public actions, which is why
- *    this check was impossible before the `#private` migration.)
+ *    *can* be reflected. TypeScript `private` would leave internal helpers on
+ *    the prototype, indistinguishable from public actions, and make the reverse
+ *    direction unsound.
  *
- * Every controller registry that `buildManifest` reflects must run this guard:
- * `tests/inspector/contract.test.ts` covers core + positioning here; controller
- * tracks that are developed privately (outside this public-synced tree) run the
- * same guard from their own suites, next to their registries.
+ * Every controller registry that `buildManifest` reflects must run this guard
+ * from the suite that owns that registry.
  */
 
 /** Lifecycle methods Stimulus calls; never user actions. */

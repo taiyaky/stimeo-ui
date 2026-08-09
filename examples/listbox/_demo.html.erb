@@ -8,7 +8,7 @@
   <span id="listbox-label" class="listbox__label"><%= t("components.listbox.demo.label") %></span>
   <button
     type="button"
-    class="listbox__trigger"
+    class="demo-trigger listbox__trigger"
     role="combobox"
     aria-haspopup="listbox"
     aria-expanded="false"
@@ -29,7 +29,9 @@
     aria-label="<%= t("components.listbox.demo.label") %>"
     hidden
     data-stimeo--listbox-target="list">
-    <% %w[apple banana cherry grape orange].each_with_index do |fruit, index| %>
+    <%# Two pairs share a first letter (apple/apricot, banana/blueberry) so pressing
+        that letter repeatedly cycles between them — the APG type-ahead behavior. %>
+    <% %w[apple apricot banana blueberry cherry grape orange].each_with_index do |fruit, index| %>
       <li
         id="listbox-opt-<%= index %>"
         class="listbox__option"

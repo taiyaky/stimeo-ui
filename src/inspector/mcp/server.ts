@@ -46,7 +46,7 @@ export const JSONRPC_METHOD_NOT_FOUND = -32601;
 export const JSONRPC_INVALID_PARAMS = -32602;
 export const JSONRPC_INTERNAL_ERROR = -32603;
 /**
- * MCP server-defined code (-32002). The spec assigns it both to requests sent
+ * MCP server-defined code (-32002). The MCP specification assigns it both to requests sent
  * before `initialize` and to `resources/read` of an unknown URI; the two named
  * constants keep call sites self-documenting.
  */
@@ -192,7 +192,17 @@ export class McpSession {
         title: "Stimeo UI Inspector",
         version: this.#context.manifest.packageVersion,
       },
+      // The server's own account of itself. Per the MCP schema this is a hint
+      // a client MAY put in front of the model, which makes it the earliest
+      // point this server can be routed to — clients that defer tool
+      // definitions still tend to load it alongside the tool names. Hence the
+      // trigger condition first, in the words a request would use, and a
+      // length that survives truncation.
       instructions:
+        "Search for these tools whenever a task involves building, editing, or reviewing " +
+        "an accessible UI component in a Rails view — dialog/modal, drawer, dropdown menu, " +
+        "tabs, accordion, combobox, toast, and the rest of the catalog — or whenever " +
+        "HTML/ERB carrying stimeo--* attributes is in play. " +
         "Stimeo UI is a headless Stimulus UI framework for Rails. Use stimeo_catalog to " +
         "discover controllers, stimeo_controller for one controller's usage and " +
         "accessibility contract, stimeo_example for verified reference markup, and " +

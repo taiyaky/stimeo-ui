@@ -1,4 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { isRtl } from "../utils/logical_scroll";
 
 /** Name of the CSS custom property exposing the thumb position (0..1). */
 const FRACTION_PROPERTY = "--stimeo--slider-fraction";
@@ -28,12 +30,17 @@ const FRACTION_PROPERTY = "--stimeo--slider-fraction";
  *
  * @remarks
  * Behavior only. The consumer owns all layout (e.g. positioning the thumb from
- * the fraction). Only the horizontal orientation is handled in this MVP.
+ * the fraction). Only the horizontal orientation is handled.
  *
  * Behavior provided:
  * - `ArrowRight`/`ArrowUp` increase and `ArrowLeft`/`ArrowDown` decrease by one
  *   step; `Home`/`End` jump to the min/max; `PageUp`/`PageDown` move by ten steps.
  * - Pointer press/drag on the track sets the value from the pointer position.
+ *
+ * The fraction is a value ratio, not a position, so only the consumer knows
+ * whether their track mirrors under RTL. Set `logicalTrack` to declare that it
+ * does: the pointer mapping and the horizontal arrow pair then follow the
+ * writing direction. Left unset, nothing here reads `direction`.
  */
 export class SliderController extends Controller<HTMLElement> {
   static override targets = ["track", "thumb"];
@@ -42,6 +49,7 @@ export class SliderController extends Controller<HTMLElement> {
     max: { type: Number, default: 100 },
     step: { type: Number, default: 1 },
     value: { type: Number, default: 0 },
+    logicalTrack: { type: Boolean, default: false },
   };
   static actions = ["onKeydown", "onPointerDown"] as const;
   static events = ["change"] as const;
@@ -54,9 +62,15 @@ export class SliderController extends Controller<HTMLElement> {
   declare maxValue: number;
   declare stepValue: number;
   declare valueValue: number;
+  declare logicalTrackValue: boolean;
 
   /** Aborts in-progress pointer-drag listeners when the drag ends or on teardown. */
   #dragAbort: AbortController | null = null;
+
+  /** Whether the consumer declared a mirroring track and the direction mirrors it. */
+  get #mirrored(): boolean {
+    return this.logicalTrackValue && isRtl(this.element);
+  }
 
   /** Clamps the initial value and renders the starting position. */
   override connect(): void {
@@ -71,9 +85,12 @@ export class SliderController extends Controller<HTMLElement> {
 
   /** Handles keyboard stepping per the APG slider model. */
   onKeydown(event: KeyboardEvent): void {
+    if (isReservedArrowChord(event)) return;
     const big = this.stepValue * 10;
     let next: number | null = null;
-    switch (event.key) {
+    // On a mirrored track the greater value sits at the visual left, so the
+    // horizontal pair trades places; the vertical pair passes through.
+    switch (this.#mirrored ? logicalArrowKey(event.key, this.element) : event.key) {
       case "ArrowRight":
       case "ArrowUp":
         next = this.valueValue + this.stepValue;
@@ -105,13 +122,17 @@ export class SliderController extends Controller<HTMLElement> {
   onPointerDown(event: PointerEvent): void {
     if (!this.hasTrackTarget) return;
     event.preventDefault();
-    this.#updateFromClientX(event.clientX);
+    // Resolve the direction once for the whole gesture: reading it per move
+    // would query computed style on every frame, and a drag that flipped
+    // mid-gesture would be incoherent anyway.
+    const mirrored = this.#mirrored;
+    this.#updateFromClientX(event.clientX, mirrored);
     if (this.hasThumbTarget) this.thumbTarget.focus();
 
     this.#dragAbort?.abort();
     const abort = new AbortController();
     this.#dragAbort = abort;
-    const onMove = (move: PointerEvent): void => this.#updateFromClientX(move.clientX);
+    const onMove = (move: PointerEvent): void => this.#updateFromClientX(move.clientX, mirrored);
     const onUp = (): void => {
       abort.abort();
       this.#dragAbort = null;
@@ -124,10 +145,11 @@ export class SliderController extends Controller<HTMLElement> {
   }
 
   /** Maps a pointer X coordinate to a value using the track's geometry. */
-  #updateFromClientX(clientX: number): void {
+  #updateFromClientX(clientX: number, mirrored: boolean): void {
     const rect = this.trackTarget.getBoundingClientRect();
     if (rect.width === 0) return;
-    const fraction = (clientX - rect.left) / rect.width;
+    const offset = (clientX - rect.left) / rect.width;
+    const fraction = mirrored ? 1 - offset : offset;
     this.#setValue(this.minValue + fraction * (this.maxValue - this.minValue));
   }
 

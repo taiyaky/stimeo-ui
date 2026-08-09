@@ -203,9 +203,9 @@ describe("FilterController", () => {
 });
 
 /**
- * Integration: the real cross-controller wiring the catalog relies on — a
- * toggle-group chip click dispatches `stimeo--toggle-group:change`, which a
- * `data-action` on the filter root routes to `stimeo--filter#apply`. Unit tests
+ * Integration of the cross-controller wiring: a toggle-group chip click
+ * dispatches `stimeo--toggle-group:change`, which a `data-action` on the filter
+ * root routes to `stimeo--filter#apply`. Unit tests
  * above prove each controller in isolation; this proves they compose in the
  * exact shape used in practice (chip = toggle-group item AND filter control).
  */

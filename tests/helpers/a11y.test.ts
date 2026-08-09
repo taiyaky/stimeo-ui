@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { auditA11y, expectNoA11yViolations } from "./a11y";
 
 /**
- * Self-tests for the layer ① a11y audit helper: it must pass on clean,
- * accessible markup and surface machine-detectable violations on broken markup.
+ * Self-tests for the a11y audit helper: it must pass on clean, accessible
+ * markup and surface machine-detectable violations on broken markup.
  */
 describe("a11y helper", () => {
   afterEach(() => {

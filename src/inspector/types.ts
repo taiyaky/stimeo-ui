@@ -2,10 +2,9 @@
  * Shared types for the Stimeo Inspector CLI (`stimeo check`).
  *
  * The Inspector statically checks HTML/ERB against a *manifest* describing the
- * official `stimeo--` controllers. The same engine powers both the project's own
- * contract checks (e.g. `stimeo check app/views`) and the
- * user-facing product feature; it is therefore intentionally input-path
- * agnostic.
+ * official `stimeo--` controllers. The same engine powers both the library's
+ * own contract checks (e.g. `stimeo check app/views`) and the user-facing CLI;
+ * it is therefore intentionally input-path agnostic.
  */
 
 /**
@@ -38,6 +37,11 @@ export interface ControllerManifest {
   /** Targets that must be present at least once inside the controller scope. */
   readonly requiredTargets: readonly string[];
   /**
+   * Target requirements that only apply once an optional target appears. See
+   * {@link ConditionalTargetRule}.
+   */
+  readonly conditionalTargets: readonly ConditionalTargetRule[];
+  /**
    * Accessibility requirements the *consumer's markup* must satisfy (stage 3):
    * ARIA attributes the controller does **not** set at runtime and therefore
    * relies on the author to provide (e.g. a dialog's `role`/`aria-modal`/name).
@@ -46,8 +50,8 @@ export interface ControllerManifest {
    */
   readonly a11y: readonly A11yRequirement[];
   /**
-   * Keyboard prerequisites (stage 3, schema v4): targets whose documented
-   * contract makes the *author* responsible for focusability — the controller
+   * Keyboard prerequisites (stage 3): targets whose documented contract makes
+   * the *author* responsible for focusability — the controller
    * moves focus (or relies on the Tab order) but never writes `tabindex` for
    * them. Each listed target must be natively focusable or carry `tabindex`.
    * Targets whose controller initializes a roving tabindex on connect (tabs,
@@ -55,8 +59,8 @@ export interface ControllerManifest {
    */
   readonly keyboard: readonly KeyboardRequirement[];
   /**
-   * Author-futile attributes (stage 3, schema v4): ARIA the controller
-   * recomputes wholesale at runtime, where an authored value can neither
+   * Author-futile attributes (stage 3): ARIA the controller recomputes
+   * wholesale at runtime, where an authored value can neither
    * survive nor serve as pre-connect initial state (e.g. a combobox input's
    * `aria-activedescendant`). Authoring one is reported as a *warning*.
    * Attributes whose authored value is a legitimate initial (`aria-expanded`,
@@ -64,13 +68,150 @@ export interface ControllerManifest {
    */
   readonly managedAria: readonly ManagedAriaRule[];
   /**
-   * Conditional cross-controller composition rules (stage 3, schema v5):
-   * value-alignment contracts between this controller and a co-located
-   * companion (e.g. sortable's sort axis vs roving's `orientation`). Prose-only
-   * before v5, where a dropped or misaligned value silently broke keyboard
-   * interaction while `stimeo check` passed.
+   * Conditional cross-controller composition rules (stage 3): value-alignment
+   * contracts between this controller and a co-located companion (e.g.
+   * sortable's sort axis vs roving's `orientation`). A dropped or misaligned
+   * value silently breaks keyboard interaction, and no single-controller rule
+   * can see it.
    */
   readonly compositions: readonly CompositionRule[];
+  /**
+   * Required companion controllers (stage 3): elements the contract says must
+   * *also* declare another controller (e.g. an overflow menu's More
+   * wrapper, whose menu behavior is delegated wholesale). Distinct from
+   * {@link compositions}, which fire only once the companion is already there:
+   * these fire on its **absence**, the case a rule keyed on presence can never
+   * see.
+   */
+  readonly companions: readonly CompanionRequirement[];
+  /**
+   * Reverse-direction target rules (stage 3): markup that carries a pattern's
+   * ARIA but was never declared as a target. Every other rule reads
+   * target → required attribute; these read attribute → required target, the
+   * direction in which an undeclared element is invisible to the controller
+   * (and therefore to every forward rule).
+   */
+  readonly targetDeclarations: readonly TargetDeclarationRule[];
+  /**
+   * Set-level count constraints (stage 3): how many elements may or must exist
+   * inside a scope or a container target. Every other family judges one element
+   * at a time, which cannot express contracts of the form "exactly one" / "at
+   * most one" however load-bearing they are.
+   */
+  readonly cardinality: readonly CardinalityRule[];
+  /**
+   * Attributes that must **not** be present in a given configuration
+   * (stage 3). The inverse of {@link a11y}, and distinct from
+   * {@link managedAria}: those attributes are futile because the *controller*
+   * owns them, whereas these stay the author's to write — they are simply
+   * contradicted by the markup around them (a menu declaring itself busy while
+   * its items are right there).
+   */
+  readonly forbiddenAria: readonly ForbiddenAriaRule[];
+}
+
+/**
+ * A condition on the controller's **own** Stimulus value, read from the scope
+ * element. Shared by every rule family that needs one.
+ *
+ * The value is compared by its **effective** reading — the authored attribute,
+ * or {@link default} when the attribute is absent — so a rule can be scoped to
+ * a non-default configuration without flagging the default one. That is the
+ * whole point: a horizontal toolbar must *not* carry
+ * `aria-orientation="vertical"`, so the requirement only exists in the vertical
+ * configuration and an unconditional rule would reject correct markup.
+ *
+ * {@link default} duplicates the controller's `static values` default; a
+ * manifest test guards it against drift.
+ */
+export interface ValueCondition {
+  /** Value name (camelCase, as declared in `static values`). */
+  readonly value: string;
+  /** Effective values that arm the rule. */
+  readonly equals: readonly string[];
+  /** The value's declared default, used when the attribute is absent. */
+  readonly default: string;
+}
+
+/**
+ * A condition on how many targets an element **holds**, evaluated against the
+ * very element the rule applies to — not the controller scope, the way
+ * {@link ValueCondition} is. Both may appear on one rule; both must hold.
+ *
+ * It exists for contracts whose ARIA depends on the element's own contents
+ * rather than on any configuration value. A `role="menu"` requires owned
+ * `menuitem`s, so a menu the consumer fills asynchronously has to declare the
+ * temporary absence with `aria-busy` — a requirement that must arm on
+ * emptiness alone, since the controller cannot tell "still loading" from
+ * "nothing to show" and therefore never infers it.
+ *
+ * Bounds are inclusive and independently optional; a condition with neither is
+ * meaningless and rejected by the manifest tests.
+ */
+export interface ContentCondition {
+  /** Target name counted **inside** the element the rule applies to. */
+  readonly target: string;
+  /** Arms the rule when the count is at least this. */
+  readonly min?: number;
+  /** Arms the rule when the count is at most this. */
+  readonly max?: number;
+}
+
+/**
+ * A condition on the element's **own tag**, evaluated per element the way
+ * {@link ContentCondition} is.
+ *
+ * It exists for roles whose accessible name ARIA marks *required* but which a
+ * **native** element can name with no author ARIA at all: a
+ * `<table role="grid">` names from its `<caption>`, a
+ * `<fieldset role="radiogroup">` from its `<legend>`, an
+ * `<input role="combobox">` from a `<label for>`. Requiring `aria-label` on
+ * those would reject correct markup, while dropping the rule outright would
+ * leave the `div`-based spelling — the one with no native naming path at all —
+ * unchecked. This disarms exactly the spellings that have one.
+ *
+ * The exemption is keyed on the **tag**, not on finding the name: a
+ * `<label for>` legitimately lives in another partial, so looking for it would
+ * report a missing name that is present one file over. Erring toward
+ * under-detection is the same call the cardinality rules make for
+ * ERB-generated values.
+ */
+export interface ElementCondition {
+  /** Lowercase tag names whose native naming path disarms the requirement. */
+  readonly exceptTags: readonly string[];
+}
+
+/**
+ * A condition on the **whole source file**: how many elements in it carry a
+ * given role. Every other condition reads one element or one scope; this one
+ * reads the file.
+ *
+ * It exists for ARIA's *conditionally* levelled names, which come in both
+ * directions: a `toolbar`'s name is "Recommended" and becomes "Required if
+ * multiple toolbars on a page" ({@link A11yRequirement.escalateWhen}), while a
+ * focusable `separator`'s name is discretionary and only becomes "Recommended
+ * if more than one focusable separator" ({@link A11yRequirement.whenDocument}).
+ * One raises the level of a standing requirement; the other brings a
+ * requirement into existence.
+ *
+ * A file is not a page, so this deliberately **under**-approximates: elements
+ * split across partials are counted apart and stay at the lower level. That is
+ * the safe direction — it never invents a requirement the author does not have.
+ */
+export interface DocumentCondition {
+  /** Role counted across the file. */
+  readonly role: string;
+  /** Holds when at least this many elements in the file carry {@link role}. */
+  readonly atLeast: number;
+  /**
+   * Counts only Tab-reachable elements; omit to count every carrier of the
+   * role. ARIA qualifies some of these conditions by focusability and some not:
+   * a `separator`'s name matters once there is more than one **focusable**
+   * separator, because that is when a user can land on both and needs to tell
+   * them apart — a decorative `hr` carrying the role does not create that
+   * problem. A `toolbar`'s condition has no such qualifier, so it counts all.
+   */
+  readonly focusable?: boolean;
 }
 
 /**
@@ -79,7 +220,7 @@ export interface ControllerManifest {
  * {@link target} element; when {@link values} is given, the present
  * attribute's value must be one of them. {@link or} widens the requirement
  * with alternative attribute/value groups — the requirement is satisfied when
- * *any* group is (schema v4; e.g. `role="status"` **or** `aria-live`).
+ * *any* group is (e.g. `role="status"` **or** `aria-live`).
  */
 export interface A11yRequirement {
   /**
@@ -102,6 +243,55 @@ export interface A11yRequirement {
    * its own right (e.g. `aria-live="off"` silencing a satisfied `role="status"`).
    */
   readonly or?: readonly A11yAlternative[];
+  /**
+   * Restricts the requirement to one configuration of the controller's own
+   * value; omit for unconditional requirements. It exists for ARIA that is
+   * mandatory in one configuration and *wrong* in another.
+   */
+  readonly when?: ValueCondition;
+  /**
+   * Restricts the requirement to elements holding a given number of a target;
+   * omit for requirements that do not depend on the contents. Evaluated per
+   * element, so sibling targets are judged independently.
+   */
+  readonly whenContains?: ContentCondition;
+  /**
+   * Disarms the requirement on elements whose tag already carries a native
+   * naming path; omit for requirements that hold for every spelling of the
+   * role.
+   */
+  readonly whenElement?: ElementCondition;
+  /**
+   * Arms the requirement only in files satisfying a file-level condition; omit
+   * for requirements that apply to every file.
+   *
+   * Some ARIA names are optional alone and only start to matter in company: a
+   * lone focusable `separator` needs no name, while a second one on the same
+   * page leaves the two indistinguishable without one. Arming on the count
+   * keeps the single-splitter page — by far the common one — silent, instead of
+   * demanding a name that would only ever be read out as noise.
+   */
+  readonly whenDocument?: DocumentCondition;
+  /**
+   * Severity of an unmet requirement; omit for `"error"`.
+   *
+   * ARIA separates names it *requires* from names it merely *recommends*
+   * (`toolbar`, `menubar`, `tablist`, `menu`). A missing recommended name is
+   * real contract guidance but not a definite defect — the pattern still works
+   * without it — so it reports as a warning, the bar `managed-aria` and
+   * `forbidden-aria` already sit at. Reporting both levels as errors would make
+   * the check say "broken" where ARIA says "could be clearer".
+   */
+  readonly severity?: DiagnosticSeverity;
+  /**
+   * Raises {@link severity} to `"error"` while the file-level condition holds;
+   * omit for requirements whose level never moves. ARIA's conditional
+   * requirements have exactly this shape — a toolbar's name is recommended on
+   * its own and required once the file holds a second one, because that is the
+   * point where the name stops being decoration and becomes the only way a user
+   * can tell the two apart.
+   */
+  readonly escalateWhen?: DocumentCondition;
   /** Human-readable fix suggestion shown by the CLI (stage 4). */
   readonly suggestion: string;
 }
@@ -115,9 +305,9 @@ export interface A11yAlternative {
 }
 
 /**
- * A keyboard prerequisite (stage 3, schema v4): every present element of
- * {@link target} must be reachable by keyboard. What "reachable" means depends
- * on how the controller drives focus, expressed by {@link reach}:
+ * A keyboard prerequisite (stage 3): every present element of {@link target}
+ * must be reachable by keyboard. What "reachable" means depends on how the
+ * controller drives focus, expressed by {@link reach}:
  *
  * - `"tab"` (Tab stop): the element is a steady tab stop the user reaches with
  *   Tab, so it must be natively tab-focusable (`button`, `input` except
@@ -148,10 +338,10 @@ export interface KeyboardRequirement {
 }
 
 /**
- * An author-futile attribute rule (stage 3, schema v4): authoring any of
- * {@link attrs} on the {@link target} element draws a `managed-aria`
- * **warning** — the controller recomputes the attribute wholesale, so the
- * authored value is dead weight that misleads readers of the markup.
+ * An author-futile attribute rule (stage 3): authoring any of {@link attrs} on
+ * the {@link target} element draws a `managed-aria` **warning** — the
+ * controller recomputes the attribute wholesale, so the authored value is dead
+ * weight that misleads readers of the markup.
  */
 export interface ManagedAriaRule {
   /**
@@ -166,8 +356,8 @@ export interface ManagedAriaRule {
 }
 
 /**
- * A conditional cross-controller composition rule (stage 3, schema v5): when a
- * companion controller is co-located on one of the host's elements, one of the
+ * A conditional cross-controller composition rule (stage 3): when a companion
+ * controller is co-located on one of the host's elements, one of the
  * companion's values must align with a value of the host. The rule fires only
  * when {@link coController} is actually declared there — composition itself
  * stays optional (whether to compose is the author's call; the rule only
@@ -200,14 +390,7 @@ export interface CompositionRule {
    * unconditional rules. The rule applies only when the host's effective
    * value is one of `equals`.
    */
-  readonly when?: {
-    /** Host value name (camelCase, as declared in `static values`). */
-    readonly value: string;
-    /** Effective host values that arm the rule. */
-    readonly equals: readonly string[];
-    /** The host value's declared default, used when the attribute is absent. */
-    readonly default: string;
-  };
+  readonly when?: ValueCondition;
   /** Requirement on the companion's value (read from the companion's element). */
   readonly require: {
     /** Companion value name (camelCase, as declared in `static values`). */
@@ -225,6 +408,142 @@ export interface CompositionRule {
 }
 
 /**
+ * A required companion controller (stage 3): the {@link target} element must
+ * itself declare {@link controller} in its `data-controller`.
+ *
+ * This is the **absence** counterpart of {@link CompositionRule}. A composition
+ * rule guards *how* two controllers are wired once both are present, and stays
+ * silent when the companion was never added — correct for optional
+ * compositions, useless for the mandatory ones. Where the host delegates a
+ * whole interaction (a More wrapper whose menu semantics and keyboard handling
+ * belong entirely to the menu controller), dropping the companion leaves markup
+ * that renders, passes every forward rule, and simply never opens.
+ */
+export interface CompanionRequirement {
+  /**
+   * Target name whose element must declare the companion; the empty string
+   * `""` means the controller's own scope element.
+   */
+  readonly target: string;
+  /** Companion controller identifier required in the element's `data-controller`. */
+  readonly controller: string;
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
+/**
+ * A reverse-direction target rule (stage 3): inside the controller's scope,
+ * every element carrying {@link attr} (with one of {@link values}, when given)
+ * must be declared as the {@link target} target.
+ *
+ * Forward rules ask "does this target carry the ARIA it needs?" and therefore
+ * only ever see markup the controller already knows about. The failure this
+ * rule exists for is the opposite one: markup that *looks* like part of the
+ * pattern to a screen reader — it has the role — but was never wired as a
+ * target, so the controller's roving, visible-item search, typeahead, and
+ * selection sync all skip it. Nothing in the forward direction can detect that,
+ * because the element is absent from every target set the forward rules read.
+ *
+ * Ownership is resolved by the **nearest** enclosing controller of the same
+ * identifier, so nested instances judge only their own elements.
+ */
+export interface TargetDeclarationRule {
+  /** Attribute that marks an element as part of the pattern (e.g. `role`). */
+  readonly attr: string;
+  /** Attribute values that mark it; omit to match any non-empty value. */
+  readonly values?: readonly string[];
+  /** Target name the matched element must be declared as. */
+  readonly target: string;
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
+/**
+ * A set-level count constraint (stage 3): how many {@link target} elements may
+ * live inside {@link within}, optionally narrowed to those carrying
+ * {@link attr}.
+ *
+ * Every other rule family judges elements one at a time, which cannot express
+ * the two contracts that matter most in a set: "this wrapper resolves to
+ * exactly one control" and "no more than one element is selected". Both fail
+ * silently — a hover wrapper holding two triggers always opens the first, and a
+ * second authored selection is quietly normalized away at connect, discarding
+ * the author's intent with no diagnostic anywhere.
+ *
+ * Bounds are inclusive and independently optional; a rule with neither is
+ * meaningless and rejected by the manifest tests.
+ */
+export interface CardinalityRule {
+  /**
+   * Container target whose element bounds the count — each container element is
+   * counted separately. The empty string `""` counts across the whole
+   * controller scope.
+   */
+  readonly within: string;
+  /** Target name whose elements are counted. */
+  readonly target: string;
+  /** Count only elements carrying this attribute; omit to count them all. */
+  readonly attr?: string;
+  /** Restricts {@link attr} to these values; omit to accept any value. */
+  readonly values?: readonly string[];
+  /** Smallest permitted count (inclusive); omit for no floor. */
+  readonly min?: number;
+  /** Largest permitted count (inclusive); omit for no ceiling. */
+  readonly max?: number;
+  /**
+   * Restricts the constraint to one configuration of the controller's own
+   * value; omit for unconditional constraints. Multiplicity is frequently a
+   * *configured* property (a grid whose `selection` value decides whether two
+   * selected rows are a bug or the point), so a fixed bound would be wrong in
+   * one of the configurations.
+   */
+  readonly when?: ValueCondition;
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
+/**
+ * An attribute that must **not** be present in a given configuration
+ * (stage 3): authoring any of {@link attrs} on the {@link target} element —
+ * with one of {@link values}, when given — contradicts the markup around it.
+ *
+ * Three families speak about an attribute the author might write, and the
+ * difference is *why* it should go:
+ *
+ * - {@link A11yRequirement} — it is missing and the pattern needs it.
+ * - {@link ManagedAriaRule} — the **controller** recomputes it, so any authored
+ *   value is dead weight in every state.
+ * - This rule — the author legitimately owns the attribute, and it is even
+ *   required in the *other* configuration; here it simply states something the
+ *   surrounding markup contradicts.
+ *
+ * Reported as a **warning**, not an error, and deliberately so: a static reader
+ * sees one file at one instant, and cannot separate a stale declaration from a
+ * genuine in-progress one (a menu whose items stream in a chunk at a time is
+ * correctly busy *with* items present). The markup may be lying; the page still
+ * works either way.
+ */
+export interface ForbiddenAriaRule {
+  /**
+   * Target name the rule applies to; the empty string `""` means the
+   * controller's own scope element.
+   */
+  readonly target: string;
+  /** Attribute names that must not be present. */
+  readonly attrs: readonly string[];
+  /** Restricts the rule to these values; omit to forbid the attribute outright. */
+  readonly values?: readonly string[];
+  /**
+   * Restricts the rule to elements holding a given number of a target. Without
+   * a condition the rule would forbid the attribute unconditionally, which is
+   * {@link ManagedAriaRule}'s job — so in practice every rule here carries one.
+   */
+  readonly whenContains?: ContentCondition;
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
+/**
  * The bundled manifest. `schemaVersion` tracks the manifest *format*;
  * `packageVersion` tracks the `stimeo-ui` release it was generated from so a
  * consumer can confirm the check matches their installed version.
@@ -236,9 +555,41 @@ export interface Manifest {
   readonly controllers: Readonly<Record<string, ControllerManifest>>;
 }
 
+/**
+ * A target requirement that only exists once another *optional* target is
+ * present.
+ *
+ * `requiredTargets` is unconditional, which cannot express the shape two
+ * controllers actually have: a feature that is entirely opt-in, but **incomplete
+ * without its whole set**. A breadcrumb without any `collapsible` is a valid plain
+ * trail; add one and the disclosure (`ellipsis` + `trigger`) becomes mandatory,
+ * because without it the collapsed items have no control that can reveal them. A
+ * file-dropzone without an `itemTemplate` never renders a list; add one without a
+ * `list` and the selected files render nowhere.
+ *
+ * Both fail the same way: the required targets are *present enough* to pass every
+ * other check, the page loads, `stimeo check` is green — and the feature silently
+ * does nothing. Making the trigger target unconditionally required is not an
+ * option: it would reject the plain spelling, which is the common one.
+ */
+export interface ConditionalTargetRule {
+  /** The optional target whose presence turns the feature on. */
+  readonly whenPresent: string;
+  /** Targets that become required once {@link whenPresent} appears. */
+  readonly require: readonly string[];
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
 /** Hand-written structure rules, merged into the reflected manifest. */
 export type StructureRules = Readonly<
-  Record<string, { readonly requiredTargets?: readonly string[] }>
+  Record<
+    string,
+    {
+      readonly requiredTargets?: readonly string[];
+      readonly conditionalTargets?: readonly ConditionalTargetRule[];
+    }
+  >
 >;
 
 /** Hand-written accessibility rules (stage 3), merged into the manifest. */
@@ -252,6 +603,18 @@ export type ManagedAriaRules = Readonly<Record<string, readonly ManagedAriaRule[
 
 /** Hand-written composition rules (stage 3), merged into the manifest. */
 export type CompositionRules = Readonly<Record<string, readonly CompositionRule[]>>;
+
+/** Hand-written required-companion rules, merged into the manifest. */
+export type CompanionRules = Readonly<Record<string, readonly CompanionRequirement[]>>;
+
+/** Hand-written reverse-direction target rules, merged into the manifest. */
+export type TargetDeclarationRules = Readonly<Record<string, readonly TargetDeclarationRule[]>>;
+
+/** Hand-written cardinality rules, merged into the manifest. */
+export type CardinalityRules = Readonly<Record<string, readonly CardinalityRule[]>>;
+
+/** Hand-written forbidden-attribute rules, merged into the manifest. */
+export type ForbiddenAriaRules = Readonly<Record<string, readonly ForbiddenAriaRule[]>>;
 
 /** Severity of a diagnostic. Only `error` affects the process exit code. */
 export type DiagnosticSeverity = "error" | "warning";
@@ -269,12 +632,17 @@ export const DIAGNOSTIC_CODES = [
   "unknown-action-method",
   "orphan-target",
   "missing-required-target",
+  "missing-conditional-target",
   "missing-aria",
   "invalid-aria-value",
   "keyboard-inaccessible",
   "unresolved-idref",
   "managed-aria",
   "composition-mismatch",
+  "missing-companion",
+  "undeclared-target",
+  "cardinality-violation",
+  "forbidden-aria",
   "unknown-ignore-code",
 ] as const;
 
@@ -312,8 +680,8 @@ export interface Diagnostic {
    * Length in source characters of the anchored token starting at `column` —
    * the attribute name for attribute-anchored diagnostics, or the opening
    * `<tag` for element-anchored ones. Lets editors underline the exact token
-   * instead of guessing a word boundary. Optional so hand-built or historical
-   * reports without it stay valid; consumers should fall back to `1`.
+   * instead of guessing a word boundary. Optional so hand-built reports without
+   * it stay valid; consumers should fall back to `1`.
    */
   readonly length?: number;
   /**
@@ -334,8 +702,8 @@ export interface FileReport {
 /**
  * Machine-readable result of `stimeo check --json`: the structured counterpart
  * of the human report, for editor tooling and CI. `files` lists only sources
- * that produced diagnostics; `ok` is
- * true when no error-severity diagnostic was found (mirrors the exit code).
+ * that produced diagnostics; `ok` is true when no error-severity diagnostic was
+ * found (mirrors the exit code).
  */
 export interface CheckReport {
   /** True when no error-severity diagnostics were found. */

@@ -1,4 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord } from "../utils/arrow_step";
+import { isRtl } from "../utils/logical_scroll";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
 
 /**
@@ -59,18 +61,44 @@ export class ToggleGroupController extends Controller<HTMLElement> {
 
   /** Arrow/Home/End move focus only; Space/Enter toggle non-button hosts. */
   onKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key must not ALSO move the roving focus —
+    // composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const current = this.itemTargets.indexOf(event.currentTarget as HTMLElement);
     if (current === -1) return;
 
     let next: number | null = null;
+    // Logical, not physical. APG defines these as "next / previous control", and
+    // says a vertical arrangement swaps in Down/Up for the same meaning — so the
+    // pair is one axis's spelling of an order, and the order reverses with the
+    // writing direction. Read from the controller element: the container is what
+    // lays the items out, and a child may carry its own `dir` (an LTR input
+    // inside an RTL form is ordinary authoring).
+    // The horizontal pair reverses; Down/Up must not come along. They share a case
+    // body here, so the direction is decided per key rather than per branch —
+    // swapping the case labels would flip the vertical axis too.
+    const rtl = isRtl(this.element);
+    const horizontalStep = (key: string) =>
+      rtl ? (key === "ArrowRight" ? -1 : 1) : key === "ArrowRight" ? 1 : -1;
     switch (event.key) {
       case "ArrowRight":
       case "ArrowDown":
-        next = rovingMove(current, this.itemTargets.length, 1, "wrap");
+        next = rovingMove(
+          current,
+          this.itemTargets.length,
+          event.key === "ArrowDown" ? 1 : horizontalStep(event.key),
+          "wrap",
+        );
         break;
       case "ArrowLeft":
       case "ArrowUp":
-        next = rovingMove(current, this.itemTargets.length, -1, "wrap");
+        next = rovingMove(
+          current,
+          this.itemTargets.length,
+          event.key === "ArrowUp" ? -1 : horizontalStep(event.key),
+          "wrap",
+        );
         break;
       case "Home":
         next = 0;

@@ -2,8 +2,8 @@
  * A minimal, dependency-free HTML tokenizer/tree builder.
  *
  * The Inspector deliberately ships **zero runtime dependencies** beyond the
- * Stimulus peer (see project invariants), so rather than pull in a DOM library
- * we build just enough of a tree to answer the only questions the checker asks:
+ * Stimulus peer, so rather than pull in a DOM library we build just enough of a
+ * tree to answer the only questions the checker asks:
  * "which `stimeo--*` attributes exist, where, and inside which controller
  * scope?". The parser is intentionally lenient — real-world ERB output has
  * unclosed tags and stray markup — and never throws.

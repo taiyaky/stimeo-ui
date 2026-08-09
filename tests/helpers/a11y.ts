@@ -2,7 +2,7 @@ import type { AxeResults, Result, RunOptions } from "axe-core";
 import { axe } from "vitest-axe";
 
 /**
- * Layer ① a11y audit helper (machine-detectable violations) for happy-dom tests.
+ * A11y audit helper (machine-detectable violations) for happy-dom tests.
  *
  * Wraps `axe-core` (via `vitest-axe`) so every controller suite can assert the
  * absence of **machine-detectable** accessibility violations — ARIA misuse,
@@ -14,7 +14,7 @@ import { axe } from "vitest-axe";
  * therefore means **"no machine-detectable a11y violation was found"** — it is
  * NOT a claim of WCAG 2.2 AA conformance. Real-browser checks and screen-reader
  * verification (virtual-screen-reader for speech order; a real screen reader /
- * human for real speech) cover what this layer cannot.
+ * human for real speech) cover what this helper cannot.
  */
 
 /** What can be audited: a live DOM element or an HTML string. */

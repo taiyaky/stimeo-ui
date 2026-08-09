@@ -51,7 +51,7 @@ export class StickyObserverController extends Controller<HTMLElement> {
   readonly #watcher = new IntersectionWatcher((entries) => this.#onIntersect(entries));
   /** Last reported stuck state, so `change` fires only on transitions. */
   #stuck: boolean | null = null;
-  /** Target currently owned by the watcher, used to avoid duplicate restarts. */
+  /** Target currently owned by the watcher; comparing it avoids duplicate restarts. */
   #observedSentinel: HTMLElement | null = null;
   #connected = false;
 

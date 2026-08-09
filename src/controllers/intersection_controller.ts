@@ -65,6 +65,8 @@ export class IntersectionController extends Controller<HTMLElement> {
 
   /** Shared IO plumbing (support guard, root resolution, active guard, re-arm). */
   readonly #watcher = new IntersectionWatcher((entries) => this.#onIntersect(entries));
+  /** Threshold actually installed in the live observer (0 after option fallback). */
+  #effectiveThreshold = 0;
   /** Bumped by `refresh()`: an in-flight batch becomes stale and stops. */
   #generation = 0;
 
@@ -90,7 +92,11 @@ export class IntersectionController extends Controller<HTMLElement> {
       // observer still fires at ratio 1. The epsilon absorbs subpixel rounding
       // (see RATIO_EPSILON); keeping the geometric `isIntersecting` conjunct
       // stops it from underflowing a tiny threshold into "always visible".
-      const threshold = this.#clampedThreshold();
+      // A constructor fallback omits the configured threshold, so the observer
+      // can only notify at its effective default line (0). Applying the authored
+      // line here would wait for a callback that the fallback observer never
+      // schedules after an initially intersecting entry.
+      const threshold = this.#effectiveThreshold;
       const intersecting =
         threshold > 0
           ? entry.isIntersecting && ratio >= threshold - RATIO_EPSILON
@@ -107,11 +113,13 @@ export class IntersectionController extends Controller<HTMLElement> {
     // A cache restore may bring back an element whose one-shot enter already
     // fired; honor it instead of re-observing (mirrors `data-lazy-loaded`).
     if (this.onceValue && this.element.getAttribute("data-intersecting") === "true") return;
+    this.#effectiveThreshold = this.#clampedThreshold();
     this.#watcher.start(this.element, {
       rootSelector: this.rootSelectorValue,
       rootMargin: this.rootMarginValue,
       threshold: this.#thresholds(),
     });
+    if (this.#watcher.usingPlatformDefaults) this.#effectiveThreshold = 0;
   }
 
   override disconnect(): void {

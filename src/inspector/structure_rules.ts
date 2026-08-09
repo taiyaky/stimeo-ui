@@ -28,7 +28,22 @@ export const structureRules: StructureRules = {
   // No required targets: the controller element is the form unless `form` is given.
   "stimeo--auto-submit": {},
   "stimeo--avatar": { requiredTargets: ["image"] },
-  "stimeo--breadcrumb": { requiredTargets: ["list"] },
+  "stimeo--breadcrumb": {
+    requiredTargets: ["list"],
+    // Collapsing is opt-in, but incomplete without its whole set: the items go
+    // behind a disclosure, so a trail that marks `collapsible` and omits either
+    // half of it hides them with no control that can bring them back. The
+    // controller degrades safely (it simply never collapses), which is exactly
+    // why the author gets no signal without this rule.
+    conditionalTargets: [
+      {
+        whenPresent: "collapsible",
+        require: ["ellipsis", "trigger"],
+        suggestion:
+          'Add the disclosure an author-marked "collapsible" needs: an "ellipsis" item and a "trigger" button inside it. Without both, the trail never collapses.',
+      },
+    ],
+  },
   "stimeo--bulk-select": { requiredTargets: ["item", "bar"] },
   "stimeo--calendar": { requiredTargets: ["grid"] },
   "stimeo--carousel": { requiredTargets: ["slide", "picker"] },
@@ -66,7 +81,27 @@ export const structureRules: StructureRules = {
   // Placeholder-style targets stay optional repo-wide (cf. `stimeo--filter` below),
   // so requiring `empty` here would reject valid CSS-driven (`data-empty`) markup.
   "stimeo--empty-state": { requiredTargets: ["list"] },
-  "stimeo--file-dropzone": { requiredTargets: ["input", "trigger"] },
+  "stimeo--file-dropzone": {
+    requiredTargets: ["input", "trigger"],
+    // The selected-file list is opt-in, and both halves are load-bearing: the
+    // template supplies the item markup and the list is where it is appended.
+    // With one of them the picker still works and the files are still submitted —
+    // they just render nowhere, which reads to a user as a broken picker.
+    conditionalTargets: [
+      {
+        whenPresent: "itemTemplate",
+        require: ["list"],
+        suggestion:
+          'Add a "list" target for the rendered items — an "itemTemplate" with nowhere to append to renders nothing.',
+      },
+      {
+        whenPresent: "list",
+        require: ["itemTemplate"],
+        suggestion:
+          'Add an "itemTemplate" target — a "list" has no item markup to clone without it.',
+      },
+    ],
+  },
   // Only `item` is required (the collection being filtered); `control`, `group`, and
   // `empty` are optional conveniences the controller guards individually.
   "stimeo--filter": { requiredTargets: ["item"] },
@@ -100,7 +135,13 @@ export const structureRules: StructureRules = {
   "stimeo--local-time": {},
   "stimeo--masonry": { requiredTargets: ["item"] },
   "stimeo--menu": { requiredTargets: ["trigger", "menu"] },
-  "stimeo--menubar": { requiredTargets: ["top", "menu", "item"] },
+  // `item` is deliberately not required: a menu the consumer fills
+  // asynchronously is supported markup, and requiring the target scope-wide
+  // would reject the very markup the empty-menu `aria-busy` requirement accepts.
+  // Emptiness is judged per menu by that rule instead, which is also the
+  // sharper check — a scope-level presence test stays silent as soon as any one
+  // menu has items.
+  "stimeo--menubar": { requiredTargets: ["top", "menu"] },
   // No required targets: value/ARIA/state live on the controller element.
   "stimeo--meter": {},
   "stimeo--multi-select": { requiredTargets: ["input", "list", "tags"] },
@@ -115,7 +156,11 @@ export const structureRules: StructureRules = {
   "stimeo--otp": { requiredTargets: ["field"] },
   "stimeo--overflow-indicator": { requiredTargets: ["viewport"] },
   "stimeo--overflow-menu": { requiredTargets: ["items", "more"] },
-  "stimeo--pagination": { requiredTargets: ["page"] },
+  // No required targets: a prev/next-only pager (no numbered page buttons) is a
+  // supported configuration — the documented markup contract allows zero `page`
+  // targets — so requiring `page` would reject valid markup. Boundary buttons
+  // stay optional too (either one alone works).
+  "stimeo--pagination": {},
   "stimeo--password-reveal": { requiredTargets: ["input", "toggle"] },
   // `label` is optional (the polite live-region readout); the input + meter are core.
   "stimeo--password-strength": { requiredTargets: ["input", "meter"] },

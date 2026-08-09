@@ -5,7 +5,7 @@
 <div class="dropdown" data-controller="stimeo--dropdown">
   <button
     type="button"
-    class="dropdown__trigger"
+    class="demo-trigger"
     aria-expanded="false"
     data-stimeo--dropdown-target="trigger"
     data-action="click->stimeo--dropdown#toggle">
@@ -17,13 +17,13 @@
       (The links are inside the controller element, so an outside click won't close
       it — wire it explicitly.) %>
   <ul class="dropdown__menu" data-stimeo--dropdown-target="menu" hidden>
-    <li><a href="#profile" data-action="click->stimeo--dropdown#close"><%= t(
+    <li><a class="demo-menuitem" href="#profile" data-action="click->stimeo--dropdown#close"><%= t(
       "components.dropdown.demo.profile"
     ) %></a></li>
-    <li><a href="#settings" data-action="click->stimeo--dropdown#close"><%= t(
+    <li><a class="demo-menuitem" href="#settings" data-action="click->stimeo--dropdown#close"><%= t(
       "components.dropdown.demo.settings"
     ) %></a></li>
-    <li><a href="#sign-out" data-action="click->stimeo--dropdown#close"><%= t(
+    <li><a class="demo-menuitem" href="#sign-out" data-action="click->stimeo--dropdown#close"><%= t(
       "components.dropdown.demo.sign_out"
     ) %></a></li>
   </ul>

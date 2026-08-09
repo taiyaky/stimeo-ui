@@ -240,8 +240,7 @@ describe("SortableController", () => {
 
   describe("horizontal orientation (dx is the primary axis)", () => {
     // The vertical fixture retargeted to the x axis: sortable orientation,
-    // pointer-drag axis, and roving orientation all flip together (the contract
-    // the markup docs spell out).
+    // pointer-drag axis, and roving orientation all flip together.
     const horizontalFixture = fixture
       .replace(
         'data-controller="stimeo--sortable"',
@@ -286,6 +285,77 @@ describe("SortableController", () => {
       expect(order()).toEqual(["i2", "i1", "i3"]);
       pointer("i1", "pointerup", 160);
       expect(reorders).toEqual([{ item: document.querySelector("#i1"), from: 0, to: 1 }]);
+    });
+
+    /**
+     * RTL rows. `pointer-drag` reports physical coordinates and leaves RTL to its
+     * consumer, and this is that consumer: DOM order runs right-to-left here, so
+     * both drag paths have to be mapped back onto it. The list is laid out in
+     * reverse — A occupies the rightmost 100px column.
+     */
+    describe("under dir=rtl", () => {
+      /** The horizontal fixture with the row reversed. */
+      const mountRtl = async () => {
+        const reorders = await mount(horizontalFixture);
+        // happy-dom does not resolve the `dir` attribute into the computed
+        // style, so the direction is set the way the other RTL suites do it.
+        (
+          document.querySelector("[data-stimeo--sortable-target='list']") as HTMLElement
+        ).style.direction = "rtl";
+        return reorders;
+      };
+
+      it("steps the item toward the arrow it was pressed with", async () => {
+        const reorders = await mountRtl();
+        key("i1", " "); // grab A, the item at the right end of the row
+        key("i1", "ArrowLeft"); // leftward on screen = later in DOM order
+        expect(order()).toEqual(["i2", "i1", "i3"]);
+        expect(status().textContent).toBe("Card A, position 2 of 3");
+
+        key("i1", "ArrowRight"); // and back
+        expect(order()).toEqual(["i1", "i2", "i3"]);
+        key("i1", " ");
+        expect(reorders).toEqual([]); // returned to the pickup slot: no reorder
+      });
+
+      it("clamps at the end the row actually starts from", async () => {
+        // The guard the physical reading gets backwards: A is already first, so
+        // ArrowRight (toward the row's start on screen) must not move it, while
+        // the physical reading would clamp the opposite end instead.
+        await mountRtl();
+        key("i1", " ");
+        key("i1", "ArrowRight");
+        expect(order()).toEqual(["i1", "i2", "i3"]);
+      });
+
+      it("follows the pointer across sibling midpoints in reverse", async () => {
+        const reorders = await mountRtl();
+        // Reversed layout: A rightmost (200), B middle (100), C leftmost (0).
+        stubRects({ i1: 200, i2: 100, i3: 0 }, "x", 100);
+        const pointer = (id: string, type: string, x: number) => pointerAt(id, type, "x", x);
+        pointer("i1", "pointerdown", 250);
+        pointer("i1", "pointermove", 140); // past B's midpoint (150), moving left
+        expect(order()).toEqual(["i2", "i1", "i3"]);
+
+        // Carried to the far end, where the two readings part company: counting
+        // physically here yields zero crossings and sends A back to the start.
+        pointer("i1", "pointermove", 40); // past C's midpoint (50) as well
+        expect(order()).toEqual(["i2", "i3", "i1"]);
+        pointer("i1", "pointerup", 40);
+        expect(reorders).toEqual([{ item: document.querySelector("#i1"), from: 0, to: 2 }]);
+      });
+
+      it("does not move the item before it has crossed anything", async () => {
+        // The failure the physical reading produces on the very first move: with
+        // A at the right end, both siblings' midpoints are below the pointer, so
+        // a physical count lands on the far slot and teleports A across the row.
+        await mountRtl();
+        stubRects({ i1: 200, i2: 100, i3: 0 }, "x", 100);
+        const pointer = (id: string, type: string, x: number) => pointerAt(id, type, "x", x);
+        pointer("i1", "pointerdown", 250);
+        pointer("i1", "pointermove", 245); // still over A's own column
+        expect(order()).toEqual(["i1", "i2", "i3"]);
+      });
     });
   });
 
@@ -400,7 +470,7 @@ describe("SortableController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech-order regression ------------------------------------------------
 
   it("keeps the list announceable and reflects the new order after a keyboard move", async () => {
     await mount();

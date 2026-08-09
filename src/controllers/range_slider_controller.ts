@@ -1,4 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { isRtl } from "../utils/logical_scroll";
 
 /** CSS custom properties exposing each thumb's position (0..1) to the consumer. */
 const START_PROPERTY = "--stimeo-range-start";
@@ -29,16 +31,21 @@ const END_PROPERTY = "--stimeo-range-end";
  *
  * @remarks
  * Behavior only — the consumer owns all layout (positioning the thumbs and the
- * selected range from the fractions). Only the horizontal orientation is handled
- * in this MVP. Each thumb's movable range is bounded by the *other* thumb's
- * current value, reflected on its `aria-valuemin`/`aria-valuemax` so assistive
- * tech announces the live constraint.
+ * selected range from the fractions). Only the horizontal orientation is handled.
+ * Each thumb's movable range is bounded by the *other* thumb's current value,
+ * reflected on its `aria-valuemin`/`aria-valuemax` so assistive tech announces the
+ * live constraint.
  *
  * Behavior provided (per focused thumb):
  * - `ArrowRight`/`ArrowUp` increase and `ArrowLeft`/`ArrowDown` decrease by one
  *   step; `Home`/`End` jump to that thumb's movable min/max; `PageUp`/`PageDown`
  *   move by ten steps. A thumb never crosses the other.
  * - Pointer press/drag on the track moves the nearest thumb.
+ *
+ * The fractions are value ratios, not positions, so only the consumer knows
+ * whether their track mirrors under RTL. Set `logicalTrack` to declare that it
+ * does: the pointer mapping and the horizontal arrow pair then follow the
+ * writing direction. Left unset, nothing here reads `direction`.
  */
 export class RangeSliderController extends Controller<HTMLElement> {
   static override targets = ["track", "startThumb", "endThumb"];
@@ -48,6 +55,7 @@ export class RangeSliderController extends Controller<HTMLElement> {
     step: { type: Number, default: 1 },
     start: { type: Number, default: 0 },
     end: { type: Number, default: 100 },
+    logicalTrack: { type: Boolean, default: false },
   };
   static actions = ["onKeydown", "onPointerDown"] as const;
   static events = ["change"] as const;
@@ -63,9 +71,15 @@ export class RangeSliderController extends Controller<HTMLElement> {
   declare stepValue: number;
   declare startValue: number;
   declare endValue: number;
+  declare logicalTrackValue: boolean;
 
   /** Aborts in-progress pointer-drag listeners when the drag ends or on teardown. */
   #dragAbort: AbortController | null = null;
+
+  /** Whether the consumer declared a mirroring track and the direction mirrors it. */
+  get #mirrored(): boolean {
+    return this.logicalTrackValue && isRtl(this.element);
+  }
 
   /** Normalizes the initial pair (clamped, snapped, ordered) and renders. */
   override connect(): void {
@@ -84,6 +98,7 @@ export class RangeSliderController extends Controller<HTMLElement> {
 
   /** Keyboard stepping for whichever thumb is focused (the action's element). */
   onKeydown(event: KeyboardEvent): void {
+    if (isReservedArrowChord(event)) return;
     const thumb = event.currentTarget as HTMLElement;
     const isStart = this.hasStartThumbTarget && thumb === this.startThumbTarget;
     const current = isStart ? this.startValue : this.endValue;
@@ -93,7 +108,9 @@ export class RangeSliderController extends Controller<HTMLElement> {
     const big = this.stepValue * 10;
 
     let next: number | null = null;
-    switch (event.key) {
+    // On a mirrored track the greater value sits at the visual left, so the
+    // horizontal pair trades places; `Home`/`End` name bounds, not a direction.
+    switch (this.#mirrored ? logicalArrowKey(event.key, this.element) : event.key) {
       case "ArrowRight":
       case "ArrowUp":
         next = current + this.stepValue;
@@ -124,7 +141,11 @@ export class RangeSliderController extends Controller<HTMLElement> {
   /** Begins a pointer drag on the track, moving the thumb nearest the press. */
   onPointerDown(event: PointerEvent): void {
     if (!this.hasTrackTarget) return;
-    const value = this.#valueFromClientX(event.clientX);
+    // Resolve the direction once for the whole gesture: reading it per move
+    // would query computed style on every frame, and a drag that flipped
+    // mid-gesture would be incoherent anyway.
+    const mirrored = this.#mirrored;
+    const value = this.#valueFromClientX(event.clientX, mirrored);
     if (value === null) return;
     event.preventDefault();
 
@@ -143,7 +164,7 @@ export class RangeSliderController extends Controller<HTMLElement> {
     const abort = new AbortController();
     this.#dragAbort = abort;
     const onMove = (move: PointerEvent): void => {
-      const moved = this.#valueFromClientX(move.clientX);
+      const moved = this.#valueFromClientX(move.clientX, mirrored);
       if (moved !== null) this.#moveThumb(useStart, moved);
     };
     const onUp = (): void => {
@@ -158,10 +179,11 @@ export class RangeSliderController extends Controller<HTMLElement> {
   }
 
   /** Maps a pointer X coordinate to a raw value using the track geometry. */
-  #valueFromClientX(clientX: number): number | null {
+  #valueFromClientX(clientX: number, mirrored: boolean): number | null {
     const rect = this.trackTarget.getBoundingClientRect();
     if (rect.width === 0) return null;
-    const fraction = (clientX - rect.left) / rect.width;
+    const offset = (clientX - rect.left) / rect.width;
+    const fraction = mirrored ? 1 - offset : offset;
     return this.minValue + fraction * (this.maxValue - this.minValue);
   }
 

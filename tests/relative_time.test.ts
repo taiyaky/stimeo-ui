@@ -114,7 +114,7 @@ describe("RelativeTimeController", () => {
       "stimeo--relative-time",
     ) as RelativeTimeController;
     // Invoke disconnect() directly for a deterministic teardown (no reliance on
-    // the async MutationObserver flush, which was environment-sensitive).
+    // the async MutationObserver flush, whose timing varies by environment).
     controller.disconnect();
     vi.advanceTimersByTime(120_000);
     // The polling timer was cleared, so the text stays at its last value.
@@ -122,7 +122,7 @@ describe("RelativeTimeController", () => {
   });
 });
 
-/** Layer ① (axe) runs under real timers, independent of the polling behavior. */
+/** The axe audit runs under real timers, independent of the polling behavior. */
 describe("RelativeTimeController accessibility", () => {
   let application: Application;
 
@@ -145,8 +145,8 @@ describe("RelativeTimeController accessibility", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // Layer ③ — the rendered relative phrase is what a reader announces for the
-  // <time> element. A real-clock datetime keeps the assertion stable.
+  // The rendered relative phrase is what a reader announces for the <time>
+  // element. A real-clock datetime keeps the assertion stable.
   it("announces the rendered relative phrase", async () => {
     const threeMinutesAgo = new Date(Date.now() - 180_000).toISOString();
     document.body.innerHTML = `

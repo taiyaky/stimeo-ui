@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * deterministically (no real layout, which happy-dom cannot model): which
  * middleware are selected from the options, that the computed coordinates land as
  * inline styles, and that `attachPositioning` wires `autoUpdate` and returns its
- * cleanup. Real-layout flip/shift behavior is covered by the real-browser e2e
- * layer, not here.
+ * cleanup. Real-layout flip/shift behavior needs a real browser and is not
+ * asserted here.
  */
 
 const computePosition = vi.fn();

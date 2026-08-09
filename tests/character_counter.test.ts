@@ -191,9 +191,9 @@ describe("CharacterCounterController", () => {
     expect(out.textContent).toBe("10"); // never written
   });
 
-  // Layer ③ — speech-order regression: the remaining count is announced in the
-  // polite live region after the debounce.
-  it("announces the remaining count in its live region (layer ③)", async () => {
+  // Speech-order regression: the remaining count is announced in the polite
+  // live region after the debounce.
+  it("announces the remaining count in its live region", async () => {
     await start('data-stimeo--character-counter-max-value="10"');
     type("hello");
     await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);

@@ -1,4 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { toFiniteNumber } from "../utils/coerce";
+import { isRtl } from "../utils/logical_scroll";
 
 /** CSS custom property exposing the current color to consumer CSS. */
 const COLOR_PROPERTY = "--stimeo-color";
@@ -51,7 +54,13 @@ interface Hsla {
  *
  * @remarks
  * Behavior only — the swatch/gradient visuals are the consumer's CSS/canvas, fed
- * by `--stimeo-color`. Pointer-drag listeners on `document` are bound to an
+ * by `--stimeo-color`. Only the consumer knows whether a channel track mirrors
+ * under RTL: set `logicalTrack` to declare that it does, and the pointer mapping
+ * and horizontal arrow pair follow the writing direction. Left unset, nothing
+ * here reads `direction`. A gradient has no logical `to` keyword, so mirroring
+ * one means swapping `to right`/`to left` under a `:dir(rtl)` selector.
+ *
+ * Pointer-drag listeners on `document` are bound to an
  * {@link AbortController} and released on drag end and on `disconnect()` (Turbo
  * navigation included). Color is fully reconstructable from the `value` (hex), so
  * there is no transient state to restore after a Turbo cache/morph.
@@ -66,6 +75,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
   static override values = {
     value: { type: String, default: "#000000" },
     alpha: { type: Boolean, default: false },
+    logicalTrack: { type: Boolean, default: false },
   };
   static actions = ["onHexInput", "onKeydown", "onPointerDown"] as const;
   static events = ["change"] as const;
@@ -77,6 +87,12 @@ export class ColorPickerController extends Controller<HTMLElement> {
   declare readonly fieldTargets: HTMLInputElement[];
   declare valueValue: string;
   declare alphaValue: boolean;
+  declare logicalTrackValue: boolean;
+
+  /** Whether the consumer declared a mirroring track and the direction mirrors it. */
+  get #mirrored(): boolean {
+    return this.logicalTrackValue && isRtl(this.element);
+  }
 
   /** The current color in the editing model. */
   #color: Hsla = { hue: 0, saturation: 0, lightness: 0, alpha: 100 };
@@ -101,6 +117,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
 
   /** Keyboard stepping on the focused channel slider (APG Slider model). */
   onKeydown(event: KeyboardEvent): void {
+    if (isReservedArrowChord(event)) return;
     const slider = event.currentTarget as HTMLElement;
     const channel = this.#channelOf(slider);
     if (!channel) return;
@@ -108,7 +125,9 @@ export class ColorPickerController extends Controller<HTMLElement> {
     const [min, max] = this.#rangeOf(slider, channel);
     const value = this.#color[channel];
     let next: number | null = null;
-    switch (event.key) {
+    // On a mirrored track the greater value sits at the visual left, so the
+    // horizontal pair trades places; the vertical pair passes through.
+    switch (this.#mirrored ? logicalArrowKey(event.key, this.element) : event.key) {
       case "ArrowRight":
       case "ArrowUp":
         next = value + 1;
@@ -145,10 +164,15 @@ export class ColorPickerController extends Controller<HTMLElement> {
     slider.focus();
 
     const [min, max] = this.#rangeOf(slider, channel);
+    // Resolve the direction once for the whole gesture: reading it per move
+    // would query computed style on every frame, and a drag that flipped
+    // mid-gesture would be incoherent anyway.
+    const mirrored = this.#mirrored;
     const update = (clientX: number): void => {
       const rect = slider.getBoundingClientRect();
       if (rect.width === 0) return;
-      const fraction = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+      const offset = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+      const fraction = mirrored ? 1 - offset : offset;
       this.#setChannel(channel, min + fraction * (max - min), min, max);
     };
     update(event.clientX);
@@ -221,12 +245,18 @@ export class ColorPickerController extends Controller<HTMLElement> {
     return channel && channel in CHANNEL_RANGE ? (channel as Channel) : null;
   }
 
-  /** A slider's `[min, max]` from aria-valuemin/max, falling back per channel. */
+  /**
+   * A slider's `[min, max]` from aria-valuemin/max, falling back per channel.
+   * An absent or blank attribute means "not authored", not zero — coercing it to
+   * a number would pin the channel at `0` and make the per-channel default
+   * unreachable.
+   */
   #rangeOf(slider: HTMLElement, channel: Channel): [number, number] {
     const [defMin, defMax] = CHANNEL_RANGE[channel];
-    const min = Number(slider.getAttribute("aria-valuemin"));
-    const max = Number(slider.getAttribute("aria-valuemax"));
-    return [Number.isFinite(min) ? min : defMin, Number.isFinite(max) ? max : defMax];
+    return [
+      toFiniteNumber(slider.getAttribute("aria-valuemin")) ?? defMin,
+      toFiniteNumber(slider.getAttribute("aria-valuemax")) ?? defMax,
+    ];
   }
 }
 

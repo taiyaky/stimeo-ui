@@ -55,6 +55,7 @@ describe("IntersectionController", () => {
   let application: Application;
   let observerCallback: ((entries: Entry[]) => void) | null = null;
   let observerOptions: IntersectionObserverInit | undefined;
+  let rejectedRootMargin: string | null = null;
   const observeMock = vi.fn();
   const unobserveMock = vi.fn();
   const disconnectMock = vi.fn();
@@ -62,12 +63,16 @@ describe("IntersectionController", () => {
   beforeEach(() => {
     observerCallback = null;
     observerOptions = undefined;
+    rejectedRootMargin = null;
     observeMock.mockClear();
     unobserveMock.mockClear();
     disconnectMock.mockClear();
 
     const IntersectionObserverMock = class {
       constructor(callback: (entries: Entry[]) => void, options?: IntersectionObserverInit) {
+        if (options?.rootMargin === rejectedRootMargin) {
+          throw new SyntaxError("invalid rootMargin");
+        }
         observerCallback = callback;
         observerOptions = options;
       }
@@ -101,6 +106,7 @@ describe("IntersectionController", () => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     await delay(20);
   });
 
@@ -139,6 +145,24 @@ describe("IntersectionController", () => {
         <div data-controller="stimeo--intersection" aria-hidden="true"
              data-stimeo--intersection-ratio-steps-value="4"></div>`);
       expect(observerOptions?.threshold).toEqual([0, 0.25, 0.5, 0.75, 1]);
+    });
+
+    it("uses the effective default threshold after configured options fall back", async () => {
+      rejectedRootMargin = "invalid";
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-root-margin-value="invalid"
+             data-stimeo--intersection-threshold-value="0.5"></div>`);
+
+      expect(observerOptions).toEqual({ root: null });
+      // A threshold-0 fallback delivers this initial overlap. It will not notify
+      // again merely because the ratio later reaches the discarded authored 0.5.
+      observerCallback?.([visible(0.1)]);
+      await tick();
+
+      expect(events.enter).toEqual([{ ratio: 0.1 }]);
+      expect(root().getAttribute("data-intersecting")).toBe("true");
     });
   });
 
@@ -371,7 +395,7 @@ describe("IntersectionController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech order -----------------------------------------------------------
 
   it("keeps the sentinel silent before and after intersection", async () => {
     await mount(`

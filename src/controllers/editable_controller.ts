@@ -106,13 +106,18 @@ export class EditableController extends Controller<HTMLElement> {
     // conversion, confirm a candidate) and must never cancel or save the edit.
     if (this.#composition.isComposing(event)) return;
     if (event.key === "Escape") {
-      // Layered-Escape rule 1: leave a press an inner handler already owned.
+      // Leave a press an inner handler already owned.
       if (event.defaultPrevented) return;
       event.preventDefault();
       this.#cancel();
       return;
     }
     if (event.key === "Enter") {
+      // A descendant widget that already claimed the key (a completion popup
+      // confirming its candidate) must not ALSO commit the edit — composition
+      // depends on this yield. Kept separate from the Escape guard above, which
+      // answers a different question: who owns an Escape press.
+      if (event.defaultPrevented) return;
       // A bare Enter inserts a newline in a textarea; only Ctrl+Enter (or Cmd+Enter on
       // macOS, the platform-conventional commit chord) saves there.
       if (this.#isMultiline && !(event.ctrlKey || event.metaKey)) return;

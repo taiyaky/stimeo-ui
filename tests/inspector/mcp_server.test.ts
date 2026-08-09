@@ -28,10 +28,15 @@ const fakeManifest: Manifest = {
       actions: ["toggle"],
       events: ["changed"],
       requiredTargets: ["panel"],
+      conditionalTargets: [],
       a11y: [],
       keyboard: [],
       managedAria: [],
       compositions: [],
+      companions: [],
+      targetDeclarations: [],
+      cardinality: [],
+      forbiddenAria: [],
     },
   },
 };
@@ -41,7 +46,7 @@ const fakeExamples: ExamplesIndex = {
   schemaVersion: 1,
   examples: {
     "stimeo--demo": {
-      file: "playground/app/views/components/demos/demo/_demo.html.erb",
+      file: "app/views/components/demos/demo/_demo.html.erb",
       source: '<div data-controller="stimeo--demo"><p data-stimeo--demo-target="panel"></p></div>',
     },
   },
@@ -92,6 +97,25 @@ describe("McpSession", () => {
       prompts: { listChanged: false },
     });
     expect(result.serverInfo).toMatchObject({ name: "stimeo-ui", version: "9.9.9" });
+  });
+
+  it("keeps the server instructions searchable and inside the host truncation limit", () => {
+    // This is the discovery layer the tool descriptions cannot reach: per the
+    // MCP schema `instructions` is a hint a client MAY put in front of the
+    // model, and clients that defer tool definitions still tend to load it
+    // with the tool names — so it can be read before any tool is. Both
+    // assertions follow from clients truncating it: the trigger vocabulary has
+    // to survive, and it has to survive near the start. 2KB is the tightest
+    // client limit known; the margin below it is slack.
+    const session = new McpSession(fakeContext);
+    const response = roundTrip(session, "initialize", { protocolVersion: "2025-03-26" });
+    const result = response?.result as Record<string, unknown>;
+    const instructions = result.instructions as string;
+    expect(Buffer.byteLength(instructions)).toBeLessThan(2048);
+    const opening = instructions.slice(0, 400).toLowerCase();
+    for (const keyword of ["search", "rails", "accessible", "component"]) {
+      expect(opening, `server instructions lost "${keyword}" from the opening`).toContain(keyword);
+    }
   });
 
   it("falls back to the latest protocol version for unsupported requests", () => {

@@ -183,8 +183,8 @@ describe("CollapsibleController", () => {
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
   });
 
-  // Layer ① — machine-detectable a11y, asserted in both states. The page-level
-  // `region` (landmark) rule is irrelevant to a headless component fragment.
+  // Machine-detectable a11y, asserted in both states. The page-level `region`
+  // (landmark) rule is irrelevant to a headless component fragment.
   it("has no machine-detectable a11y violations in either state", async () => {
     const noRegion = { rules: { region: { enabled: false } } };
     await expectNoA11yViolations(document.body, noRegion);
@@ -192,8 +192,8 @@ describe("CollapsibleController", () => {
     await expectNoA11yViolations(document.body, noRegion);
   });
 
-  // Layer ③ — speech-order regression: the trigger's expanded state must flip in
-  // the announced phrase across a toggle.
+  // Speech-order regression: the trigger's expanded state must flip in the
+  // announced phrase across a toggle.
   it("announces the trigger's expanded state and flips it on toggle", async () => {
     const before = await captureSpeech({ container: trigger(), steps: 0 });
     expect(before).toEqual(["button, Show details, not expanded"]);

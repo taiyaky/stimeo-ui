@@ -103,7 +103,7 @@ describe("DrawerController", () => {
     root.setAttribute("data-stimeo--drawer-placement-value", "bottom");
     // Drive the reflect directly: Stimulus's value-change observer is
     // MutationObserver-based and intermittently misses the change under parallel
-    // load in happy-dom (same workaround as aspect_ratio's re-reflect test).
+    // load in happy-dom. placementValueChanged re-reads the updated value getter.
     controller.placementValueChanged();
     expect(panel().getAttribute("data-placement")).toBe("bottom");
   });
@@ -469,7 +469,7 @@ describe("DrawerController initial open and placement value", () => {
   });
 
   it("defaults data-placement to right when no placement value is set", async () => {
-    // Pins the spec default (placement: "right") for markup that omits the value.
+    // Markup that omits the value gets placement "right".
     document.body.innerHTML = `
       <div data-controller="stimeo--drawer">
         <div data-stimeo--drawer-target="overlay">

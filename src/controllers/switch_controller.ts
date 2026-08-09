@@ -55,6 +55,9 @@ export class SwitchController extends Controller<HTMLElement> {
    * which would otherwise toggle the switch twice.
    */
   onKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key must not ALSO toggle the switch —
+    // composition depends on this yield.
+    if (event.defaultPrevented) return;
     if (this.element instanceof HTMLButtonElement) return;
     if (event.repeat) return;
     if (event.key === " " || event.key === "Enter") {

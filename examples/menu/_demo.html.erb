@@ -6,7 +6,7 @@
   <button
     id="menu-trigger"
     type="button"
-    class="menu__trigger"
+    class="demo-trigger"
     aria-haspopup="menu"
     aria-expanded="false"
     aria-controls="menu-list"
@@ -15,32 +15,22 @@
     <%= t("components.menu.demo.trigger") %>
   </button>
 
-  <%# The trigger labels the menu; each item is a role="menuitem" button (tabindex=-1). %>
+  <%# The trigger labels the menu; each item is a role="menuitem" button (tabindex=-1).
+      Items need no data-action: the controller handles their clicks and keys from its own
+      element, so items added or moved in later work without being wired up. %>
   <ul id="menu-list" class="menu__list" role="menu" aria-labelledby="menu-trigger"
       data-stimeo--menu-target="menu" hidden>
     <li role="none">
-      <button type="button" role="menuitem" class="menu__item" tabindex="-1"
-              data-stimeo--menu-target="item"
-              data-action="click->stimeo--menu#activate
-                           keydown->stimeo--menu#onItemKeydown"><%= t(
-                "components.menu.demo.edit"
-              ) %></button>
+      <button type="button" role="menuitem" class="demo-menuitem" tabindex="-1"
+              data-stimeo--menu-target="item"><%= t("components.menu.demo.edit") %></button>
     </li>
     <li role="none">
-      <button type="button" role="menuitem" class="menu__item" tabindex="-1"
-              data-stimeo--menu-target="item"
-              data-action="click->stimeo--menu#activate
-                           keydown->stimeo--menu#onItemKeydown"><%= t(
-                "components.menu.demo.duplicate"
-              ) %></button>
+      <button type="button" role="menuitem" class="demo-menuitem" tabindex="-1"
+              data-stimeo--menu-target="item"><%= t("components.menu.demo.duplicate") %></button>
     </li>
     <li role="none">
-      <button type="button" role="menuitem" class="menu__item" tabindex="-1"
-              data-stimeo--menu-target="item"
-              data-action="click->stimeo--menu#activate
-                           keydown->stimeo--menu#onItemKeydown"><%= t(
-                "components.menu.demo.delete"
-              ) %></button>
+      <button type="button" role="menuitem" class="demo-menuitem" tabindex="-1"
+              data-stimeo--menu-target="item"><%= t("components.menu.demo.delete") %></button>
     </li>
   </ul>
 </div>

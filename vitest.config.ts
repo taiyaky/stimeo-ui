@@ -9,7 +9,7 @@ export default defineConfig({
     // is still live; under the coverage run's GC pressure it gets reclaimed and the
     // records are silently dropped, flaking every MutationObserver-driven test
     // (Stimulus disconnect-on-removal, dynamic-insert detection). Pin WeakRef to a
-    // strong ref so delivery is deterministic — see the setup file for the full why.
+    // strong ref so delivery is deterministic.
     setupFiles: [
       "tests/setup/deterministic-mutation-observer.ts",
       // happy-dom (>=20.10) reports every <img> as complete=true; this restores the

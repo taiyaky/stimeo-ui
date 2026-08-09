@@ -50,6 +50,20 @@ describe("SwitchController", () => {
     expect(sw().getAttribute("aria-checked")).toBe("false");
   });
 
+  it("yields a key a descendant widget already consumed", () => {
+    // A composed widget that claims the key must not ALSO toggle the switch —
+    // composition depends on this yield.
+    const inner = document.createElement("span");
+    sw().append(inner);
+    inner.addEventListener("keydown", (event) => event.preventDefault());
+
+    const claimed = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    const notCanceled = inner.dispatchEvent(claimed);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(sw().getAttribute("aria-checked")).toBe("false");
+  });
+
   it("toggles on Space and prevents the default scroll", () => {
     const event = new KeyboardEvent("keydown", { key: " ", cancelable: true });
     sw().dispatchEvent(event);
@@ -88,16 +102,16 @@ describe("SwitchController", () => {
     expect(button.getAttribute("aria-checked")).toBe("false");
   });
 
-  // Layer ① — machine-detectable a11y. Asserted in both states because the only
-  // exposed state (aria-checked) flips between them.
+  // Machine-detectable a11y. Asserted in both states because the only exposed
+  // state (aria-checked) flips between them.
   it("has no machine-detectable a11y violations in either state", async () => {
     await expectNoA11yViolations(sw());
     sw().click();
     await expectNoA11yViolations(sw());
   });
 
-  // Layer ③ — speech-order regression: the role/name/state announcement must be
-  // stable, and the checked state must flip in the spoken phrase on toggle.
+  // Speech-order regression: the role/name/state announcement must be stable,
+  // and the checked state must flip in the spoken phrase on toggle.
   it("announces role, name, and checked state before and after a toggle", async () => {
     const before = await captureSpeech({ container: sw(), steps: 0 });
     expect(before).toEqual(["switch, Notifications, not checked"]);

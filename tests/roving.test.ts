@@ -50,6 +50,42 @@ describe("RovingController", () => {
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
+  it("reverses the horizontal arrows under RTL, leaving Home/End alone", async () => {
+    // Logical direction: APG describes these as "next / previous", so the pair
+    // reverses with the writing direction. `dir="rtl"` is the authoring contract,
+    // but happy-dom does not resolve it into the computed style, so the direction
+    // is set as an inline style instead.
+    await mount("", ["0", "-1", "-1"]);
+    group().style.direction = "rtl";
+
+    arrow("#a", "ArrowLeft"); // "next" under RTL
+    expect(tabindexes()).toEqual([-1, 0, -1]);
+
+    arrow("#b", "ArrowRight"); // and back to "previous"
+    expect(tabindexes()).toEqual([0, -1, -1]);
+
+    arrow("#a", "End"); // logical already; unchanged by direction
+    expect(tabindexes()).toEqual([-1, -1, 0]);
+  });
+
+  it("reads the direction from the container, not the focused item", async () => {
+    // The rule this pins: the container is what lays the items out,
+    // so a child carrying its own `dir` must not change which way "next" goes.
+    // An LTR field inside an RTL form is ordinary authoring, and probing the
+    // focused element instead would make two handlers on the same widget
+    // disagree at the boundary between them.
+    //
+    // Without a case shaped like this, `isRtl(this.element)` and
+    // `isRtl(event.currentTarget)` are indistinguishable: an inline `direction`
+    // set on the container inherits to every child, so both answer the same.
+    await mount("", ["0", "-1", "-1"]);
+    group().style.direction = "rtl";
+    query("#a").style.direction = "ltr"; // the child disagrees with its container
+
+    arrow("#a", "ArrowLeft"); // still "next": the container decides
+    expect(tabindexes()).toEqual([-1, 0, -1]);
+  });
+
   it("defaults the tab stop to the first item when none is set", async () => {
     await mount("", ["-1", "-1", "-1"]);
     expect(tabindexes()).toEqual([0, -1, -1]);
@@ -161,6 +197,23 @@ describe("RovingController", () => {
     claimed.preventDefault();
     query("#a").dispatchEvent(claimed);
     expect(tabindexes()).toEqual([0, -1, -1]); // tab stop did not move
+  });
+
+  it("leaves a modified arrow to the browser", async () => {
+    // A chorded arrow is the browser's (history back/forward and the like), so
+    // the delegated handler neither consumes the key nor moves the tab stop.
+    await mount();
+    const chord = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    query("#a").dispatchEvent(chord);
+
+    expect(chord.defaultPrevented).toBe(false);
+    expect(tabindexes()).toEqual([0, -1, -1]);
+    expect(document.activeElement).not.toBe(query("#b"));
   });
 
   it("removes its listeners on disconnect", async () => {

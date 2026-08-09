@@ -165,8 +165,8 @@ describe("FormValidationController", () => {
     expect(emailInput().getAttribute("aria-errormessage")).toBe(errorFor("email").id);
   });
 
-  // Layer ③ — speech-order regression. form-validation does not own the announced
-  // text (form-field carries the ARIA), so this freezes the *integration*: after an
+  // Speech-order regression. form-validation does not own the announced text
+  // (form-field carries the ARIA), so this freezes the *integration*: after an
   // invalid submit the control reads as invalid and its error region announces the
   // routed validationMessage, in order.
   it("announces the invalid control and its routed error message in order", async () => {

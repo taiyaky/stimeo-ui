@@ -48,7 +48,7 @@ export class ScrollRestoreController extends Controller<HTMLElement> {
   declare keyValue: string;
   declare axisValue: string;
 
-  /** Pending rAF id used to coalesce scroll bursts into one save. */
+  /** Pending rAF id that coalesces scroll bursts into one save. */
   #rafId: number | null = null;
   /** Resolved storage key; empty disables persistence (no key and no id). */
   #storageKey = "";

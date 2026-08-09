@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { BlurDeferral } from "../utils/blur_deferral";
 import { LayoutObserver } from "../utils/layout_observer";
 import { logicalScrollMetrics, physicalScrollDelta } from "../utils/logical_scroll";
 import { prefersReducedMotion } from "../utils/reduced_motion";
@@ -35,8 +36,9 @@ const DIRECTION_BUTTON_SELECTOR = "[data-stimeo--overflow-indicator-direction-pa
  * @remarks
  * Behavior only — shadows, arrows, and gradients are the consumer's CSS;
  * `data-overflow-*` carry no ARIA semantics. All observers/listeners are released
- * on `disconnect()` (Turbo navigation included). `scrollByPage` honors
- * `prefers-reduced-motion`.
+ * on `disconnect()` (Turbo navigation included). `scrollByPage` scrolls smoothly
+ * by default and forces an instant jump under `prefers-reduced-motion`, regardless
+ * of the consumer's CSS `scroll-behavior`.
  */
 export class OverflowIndicatorController extends Controller<HTMLElement> {
   static override targets = ["viewport"];
@@ -60,7 +62,17 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
   #observedViewport: HTMLElement | null = null;
   readonly #observedContent = new Set<Element>();
   #mutationObserver: MutationObserver | null = null;
-  readonly #pendingButtonDisables = new Map<HTMLButtonElement, { onBlur: () => void }>();
+  /**
+   * Boundary buttons whose native `disabled` is held back while they hold focus.
+   *
+   * Completing the deferral is what actually disables the button, so the release
+   * callback — unlike {@link #cancelPendingButtonDisable} — applies it.
+   */
+  readonly #pendingButtonDisables = new BlurDeferral<HTMLButtonElement>((button) => {
+    this.#restorePendingMarkers(button);
+    // If the author disabled it while focus was pending, do not claim ownership.
+    if (!button.disabled) this.#disableButton(button);
+  });
   /** Last reported room, so `change` fires only on transitions. */
   #state: { start: boolean; end: boolean } | null = null;
 
@@ -130,7 +142,7 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
     const page = horizontal ? vp.clientWidth : vp.clientHeight;
     const logicalDelta = direction === "start" ? -page : page;
     const delta = physicalScrollDelta(vp, horizontal, logicalDelta);
-    const behavior: ScrollBehavior = prefersReducedMotion() ? "auto" : "smooth";
+    const behavior: ScrollBehavior = prefersReducedMotion() ? "instant" : "smooth";
 
     if (horizontal) {
       vp.scrollBy({ left: delta, behavior });
@@ -141,7 +153,7 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
 
   /** Mirrors remaining room onto any direction buttons by toggling `disabled`. */
   #syncButtons(start: boolean, end: boolean): void {
-    for (const button of [...this.#pendingButtonDisables.keys()]) {
+    for (const button of this.#pendingButtonDisables.elements) {
       if (
         !button.isConnected ||
         button.closest("[data-controller~='stimeo--overflow-indicator']") !== this.element
@@ -208,13 +220,7 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
       button.getAttribute("aria-disabled") ?? "",
     );
     button.setAttribute("aria-disabled", "true");
-    const onBlur = (): void => {
-      this.#cancelPendingButtonDisable(button);
-      // If the author disabled it while focus was pending, do not claim ownership.
-      if (!button.disabled) this.#disableButton(button);
-    };
-    this.#pendingButtonDisables.set(button, { onBlur });
-    button.addEventListener("blur", onBlur);
+    this.#pendingButtonDisables.defer(button);
   }
 
   #disableButton(button: HTMLButtonElement): void {
@@ -222,10 +228,20 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
     button.setAttribute("data-overflow-indicator-disabled", "");
   }
 
+  /** Cancels a pending disable without applying it, restoring the displaced state. */
   #cancelPendingButtonDisable(button: HTMLButtonElement): void {
-    const pending = this.#pendingButtonDisables.get(button);
-    if (pending) button.removeEventListener("blur", pending.onBlur);
-    this.#pendingButtonDisables.delete(button);
+    this.#pendingButtonDisables.release(button);
+    this.#restorePendingMarkers(button);
+  }
+
+  /**
+   * Drops the pending marker and gives back the `aria-disabled` it displaced.
+   *
+   * Reads the displaced value from the DOM rather than memory: a Turbo snapshot is
+   * cloned before `disconnect()` runs, so a restored page can arrive with markers
+   * this instance never wrote.
+   */
+  #restorePendingMarkers(button: HTMLButtonElement): void {
     button.removeAttribute("data-overflow-indicator-pending-disabled");
     const displaced = button.getAttribute("data-overflow-indicator-aria-disabled");
     if (displaced !== null) {
@@ -238,7 +254,7 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
   }
 
   #clearPendingButtonDisables(): void {
-    for (const button of [...this.#pendingButtonDisables.keys()]) {
+    for (const button of this.#pendingButtonDisables.elements) {
       this.#cancelPendingButtonDisable(button);
     }
   }

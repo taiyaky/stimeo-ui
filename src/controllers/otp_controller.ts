@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { CompositionTracker } from "../utils/composition_tracker";
 
 /**
@@ -96,6 +97,7 @@ export class OtpController extends Controller<HTMLElement> {
 
   /** Handles Backspace retreating, arrows, and home/end navigation. */
   onKeydown(event: KeyboardEvent): void {
+    if (isReservedArrowChord(event)) return;
     const input = event.currentTarget as HTMLInputElement | null;
     if (!input) return;
 
@@ -104,8 +106,11 @@ export class OtpController extends Controller<HTMLElement> {
 
     // Do not trigger keydown actions during composition
     if (this.#composition.isComposing(event)) return;
+    // Logical, not physical. The key is normalised rather than the
+    // delta negated: these two branches are not mirror images — their bounds
+    // guards differ — so swapping the key keeps each guard with its own direction.
 
-    switch (event.key) {
+    switch (logicalArrowKey(event.key, this.element)) {
       case "Backspace":
         if (!input.value) {
           // Empty field: step backward, wipe previous digit, and focus it

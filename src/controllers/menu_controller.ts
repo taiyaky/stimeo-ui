@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord } from "../utils/arrow_step";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { SafeTimeout } from "../utils/safe_timeout";
 
@@ -17,12 +18,19 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *         data-stimeo--menu-target="menu" hidden>
  *       <li role="none">
  *         <button role="menuitem" tabindex="-1"
- *                 data-stimeo--menu-target="item"
- *                 data-action="click->stimeo--menu#activate
- *                              keydown->stimeo--menu#onItemKeydown">…</button>
+ *                 data-stimeo--menu-target="item">…</button>
  *       </li>
  *     </ul>
  *   </div>
+ *
+ * The trigger's two actions are required. Items need none: their click and key
+ * handling is delegated from the controller element, so an item added, moved, or
+ * server-rendered after connect works without the consumer wiring anything onto
+ * it. The per-element form (`click->stimeo--menu#activate` /
+ * `keydown->stimeo--menu#onItemKeydown`) is supported alongside it. A
+ * focus-moving key runs once (the action claims it and the delegate stands
+ * down), and `activate`, reachable on both paths, claims the click so one
+ * gesture activates once. See {@link #onDelegatedItemClick}.
  *
  * Implements the WAI-ARIA APG **Menu Button** pattern (a button that opens a menu
  * of commands). Unlike `stimeo--dropdown` (a disclosure for arbitrary content),
@@ -44,14 +52,14 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * - `Escape` closes and returns focus to the trigger. While open the menu is a
  *   layer on the shared {@link EscapeLayer} stack; it claims a press only while
  *   focus is inside the controller or fell to the body, so one keypress closes
- *   exactly one layer (the shared layered-Escape contract) and a newer layer
- *   (e.g. a tooltip shown over an item) is dismissed first.
+ *   exactly one layer and a newer layer (e.g. a tooltip shown over an item) is
+ *   dismissed first.
  * - A click outside the controller closes the menu without moving focus away
  *   from the clicked element.
  *
- * Roving focus skips items that are not navigable — `hidden`, natively
- * `disabled`, or `aria-disabled="true"` — so the keyboard never lands focus on an
- * inert command (matching `stimeo--command-palette` / `stimeo--toolbar`).
+ * Roving focus skips `hidden` and natively `disabled` items. An
+ * `aria-disabled="true"` item remains discoverable by arrow-key focus, while its
+ * activation is suppressed in the capture phase.
  */
 export class MenuController extends Controller<HTMLElement> {
   static override targets = ["trigger", "menu", "item"];
@@ -75,11 +83,23 @@ export class MenuController extends Controller<HTMLElement> {
   /** Escape-stack membership while open; the shared resolver dismisses via it. */
   readonly #escapeLayer = new EscapeLayer();
 
-  /** Starts closed and registers delegated listeners. */
+  /**
+   * The item a click started on, recorded in the capture pass. Read once by the
+   * delegated bubble listener, which must not re-derive it: consumer handlers run
+   * in between and may detach the item.
+   */
+  #clickOwner: HTMLButtonElement | null = null;
+
+  /** Clicks already turned into an activation, so the two paths run it once. */
+  readonly #activated = new WeakSet<Event>();
+
+  /** Starts closed and registers activation / outside-click listeners. */
   override connect(): void {
     this.close();
     this.element.addEventListener("click", this.#onItemClickCapture, true);
-    document.addEventListener("click", this.#onOutsideClick);
+    this.element.addEventListener("click", this.#onDelegatedItemClick);
+    this.element.addEventListener("keydown", this.#onDelegatedItemKeydown);
+    document.addEventListener("click", this.#onOutsideClick, true);
   }
 
   /** Releases the listeners, stack membership, and any pending Tab-close task. */
@@ -87,7 +107,9 @@ export class MenuController extends Controller<HTMLElement> {
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
     this.element.removeEventListener("click", this.#onItemClickCapture, true);
-    document.removeEventListener("click", this.#onOutsideClick);
+    this.element.removeEventListener("click", this.#onDelegatedItemClick);
+    this.element.removeEventListener("keydown", this.#onDelegatedItemKeydown);
+    document.removeEventListener("click", this.#onOutsideClick, true);
   }
 
   /** Toggles the menu open/closed. Bound via `data-action` (click). */
@@ -132,6 +154,8 @@ export class MenuController extends Controller<HTMLElement> {
    * open and then immediately re-toggle the menu.
    */
   onTriggerKeydown(event: KeyboardEvent): void {
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
       this.open();
@@ -145,8 +169,23 @@ export class MenuController extends Controller<HTMLElement> {
 
   /** Implements roving focus and closing keys inside the menu. */
   onItemKeydown(event: KeyboardEvent): void {
+    this.#handleItemKeydown(event, event.currentTarget);
+  }
+
+  /**
+   * The roving-focus body, shared by the per-element action and its delegated
+   * twin. `from` is the item the key belongs to: the bound element for the
+   * action, the resolved owner of the event target for the delegate.
+   */
+  #handleItemKeydown(event: KeyboardEvent, from: EventTarget | null): void {
+    // A descendant widget that already claimed the key must not also move the
+    // menu's roving focus — composition depends on this yield. It is also what
+    // makes the per-element action and the delegated listener idempotent:
+    // whichever runs first calls `preventDefault()`, and the other one bows out.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const items = this.#navigableItems;
-    const currentIndex = items.indexOf(event.currentTarget as HTMLButtonElement);
+    const currentIndex = items.indexOf(from as HTMLButtonElement);
 
     switch (event.key) {
       case "ArrowDown":
@@ -170,7 +209,9 @@ export class MenuController extends Controller<HTMLElement> {
         // returned to the trigger — that is Escape's job). Closing synchronously
         // would remove the focused item before the browser's default Tab action,
         // which can restart traversal at the document head, so the close is
-        // deferred to the next task.
+        // deferred to the next task. The key is deliberately left unclaimed, so
+        // this is the one branch both handlers can run: rescheduling the same
+        // one-shot close is idempotent.
         this.#timers.clearAll();
         this.#timers.set(() => this.close(), 0);
         break;
@@ -179,8 +220,23 @@ export class MenuController extends Controller<HTMLElement> {
     }
   }
 
-  /** Closes the menu after an item is activated. Bound via `data-action`. */
-  activate(): void {
+  /**
+   * Closes the menu after an item is activated. Bound via `data-action`, and
+   * also reached from the delegated listener.
+   *
+   * Markup that carries the per-element action *and* gets the delegate would run
+   * this twice for one gesture. `close()` writes the state hooks (`hidden`,
+   * `aria-expanded`), and an identical reassign still queues a MutationRecord,
+   * so a second pass is observable to anyone watching them. The event is
+   * therefore claimed: the path that gets there first does the work, the other
+   * one finds it claimed and returns. A programmatic call with no event always
+   * runs.
+   */
+  activate(event?: Event): void {
+    if (event !== undefined) {
+      if (this.#activated.has(event)) return;
+      this.#activated.add(event);
+    }
     this.#closeAndRestore();
   }
 
@@ -196,16 +252,62 @@ export class MenuController extends Controller<HTMLElement> {
   };
 
   /**
-   * Captures clicks so `aria-disabled` commands cannot reach consumer handlers.
-   * Native Enter/Space activation also synthesizes a click and is blocked here.
+   * Delegated twin of {@link onItemKeydown}, bound on the controller element.
+   *
+   * An item that arrives *after* connect — Overflow Menu moves toolbar controls
+   * into this menu at runtime — carries whatever `data-action` its author wrote,
+   * and that is exactly the binding a consumer forgets, because the markup that
+   * declares the item lives nowhere near the menu. Listening on the container
+   * makes membership in the `item` target enough to be operable. The per-element
+   * action stays supported and is not double-handled: see
+   * {@link #handleItemKeydown}.
+   */
+  readonly #onDelegatedItemKeydown = (event: KeyboardEvent): void => {
+    const item = this.#itemFrom(event.target);
+    if (item === null) return; // the trigger and menu chrome own their own keys
+    this.#handleItemKeydown(event, item);
+  };
+
+  /**
+   * Delegated twin of {@link activate}, for the same reason as the keydown one.
+   *
+   * It works from the item the capture pass recorded, not from a fresh lookup:
+   * by the time a click bubbles up here, a consumer handler may already have
+   * detached the row it lives in, and `itemTargets` is a live query that would
+   * then resolve nothing — the activation would be lost and the menu left open
+   * over an item that no longer exists. `aria-disabled` items never reach this
+   * listener at all: the capture pass stops the click outright.
+   */
+  readonly #onDelegatedItemClick = (event: MouseEvent): void => {
+    const item = this.#clickOwner;
+    this.#clickOwner = null;
+    if (item === null) return;
+    this.activate(event);
+  };
+
+  /** The item target that is, or contains, `node`; `null` when it is neither. */
+  #itemFrom(node: EventTarget | null): HTMLButtonElement | null {
+    if (!(node instanceof Node)) return null;
+    return this.itemTargets.find((item) => item === node || item.contains(node)) ?? null;
+  }
+
+  /**
+   * First look at every click inside the controller, and the only point at which
+   * the DOM is still the one the user clicked. Two jobs: record which item owns
+   * the click for the delegate above, and stop an `aria-disabled` command before
+   * it reaches consumer handlers (native Enter/Space activation synthesizes a
+   * click and is blocked here too).
    */
   readonly #onItemClickCapture = (event: MouseEvent): void => {
     const target = event.target;
-    if (!(target instanceof Node)) return;
-    const disabled = this.itemTargets.some(
-      (item) => item.getAttribute("aria-disabled") === "true" && item.contains(target),
-    );
-    if (!disabled) return;
+    if (!(target instanceof Node)) {
+      this.#clickOwner = null;
+      return;
+    }
+    const item = this.#itemFrom(target);
+    this.#clickOwner = item;
+    if (item === null || item.getAttribute("aria-disabled") !== "true") return;
+    this.#clickOwner = null;
     event.preventDefault();
     event.stopImmediatePropagation();
   };
@@ -227,13 +329,12 @@ export class MenuController extends Controller<HTMLElement> {
   }
 
   /**
-   * An item can take roving focus unless it is `hidden`, `aria-disabled="true"`,
-   * or a natively `disabled` form control. CSS-only visibility is not detectable
-   * here and is the consumer's responsibility.
+   * An item can take roving focus unless it is `hidden` or a natively `disabled`
+   * form control. `aria-disabled` remains focusable for discoverability; capture
+   * suppresses activation. CSS-only visibility is the consumer's responsibility.
    */
   #isNavigable(item: HTMLButtonElement): boolean {
     if (item.hasAttribute("hidden")) return false;
-    if (item.getAttribute("aria-disabled") === "true") return false;
     return !item.disabled;
   }
 

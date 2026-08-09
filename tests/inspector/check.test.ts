@@ -29,9 +29,9 @@ describe("checkSource", () => {
     <div data-controller="stimeo--tabs">
       <h2 id="tabs-title">Sections</h2>
       <div role="tablist" aria-labelledby="tabs-title" data-stimeo--tabs-target="list">
-        <button role="tab" data-stimeo--tabs-target="tab">A</button>
+        <button id="tabs-tab-a" role="tab" data-stimeo--tabs-target="tab">A</button>
       </div>
-      <div role="tabpanel" data-stimeo--tabs-target="panel">A</div>
+      <div role="tabpanel" aria-labelledby="tabs-tab-a" data-stimeo--tabs-target="panel">A</div>
     </div>`;
 
   it("reports no problems for well-formed markup", () => {
@@ -99,6 +99,80 @@ describe("checkSource", () => {
           <button data-stimeo--menu-target="trigger"></button>
         </div>`);
       expect(codeList).toContain("missing-required-target");
+    });
+
+    // A feature that is opt-in but incomplete without its whole set (schema v8).
+    // Every other check passes and the page loads — the feature just silently does
+    // nothing — so a static rule is the only layer that can say anything.
+    describe("conditional targets", () => {
+      const trail = (extra: string) => `
+        <nav data-controller="stimeo--breadcrumb">
+          <ol data-stimeo--breadcrumb-target="list">
+            <li><a href="/">Home</a></li>
+            ${extra}
+            <li id="bc-a" data-stimeo--breadcrumb-target="collapsible"><a href="/a">A</a></li>
+            <li><a href="/a/b" aria-current="page">B</a></li>
+          </ol>
+        </nav>`;
+
+      it("requires the disclosure once an item is marked collapsible", () => {
+        const found = checkSource(trail(""), manifest).filter(
+          (d) => d.code === "missing-conditional-target",
+        );
+        expect(found).toHaveLength(1);
+        expect(found[0]?.message).toContain('"ellipsis"');
+        expect(found[0]?.message).toContain('"trigger"');
+      });
+
+      it("names only the half that is missing", () => {
+        const found = checkSource(
+          trail('<li data-stimeo--breadcrumb-target="ellipsis"></li>'),
+          manifest,
+        ).filter((d) => d.code === "missing-conditional-target");
+        expect(found).toHaveLength(1);
+        expect(found[0]?.message).toContain('"trigger"');
+        expect(found[0]?.message).not.toContain('"ellipsis"');
+      });
+
+      it("says nothing once the set is complete", () => {
+        const complete = trail(
+          '<li data-stimeo--breadcrumb-target="ellipsis"><button data-stimeo--breadcrumb-target="trigger">…</button></li>',
+        );
+        expect(codes(complete)).not.toContain("missing-conditional-target");
+      });
+
+      it("says nothing about a plain trail that opts out entirely", () => {
+        // The whole point: `collapsible` is optional, and a trail without it is
+        // the common spelling. Making the disclosure unconditionally required
+        // would reject this.
+        const plain = `
+          <nav data-controller="stimeo--breadcrumb">
+            <ol data-stimeo--breadcrumb-target="list">
+              <li><a href="/">Home</a></li>
+              <li><a href="/a" aria-current="page">A</a></li>
+            </ol>
+          </nav>`;
+        expect(codes(plain)).toEqual([]);
+      });
+
+      it("holds in both directions when the rule is declared both ways", () => {
+        // file-dropzone needs the template *and* the list: either one alone
+        // renders nothing.
+        const dropzone = (target: string) => `
+          <div data-controller="stimeo--file-dropzone">
+            <input type="file" data-stimeo--file-dropzone-target="input">
+            <button data-stimeo--file-dropzone-target="trigger">Choose</button>
+            <div data-stimeo--file-dropzone-target="${target}"></div>
+          </div>`;
+        const withTemplate = checkSource(dropzone("itemTemplate"), manifest).filter(
+          (d) => d.code === "missing-conditional-target",
+        );
+        const withList = checkSource(dropzone("list"), manifest).filter(
+          (d) => d.code === "missing-conditional-target",
+        );
+        expect(withTemplate[0]?.message).toContain('"list"');
+        expect(withList[0]?.message).toContain('"itemTemplate"');
+      });
     });
 
     it("flags a target with no enclosing controller", () => {
@@ -227,7 +301,7 @@ describe("checkSource", () => {
             <button data-stimeo--tabs-target="tab">A</button>
             <button data-stimeo--tabs-target="tab">B</button>
           </div>
-          <div data-stimeo--tabs-target="panel" role="tabpanel">A</div>
+          <div data-stimeo--tabs-target="panel" role="tabpanel" aria-label="A">A</div>
         </div>`);
       expect(codeList.filter((c) => c === "missing-aria")).toHaveLength(2);
     });
@@ -237,6 +311,9 @@ describe("checkSource", () => {
       const missing = checkSource(unnamed, manifest).filter((d) => d.code === "missing-aria");
       expect(missing).toHaveLength(1);
       expect(missing[0]?.suggestion).toBe("Name the tablist via aria-labelledby or aria-label.");
+      // ARIA recommends this name rather than requiring it, so it is a warning:
+      // an unnamed tablist is still a working tab set.
+      expect(missing[0]?.severity).toBe("warning");
 
       const labelled = validTabs.replace('aria-labelledby="tabs-title"', 'aria-label="Sections"');
       expect(codes(labelled)).not.toContain("missing-aria");
@@ -273,7 +350,7 @@ describe("checkSource", () => {
 
     it('checks scope-element rules (target: "") on the data-controller element', () => {
       const bare = `
-        <div data-controller="stimeo--toolbar">
+        <div data-controller="stimeo--toolbar" aria-label="Format">
           <button data-stimeo--toolbar-target="control">Bold</button>
         </div>`;
       expect(codes(bare).filter((c) => c === "missing-aria")).toHaveLength(1);
@@ -328,7 +405,7 @@ describe("checkSource", () => {
           <button role="combobox" aria-labelledby="l v" data-stimeo--listbox-target="trigger">
             <span id="v" data-stimeo--listbox-target="value">Apple</span>
           </button>
-          <ul role="listbox" data-stimeo--listbox-target="list" hidden>
+          <ul role="listbox" aria-labelledby="l" data-stimeo--listbox-target="list" hidden>
             <li role="option" data-stimeo--listbox-target="option">Apple</li>
           </ul>
         </div>`;
@@ -411,6 +488,7 @@ describe("checkSource", () => {
               actions: [],
               events: [],
               requiredTargets: [],
+              conditionalTargets: [],
               a11y: [
                 {
                   target: "box",
@@ -423,6 +501,10 @@ describe("checkSource", () => {
               keyboard: [],
               managedAria: [],
               compositions: [],
+              companions: [],
+              targetDeclarations: [],
+              cardinality: [],
+              forbiddenAria: [],
             },
           },
         };
@@ -682,6 +764,686 @@ describe("checkSource", () => {
       });
     });
 
+    describe("requirements conditioned on the controller's own value", () => {
+      // A toolbar's `aria-orientation` is the author's job, but only in the
+      // vertical configuration: `horizontal` is the implicit ARIA default, so an
+      // unconditional rule would reject every correct horizontal toolbar.
+      const toolbar = ({ orientation = "", aria = "" } = {}) => `
+        <div data-controller="stimeo--toolbar" role="toolbar" aria-label="Format"
+             ${orientation} ${aria}>
+          <button type="button" data-stimeo--toolbar-target="control">B</button>
+        </div>`;
+
+      it("stays silent in the default configuration", () => {
+        expect(codes(toolbar())).toEqual([]);
+      });
+
+      it("stays silent when the value is authored as the default", () => {
+        expect(
+          codes(toolbar({ orientation: 'data-stimeo--toolbar-orientation-value="horizontal"' })),
+        ).toEqual([]);
+      });
+
+      it("requires the attribute once the value arms the rule", () => {
+        const d = checkSource(
+          toolbar({ orientation: 'data-stimeo--toolbar-orientation-value="vertical"' }),
+          manifest,
+        ).find((x) => x.code === "missing-aria");
+        expect(d?.severity).toBe("error");
+        expect(d?.message).toContain("aria-orientation");
+        expect(d?.suggestion).toContain('aria-orientation="vertical"');
+      });
+
+      it("accepts the armed configuration once the attribute is there", () => {
+        expect(
+          codes(
+            toolbar({
+              orientation: 'data-stimeo--toolbar-orientation-value="vertical"',
+              aria: 'aria-orientation="vertical"',
+            }),
+          ),
+        ).toEqual([]);
+      });
+
+      it("still checks the value of an attribute the condition armed", () => {
+        const d = checkSource(
+          toolbar({
+            orientation: 'data-stimeo--toolbar-orientation-value="vertical"',
+            aria: 'aria-orientation="horizontal"',
+          }),
+          manifest,
+        ).find((x) => x.code === "invalid-aria-value");
+        expect(d?.message).toContain('aria-orientation="horizontal"');
+      });
+
+      it("skips the requirement when the deciding value is ERB-generated", () => {
+        // Undecidable, not absent: the page may render either configuration, so
+        // reporting would invent a violation half the time.
+        expect(
+          codes(toolbar({ orientation: 'data-stimeo--toolbar-orientation-value="<%= axis %>"' })),
+        ).toEqual([]);
+      });
+
+      it("treats a partly interpolated value as undecidable, not as its literal remnant", () => {
+        // Neutralization blanks the ERB tag in place, so the leftover text reads
+        // as a whole value and would arm the rule against markup whose rendered
+        // value nobody has seen. Only "the value is ERB-touched at all" is a
+        // sound reading here.
+        expect(
+          codes(
+            toolbar({
+              orientation: 'data-stimeo--toolbar-orientation-value="<%= prefix %>vertical"',
+            }),
+          ),
+        ).toEqual([]);
+      });
+    });
+
+    describe("required companion controllers", () => {
+      // The More wrapper is a menu the overflow controller only fills; without
+      // the menu controller the banked items are unreachable, and nothing else
+      // in the schema notices because there is no companion to check.
+      const overflow = (more: string, menu = "") => `
+        <nav data-controller="stimeo--overflow-menu" aria-label="Actions">
+          <div data-stimeo--overflow-menu-target="items"><button type="button">Save</button></div>
+          <div data-stimeo--overflow-menu-target="more" ${more} hidden>
+            <button type="button" id="more" aria-haspopup="menu" aria-expanded="false"
+                    data-action="click->stimeo--menu#toggle" ${menu ? 'data-stimeo--menu-target="trigger"' : ""}>More</button>
+            ${menu}
+          </div>
+        </nav>`;
+      /** The wired form: Menu present, with the targets its own contract requires. */
+      const wired =
+        '<div role="menu" aria-labelledby="more" data-stimeo--menu-target="menu" hidden></div>';
+
+      it("accepts the documented composition", () => {
+        expect(codes(overflow('data-controller="stimeo--menu"', wired))).toEqual([]);
+      });
+
+      it("flags a More wrapper that never declares the menu controller", () => {
+        const all = checkSource(overflow(""), manifest);
+        expect(all.filter((x) => x.code === "missing-companion")).toHaveLength(1);
+        const [d] = all;
+        expect(d?.severity).toBe("error");
+        expect(d?.message).toContain('"stimeo--menu"');
+        expect(d?.suggestion).toContain('data-controller="stimeo--menu"');
+      });
+
+      it("skips an ERB-generated data-controller", () => {
+        expect(codes(overflow('data-controller="<%= controllers %>"'))).not.toContain(
+          "missing-companion",
+        );
+      });
+
+      it("is suppressible via data-stimeo-ignore on the element", () => {
+        expect(codes(overflow('data-stimeo-ignore="missing-companion"'))).toEqual([]);
+      });
+    });
+
+    describe("reverse-direction target declarations", () => {
+      // The failure no forward rule can see: markup that a screen reader
+      // announces as part of the tree, but which the controller never manages
+      // because it is absent from the target set every forward rule reads.
+      const tree = (extra = "") => `
+        <ul data-controller="stimeo--tree-view" role="tree" aria-label="Files">
+          <li role="treeitem" aria-selected="false" tabindex="0"
+              data-stimeo--tree-view-target="item">a</li>
+          ${extra}
+        </ul>`;
+
+      it("accepts treeitems that are declared items", () => {
+        expect(codes(tree())).toEqual([]);
+      });
+
+      it("flags a treeitem that was never declared as an item target", () => {
+        const all = checkSource(
+          tree(`<li role="treeitem" aria-selected="false" tabindex="-1">b</li>`),
+          manifest,
+        );
+        expect(all.filter((x) => x.code === "undeclared-target")).toHaveLength(1);
+        const [d] = all;
+        expect(d?.severity).toBe("error");
+        expect(d?.message).toContain('role="treeitem"');
+        expect(d?.suggestion).toContain('data-stimeo--tree-view-target="item"');
+      });
+
+      it("flags a treeitem declared as the wrong target", () => {
+        expect(
+          codes(
+            tree(
+              `<li role="treeitem" aria-selected="false" data-stimeo--tree-view-target="group">b</li>`,
+            ),
+          ),
+        ).toContain("undeclared-target");
+      });
+
+      it("credits the nearest enclosing tree, so a nested item is judged once", () => {
+        // Both scopes enclose the inner element, so without nearest-owner
+        // resolution the same treeitem is reported twice — once per tree.
+        const nested = `
+          <ul data-controller="stimeo--tree-view" role="tree" aria-label="Outer">
+            <li role="treeitem" aria-selected="false" tabindex="0"
+                data-stimeo--tree-view-target="item">a
+              <ul data-controller="stimeo--tree-view" role="tree" aria-label="Inner">
+                <li role="treeitem" aria-selected="false" tabindex="-1">b</li>
+              </ul>
+            </li>
+          </ul>`;
+        expect(
+          checkSource(nested, manifest).filter((x) => x.code === "undeclared-target"),
+        ).toHaveLength(1);
+      });
+
+      it("skips an ERB-generated role", () => {
+        expect(codes(tree(`<li role="<%= role %>" aria-selected="false">b</li>`))).not.toContain(
+          "undeclared-target",
+        );
+      });
+
+      it("is suppressible via data-stimeo-ignore on the element", () => {
+        expect(
+          codes(
+            tree(
+              `<li role="treeitem" aria-selected="false" data-stimeo-ignore="undeclared-target">b</li>`,
+            ),
+          ),
+        ).toEqual([]);
+      });
+    });
+
+    describe("requirements conditioned on the element's own contents", () => {
+      // A menu the consumer fills asynchronously is supported markup, but
+      // `role="menu"` requires owned menuitems — so the author declares the
+      // temporary absence, and only while the menu is structurally empty.
+      const menubar = ({ empty = "", filled = 'aria-busy="true"' } = {}) => `
+        <div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+          <button id="t-file" role="menuitem" aria-controls="m-file" data-stimeo--menubar-target="top">File</button>
+          <ul id="m-file" role="menu" aria-labelledby="t-file" data-stimeo--menubar-target="menu" ${filled} hidden>
+            <li role="none"><button role="menuitem" tabindex="-1"
+                    data-stimeo--menubar-target="item">New</button></li>
+          </ul>
+          <button id="t-recent" role="menuitem" aria-controls="m-recent" data-stimeo--menubar-target="top">Recent</button>
+          <ul id="m-recent" role="menu" aria-labelledby="t-recent" data-stimeo--menubar-target="menu" ${empty} hidden></ul>
+        </div>`;
+
+      it("accepts an empty menu that declares the absence, next to a filled one", () => {
+        expect(codes(menubar({ empty: 'aria-busy="true"', filled: "" }))).toEqual([]);
+      });
+
+      it("requires the attribute on a menu that holds no items", () => {
+        const all = checkSource(menubar({ empty: "", filled: "" }), manifest);
+        const missing = all.filter((x) => x.code === "missing-aria");
+        expect(missing).toHaveLength(1);
+        expect(missing[0]?.severity).toBe("error");
+        expect(missing[0]?.message).toContain("aria-busy");
+        expect(missing[0]?.suggestion).toContain('aria-busy="true"');
+      });
+
+      it("judges each element separately, not the scope as a whole", () => {
+        // The filled menu must stay silent while its empty sibling is reported —
+        // a scope-level condition could not tell the two apart.
+        const source = menubar({ empty: "", filled: "" });
+        const line = checkSource(source, manifest).find((x) => x.code === "missing-aria")?.line;
+        expect(source.split("\n")[line ? line - 1 : 0]).toContain("m-recent");
+      });
+
+      it("still checks the value on a menu the condition armed", () => {
+        const d = checkSource(menubar({ empty: 'aria-busy="false"', filled: "" }), manifest).find(
+          (x) => x.code === "invalid-aria-value",
+        );
+        expect(d?.message).toContain('aria-busy="false"');
+      });
+
+      it("does not count inert items as absent", () => {
+        // A menu whose items exist but are all disabled is structurally
+        // satisfied — the requirement is about the items being *there*.
+        const inert = `
+          <div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+            <button id="t-file" role="menuitem" aria-controls="m-file" data-stimeo--menubar-target="top">File</button>
+            <ul id="m-file" role="menu" aria-labelledby="t-file" data-stimeo--menubar-target="menu" hidden>
+              <li role="none"><button role="menuitem" tabindex="-1" disabled
+                      data-stimeo--menubar-target="item">New</button></li>
+            </ul>
+          </div>`;
+        expect(codes(inert)).toEqual([]);
+      });
+
+      it("accepts a menubar whose only menu is empty and declares itself busy", () => {
+        // The wholly-async case the requirement exists for. Requiring `item`
+        // scope-wide would reject it before this rule ever ran, so the two
+        // contracts have to agree: emptiness is judged per menu, not per scope.
+        const async = `
+          <div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+            <button id="t-file" role="menuitem" aria-controls="m-file" data-stimeo--menubar-target="top">File</button>
+            <ul id="m-file" role="menu" aria-busy="true" aria-labelledby="t-file"
+                data-stimeo--menubar-target="menu" hidden></ul>
+          </div>`;
+        expect(codes(async)).toEqual([]);
+      });
+
+      it("still reports the only menu when it is empty without declaring it", () => {
+        // The other half of dropping the scope-level `item` requirement: the
+        // absence must still be reported, just by the per-menu rule.
+        const silent = `
+          <div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+            <button id="t-file" role="menuitem" aria-controls="m-file" data-stimeo--menubar-target="top">File</button>
+            <ul id="m-file" role="menu" aria-labelledby="t-file" data-stimeo--menubar-target="menu" hidden></ul>
+          </div>`;
+        expect(codes(silent)).toEqual(["missing-aria"]);
+      });
+
+      it("is suppressible via data-stimeo-ignore on the element", () => {
+        expect(codes(menubar({ empty: 'data-stimeo-ignore="missing-aria"', filled: "" }))).toEqual(
+          [],
+        );
+      });
+    });
+
+    // ARIA levels its accessible-name requirements — required, recommended, and
+    // conditional on the rest of the page. v7 mirrors those levels instead of
+    // flattening them into one severity, so the check says "broken" only where
+    // ARIA does.
+    describe("accessible-name requirement levels (schema v7)", () => {
+      const missingAria = (source: string): Diagnostic[] =>
+        checkSource(source, manifest).filter((d) => d.code === "missing-aria");
+
+      it("reports a required name as an error", () => {
+        const missing = missingAria(`
+          <ul data-controller="stimeo--tree-view" role="tree">
+            <li role="treeitem" data-stimeo--tree-view-target="item">A</li>
+          </ul>`);
+        expect(missing).toHaveLength(1);
+        expect(missing[0]?.severity).toBe("error");
+        expect(missing[0]?.message).toContain("requires");
+      });
+
+      it("reports a recommended name as a warning, and words it as a recommendation", () => {
+        const missing = missingAria(`
+          <div data-controller="stimeo--toolbar" role="toolbar">
+            <button data-stimeo--toolbar-target="control">Bold</button>
+          </div>`);
+        expect(missing).toHaveLength(1);
+        expect(missing[0]?.severity).toBe("warning");
+        // The verb is the part a reader acts on: "requires" here would misstate
+        // the contract as firmly as the wrong severity would.
+        expect(missing[0]?.message).toContain("recommends");
+        expect(missing[0]?.message).not.toContain("requires");
+      });
+
+      describe("names a native tag already provides", () => {
+        const grid = (tag: string) =>
+          `<${tag} data-controller="stimeo--data-grid" role="grid"></${tag}>`;
+
+        it("disarms on the tag that names the role natively", () => {
+          // A <table> takes its name from <caption>, which no attribute check
+          // can see — flagging it would reject correct markup.
+          expect(missingAria(grid("table"))).toHaveLength(0);
+        });
+
+        it("stays armed on the spelling with no native naming path", () => {
+          const missing = missingAria(grid("div"));
+          expect(missing).toHaveLength(1);
+          expect(missing[0]?.severity).toBe("error");
+        });
+
+        it("exempts a fieldset radiogroup but not a div one", () => {
+          const radios = (tag: string) => `
+            <${tag} data-controller="stimeo--radio-group" role="radiogroup">
+              <div role="radio" data-stimeo--radio-group-target="radio">A</div>
+            </${tag}>`;
+          expect(missingAria(radios("fieldset"))).toHaveLength(0);
+          expect(missingAria(radios("div"))).toHaveLength(1);
+        });
+
+        it("exempts a native input combobox while still requiring the popup's name", () => {
+          const missing = missingAria(`
+            <div data-controller="stimeo--combobox">
+              <input role="combobox" aria-autocomplete="list" data-stimeo--combobox-target="input">
+              <ul role="listbox" data-stimeo--combobox-target="list"></ul>
+            </div>`);
+          // The input is exempt (a <label for> may sit in another partial); the
+          // listbox is a plain <ul> with no such path and stays required.
+          expect(missing).toHaveLength(1);
+          expect(missing[0]?.message).toContain('"list" target');
+        });
+
+        it("still requires the name when the combobox is not a native control", () => {
+          // The exemption is the tag's, not the role's: a div spelling of the
+          // same combobox has no <label for> to reach and stays checked.
+          const missing = missingAria(`
+            <div data-controller="stimeo--combobox">
+              <div role="combobox" aria-autocomplete="list" data-stimeo--combobox-target="input"></div>
+              <ul role="listbox" aria-label="Fruit" data-stimeo--combobox-target="list"></ul>
+            </div>`);
+          expect(missing).toHaveLength(1);
+          expect(missing[0]?.message).toContain('"input" target');
+          expect(missing[0]?.severity).toBe("error");
+        });
+      });
+
+      it("requires a name on the listbox a trigger opens", () => {
+        const missing = missingAria(`
+          <div data-controller="stimeo--listbox">
+            <span id="l">Fruit</span>
+            <button role="combobox" aria-labelledby="l v" data-stimeo--listbox-target="trigger">
+              <span id="v" data-stimeo--listbox-target="value">Apple</span>
+            </button>
+            <ul role="listbox" data-stimeo--listbox-target="list" hidden>
+              <li role="option" data-stimeo--listbox-target="option">Apple</li>
+            </ul>
+          </div>`);
+        expect(missing).toHaveLength(1);
+        expect(missing[0]?.message).toContain('"list" target');
+        expect(missing[0]?.severity).toBe("error");
+      });
+
+      it("recommends a name on the menubar itself, not only on its menus", () => {
+        const missing = missingAria(`
+          <div data-controller="stimeo--menubar" role="menubar">
+            <button id="t" role="menuitem" aria-controls="m" data-stimeo--menubar-target="top">File</button>
+            <ul id="m" role="menu" aria-labelledby="t" data-stimeo--menubar-target="menu" hidden>
+              <li role="none"><button role="menuitem" tabindex="-1"
+                      data-stimeo--menubar-target="item">New</button></li>
+            </ul>
+          </div>`);
+        expect(missing).toHaveLength(1);
+        expect(missing[0]?.message).toContain("scope element");
+        expect(missing[0]?.severity).toBe("warning");
+      });
+
+      it("requires a name on every carousel slide", () => {
+        const missing = missingAria(`
+          <div data-controller="stimeo--carousel" aria-roledescription="carousel" aria-label="Photos">
+            <div role="tabpanel" aria-roledescription="slide"
+                 data-stimeo--carousel-target="slide">One</div>
+          </div>`);
+        expect(missing).toHaveLength(1);
+        expect(missing[0]?.message).toContain('"slide" target');
+        expect(missing[0]?.severity).toBe("error");
+      });
+
+      describe("levels that depend on the rest of the file", () => {
+        const toolbar = `<div data-controller="stimeo--toolbar" role="toolbar"></div>`;
+
+        it("leaves a lone toolbar at the recommended level", () => {
+          const missing = missingAria(toolbar);
+          expect(missing).toHaveLength(1);
+          expect(missing[0]?.severity).toBe("warning");
+        });
+
+        it("escalates to an error once the file holds a second toolbar", () => {
+          const missing = missingAria(`${toolbar}\n${toolbar}`);
+          expect(missing).toHaveLength(2);
+          expect(missing.every((d) => d.severity === "error")).toBe(true);
+        });
+
+        it("counts the role, not the controller, when deciding to escalate", () => {
+          // A second toolbar that is not a Stimeo scope still makes the pair
+          // indistinguishable, which is the condition ARIA actually states.
+          const missing = missingAria(`${toolbar}\n<div role="toolbar"></div>`);
+          expect(missing).toHaveLength(1);
+          expect(missing[0]?.severity).toBe("error");
+        });
+
+        it("does not escalate on a partly ERB-generated role", () => {
+          // Neutralization blanks the tag but preserves offsets, so
+          // `role="<%= p %>toolbar"` trims back to a literal-looking "toolbar".
+          // Reading that remnant would escalate the level on a guess — the same
+          // trap the cardinality counts and target names already avoid.
+          const missing = missingAria(`${toolbar}\n<div role="<%= p %>toolbar"></div>`);
+          expect(missing).toHaveLength(1);
+          expect(missing[0]?.severity).toBe("warning");
+        });
+
+        it("leaves a lone separator unchecked and arms on the second", () => {
+          // tabindex is not decoration here: the contract makes the splitter a
+          // Tab stop, and the condition counts only what a user can reach.
+          const separators = (count: number) => `
+            <div data-controller="stimeo--resizable">
+              ${'<div role="separator" tabindex="0" data-stimeo--resizable-target="separator"></div>'.repeat(count)}
+            </div>`;
+          // Discretionary alone: a single splitter is unambiguous, so demanding
+          // a name would add an announcement the user gains nothing from.
+          expect(missingAria(separators(1))).toHaveLength(0);
+          const armed = missingAria(separators(2));
+          expect(armed).toHaveLength(2);
+          expect(armed.every((d) => d.severity === "warning")).toBe(true);
+        });
+
+        it("does not arm on a separator the user cannot reach", () => {
+          // ARIA qualifies this condition by focusability: a decorative
+          // `hr role="separator"` is not somewhere focus can land, so it never
+          // creates the ambiguity a name would resolve. Counting every carrier
+          // of the role would warn about a page with one reachable splitter.
+          const withDecorative = `
+            <div data-controller="stimeo--resizable">
+              <div role="separator" tabindex="0" data-stimeo--resizable-target="separator"></div>
+            </div>
+            <hr role="separator">`;
+          expect(missingAria(withDecorative)).toHaveLength(0);
+        });
+      });
+    });
+
+    describe("attributes the surrounding markup contradicts", () => {
+      const menu = (busy: string) => `
+        <div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+          <button id="t-file" role="menuitem" aria-controls="m-file" data-stimeo--menubar-target="top">File</button>
+          <ul id="m-file" role="menu" aria-labelledby="t-file" data-stimeo--menubar-target="menu" ${busy} hidden>
+            <li role="none"><button role="menuitem" tabindex="-1"
+                    data-stimeo--menubar-target="item">New</button></li>
+          </ul>
+        </div>`;
+
+      it("warns when a filled menu still declares itself busy", () => {
+        const all = checkSource(menu('aria-busy="true"'), manifest);
+        const forbidden = all.filter((x) => x.code === "forbidden-aria");
+        expect(forbidden).toHaveLength(1);
+        // Warning, not error: one file at one instant cannot separate a stale
+        // declaration from a menu still streaming its items in.
+        expect(forbidden[0]?.severity).toBe("warning");
+        expect(forbidden[0]?.message).toContain("aria-busy");
+        expect(forbidden[0]?.suggestion).toContain("Drop aria-busy");
+      });
+
+      it("stays silent for the value that is not forbidden", () => {
+        expect(codes(menu('aria-busy="false"'))).not.toContain("forbidden-aria");
+      });
+
+      it("stays silent when the attribute is absent", () => {
+        expect(codes(menu(""))).toEqual([]);
+      });
+
+      it("skips an ERB-generated value when the rule names specific ones", () => {
+        expect(codes(menu('aria-busy="<%= loading %>"'))).not.toContain("forbidden-aria");
+      });
+
+      it("is suppressible via data-stimeo-ignore on the element", () => {
+        expect(codes(menu('aria-busy="true" data-stimeo-ignore="forbidden-aria"'))).toEqual([]);
+      });
+    });
+
+    describe("set-level cardinality", () => {
+      // A second authored selection is normalized away on connect (first in DOM
+      // order wins), so the source is the last place the mistake is visible.
+      const tabs = (second: string, third = "") => `
+        <div data-controller="stimeo--tabs">
+          <div role="tablist" aria-label="Sections" data-stimeo--tabs-target="list">
+            <button role="tab" aria-selected="true" data-stimeo--tabs-target="tab">A</button>
+            <button role="tab" aria-selected="${second}" data-stimeo--tabs-target="tab">B</button>
+            ${third}
+          </div>
+          <div role="tabpanel" aria-label="A" data-stimeo--tabs-target="panel">A</div>
+          <div role="tabpanel" aria-label="B" data-stimeo--tabs-target="panel" hidden>B</div>
+        </div>`;
+
+      it("accepts a single selected element", () => {
+        expect(codes(tabs("false"))).toEqual([]);
+      });
+
+      it("flags a second selected element and anchors on the one that is dropped", () => {
+        const source = tabs("true");
+        const all = checkSource(source, manifest);
+        const violations = all.filter((x) => x.code === "cardinality-violation");
+        expect(violations).toHaveLength(1);
+        const [d] = violations;
+        expect(d?.severity).toBe("error");
+        expect(d?.message).toContain("at most 1");
+        expect(d?.message).toContain("but found 2");
+        // The *second* tab is the one connect deselects, so it is what the
+        // author has to change — anchoring on the first would name the keeper.
+        expect(source.split("\n")[d ? d.line - 1 : 0]).toContain(">B<");
+      });
+
+      it("does not count an ERB-generated value as a match", () => {
+        // Under-counting is the safe direction: it can hide a violation but
+        // never invent one, whereas a rendered "true" is a guess either way.
+        expect(codes(tabs("<%= selected %>"))).not.toContain("cardinality-violation");
+      });
+
+      it("does not read a partly interpolated value as its literal remnant", () => {
+        // Neutralization blanks the ERB tag in place, so `<%= prefix %>true`
+        // trims to a bare "true" and would be counted as a second definite
+        // selection — fabricating a violation the rendering may never produce.
+        // The deciding-value condition already refuses to read such a remnant;
+        // the count has to refuse it too.
+        expect(codes(tabs("<%= prefix %>true"))).not.toContain("cardinality-violation");
+      });
+
+      it("still flags a definite over-count beside an ERB-generated value", () => {
+        // The two literal `true`s are selected in every rendering, so waving the
+        // whole count off as undecidable would forfeit a certain violation —
+        // and `aria-selected="<%= … %>"` is ordinary Rails, so that stance would
+        // switch the rule off across most real markup.
+        const source = tabs(
+          "true",
+          `<button role="tab" aria-selected="<%= c %>" data-stimeo--tabs-target="tab">C</button>`,
+        );
+        expect(
+          checkSource(source, manifest).filter((x) => x.code === "cardinality-violation"),
+        ).toHaveLength(1);
+      });
+
+      it("is suppressible via data-stimeo-ignore", () => {
+        const source = tabs("true").replace(
+          'aria-selected="true" data-stimeo--tabs-target="tab">B',
+          'aria-selected="true" data-stimeo-ignore="cardinality-violation" data-stimeo--tabs-target="tab">B',
+        );
+        expect(codes(source)).toEqual([]);
+      });
+
+      describe("conditioned on the controller's own value", () => {
+        const grid = (selection: string) => `
+          <table data-controller="stimeo--data-grid" role="grid" aria-label="Rows" ${selection}>
+            <thead><tr><th role="columnheader" data-stimeo--data-grid-target="columnHeader"
+                          tabindex="0">Name</th></tr></thead>
+            <tbody>
+              <tr role="row" aria-selected="true" data-stimeo--data-grid-target="row">
+                <td role="gridcell" data-stimeo--data-grid-target="cell" tabindex="-1">a</td>
+              </tr>
+              <tr role="row" aria-selected="true" data-stimeo--data-grid-target="row">
+                <td role="gridcell" data-stimeo--data-grid-target="cell" tabindex="-1">b</td>
+              </tr>
+            </tbody>
+          </table>`;
+
+        it("bounds the count only in the single-selection configuration", () => {
+          expect(codes(grid('data-stimeo--data-grid-selection-value="single"'))).toContain(
+            "cardinality-violation",
+          );
+        });
+
+        it("allows several when the configuration is multiple", () => {
+          expect(codes(grid('data-stimeo--data-grid-selection-value="multiple"'))).not.toContain(
+            "cardinality-violation",
+          );
+        });
+
+        it("stays disarmed on the declared default", () => {
+          expect(codes(grid(""))).not.toContain("cardinality-violation");
+        });
+
+        it("skips an ERB-generated deciding value", () => {
+          expect(codes(grid('data-stimeo--data-grid-selection-value="<%= mode %>"'))).not.toContain(
+            "cardinality-violation",
+          );
+        });
+      });
+
+      describe("counted per container target", () => {
+        // A hoverArea stands in for the one trigger it wraps: hovering an area
+        // holding several always resolves to the first, silently.
+        const item = (id: string) => `
+          <button data-stimeo--navigation-menu-target="trigger" aria-expanded="false"
+                  aria-controls="${id}">P</button>
+          <div id="${id}" data-stimeo--navigation-menu-target="panel" hidden>
+            <a href="/a">A</a>
+          </div>`;
+        const nav = (inner: string) => `
+          <nav data-controller="stimeo--navigation-menu" aria-label="Main"
+               data-stimeo--navigation-menu-open-on-hover-value="true">
+            <ul>${inner}</ul>
+          </nav>`;
+
+        it("accepts a wrapper holding exactly one trigger", () => {
+          expect(
+            codes(nav(`<li data-stimeo--navigation-menu-target="hoverArea">${item("p1")}</li>`)),
+          ).toEqual([]);
+        });
+
+        it("flags a wrapper holding several triggers", () => {
+          const all = checkSource(
+            nav(
+              `<li data-stimeo--navigation-menu-target="hoverArea">${item("p1")}${item("p2")}</li>`,
+            ),
+            manifest,
+          );
+          const violations = all.filter((x) => x.code === "cardinality-violation");
+          expect(violations).toHaveLength(1);
+          expect(violations[0]?.message).toContain("at most 1");
+          expect(violations[0]?.message).toContain('per "hoverArea" target');
+          expect(violations[0]?.suggestion).toContain("exactly one trigger");
+        });
+
+        it("flags a wrapper holding no trigger at all", () => {
+          const all = checkSource(
+            nav(
+              `<li data-stimeo--navigation-menu-target="hoverArea"><span>Nothing</span></li>
+               <li>${item("p1")}</li>`,
+            ),
+            manifest,
+          );
+          const violations = all.filter((x) => x.code === "cardinality-violation");
+          expect(violations).toHaveLength(1);
+          expect(violations[0]?.message).toContain("at least 1");
+          expect(violations[0]?.message).toContain("but found 0");
+        });
+
+        it("counts each wrapper separately", () => {
+          // Two correct wrappers must not be summed into one over-count.
+          expect(
+            codes(
+              nav(
+                `<li data-stimeo--navigation-menu-target="hoverArea">${item("p1")}</li>
+                 <li data-stimeo--navigation-menu-target="hoverArea">${item("p2")}</li>`,
+              ),
+            ),
+          ).toEqual([]);
+        });
+
+        it("ignores triggers outside the wrapper", () => {
+          expect(
+            codes(
+              nav(
+                `<li data-stimeo--navigation-menu-target="hoverArea">${item("p1")}</li>
+                 <li>${item("p2")}</li>`,
+              ),
+            ),
+          ).toEqual([]);
+        });
+      });
+    });
+
     describe("ARIA idref resolution", () => {
       it("warns on a dangling reference with a nearest-id suggestion", () => {
         const source = validDialog.replace('aria-labelledby="t"', 'aria-labelledby="tt"');
@@ -712,7 +1474,7 @@ describe("checkSource", () => {
             <div role="tablist" aria-label="Sections" data-stimeo--tabs-target="list">
               <button data-stimeo--tabs-target="tab">A</button>
             </div>
-            <div data-stimeo--tabs-target="panel">A</div>
+            <div aria-label="A" data-stimeo--tabs-target="panel">A</div>
           </div>`;
         expect(codes(bare)).toEqual([]);
         expect(
@@ -812,6 +1574,35 @@ describe("checkSource", () => {
       expect(codes(`<div data-<%= id %>-target="trigger"></div>`)).toEqual([]);
     });
 
+    it("does not read a partly interpolated target name as its literal remnant", () => {
+      // Neutralization blanks the tag in place, so `<%= prefix %>tab` is left
+      // reading as "tab". Taking that would register a target the runtime never
+      // resolves — and silence the required-target check that a fully generated
+      // name (below) still trips. Undecidable, so the two must agree.
+      const tabs = (name: string) => `
+        <div data-controller="stimeo--tabs">
+          <div role="tablist" aria-label="Sections" data-stimeo--tabs-target="list">
+            <button role="tab" id="t1" aria-controls="p1" data-stimeo--tabs-target="${name}">A</button>
+          </div>
+          <div role="tabpanel" id="p1" aria-labelledby="t1" data-stimeo--tabs-target="panel"></div>
+        </div>`;
+      expect(codes(tabs("<%= prefix %>tab"))).toEqual(["missing-required-target"]);
+      expect(codes(tabs("<%= prefix %>tab"))).toEqual(codes(tabs("<%= prefix %>")));
+    });
+
+    it("does not count a partly interpolated target name toward a cardinality bound", () => {
+      // The same remnant reaching the count would report an over-count among
+      // elements the runtime does not even own.
+      const source = `
+        <ul data-controller="stimeo--tree-view" role="tree" aria-label="Files">
+          <li role="treeitem" aria-selected="true" tabindex="0"
+              data-stimeo--tree-view-target="item">a</li>
+          <li role="treeitem" aria-selected="true" tabindex="-1"
+              data-stimeo--tree-view-target="<%= prefix %>item">b</li>
+        </ul>`;
+      expect(codes(source)).toEqual([]);
+    });
+
     it("does not treat event names inside <script> as attributes", () => {
       const source = `
         <div data-controller="stimeo--otp" id="x">
@@ -897,6 +1688,25 @@ describe("checkSource", () => {
       expect(d?.fix?.text).toBe("t");
       const fixed = applyFix(source, d);
       expect(checkSource(fixed, manifest).map((x) => x.code)).not.toContain("unresolved-idref");
+    });
+
+    it("appends a required companion to an existing data-controller", () => {
+      // Appending to a list is unambiguous; creating the attribute from nothing
+      // would be an insertion the diagnostic's anchor cannot express, so that
+      // case deliberately ships the suggestion alone.
+      const source = `
+        <nav data-controller="stimeo--overflow-menu" aria-label="Actions">
+          <div data-stimeo--overflow-menu-target="items"><button type="button">Save</button></div>
+          <div data-stimeo--overflow-menu-target="more" data-controller="stimeo--portal" hidden>
+            <button type="button">More</button>
+          </div>
+        </nav>`;
+      const d = checkSource(source, manifest).find((x) => x.code === "missing-companion");
+      expect(d?.fix?.text).toBe("stimeo--portal stimeo--menu");
+      expect(d?.fix?.title).toBe('Add "stimeo--menu" to data-controller');
+      expect(checkSource(applyFix(source, d), manifest).map((x) => x.code)).not.toContain(
+        "missing-companion",
+      );
     });
 
     it("emits no fix when nothing is plausibly close", () => {

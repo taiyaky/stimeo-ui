@@ -13,7 +13,7 @@ import { tick } from "./helpers/timing";
  * `active`, maps Values to the engine, mirrors the resolved placement onto
  * `data-anchored-placement` + emits `position`, re-applies on option changes only
  * while tracking, and releases the observer on deactivate/disconnect. Real
- * flip/shift behavior is covered by the real-browser e2e layer.
+ * flip/shift behavior needs a real browser and is out of scope here.
  */
 
 const computePosition = vi.fn();

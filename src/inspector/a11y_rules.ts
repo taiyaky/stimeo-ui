@@ -1,6 +1,14 @@
 import type { A11yRules } from "./types";
 
 /**
+ * Tags a form control's accessible name can reach through natively, via a
+ * `<label for>`. A rule disarmed on these is not conceding the name is
+ * optional — it is conceding that the label may sit in a different partial,
+ * where no single-file check can see it.
+ */
+export const NATIVELY_LABELLED = ["input", "select", "textarea"];
+
+/**
  * Hand-written **accessibility rules** (Inspector stage 3).
  *
  * Stage 1/2 check that markup is spelled and structured correctly; stage 3
@@ -10,10 +18,16 @@ import type { A11yRules } from "./types";
  *
  * The distinction is deliberate and load-bearing: a controller that assigns,
  * say, `aria-selected` on connect must never have that attribute *required* in
- * the source, or every correct page would be flagged. Each rule here was
- * verified against the controller implementation (it does **not** `setAttribute`
- * the listed ARIA) and the recommended demo markup (the author **does** author
- * it). Attributes the controller manages are intentionally absent.
+ * the source, or every correct page would be flagged. A rule is listed only
+ * where the controller does **not** `setAttribute` the listed ARIA and the
+ * documented markup contract has the author supply it; attributes the
+ * controller manages are intentionally absent.
+ *
+ * `aria-selected` is managed everywhere it appears: every selectable element
+ * gets an explicit value on connect, whether the attribute marks the *active*
+ * candidate or a committed choice. Its set-level half — "at most one `true` in
+ * a single-select scope" — is an invariant no per-element requirement can
+ * express, and lives in the cardinality rules instead.
  *
  * Like the structure rules, these are conservative: a requirement is listed
  * only when the pattern genuinely cannot be accessible without that ARIA, so
@@ -23,16 +37,29 @@ import type { A11yRules } from "./types";
  * 1. the controller never sets the attribute at runtime (else: excluded, e.g.
  *    tabs' `aria-selected`, switch's `role`/`aria-checked`, menu/listbox's
  *    `aria-expanded`/`aria-activedescendant`, separator's defaulted `role`);
- * 2. the documented markup contract and demo actually author it;
- * 3. the APG pattern is broken for AT without it — accessible-name rules are
- *    limited to roles that only name from author (dialog, menu, combobox,
- *    slider, spinbutton, meter, progressbar, separator-handle), never to plain
- *    inputs (a native `<label for>` is a legitimate alternative the static
- *    check cannot see) nor to optional names outside the documented contract;
+ * 2. the documented markup contract and its example actually author it;
+ * 3. the APG pattern is broken for AT without it. For **accessible names** this
+ *    is not a yes/no question: ARIA assigns each role its own requirement level,
+ *    so the rules mirror that level rather than a single house rule. Required
+ *    (`dialog`, `alertdialog`, `tree`, `grid`, `radiogroup`, `listbox`,
+ *    `combobox`, `tabpanel`, `slider`, `spinbutton`, `meter`, `progressbar`)
+ *    reports as an **error**; Recommended (`menu`, `menubar`, `tablist`,
+ *    `toolbar`) as a **warning**, because the pattern still works unnamed;
+ *    discretionary names (a focusable `separator`) are checked only once the
+ *    file holds enough of them to make the name load-bearing. Conditional
+ *    levels are written as conditions, not rounded off: a toolbar's name
+ *    escalates to Required on the second toolbar in the file;
  * 4. no legitimate alternative spelling exists (e.g. `<td>` inside a
  *    `role="grid"` table is an *implicit* gridcell, so cell roles on
  *    table-based grids are not required; a controller that documents an
  *    attribute as optional and falls back gracefully keeps it optional here).
+ *    Where the alternative depends on the tag rather than the contract, the
+ *    rule says so with `whenElement` instead of being dropped: a
+ *    `<table role="grid">` names from its `<caption>` and a
+ *    `<fieldset role="radiogroup">` from its `<legend>`, but the `div` spelling
+ *    of either has no such path and goes unchecked if the rule is abandoned.
+ *    The exemption is keyed on the tag, never on finding the native name — a
+ *    `<label for>` legitimately sits in a different partial.
  *
  * Each requirement carries a `suggestion` used by stage 4 to print the exact
  * attribute to add.
@@ -153,10 +180,21 @@ export const a11yRules: A11yRules = {
       suggestion: 'Add aria-autocomplete="list" to the input target.',
     },
     {
+      target: "input",
+      attrs: ["aria-labelledby", "aria-label"],
+      whenElement: { exceptTags: NATIVELY_LABELLED },
+      suggestion: "Name the combobox via aria-labelledby, aria-label, or a native <label for>.",
+    },
+    {
       target: "list",
       attrs: ["role"],
       values: ["listbox"],
       suggestion: 'Add role="listbox" to the list target.',
+    },
+    {
+      target: "list",
+      attrs: ["aria-labelledby", "aria-label"],
+      suggestion: "Name the listbox via aria-labelledby (the input's label) or aria-label.",
     },
     {
       target: "option",
@@ -221,9 +259,12 @@ export const a11yRules: A11yRules = {
       values: ["menu"],
       suggestion: 'Add role="menu" to the menu target.',
     },
+    // ARIA recommends (does not require) a name on `menu`: the pattern works
+    // unnamed, the name only tells the user which trigger opened this one.
     {
       target: "menu",
       attrs: ["aria-labelledby", "aria-label"],
+      severity: "warning",
       suggestion: "Name the menu via aria-labelledby (the trigger's id) or aria-label.",
     },
     {
@@ -251,6 +292,14 @@ export const a11yRules: A11yRules = {
       suggestion:
         'Add role="menuitem" (or "menuitemcheckbox" / "menuitemradio") to each item target.',
     },
+    // Recommended, as on every other `menu`. A context menu has no visible
+    // trigger to name it after, so `aria-label` is usually the only option.
+    {
+      target: "menu",
+      attrs: ["aria-labelledby", "aria-label"],
+      severity: "warning",
+      suggestion: "Name the menu via aria-label (a context menu has no visible trigger).",
+    },
   ],
   // Menubar (APG): the bar / top items / submenus / items carry authored
   // roles. aria-controls and aria-haspopup on top items are intentionally NOT
@@ -275,6 +324,35 @@ export const a11yRules: A11yRules = {
       attrs: ["role"],
       values: ["menu"],
       suggestion: 'Add role="menu" to each menu target.',
+    },
+    // Recommended names, the same level `stimeo--menu`'s menu sits at. One
+    // menubar owns several menus, so the name that distinguishes them matters
+    // more, not less, than on a lone dropdown.
+    {
+      target: "",
+      attrs: ["aria-labelledby", "aria-label"],
+      severity: "warning",
+      suggestion: "Name the menubar via aria-labelledby or aria-label.",
+    },
+    {
+      target: "menu",
+      attrs: ["aria-labelledby", "aria-label"],
+      severity: "warning",
+      suggestion: "Name each menu via aria-labelledby (its top item's id) or aria-label.",
+    },
+    // A menu the consumer fills asynchronously still opens, so an empty one is
+    // supported markup — but `role="menu"` requires owned `menuitem`s, and the
+    // controller cannot tell "still loading" from "nothing to show", so it never
+    // infers the state. Declaring the temporary absence is therefore the
+    // author's job, and only while the menu is structurally empty: a menu whose
+    // items exist but are all inert is structurally satisfied and not busy.
+    {
+      target: "menu",
+      whenContains: { target: "item", max: 0 },
+      attrs: ["aria-busy"],
+      values: ["true"],
+      suggestion:
+        'Add aria-busy="true" to the empty menu and drop it once the items land — role="menu" requires owned menuitems, and the controller never infers the state.',
     },
     {
       target: "item",
@@ -306,6 +384,13 @@ export const a11yRules: A11yRules = {
       values: ["listbox"],
       suggestion: 'Add role="listbox" to the list target.',
     },
+    // ARIA requires a name on `listbox`. The popup is a div/ul by contract, so
+    // there is no native `<select>` naming path to exempt here.
+    {
+      target: "list",
+      attrs: ["aria-labelledby", "aria-label"],
+      suggestion: "Name the listbox via aria-labelledby (the trigger's label) or aria-label.",
+    },
     {
       target: "option",
       attrs: ["role"],
@@ -314,8 +399,10 @@ export const a11yRules: A11yRules = {
     },
   ],
   // Editable combobox (APG): the input's combobox role and its list-filter
-  // announcement are authored; no name rule — a native <label for> is a
-  // legitimate alternative the static check cannot see.
+  // announcement are authored. ARIA requires a name on both `combobox` and
+  // `listbox`, but the input's is disarmed on the native tags — an
+  // `<input role="combobox">` is named by a `<label for>` that legitimately
+  // lives in another partial, so demanding ARIA there would flag correct pages.
   "stimeo--combobox": [
     {
       target: "input",
@@ -330,10 +417,21 @@ export const a11yRules: A11yRules = {
       suggestion: 'Add aria-autocomplete="list" to the input target.',
     },
     {
+      target: "input",
+      attrs: ["aria-labelledby", "aria-label"],
+      whenElement: { exceptTags: NATIVELY_LABELLED },
+      suggestion: "Name the combobox via aria-labelledby, aria-label, or a native <label for>.",
+    },
+    {
       target: "list",
       attrs: ["role"],
       values: ["listbox"],
       suggestion: 'Add role="listbox" to the list target.',
+    },
+    {
+      target: "list",
+      attrs: ["aria-labelledby", "aria-label"],
+      suggestion: "Name the listbox via aria-labelledby (the input's label) or aria-label.",
     },
     {
       target: "option",
@@ -359,10 +457,21 @@ export const a11yRules: A11yRules = {
       suggestion: 'Add aria-autocomplete="list" to the input target.',
     },
     {
+      target: "input",
+      attrs: ["aria-labelledby", "aria-label"],
+      whenElement: { exceptTags: NATIVELY_LABELLED },
+      suggestion: "Name the combobox via aria-labelledby, aria-label, or a native <label for>.",
+    },
+    {
       target: "list",
       attrs: ["role"],
       values: ["listbox"],
       suggestion: 'Add role="listbox" to the list target.',
+    },
+    {
+      target: "list",
+      attrs: ["aria-labelledby", "aria-label"],
+      suggestion: "Name the listbox via aria-labelledby (the input's label) or aria-label.",
     },
     {
       target: "list",
@@ -398,10 +507,21 @@ export const a11yRules: A11yRules = {
       values: ["tablist"],
       suggestion: 'Add role="tablist" to the list target.',
     },
+    // Recommended, not required: an unnamed tablist is still a working tab set.
     {
       target: "list",
       attrs: ["aria-labelledby", "aria-label"],
+      severity: "warning",
       suggestion: "Name the tablist via aria-labelledby or aria-label.",
+    },
+    // The panel, by contrast, ARIA *requires* a name for — and the contract
+    // already has the author point it at the controlling tab, so nothing here
+    // is new to write. The controller never sets it (it owns aria-selected
+    // only), which is what makes the requirement checkable at all.
+    {
+      target: "panel",
+      attrs: ["aria-labelledby", "aria-label"],
+      suggestion: "Name each panel via aria-labelledby (its tab's id) or aria-label.",
     },
   ],
   // Tabbed carousel (APG): picker dots are tabs and slides are tabpanels with
@@ -432,6 +552,14 @@ export const a11yRules: A11yRules = {
       values: ["slide"],
       suggestion: 'Add aria-roledescription="slide" to each slide target.',
     },
+    // A slide is a `tabpanel`, whose name ARIA requires. Unnamed, every slide
+    // is announced as "slide" and the position the roledescription promised is
+    // exactly the thing the user cannot hear.
+    {
+      target: "slide",
+      attrs: ["aria-labelledby", "aria-label"],
+      suggestion: "Name each slide via aria-labelledby (its picker's id) or aria-label.",
+    },
     {
       target: "picker",
       attrs: ["role"],
@@ -455,9 +583,25 @@ export const a11yRules: A11yRules = {
       values: ["radio"],
       suggestion: 'Add role="radio" to each radio target.',
     },
+    // ARIA requires a name on `radiogroup` — without it the individual radios
+    // are announced with no idea what they are choosing between. Disarmed on
+    // `<fieldset>`, which names the group from its `<legend>`; the `div`
+    // spelling the contract documents has no such path.
+    {
+      target: "",
+      attrs: ["aria-labelledby", "aria-label"],
+      whenElement: { exceptTags: ["fieldset"] },
+      suggestion: "Name the radio group via aria-labelledby or aria-label.",
+    },
   ],
   // Toolbar (APG): the controller provides the roving tabindex; the toolbar
-  // role that makes the grouping perceivable is authored.
+  // role that makes the grouping perceivable is authored, and so is the
+  // orientation — the controller reads its own Value to decide which arrow keys
+  // move focus, but never writes `aria-orientation`, so a vertical toolbar is
+  // announced as horizontal unless the author says otherwise. The requirement
+  // holds *only* in the vertical configuration: `horizontal` is the implicit
+  // ARIA default, so demanding the attribute unconditionally would reject the
+  // correct markup of every horizontal toolbar.
   "stimeo--toolbar": [
     {
       target: "",
@@ -465,10 +609,30 @@ export const a11yRules: A11yRules = {
       values: ["toolbar"],
       suggestion: 'Add role="toolbar" to the controller element.',
     },
+    {
+      target: "",
+      when: { value: "orientation", equals: ["vertical"], default: "horizontal" },
+      attrs: ["aria-orientation"],
+      values: ["vertical"],
+      suggestion:
+        'Add aria-orientation="vertical" to the controller element — the toolbar roves with Up/Down but is announced as horizontal without it.',
+    },
+    // ARIA recommends a toolbar's name and *requires* it once a page holds more
+    // than one — with two, "toolbar" alone identifies neither. The count is per
+    // file, which under-approximates a page assembled from partials: that only
+    // ever leaves the level at warning, never raises it wrongly.
+    {
+      target: "",
+      attrs: ["aria-labelledby", "aria-label"],
+      severity: "warning",
+      escalateWhen: { role: "toolbar", atLeast: 2 },
+      suggestion: "Name the toolbar via aria-labelledby or aria-label.",
+    },
   ],
   // Tree view (APG): tree/treeitem/group roles are authored on a ul/li
   // structure whose implicit list semantics can never stand in for them;
-  // aria-expanded / aria-selected are controller-managed.
+  // aria-expanded is controller-managed; aria-selected is shared — the author may
+  // render the initial selection and connect normalizes it, so it is not required.
   "stimeo--tree-view": [
     {
       target: "",
@@ -488,6 +652,15 @@ export const a11yRules: A11yRules = {
       values: ["group"],
       suggestion: 'Add role="group" to each group target.',
     },
+    // ARIA requires a name on `tree`. There is no native spelling of a tree to
+    // exempt — a `<ul>` carrying role="tree" has lost the list semantics it
+    // might otherwise have been named through — so the requirement is
+    // unconditional.
+    {
+      target: "",
+      attrs: ["aria-labelledby", "aria-label"],
+      suggestion: "Name the tree via aria-labelledby or aria-label.",
+    },
   ],
   // Data grid (APG grid): only the grid role on the table is required — a
   // plain <table> never becomes a grid by itself, while row/columnheader/
@@ -501,20 +674,35 @@ export const a11yRules: A11yRules = {
       values: ["grid"],
       suggestion: 'Add role="grid" to the controller element.',
     },
+    // ARIA requires a name on `grid`. Disarmed on `<table>`, which names itself
+    // from a `<caption>` — the contract's own example is table-based, so an
+    // unconditional rule would reject the documented spelling. The `div` form
+    // has no caption to fall back on and stays checked.
+    {
+      target: "",
+      attrs: ["aria-labelledby", "aria-label"],
+      whenElement: { exceptTags: ["table"] },
+      suggestion: "Name the grid via aria-labelledby or aria-label.",
+    },
   ],
   // Date range picker: unlike stimeo--calendar (table-based; grid role lives on
   // a non-target <table> and <td> cells are implicit gridcells), its documented
   // contract is div/button-based, so the grid and gridcell roles are explicit
-  // and authored on the targets themselves. The grid's accessible name is NOT
-  // required: the controller's minimal markup contract omits it (the demo's
-  // aria-labelledby month link goes beyond the contract). aria-selected /
-  // aria-disabled are controller-managed.
+  // and authored on the targets themselves — and with no `<table>` in sight
+  // there is no `<caption>` to name the grid either, so ARIA's required name
+  // has to be authored. aria-selected / aria-disabled are controller-managed.
   "stimeo--date-range-picker": [
     {
       target: "grid",
       attrs: ["role"],
       values: ["grid"],
       suggestion: 'Add role="grid" to the grid target.',
+    },
+    {
+      target: "grid",
+      attrs: ["aria-labelledby", "aria-label"],
+      whenElement: { exceptTags: ["table"] },
+      suggestion: "Name the grid via aria-labelledby (the month heading) or aria-label.",
     },
     {
       target: "cell",
@@ -646,16 +834,29 @@ export const a11yRules: A11yRules = {
       values: ["separator"],
       suggestion: 'Add role="separator" to the separator target.',
     },
+    // ARIA leaves a focusable separator's name discretionary and only
+    // recommends one "if more than one focusable separator" exists — a single
+    // splitter is unambiguous, and naming it would add an announcement the user
+    // gains nothing from. So the rule arms on the second one in the file rather
+    // than standing unconditionally, and reports at the recommended level.
+    //
+    // `focusable` is load-bearing, not decoration: a decorative
+    // `hr role="separator"` is not something a user can land on, so it cannot
+    // create the ambiguity the name resolves. Counting it would warn about a
+    // page that has exactly one reachable splitter.
     {
       target: "separator",
       attrs: ["aria-label", "aria-labelledby"],
-      suggestion: "Name the separator target via aria-label or aria-labelledby.",
+      whenDocument: { role: "separator", atLeast: 2, focusable: true },
+      severity: "warning",
+      suggestion:
+        "Name each separator target via aria-label or aria-labelledby — this file has more than one focusable separator.",
     },
   ],
-  // Live-region contracts (`or` groups, schema v4): the announcement channel
-  // can be spelled as a live role OR a bare aria-live region — either
-  // satisfies the requirement, while a present-and-wrong value on either side
-  // (e.g. aria-live="off") is still an error.
+  // Live-region contracts (`or` groups): the announcement channel can be
+  // spelled as a live role OR a bare aria-live region — either satisfies the
+  // requirement, while a present-and-wrong value on either side (e.g.
+  // aria-live="off") is still an error.
   "stimeo--sortable": [
     {
       target: "status",

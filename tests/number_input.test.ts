@@ -98,6 +98,21 @@ describe("NumberInputController", () => {
     expect(input().value).toBe("0");
   });
 
+  it("leaves a modified arrow to the browser", () => {
+    // A chorded arrow belongs to the browser or the OS, so the spinbutton must
+    // neither consume the press nor step its value.
+    const chord = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    input().dispatchEvent(chord);
+
+    expect(chord.defaultPrevented).toBe(false);
+    expect(input().value).toBe("0");
+  });
+
   it("steps with ArrowUp and ArrowDown", () => {
     press("ArrowUp");
     expect(input().value).toBe("10");

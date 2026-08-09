@@ -23,7 +23,7 @@ import { FocusTrap } from "../utils/focus_trap";
  *
  * @remarks
  * Behavior only — it does not open/close or render an overlay (pair with Dialog) and
- * does not move DOM (pair with Portal). It reuses `src/utils/focus_trap.ts`, so it never
+ * does not move DOM (pair with Portal). It reuses the shared {@link FocusTrap}, so it never
  * scroll-locks the page (unlike the modal overlays) and tracks live focusable children
  * (dynamic additions are picked up on the next `Tab`). The opener is recorded on
  * activate and refocused on release if still present. Everything is torn down on

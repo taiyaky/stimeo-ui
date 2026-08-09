@@ -9,12 +9,12 @@ import { type ConfirmedCableSubscription, createConfirmedSubscription } from "./
 const DISABLED_MARKER = "data-live-counter-disabled";
 
 /**
- * Headless **live counter** — the third *server-bound* behavior: a
- * number bound to an Action Cable stream (likes, views, active users) that
- * ticks across every connected client. A local action applies an **optimistic**
- * increment immediately, then reconciles with the broadcast; the own echo of a
- * delta broadcast is deduped so the increment is never applied twice. Ships in
- * the opt-in `stimeo-ui/cable` subpath (`@rails/actioncable` optional peer).
+ * Headless **live counter** — a *server-bound* behavior: a number bound to an
+ * Action Cable stream (likes, views, active users) that ticks across every
+ * connected client. A local action applies an **optimistic** increment
+ * immediately, then reconciles with the broadcast; the own echo of a delta
+ * broadcast is deduped so the increment is never applied twice. Ships in the
+ * opt-in `stimeo-ui/cable` subpath (`@rails/actioncable` optional peer).
  *
  * Markup contract (identifier: `stimeo--live-counter`):
  *   <div data-controller="stimeo--live-counter"

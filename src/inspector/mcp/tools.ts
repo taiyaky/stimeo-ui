@@ -44,7 +44,7 @@ export interface ToolInputSchema {
 
 /**
  * MCP tool annotations (protocol 2025-03-26+): machine-readable behavior hints.
- * Every v1 tool is read-only and closed-world (it only consults the bundled
+ * Every tool here is read-only and closed-world (it only consults the bundled
  * manifest and the strings the client sends), so clients can skip destructive-
  * action confirmation UX.
  */
@@ -57,7 +57,7 @@ export interface ToolAnnotations {
  * JSON Schema for a tool result (`outputSchema` in `tools/list`). Typed as a
  * plain JSON object rather than a full JSON Schema model: the schemas below
  * are hand-written literals, and their conformance to what the handlers
- * actually return is locked by `mcp_tools.test.ts`.
+ * actually return is locked by tests rather than by the type.
  */
 export type ToolOutputSchema = Readonly<Record<string, unknown>>;
 
@@ -71,7 +71,7 @@ export interface ToolDescriptor {
   readonly outputSchema: ToolOutputSchema;
 }
 
-/** Shared annotations: every v1 tool is read-only over bundled data. */
+/** Shared annotations: every tool is read-only over bundled data. */
 const READ_ONLY_ANNOTATIONS: ToolAnnotations = { readOnlyHint: true, openWorldHint: false };
 
 /** JSON Schema fragment for a `readonly string[]` field. */
@@ -156,6 +156,58 @@ const EXAMPLE_RESULT_SCHEMA: ToolOutputSchema = {
   required: ["id", "file", "source", "guidance"],
 };
 
+/** JSON Schema fragment for a content condition (how many targets an element holds). */
+const CONTENT_CONDITION_SCHEMA = {
+  type: "object",
+  description:
+    "Condition on the element's own contents arming the rule; absent means it does not " +
+    "depend on them. Evaluated per element, unlike the scope-level `when`.",
+  properties: {
+    target: { type: "string", description: "Target counted inside the element." },
+    min: { type: "integer", description: "Arms the rule when the count is at least this." },
+    max: { type: "integer", description: "Arms the rule when the count is at most this." },
+  },
+  required: ["target"],
+} as const;
+
+/** JSON Schema fragment for an element condition (the element's own tag). */
+const ELEMENT_CONDITION_SCHEMA = {
+  type: "object",
+  description:
+    "Tags the rule is disarmed on because they name the role natively (a <table>'s " +
+    "<caption>, a <fieldset>'s <legend>, an <input>'s <label for>); absent means the " +
+    "rule applies to every spelling.",
+  properties: {
+    exceptTags: {
+      type: "array",
+      items: { type: "string" },
+      description: "Lowercase tag names whose native naming path disarms the rule.",
+    },
+  },
+  required: ["exceptTags"],
+} as const;
+
+/** JSON Schema fragment for a file-level condition (how many carry a role). */
+const DOCUMENT_CONDITION_SCHEMA = {
+  type: "object",
+  description:
+    "Condition on the whole file: how many elements in it carry a role. Backs ARIA's " +
+    "conditional name levels (a toolbar's name becomes required on the second toolbar). " +
+    "Counts per file, which under-approximates a page built from partials.",
+  properties: {
+    role: { type: "string", description: "Role counted across the file." },
+    atLeast: { type: "integer", description: "Holds at this many or more." },
+    focusable: {
+      type: "boolean",
+      description:
+        "Counts only Tab-reachable carriers of the role; absent counts all. ARIA qualifies " +
+        "a separator's condition by focusability (a decorative hr cannot be landed on) but " +
+        "a toolbar's not at all.",
+    },
+  },
+  required: ["role", "atLeast"],
+} as const;
+
 /** JSON Schema for the `stimeo_controller` result (mirrors {@link ControllerContract}). */
 const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
   type: "object",
@@ -168,6 +220,22 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
     requiredTargets: {
       ...STRING_ARRAY,
       description: "Targets that must be present at least once inside the controller scope.",
+    },
+    conditionalTargets: {
+      type: "array",
+      description:
+        "Targets that become required only once another optional target appears — an " +
+        "opt-in feature that is incomplete without its whole set. Omitting one half " +
+        "passes every other check and silently does nothing.",
+      items: {
+        type: "object",
+        properties: {
+          whenPresent: { type: "string", description: "The optional target that turns it on." },
+          require: { ...STRING_ARRAY, description: "Targets required once it appears." },
+          suggestion: { type: "string" },
+        },
+        required: ["whenPresent", "require", "suggestion"],
+      },
     },
     a11y: {
       type: "array",
@@ -190,6 +258,29 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
               required: ["attrs"],
             },
           },
+          when: {
+            type: "object",
+            description:
+              "Own-value condition arming the requirement; absent means unconditional. " +
+              "Outside the named configuration the ARIA is not optional but wrong.",
+            properties: {
+              value: { type: "string" },
+              equals: STRING_ARRAY,
+              default: { type: "string" },
+            },
+            required: ["value", "equals", "default"],
+          },
+          whenContains: CONTENT_CONDITION_SCHEMA,
+          whenElement: ELEMENT_CONDITION_SCHEMA,
+          whenDocument: DOCUMENT_CONDITION_SCHEMA,
+          severity: {
+            type: "string",
+            enum: ["error", "warning"],
+            description:
+              'Level of an unmet requirement; absent means "error". ARIA recommends some ' +
+              "names rather than requiring them, and those report as warnings.",
+          },
+          escalateWhen: DOCUMENT_CONDITION_SCHEMA,
           suggestion: { type: "string" },
         },
         required: ["target", "attrs", "suggestion"],
@@ -267,6 +358,93 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
         required: ["target", "coController", "require", "suggestion"],
       },
     },
+    companions: {
+      type: "array",
+      description:
+        "Controllers the named target must ALSO declare. Unlike compositions (which only " +
+        "check an already co-located companion), these report the companion being missing.",
+      items: {
+        type: "object",
+        properties: {
+          target: {
+            type: "string",
+            description: 'Target that must declare it; "" means the data-controller element.',
+          },
+          controller: { type: "string", description: "Required companion identifier." },
+          suggestion: { type: "string" },
+        },
+        required: ["target", "controller", "suggestion"],
+      },
+    },
+    targetDeclarations: {
+      type: "array",
+      description:
+        "Reverse direction: elements in scope carrying the attribute must be declared as the " +
+        "named target, or the controller never manages them.",
+      items: {
+        type: "object",
+        properties: {
+          attr: { type: "string", description: 'Marking attribute, e.g. "role".' },
+          values: { ...STRING_ARRAY, description: "Marking values; absent = any value." },
+          target: {
+            type: "string",
+            description: "Target the matched element must be declared as.",
+          },
+          suggestion: { type: "string" },
+        },
+        required: ["attr", "target", "suggestion"],
+      },
+    },
+    cardinality: {
+      type: "array",
+      description:
+        "Set-level count bounds: how many of the named target may or must exist per scope or " +
+        "per container target, optionally narrowed to elements carrying an attribute.",
+      items: {
+        type: "object",
+        properties: {
+          within: {
+            type: "string",
+            description: 'Container target bounding the count; "" means the whole scope.',
+          },
+          target: { type: "string", description: "Target name being counted." },
+          attr: { type: "string", description: "Count only elements carrying this attribute." },
+          values: { ...STRING_ARRAY, description: "Restrict the attribute to these values." },
+          min: { type: "integer", description: "Smallest permitted count (inclusive)." },
+          max: { type: "integer", description: "Largest permitted count (inclusive)." },
+          when: {
+            type: "object",
+            description: "Own-value condition arming the bound; absent means unconditional.",
+            properties: {
+              value: { type: "string" },
+              equals: STRING_ARRAY,
+              default: { type: "string" },
+            },
+            required: ["value", "equals", "default"],
+          },
+          suggestion: { type: "string" },
+        },
+        required: ["within", "target", "suggestion"],
+      },
+    },
+    forbiddenAria: {
+      type: "array",
+      description:
+        "ARIA the author owns that the surrounding markup contradicts (e.g. a menu still " +
+        "declaring itself busy once its items are present). Reported as a warning — unlike " +
+        "managedAria, the attribute is the author's and is required in the other configuration.",
+      items: {
+        type: "object",
+        properties: {
+          target: { type: "string" },
+          attrs: STRING_ARRAY,
+          values: { ...STRING_ARRAY, description: "Forbidden values; absent = any value." },
+          whenContains: CONTENT_CONDITION_SCHEMA,
+          suggestion: { type: "string" },
+        },
+        required: ["target", "attrs", "suggestion"],
+      },
+    },
   },
   required: [
     "id",
@@ -275,10 +453,15 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
     "actions",
     "events",
     "requiredTargets",
+    "conditionalTargets",
     "a11y",
     "keyboard",
     "managedAria",
     "compositions",
+    "companions",
+    "targetDeclarations",
+    "cardinality",
+    "forbiddenAria",
   ],
 };
 
@@ -327,7 +510,7 @@ export interface ControllerContract extends ControllerManifest {
 /** Result of `stimeo_example`: one controller's verified example markup. */
 export interface ExampleResult {
   readonly id: string;
-  /** Repo-relative provenance of the example (the catalog demo sidecar). */
+  /** Repo-relative path the example was read from. */
   readonly file: string;
   /** The HTML/ERB source. */
   readonly source: string;
@@ -337,8 +520,8 @@ export interface ExampleResult {
 
 /**
  * Consumption note attached to every `stimeo_example` result. The examples are
- * headless-catalog demos: the `stimeo--*` data attributes are the contract;
- * class attributes are demo styling placeholders the consumer must replace.
+ * headless demos: the `stimeo--*` data attributes are the contract; class
+ * attributes are demo styling placeholders the consumer must replace.
  */
 export const EXAMPLE_GUIDANCE =
   "Verified example from the official Stimeo UI catalog (it passes stimeo_check against the " +
@@ -347,18 +530,51 @@ export const EXAMPLE_GUIDANCE =
   "placeholders — the library ships no CSS, so replace them with your own classes. ERB " +
   "helpers/comments illustrate Rails usage and can be adapted.";
 
-/** Tool descriptors advertised via `tools/list`. */
+/**
+ * Tool descriptors advertised via `tools/list`.
+ *
+ * A client can only route on the text a server ships — tool names,
+ * descriptions, and argument names/descriptions — and MCP defines no search or
+ * routing metadata to declare instead. Word choice is therefore the whole
+ * mechanism, whichever way a client selects tools: reading the full list,
+ * deferring definitions behind a search, or retrieving semantically. So these
+ * descriptions are written for discovery, in two tiers:
+ *
+ * 1. Every description carries the shared keywords "Rails", "Stimulus",
+ *    "accessible", and "component", so a query in any one of them can match
+ *    all four tools at once (helped by the shared `stimeo_` name prefix).
+ * 2. The enumeration of component names (dialog, drawer, tabs, …) lives in
+ *    `stimeo_catalog`, the discovery entry point, rather than being repeated
+ *    in all four — that would pad every description, and clients truncate
+ *    descriptions at a few kilobytes each. Nothing asserts the absence of
+ *    those names elsewhere, so tier 2 is a convention rather than an
+ *    invariant.
+ *
+ * Getting this wrong costs the most under deferred loading, where a client
+ * keeps definitions out of context until a search asks for them and matches
+ * against tool names, descriptions, argument names, and argument descriptions.
+ * A query that matches nothing comes back empty rather than as an error, so a
+ * description missing the words the request is phrased in leaves these tools
+ * unused for that request, however correct they are.
+ *
+ * Descriptions are not the only lever — the server `instructions` reach
+ * clients that use them, and the `stimeo_` name prefix survives even where
+ * descriptions are deferred — but `instructions` is a hint clients MAY ignore
+ * per the MCP schema, so word choice here is the layer that carries furthest.
+ */
 export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   {
     name: "stimeo_check",
     title: "Check Stimeo UI markup",
     description:
-      "Statically check HTML or ERB source that uses Stimeo UI (stimeo--*) controllers. " +
+      "Statically check HTML or ERB source that uses Stimeo UI (stimeo--*) controllers — " +
+      "the headless, accessible Stimulus UI component library for Rails. " +
       "Returns a CheckReport with diagnostics — unknown controllers/targets/values/action " +
       "methods, missing required targets, missing or invalid author-supplied ARIA, " +
       "keyboard-focusability prerequisites, and misaligned cross-controller composition " +
       "values — each with a fix suggestion when available. " +
-      "Call this on generated markup before finalizing it; ok=true means no errors.",
+      "Call this to validate any Rails view, ERB template, or HTML you write or edit with " +
+      "these components, before finalizing it; ok=true means no errors.",
     annotations: READ_ONLY_ANNOTATIONS,
     inputSchema: {
       type: "object",
@@ -383,8 +599,12 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
     title: "List Stimeo UI controllers",
     description:
       "List every Stimeo UI controller with its targets, values, actions, and events. " +
-      "Use this to discover which stimeo--* controllers exist and the data-* API each " +
-      "accepts before writing markup.",
+      "Stimeo UI is a headless, accessible (WAI-ARIA APG) Stimulus UI component library " +
+      "for Rails: dialog/modal, drawer, dropdown menu, tabs, accordion, combobox, " +
+      "listbox, tooltip, popover, toast, carousel, data grid, date picker, tree view, and " +
+      "many more. " +
+      "Start here to find which stimeo--* controller implements a requested component and " +
+      "the data-* API it accepts before writing markup.",
     annotations: READ_ONLY_ANNOTATIONS,
     inputSchema: {
       type: "object",
@@ -401,7 +621,9 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
       '(e.g. "stimeo--tabs"): targets, values, actions, events, required targets, and the ' +
       "accessibility contract — author-supplied ARIA requirements, keyboard-focusability " +
       "prerequisites, the ARIA attributes the controller manages at runtime (which the " +
-      "author must NOT hardcode), and cross-controller composition value alignments.",
+      "author must NOT hardcode), and cross-controller composition value alignments. " +
+      "Use it after stimeo_catalog to write correct, accessible Rails ERB or HTML markup " +
+      "for that Stimulus component.",
     annotations: READ_ONLY_ANNOTATIONS,
     inputSchema: {
       type: "object",
@@ -425,7 +647,9 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
       "stimeo_check against the bundled manifest, so use it as the reference for correct " +
       "structure, required targets, and author-supplied ARIA. class attributes in it are " +
       "demo styling placeholders to replace; the stimeo--* data attributes and role/aria-* " +
-      "attributes are the contract to keep.",
+      "attributes are the contract to keep. " +
+      "Copy it as the starting point when adding that accessible Stimulus component to a " +
+      "Rails ERB view.",
     annotations: READ_ONLY_ANNOTATIONS,
     inputSchema: {
       type: "object",
@@ -544,8 +768,8 @@ export function runControllerTool(manifest: Manifest, args: unknown): Controller
 
 /**
  * `stimeo_example`: one controller's verified example markup, straight from
- * the bundled catalog-demo index. Unknown ids produce a tool execution error
- * with a "did you mean" hint so the calling model can self-correct.
+ * the bundled example index. Unknown ids produce a tool execution error with a
+ * "did you mean" hint so the calling model can self-correct.
  */
 export function runExampleTool(examples: ExamplesIndex, args: unknown): ExampleResult {
   const record = asArgsRecord(args, ["id"]);

@@ -131,11 +131,60 @@ describe("ScrollVisibilityController", () => {
     expect(document.activeElement).toBe(main);
   });
 
+  it("removes a focus tabindex it added when the controller disconnects", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-focus-selector-value="#main">
+        <button type="button" data-stimeo--scroll-visibility-target="element"
+                data-action="stimeo--scroll-visibility#toTop">Top</button>
+      </div>
+      <main id="main">Content</main>`);
+    element().click();
+    const main = document.getElementById("main") as HTMLElement;
+    expect(main.getAttribute("tabindex")).toBe("-1");
+
+    application.unload("stimeo--scroll-visibility");
+    expect(main.hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("preserves an authored focus tabindex when the controller disconnects", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-focus-selector-value="#main">
+        <button type="button" data-stimeo--scroll-visibility-target="element"
+                data-action="stimeo--scroll-visibility#toTop">Top</button>
+      </div>
+      <main id="main" tabindex="-1">Content</main>`);
+    element().click();
+    const main = document.getElementById("main") as HTMLElement;
+    expect(document.activeElement).toBe(main);
+
+    application.unload("stimeo--scroll-visibility");
+    expect(main.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("preserves a focus tabindex changed after the controller adds it", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-focus-selector-value="#main">
+        <button type="button" data-stimeo--scroll-visibility-target="element"
+                data-action="stimeo--scroll-visibility#toTop">Top</button>
+      </div>
+      <main id="main">Content</main>`);
+    element().click();
+    const main = document.getElementById("main") as HTMLElement;
+    expect(main.getAttribute("tabindex")).toBe("-1");
+    main.setAttribute("tabindex", "0");
+
+    application.unload("stimeo--scroll-visibility");
+    expect(main.getAttribute("tabindex")).toBe("0");
+  });
+
   it("scrolls instantly when reduced motion is requested", async () => {
     reducedMotion = true;
     await start(offsetMarkup);
     element().click();
-    expect(window.scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "auto" });
+    expect(window.scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "instant" });
   });
 
   it("stops reacting to scroll after disconnect", async () => {
@@ -213,7 +262,7 @@ describe("ScrollVisibilityController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech-order regression ------------------------------------------------
 
   it("removes the control from the announcement order while hidden, and restores it when shown", async () => {
     await start(offsetMarkup);

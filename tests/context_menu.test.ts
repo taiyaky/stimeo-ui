@@ -59,6 +59,45 @@ describe("ContextMenuController", () => {
       new MouseEvent("contextmenu", { bubbles: true, clientX: x, clientY: y }),
     );
 
+  it("yields a key a descendant widget already consumed", () => {
+    // A composed widget that claims the key must not ALSO act on it —
+    // composition depends on this yield.
+    region().dispatchEvent(new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true }));
+    const focused = document.activeElement as HTMLElement;
+    const inner = document.createElement("span");
+    focused.append(inner);
+    inner.addEventListener("keydown", (event) => event.preventDefault());
+
+    inner.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+    );
+
+    expect(document.activeElement).toBe(focused);
+  });
+
+  it("yields a region key a descendant widget already consumed", () => {
+    // The controller has TWO guards — `onItemKeydown` (covered above) and
+    // `onRegionKeydown`, the keyboard entry point for `ContextMenu` / `Shift+F10`.
+    // Each needs its own case. The shape here is a nested widget that opens its
+    // own menu on the same chord: the outer menu must not ALSO open and steal
+    // focus.
+    const inner = document.createElement("span");
+    region().append(inner);
+    inner.addEventListener("keydown", (event) => event.preventDefault());
+
+    const event = new KeyboardEvent("keydown", {
+      key: "F10",
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const notCanceled = inner.dispatchEvent(event);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(menu().hidden).toBe(true);
+    expect(region().getAttribute("data-state")).toBe("closed");
+  });
+
   it("starts closed with collapsed state", () => {
     expect(menu().hidden).toBe(true);
     expect(region().getAttribute("data-state")).toBe("closed");
@@ -113,6 +152,26 @@ describe("ContextMenuController", () => {
     expect(document.activeElement).toBe(del);
   });
 
+  it("leaves a modified arrow to the browser", () => {
+    // A bare arrow roves the menu; a chorded one does not. Alt plus a horizontal
+    // arrow is the browser's history shortcut, and a menu that swallows any
+    // chord makes the shortcut work or not depending on where focus sits.
+    contextmenu(0, 0);
+    const copy = query("#copy");
+    expect(document.activeElement).toBe(copy);
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    copy.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(copy);
+  });
+
   it("jumps to first/last with Home/End", () => {
     contextmenu(0, 0);
     const copy = query("#copy");
@@ -157,6 +216,36 @@ describe("ContextMenuController", () => {
     expect(document.activeElement).toBe(outside);
   });
 
+  it("stays open when an inside click removes the clicked node first", () => {
+    // The failure mode that decides the listener phase. On bubble, the inner
+    // handler runs first and detaches the node, so by the time the document
+    // listener runs `event.target` is outside the tree and `contains()` says
+    // "outside" — closing on what was an *inside* click. On capture the
+    // document observes it first, against the tree the user actually clicked.
+    contextmenu(0, 0);
+    const item = document.createElement("button");
+    menu().append(item);
+    item.addEventListener("click", () => item.remove());
+
+    item.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(menu().hidden).toBe(false);
+  });
+
+  it("stays open when an inside contextmenu handler removes the pressed node first", () => {
+    // The contextmenu twin of the click case above: the outside guard is shared,
+    // so both phases must match or an inside right-click on a self-detaching node
+    // reads as outside.
+    contextmenu(0, 0);
+    const cell = document.createElement("span");
+    region().append(cell);
+    cell.addEventListener("contextmenu", () => cell.remove());
+
+    cell.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 5, clientY: 5 }));
+
+    expect(menu().hidden).toBe(false);
+  });
+
   it("closes when a contextmenu event occurs outside the controller", () => {
     contextmenu(0, 0);
     query("#outside").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
@@ -196,7 +285,11 @@ describe("ContextMenuController disabled items", () => {
   let application: Application;
 
   beforeEach(async () => {
-    // The first item is aria-disabled and the second is hidden; roving must skip both.
+    // The first item is aria-disabled and the second is hidden. Roving skips the
+    // hidden one and the natively `disabled` Cut, but KEEPS the aria-disabled
+    // Copy reachable — APG marks that attribute for controls that must stay
+    // discoverable, and hiding a command's existence from a keyboard user is
+    // worse than letting them land on an inert one.
     document.body.innerHTML = `
       <main>
         <div data-controller="stimeo--context-menu">
@@ -250,43 +343,50 @@ describe("ContextMenuController disabled items", () => {
   it("focuses the first navigable item on open", () => {
     contextmenu();
     expect(menu().hidden).toBe(false);
-    expect(document.activeElement).toBe(query("#paste"));
+    // Copy is aria-disabled but reachable, so it is the first navigable item.
+    expect(document.activeElement).toBe(query("#copy"));
   });
 
-  it("skips disabled items moving down with ArrowDown", () => {
-    contextmenu(); // focus Paste
-    press(query("#paste"), "ArrowDown"); // skip Cut → Delete
+  it("skips hidden and natively disabled items moving down with ArrowDown", () => {
+    contextmenu(); // focus Copy (aria-disabled, still reachable)
+    press(query("#copy"), "ArrowDown"); // skip the hidden one → Paste
+    expect(document.activeElement).toBe(query("#paste"));
+    press(query("#paste"), "ArrowDown"); // skip natively disabled Cut → Delete
     expect(document.activeElement).toBe(query("#del"));
   });
 
-  it("skips disabled items wrapping with ArrowUp", () => {
-    contextmenu(); // focus Paste
-    press(query("#paste"), "ArrowUp"); // wrap past disabled/hidden to Delete
+  it("skips hidden and natively disabled items wrapping with ArrowUp", () => {
+    contextmenu(); // focus Copy
+    press(query("#copy"), "ArrowUp"); // wrap past hidden/disabled to Delete
     expect(document.activeElement).toBe(query("#del"));
   });
 
   it("End jumps to the last navigable item, Home to the first", () => {
     contextmenu();
-    press(query("#paste"), "End");
+    press(query("#copy"), "End");
     expect(document.activeElement).toBe(query("#del"));
     press(query("#del"), "Home");
-    expect(document.activeElement).toBe(query("#paste"));
+    expect(document.activeElement).toBe(query("#copy"));
   });
 
-  it("recovers roving focus when the current target is disabled", () => {
+  it("roves onward from an aria-disabled item the user landed on", () => {
+    // The other half of keeping it reachable: focus can rest there, so the arrow
+    // keys have to keep working from it. A natively `disabled` item cannot be
+    // focused at all, so there is no equivalent case for that attribute.
     contextmenu();
-    const disabled = query<HTMLButtonElement>("#copy");
+    const inert = query<HTMLButtonElement>("#copy");
+    expect(document.activeElement).toBe(inert);
 
-    disabled.focus();
-    expect(press(disabled, "ArrowDown").defaultPrevented).toBe(true);
+    expect(press(inert, "ArrowDown").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(query("#paste"));
 
-    disabled.focus();
-    expect(press(disabled, "ArrowUp").defaultPrevented).toBe(true);
+    inert.focus();
+    expect(press(inert, "ArrowUp").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(query("#del"));
   });
 
   it("keeps the menu open when every item is disabled or hidden", () => {
+    query<HTMLButtonElement>("#copy").disabled = true; // natively, on top of aria-disabled
     query<HTMLButtonElement>("#paste").disabled = true;
     query<HTMLButtonElement>("#del").disabled = true;
     region().focus();
@@ -375,6 +475,20 @@ describe("ContextMenuController multiple instances", () => {
 
     query("#second-region").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
 
+    expect(query<HTMLElement>("#first-menu").hidden).toBe(true);
+    expect(query<HTMLElement>("#second-menu").hidden).toBe(false);
+  });
+
+  it("hands over between instances even when the new region stops propagation", () => {
+    query("#second-region").addEventListener("contextmenu", (event) => event.stopPropagation());
+    query("#first-region").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    expect(query<HTMLElement>("#first-menu").hidden).toBe(false);
+
+    query("#second-region").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+
+    // The outside guard observes before the consumer handler, so the first menu
+    // still comes down; the second opens from its own same-element action, which
+    // stopPropagation does not suppress.
     expect(query<HTMLElement>("#first-menu").hidden).toBe(true);
     expect(query<HTMLElement>("#second-menu").hidden).toBe(false);
   });

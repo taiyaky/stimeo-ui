@@ -55,6 +55,46 @@ describe("ToggleGroupController", () => {
   const key = (index: number, k: string) =>
     items()[index]?.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
 
+  it("reverses the horizontal arrows under RTL without touching the vertical pair", async () => {
+    // Logical direction: APG describes these as "next / previous", so the pair
+    // reverses with the writing direction. `dir="rtl"` is the authoring contract,
+    // but happy-dom does not resolve it into the computed style, so the direction
+    // is set as an inline style instead.
+    // Right/Down and Left/Up share a case body here, so a careless swap would
+    // flip the vertical axis too. That is what this pins.
+    await start();
+    root().style.direction = "rtl";
+
+    key(0, "ArrowLeft"); // "next" under RTL
+    expect(tabindexes()).toEqual([-1, 0, -1]);
+
+    key(1, "ArrowRight"); // "previous"
+    expect(tabindexes()).toEqual([0, -1, -1]);
+
+    key(0, "ArrowDown"); // unchanged: the vertical pair carries no direction
+    expect(tabindexes()).toEqual([-1, 0, -1]);
+  });
+
+  it("yields a key a descendant widget already consumed", async () => {
+    // A composed widget that claims the key must not ALSO move the roving focus —
+    // composition depends on this yield.
+    await start();
+    items()[0]?.focus();
+    const inner = document.createElement("span");
+    items()[0]?.append(inner);
+    inner.addEventListener("keydown", (event) => event.preventDefault());
+
+    const claimed = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    const notCanceled = inner.dispatchEvent(claimed);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(document.activeElement).toBe(items()[0]);
+  });
+
   it("establishes roving from the first pressed item", async () => {
     await start();
     expect(tabindexes()).toEqual([0, -1, -1]);
@@ -119,6 +159,21 @@ describe("ToggleGroupController", () => {
       "button, Underline, not pressed",
       "end of group, Text style",
     ]);
+  });
+
+  it("leaves a modified arrow to the browser (Alt+Left/Right is history navigation)", async () => {
+    await start();
+    items()[0]?.focus();
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    items()[0]?.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(items()[0]);
+    expect(tabindexes()).toEqual([0, -1, -1]); // the roving tab stop stayed put
   });
 
   it("has no machine-detectable a11y violations", async () => {

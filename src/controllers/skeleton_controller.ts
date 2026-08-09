@@ -43,7 +43,7 @@ export class SkeletonController extends Controller<HTMLElement> {
 
   /** Pending min-duration reveal timer id, or `null` when none is scheduled. */
   #revealTimerId: number | null = null;
-  /** Epoch ms when the loading state began, used to enforce `minDuration`. */
+  /** Epoch ms when the loading state began; `minDuration` is measured from it. */
   #loadingSince = 0;
 
   override connect(): void {

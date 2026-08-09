@@ -151,8 +151,8 @@ describe("CurrencyInputController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — speech-order regression. The grouped display string is for sighted
-  // users; assistive tech must hear the *normalized* value via the srValue span
+  // Speech-order regression. The grouped display string is for sighted users;
+  // assistive tech must hear the *normalized* value via the srValue span
   // referenced by aria-describedby. Capturing the field's announcement pins the
   // textbox role, its accessible name, and that the described value rides along.
   it("announces the textbox role, name, and the normalized described value", async () => {

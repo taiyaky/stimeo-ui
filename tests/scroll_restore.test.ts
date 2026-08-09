@@ -141,8 +141,8 @@ describe("ScrollRestoreController", () => {
   });
 
   it("does not overwrite the saved position with 0 when the element reads 0 at teardown", async () => {
-    // Reproduces the Turbo regression: Turbo detaches the node before disconnect,
-    // so a fresh scrollTop read is 0. The flush must persist the captured value.
+    // Turbo detaches the node before disconnect, so a fresh scrollTop read is 0.
+    // The flush must persist the captured value.
     await start(markup());
     box().scrollTop = 260;
     box().dispatchEvent(new Event("scroll"));

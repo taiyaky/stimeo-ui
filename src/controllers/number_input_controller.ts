@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord } from "../utils/arrow_step";
 import { SafeInterval, SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -24,7 +25,7 @@ import { SafeInterval, SafeTimeout } from "../utils/safe_timeout";
  * Implements the WAI-ARIA APG **Spinbutton** pattern. The arrow/step logic is
  * fully owned by the controller (not delegated to the browser's native number
  * stepping) so the behavior is identical for a native `<input type="number">` and
- * a custom `role="spinbutton"` host, and deterministic under happy-dom.
+ * a custom `role="spinbutton"` host.
  *
  * @remarks
  * Behavior only — the consumer styles the field and buttons. The input is the
@@ -144,6 +145,7 @@ export class NumberInputController extends Controller<HTMLElement> {
 
   /** Keyboard stepping per the APG spinbutton model. */
   onKeydown(event: KeyboardEvent): void {
+    if (isReservedArrowChord(event)) return;
     const page = this.pageStepValue > 0 ? this.pageStepValue : this.stepValue * 10;
     let next: number | null = null;
     switch (event.key) {

@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.3.0] - 2026-08-09
+
+Minor release focused on consistent keyboard and selection behavior, resilient
+runtime DOM changes, and substantially stronger Inspector diagnostics. No
+controller, target, value, action, event, or package export was removed. The
+Inspector manifest advances from schema v5 to v8, so tools that read the raw
+manifest must accept the new schema and fields.
+
+### Upgrade notes
+
+- Run `stimeo check` against existing views before deploying. New structural
+  checks can report errors for incomplete optional target groups, missing
+  companion controllers, undeclared role-bearing targets, and invalid
+  cardinality. New ARIA checks can also add warnings without failing the command.
+- In RTL containers, horizontal arrow keys now follow logical inline direction
+  across composite widgets. LTR behavior is unchanged.
+- Slider, range-slider, and color-picker pointer/arrow mirroring remains opt-in:
+  set their new `logicalTrack` value only when the consuming CSS mirrors the
+  track in RTL.
+- calendar's `stimeo--calendar:monthchange` no longer fires while the grid
+  settles on its initial month, so code that ran from that first event must now
+  run once at initialization. Listeners that re-apply per-date `aria-disabled`
+  marks are the common case.
+
+### Added
+
+- breadcrumb: a public `update` action for reconciling collapsible state after
+  application-driven DOM changes.
+- tree-view: a public `toggle` action for explicitly expanding or collapsing an
+  item from application markup.
+- scrollspy: a `focusSection` value for opting into focus movement when a link
+  activates a section.
+- slider, range-slider, color-picker: the `logicalTrack` value described above.
+- Inspector schema v6-v8: conditional target requirements and the new
+  `missing-companion`, `undeclared-target`, `cardinality-violation`,
+  `forbidden-aria`, and `missing-conditional-target` diagnostics. Rules can now
+  depend on controller values, element/document conditions, contained targets,
+  and ARIA requirement severity.
+
+### Changed
+
+- accordion, carousel, calendar, combobox, command-palette, context-menu,
+  data-grid, date-range-picker, listbox, menu, menubar, multi-select,
+  navigation-menu, OTP, radio-group, roving, tabs, tags-input, time-picker,
+  toggle-group, toolbar, tree-view, and related horizontal controls now resolve
+  Left/Right behavior from the effective text direction. Sortable geometry also
+  follows logical inline direction.
+- Arrow-key handlers yield modified browser shortcuts, and composite handlers
+  yield events already consumed by a nested widget. IME composition continues to
+  take precedence over component shortcuts.
+- Selection widgets normalize controller-owned `aria-selected` state, preserve a
+  single active/selected item where the pattern requires one, and reconcile that
+  state when options are inserted, removed, or replaced at runtime.
+- menu and overflow-menu delegate item interaction from their containers, so
+  dynamically added items work without per-item actions. Existing action markup
+  remains compatible.
+- `aria-disabled="true"` items remain discoverable by composite keyboard
+  navigation while activation, expansion, and consumer actions are suppressed.
+- Outside pointer listeners for dismissible composites — click and context-menu
+  alike — run in the capture phase so nested application code cannot leave an
+  open layer stuck by stopping bubbling.
+- Inspector accessible-name diagnostics now follow ARIA's Required, Recommended,
+  and conditional levels instead of treating every role alike.
+
+### Fixed
+
+- combobox, command-palette, listbox, and multi-select no longer retain stale
+  active IDs, selection, chips, or hidden fields after Turbo morphs and runtime
+  target replacement. A disconnect/reconnect in the same task can no longer let
+  an old reconciliation microtask consume the fresh generation's pass.
+- breadcrumb fails open when its optional disclosure targets are incomplete and
+  restores items that leave the collapsible set instead of leaving them hidden.
+- menu, menubar, navigation-menu, overflow-menu, pagination, and tree-view now
+  recover focus consistently across empty lists, disabled fieldsets, hidden
+  ancestors, item banking, and runtime item removal.
+- toolbar restores its single tab stop when an enclosing `<fieldset>` is
+  re-enabled, so unlocking a form brings the group back into the Tab sequence.
+- multi-select keeps chip focus when the selection was made in an order other
+  than the option order. The chips are reconciled against the selected value set
+  rather than position by position, and their labels are paired by value.
+- overflow-menu measures items adopted from server-rendered overflow in the bar
+  rather than inside the closed menu, so an already-overflowed bar no longer
+  returns every item to the bar on first paint.
+- combobox commits a clicked option after its input target is removed instead of
+  throwing, matching the tolerance the popup already had for that state.
+- color-picker falls back to the per-channel range when a slider omits
+  `aria-valuemin` / `aria-valuemax`, instead of pinning the channel at zero.
+- calendar maintains exactly one roving tab stop while selection and available
+  days change.
+- calendar reports `monthchange` from the month it paints, so a malformed
+  `month` value can no longer put a raw non-`YYYY-MM` string in `detail.month`.
+  The report is driven by the repaint rather than by the `month` value, so a
+  fallback month moved by `selected` or by selecting a neighbouring month's cell
+  is announced as it happens instead of arriving on a later repaint. Re-applying
+  the same month, as a Turbo cache restore does, stays silent.
+- scrollspy re-evaluates links and sections after every supported entry path;
+  intersection-based controllers align fallback thresholds, hidden-layout
+  handling, and reduced-motion behavior.
+- `stimeo catalog --json` and large `stimeo check --json` reports are no longer
+  truncated when stdout is piped; the CLI now lets buffered output flush before
+  exiting, and the build audit exercises the real piped catalog.
+
 ## [0.2.1] - 2026-07-26
 
 Patch release from a review of the disclosure and layout components, plus a
@@ -234,6 +336,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.3.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.3.0
 [0.2.1]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.2.1
 [0.2.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.2.0
 [0.1.0-beta.3]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.1.0-beta.3

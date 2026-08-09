@@ -3,12 +3,11 @@
  * (count-up, highlight, overflow-indicator, scroll-visibility, stick-to-bottom,
  * transition).
  *
- * Each of those controllers used to duplicate the same guarded `matchMedia`
- * read; this one-liner keeps the media query string and the environment guard
- * single-sourced. The preference is intentionally re-read on every call — the
- * controllers check it at each animation/scroll start (WCAG 2.2 **2.3.3**), so
- * flipping the OS setting takes effect immediately without any listener or
- * cache bookkeeping here.
+ * This one-liner keeps the media query string and the environment guard
+ * single-sourced across them. The preference is intentionally re-read on every
+ * call — the controllers check it at each animation/scroll start (WCAG 2.2
+ * **2.3.3**), so flipping the OS setting takes effect immediately without any
+ * listener or cache bookkeeping here.
  */
 
 /**

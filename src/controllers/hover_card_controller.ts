@@ -43,7 +43,7 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  *   stack, so `Escape` closes it regardless of where focus sits (card, trigger,
  *   or elsewhere). The resolver ignores an Escape already consumed by an inner
  *   handler and lets the most recently shown layer own the press, so one
- *   keypress closes exactly one layer (the shared layered-Escape contract).
+ *   keypress closes exactly one layer.
  * - Open/closed flips the trigger's `aria-expanded`, the card's `hidden`, and a
  *   `data-state` (`open`/`closed`). Focus is never stolen on open.
  * - Opt-in **dismiss on scroll** (`closeOnScroll`): while open, scrolling a tracked

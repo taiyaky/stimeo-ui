@@ -55,6 +55,71 @@ describe("RadioGroupController", () => {
   const key = (index: number, k: string) =>
     radios()[index]?.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
 
+  it("yields a key a descendant widget already consumed", () => {
+    // A composed widget that claims the key must not ALSO move the selection —
+    // composition depends on this yield.
+    radios()[0]?.focus();
+    const inner = document.createElement("span");
+    radios()[0]?.append(inner);
+    inner.addEventListener("keydown", (event) => event.preventDefault());
+
+    const claimed = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    const notCanceled = inner.dispatchEvent(claimed);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(tabindexes()).toEqual([0, -1, -1]);
+    expect(checkedValues()).toEqual(["true", "false", "false"]);
+  });
+
+  it("leaves a modified arrow to the browser", () => {
+    // A chorded arrow belongs to the browser (history navigation and friends):
+    // the group neither consumes it nor moves the selection.
+    const chord = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+      altKey: true,
+    });
+    radios()[0]?.dispatchEvent(chord);
+
+    expect(chord.defaultPrevented).toBe(false);
+    expect(tabindexes()).toEqual([0, -1, -1]);
+    expect(checkedValues()).toEqual(["true", "false", "false"]);
+  });
+
+  it("moves and checks with the horizontal arrows under LTR", () => {
+    // The APG Radio Group pattern pairs `ArrowRight` with `ArrowDown` and
+    // `ArrowLeft` with `ArrowUp`; this case covers the horizontal half.
+    key(0, "ArrowRight");
+    expect(tabindexes()).toEqual([-1, 0, -1]);
+    expect(checkedValues()).toEqual(["false", "true", "false"]);
+
+    key(1, "ArrowLeft");
+    expect(tabindexes()).toEqual([0, -1, -1]);
+    expect(checkedValues()).toEqual(["true", "false", "false"]);
+  });
+
+  it("reverses the horizontal arrows under RTL, leaving Down/Up alone", () => {
+    // Logical direction: APG describes the horizontal pair as "next / previous",
+    // so it reverses with the writing direction. `dir="rtl"` is the authoring
+    // contract, but happy-dom does not resolve it into the computed style, so the
+    // direction is set as an inline style instead.
+    root().style.direction = "rtl";
+
+    key(0, "ArrowLeft"); // "next" under RTL
+    expect(tabindexes()).toEqual([-1, 0, -1]);
+
+    key(1, "ArrowRight"); // "previous"
+    expect(tabindexes()).toEqual([0, -1, -1]);
+
+    key(0, "ArrowDown"); // the vertical pair carries no direction
+    expect(tabindexes()).toEqual([-1, 0, -1]);
+  });
+
   it("sets up roving from the preselected radio and mirrors the field", () => {
     expect(tabindexes()).toEqual([0, -1, -1]);
     expect(field().value).toBe("basic");

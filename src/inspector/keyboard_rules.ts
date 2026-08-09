@@ -1,14 +1,14 @@
 import type { KeyboardRules } from "./types";
 
 /**
- * Hand-written **keyboard prerequisites** (Inspector stage 3, schema v4).
+ * Hand-written **keyboard prerequisites** (Inspector stage 3).
  *
- * Static markup cannot prove key *behavior* — that is the library's contract,
- * verified by the runtime lanes (Vitest keyboard tests, Playwright e2e, real
- * screen readers). What markup CAN break is **focus reachability**: div-based
- * operation points that keyboard users can only reach when the author makes
- * them focusable. These rules list exactly the targets whose documented
- * contract authors `tabindex` because the controller never writes it:
+ * Static markup cannot prove key *behavior* — that is the library's own
+ * contract, and it holds at runtime. What markup CAN break is **focus
+ * reachability**: div-based operation points that keyboard users can only reach
+ * when the author makes them focusable. These rules list exactly the targets
+ * whose documented contract authors `tabindex` because the controller never
+ * writes it:
  *
  * - It moves focus (`element.focus()`, which silently no-ops on a
  *   non-focusable element) or relies on the element being in the Tab order,
@@ -26,11 +26,11 @@ import type { KeyboardRules } from "./types";
  *
  * Each entry declares {@link KeyboardRequirement.reach}: `"tab"` for steady
  * Tab stops (the controller never touches their `tabindex`, so the authored
- * value *is* the steady state and must be `0` / native — verified against each
- * controller and demo), `"focus"` for the two menu families whose items the
- * controller reaches with `element.focus()` and which the APG pattern authors
- * `tabindex="-1"`. The set-level roving invariant ("exactly one item is `0`")
- * stays runtime state the per-element engine does not model.
+ * value *is* the steady state and must be `0` / native), `"focus"` for the two
+ * menu families whose items the controller reaches with `element.focus()` and
+ * which the APG pattern authors `tabindex="-1"`. The set-level roving invariant
+ * ("exactly one item is `0`") stays runtime state the per-element engine does
+ * not model.
  */
 export const keyboardRules: KeyboardRules = {
   // APG slider thumb: a single Tab stop (the controller never roves it), so a
@@ -42,7 +42,7 @@ export const keyboardRules: KeyboardRules = {
       suggestion: 'Add tabindex="0" to the thumb target (or use a natively focusable element).',
     },
   ],
-  // Both thumbs are independent Tab stops (the demo authors tabindex="0" on each).
+  // Both thumbs are independent Tab stops, each authoring its own tabindex="0".
   "stimeo--range-slider": [
     {
       target: "startThumb",

@@ -200,7 +200,7 @@ describe("HoverCardController", () => {
     const handled = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
     handled.preventDefault();
     document.dispatchEvent(handled);
-    // The layered-Escape contract: a consumed press closes at most one layer.
+    // A consumed press closes at most one layer.
     expect(card().hidden).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
 

@@ -237,8 +237,8 @@ describe("FlashController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — the live region must actually announce the flash, not just carry the
-  // right attributes: freeze the role + message in spoken order.
+  // The live region must actually announce the flash, not just carry the right
+  // attributes: freeze the role + message in spoken order.
   it("announces a notice flash through its status live region", async () => {
     vi.useRealTimers();
     document.body.innerHTML = region(

@@ -283,7 +283,7 @@ describe("LiveCounterController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech order -----------------------------------------------------------
 
   it("announces the count as plain text, before and after a broadcast", async () => {
     await mount();

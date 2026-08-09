@@ -101,6 +101,39 @@ describe("ThemeController", () => {
     expect(root().getAttribute("data-theme")).toBe("dark");
   });
 
+  it("yields a key a widget on the option already consumed", async () => {
+    // A composed widget that claims the key must not ALSO act on it —
+    // composition depends on this yield.
+    //
+    // The claim has to come from a handler on the OPTION, not from a node nested
+    // inside it. This controller resolves the current index with
+    // `optionTargets.indexOf(event.target)`, an identity check: an event sourced
+    // from a nested child answers -1 and returns before any navigation, so the
+    // guard is never what stopped it and removing the guard changes nothing.
+    // Dispatching on the option itself is also the real composition — the
+    // claiming widget (a grabbed drag handle) is bound to the same element that
+    // is the option.
+    await start(RADIOGROUP());
+    const first = optionByMode("system");
+    first.focus();
+    // Registered on the option, so it runs before the controller's own keydown
+    // listener on the container sees the same bubbling event.
+    first.addEventListener("keydown", (event) => event.preventDefault());
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    const notCanceled = first.dispatchEvent(event);
+
+    // Without the guard this wraps from the last option to the first, focuses it
+    // and commits the mode — so the yield has to hold both.
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(document.activeElement).toBe(first);
+    expect(optionByMode("light").getAttribute("aria-checked")).toBe("false");
+  });
+
   it("sets an explicit mode on click, syncing aria-checked and persisting", async () => {
     await start(RADIOGROUP());
     optionByMode("dark").click();
@@ -128,6 +161,28 @@ describe("ThemeController", () => {
     expect(document.activeElement).toBe(optionByMode("dark"));
     expect(optionByMode("dark").getAttribute("aria-checked")).toBe("true");
     expect(root().getAttribute("data-theme")).toBe("dark");
+  });
+
+  it("reverses the horizontal arrows under RTL, leaving Down/Up alone", async () => {
+    // Logical direction: APG describes the horizontal pair as "next / previous",
+    // so it reverses with the writing direction. `dir="rtl"` is the authoring
+    // contract, but happy-dom does not resolve it into the computed style, so the
+    // direction is set as an inline style instead.
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
+    const group = optionByMode("light").closest("[role='radiogroup']") as HTMLElement;
+    group.style.direction = "rtl";
+    const press = (mode: string, key: string) =>
+      optionByMode(mode).dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    optionByMode("light").focus();
+
+    press("light", "ArrowRight"); // "previous" under RTL: wraps to the last
+    expect(document.activeElement).toBe(optionByMode("system"));
+
+    press("system", "ArrowLeft"); // "next": back to the first
+    expect(document.activeElement).toBe(optionByMode("light"));
+
+    press("light", "ArrowDown"); // the vertical pair carries no direction
+    expect(document.activeElement).toBe(optionByMode("dark"));
   });
 
   it("navigates with ArrowLeft/ArrowUp and wraps to the last option", async () => {
@@ -161,6 +216,27 @@ describe("ThemeController", () => {
     press("system", "Home");
     expect(document.activeElement).toBe(optionByMode("light"));
     expect(optionByMode("light").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("leaves a modified arrow to the browser (Alt+Left/Right is history navigation)", async () => {
+    // A modified arrow belongs to the browser, not the widget: no focus move and
+    // no mode change.
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
+    const light = optionByMode("light");
+    light.focus();
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    light.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(light);
+    expect(optionByMode("dark").getAttribute("aria-checked")).toBe("false");
+    expect(root().getAttribute("data-theme")).toBe("light");
   });
 
   it("ignores non-navigation keys without selecting", async () => {
@@ -274,9 +350,9 @@ describe("ThemeController", () => {
     expect(options().length).toBe(3);
   });
 
-  // Layer ③ — speech-order regression: the radiogroup announces its label and the
-  // three radios, with the resolved mode (light) checked.
-  it("announces the radiogroup with the checked option (layer ③)", async () => {
+  // Speech-order regression: the radiogroup announces its label and the three
+  // radios, with the resolved mode (light) checked.
+  it("announces the radiogroup with the checked option", async () => {
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
     const speech = await captureSpeech({ container: query("[role='radiogroup']"), steps: 4 });
     expect(speech).toEqual([

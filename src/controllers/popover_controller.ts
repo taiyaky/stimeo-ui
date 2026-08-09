@@ -34,8 +34,7 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  *   layer on the shared {@link EscapeLayer} stack; it claims a press only while
  *   focus is inside the controller or fell to the body (a click on non-focusable
  *   panel content), so a press aimed at another layer is never consumed here,
- *   and one keypress closes exactly one layer (the shared layered-Escape
- *   contract).
+ *   and one keypress closes exactly one layer.
  * - An outside click (anywhere off the controller element) closes without moving
  *   focus. Focus stays at the clicked element, or falls back to the document body
  *   for a non-focusable destination.
@@ -74,7 +73,7 @@ export class PopoverController extends Controller<HTMLElement> {
   /** Starts closed and registers the standing dismissal listeners. */
   override connect(): void {
     this.close();
-    document.addEventListener("click", this.#onOutsideClick);
+    document.addEventListener("click", this.#onOutsideClick, true);
     this.element.addEventListener("focusout", this.#onFocusOut);
   }
 
@@ -86,7 +85,7 @@ export class PopoverController extends Controller<HTMLElement> {
    */
   override disconnect(): void {
     this.#escapeLayer.deactivate();
-    document.removeEventListener("click", this.#onOutsideClick);
+    document.removeEventListener("click", this.#onOutsideClick, true);
     this.element.removeEventListener("focusout", this.#onFocusOut);
     this.#stopScrollDismiss?.();
     this.#stopScrollDismiss = null;

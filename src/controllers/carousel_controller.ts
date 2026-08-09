@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
 import { SafeInterval } from "../utils/safe_timeout";
 
@@ -72,6 +73,8 @@ export class CarouselController extends Controller<HTMLElement> {
   declare loopValue: boolean;
 
   readonly #roving = new RovingTabindex(() => this.pickerTargets);
+  /** Gates the target callback so it does not repaint once per authored picker on mount. */
+  #connected = false;
   readonly #intervals = new SafeInterval();
   /** Index of the visible slide. */
   #index = 0;
@@ -82,7 +85,12 @@ export class CarouselController extends Controller<HTMLElement> {
   /** Id of the live autoplay interval, or null when stopped. */
   #timerId: number | null = null;
 
-  /** Renders the initial slide and starts autoplay when requested. */
+  /**
+   * Renders the initial slide and starts autoplay when requested.
+   *
+   * `findIndex` makes the authored pre-selection first-wins when several pickers
+   * are marked; `#render` then writes an explicit value onto every picker.
+   */
   override connect(): void {
     const preselected = this.pickerTargets.findIndex(
       (picker) => picker.getAttribute("aria-selected") === "true",
@@ -91,6 +99,21 @@ export class CarouselController extends Controller<HTMLElement> {
     this.#playing = this.#initialPlaying();
     this.#render({ focus: false });
     this.#syncTimer();
+    this.#connected = true;
+  }
+
+  /**
+   * Re-establishes the single selected picker when one is added after connect.
+   *
+   * Without this an appended picker that arrives `aria-selected="true"` leaves two
+   * marked at once — the authored pre-selection is only read on connect, so
+   * nothing else ever resolves the conflict. The current slide is kept: the
+   * repaint re-derives every picker from `#index`, so a late arrival never steals
+   * the selection.
+   */
+  pickerTargetConnected(): void {
+    if (!this.#connected) return;
+    this.#render({ focus: false });
   }
 
   /**
@@ -109,6 +132,7 @@ export class CarouselController extends Controller<HTMLElement> {
 
   /** Clears the autoplay interval so it never fires after teardown. */
   override disconnect(): void {
+    this.#connected = false;
     this.#intervals.clearAll();
     this.#timerId = null;
   }
@@ -163,21 +187,26 @@ export class CarouselController extends Controller<HTMLElement> {
 
   /** Picker roving: arrows move focus only; Home/End activate first/last slide. */
   onPickerKeydown(event: KeyboardEvent): void {
+    // A descendant widget that already claimed the key must not ALSO move the
+    // picker focus or change the slide — composition depends on this yield.
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
     const current = this.pickerTargets.indexOf(event.currentTarget as HTMLElement);
     if (current === -1) return;
 
     const length = this.pickerTargets.length;
+    // Logical, not physical. The helper reverses only the horizontal
+    // pair, so folding Down/Up into the same branch stays correct.
     switch (event.key) {
       case "ArrowRight":
       case "ArrowDown":
-        event.preventDefault();
-        this.#roving.setActive(rovingMove(current, length, 1, "wrap"), { focus: true });
-        return;
       case "ArrowLeft":
-      case "ArrowUp":
+      case "ArrowUp": {
         event.preventDefault();
-        this.#roving.setActive(rovingMove(current, length, -1, "wrap"), { focus: true });
+        const step = logicalArrowStep(event.key, this.element);
+        this.#roving.setActive(rovingMove(current, length, step, "wrap"), { focus: true });
         return;
+      }
       case "Home":
         event.preventDefault();
         this.#select(0, { focus: true });

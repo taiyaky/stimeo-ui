@@ -1,8 +1,7 @@
 import { virtual } from "@guidepup/virtual-screen-reader";
 
 /**
- * Layer ③ speech-order regression helper, built on
- * `@guidepup/virtual-screen-reader`.
+ * Speech-order regression helper, built on `@guidepup/virtual-screen-reader`.
  *
  * The virtual screen reader walks the **accessibility tree** and simulates what
  * a screen reader would announce — role, accessible name, and state — entirely

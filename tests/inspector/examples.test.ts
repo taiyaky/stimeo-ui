@@ -23,17 +23,22 @@ const miniManifest: Manifest = {
       actions: [],
       events: [],
       requiredTargets: ["panel"],
+      conditionalTargets: [],
       a11y: [],
       keyboard: [],
       managedAria: [],
       compositions: [],
+      companions: [],
+      targetDeclarations: [],
+      cardinality: [],
+      forbiddenAria: [],
     },
   },
 };
 
 const cleanDemo: DemoSource = {
   dir: "demo",
-  file: "playground/app/views/components/demos/demo/_demo.html.erb",
+  file: "app/views/components/demos/demo/_demo.html.erb",
   source: '<div data-controller="stimeo--demo"><p data-stimeo--demo-target="panel"></p></div>',
 };
 
@@ -101,9 +106,8 @@ describe("buildExamplesIndex", () => {
  * manifest — the exact operation `scripts/postbuild.ts` performs at build
  * time, sharing its `collectDemoSources` walk. A drift (new controller
  * without demo, renamed demo dir, or a demo breaking the checker) fails here
- * before it fails the build. The walk resolves the supply for the current
- * tree, so this contract also holds in the public mirror (core demos under
- * `examples/`, premium-stripped manifest).
+ * before it fails the build. The walk resolves whatever demos the current tree
+ * supplies, so the contract holds for any subset of them.
  */
 describe("buildExamplesIndex (real demo sidecars)", () => {
   const here = dirname(fileURLToPath(import.meta.url));

@@ -19,10 +19,10 @@ import { tick } from "./helpers/timing";
  * outer layer must close on the first press (it activated last) and the outer
  * on the second — one layer per press, newest first.
  *
- * The point of the table is coverage of the *pairs nobody thought to write by
- * hand*: the historical Escape regressions were each a pair-wise hole
- * (tooltip-in-dropdown, modal-in-dropdown, …) that the per-scenario suites
- * missed. Adding an overlay kind here extends the sweep automatically.
+ * The point of the table is coverage of the *pairs nobody thinks to write by
+ * hand*: an Escape bug is typically a single pair-wise hole
+ * (tooltip-in-dropdown, modal-in-dropdown, …) that hand-written per-scenario
+ * cases miss. Adding an overlay kind here extends the sweep automatically.
  */
 
 /** One overlay kind the matrix can compose. */
@@ -203,7 +203,7 @@ const KINDS: LayerKind[] = [
         <span id="${p}-overlay" role="tooltip" data-stimeo--tooltip-target="content" hidden>Hint</span>
       </span>`,
     // Hover-shown: focus stays wherever the outer layer put it, which is the
-    // historically regression-prone shape (a stale focus under a newer layer).
+    // hardest shape to get right (a stale focus under a newer layer).
     open: (p) =>
       byId(`${p}-trigger`).dispatchEvent(new MouseEvent("mouseenter", { bubbles: true })),
     isOpen: (p) => !byId(`${p}-overlay`).hidden,

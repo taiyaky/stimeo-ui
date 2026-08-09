@@ -91,6 +91,49 @@ describe("CarouselController", () => {
   const states = () => slides().map((slide) => slide.getAttribute("data-state"));
   const selected = () => pickers().map((picker) => picker.getAttribute("aria-selected"));
 
+  it("reverses the horizontal arrows under RTL, leaving Down/Up alone", async () => {
+    // Logical direction: APG describes the horizontal pair as "next / previous",
+    // so it reverses with the writing direction. `dir="rtl"` is the authoring
+    // contract, but happy-dom does not resolve it into the computed style, so the
+    // direction is set inline instead.
+    await start();
+    root().style.direction = "rtl";
+    const press = (index: number, key: string) =>
+      pickers()[index]?.dispatchEvent(
+        new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+      );
+
+    press(0, "ArrowLeft"); // "next" under RTL
+    expect(document.activeElement).toBe(pickers()[1]);
+
+    press(1, "ArrowRight"); // "previous"
+    expect(document.activeElement).toBe(pickers()[0]);
+
+    press(0, "ArrowDown"); // the vertical pair carries no direction
+    expect(document.activeElement).toBe(pickers()[1]);
+  });
+
+  it("yields a picker key a descendant widget already consumed", async () => {
+    // A composed widget that claims the key must not ALSO move the picker focus
+    // or change the slide — composition depends on this yield.
+    await start();
+    pickers()[0]?.focus();
+    const inner = document.createElement("span");
+    pickers()[0]?.append(inner);
+    inner.addEventListener("keydown", (event) => event.preventDefault());
+
+    const claimed = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    const notCanceled = inner.dispatchEvent(claimed);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(document.activeElement).toBe(pickers()[0]);
+    expect(selected()[0]).toBe("true");
+  });
+
   it("activates the first slide and hides the rest on connect", async () => {
     await start();
     expect(states()).toEqual(["active", "inactive", "inactive"]);
@@ -163,6 +206,24 @@ describe("CarouselController", () => {
     expect(document.activeElement).toBe(pickers()[1]);
     // The active slide and aria-selected are unchanged by mere focus movement.
     expect(states()).toEqual(["active", "inactive", "inactive"]);
+    expect(selected()).toEqual(["true", "false", "false"]);
+  });
+
+  it("leaves a modified arrow to the browser", async () => {
+    // Alt+Arrow is a browser binding: the picker neither moves focus nor calls
+    // preventDefault().
+    await start();
+    pickers()[0]?.focus();
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    pickers()[0]?.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(pickers()[0]);
     expect(selected()).toEqual(["true", "false", "false"]);
   });
 
@@ -295,8 +356,8 @@ describe("CarouselController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — speech-order regression over the picker tablist: role, name, and
-  // selected state are announced in order so a lost role/state surfaces as a diff.
+  // Speech-order regression over the picker tablist: role, name, and selected
+  // state are announced in order so a lost role/state surfaces as a diff.
   it("announces the tablist pickers with roles and selected state", async () => {
     await startReal();
     const tablist = document.querySelector<HTMLElement>("[role='tablist']") as HTMLElement;
@@ -307,5 +368,48 @@ describe("CarouselController", () => {
       "tab, Slide 2, not selected, position 2, set size 3",
       "tab, Slide 3, not selected, position 3, set size 3",
     ]);
+  });
+
+  describe("a picker added after connect", () => {
+    it("re-establishes the single selected picker", async () => {
+      // The authored pre-selection is only read on connect, so an appended picker
+      // that arrives `aria-selected="true"` has to be resolved as it connects or
+      // two pickers stay marked at once.
+      await start();
+      expect(pickers().map((p) => p.getAttribute("aria-selected"))).toEqual([
+        "true",
+        "false",
+        "false",
+      ]);
+
+      const tablist = document.querySelector('[role="tablist"]') as HTMLElement;
+      const slide = document.createElement("div");
+      slide.id = "s4";
+      slide.setAttribute("role", "tabpanel");
+      slide.setAttribute("aria-labelledby", "d4");
+      slide.setAttribute("data-stimeo--carousel-target", "slide");
+      slide.textContent = "Four";
+      (
+        document.querySelector('[data-stimeo--carousel-target="viewport"]') as HTMLElement
+      ).appendChild(slide);
+      const late = document.createElement("button");
+      late.id = "d4";
+      late.type = "button";
+      late.setAttribute("role", "tab");
+      late.setAttribute("aria-selected", "true");
+      late.setAttribute("aria-controls", "s4");
+      late.setAttribute("aria-label", "Slide 4");
+      late.setAttribute("data-stimeo--carousel-target", "picker");
+      tablist.appendChild(late);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The current slide is kept: a late arrival never steals the selection.
+      expect(pickers().map((p) => p.getAttribute("aria-selected"))).toEqual([
+        "true",
+        "false",
+        "false",
+        "false",
+      ]);
+    });
   });
 });

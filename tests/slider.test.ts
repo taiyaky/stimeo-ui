@@ -100,6 +100,22 @@ describe("SliderController", () => {
     expect(thumb().getAttribute("aria-valuenow")).toBe("100");
   });
 
+  it("leaves a modified arrow to the browser", () => {
+    // A chorded arrow is the browser's (history back/forward and the like), so
+    // the slider neither consumes the key nor steps its value.
+    const chord = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    thumb().dispatchEvent(chord);
+
+    expect(chord.defaultPrevented).toBe(false);
+    expect(thumb().getAttribute("aria-valuenow")).toBe("40");
+    expect(fraction()).toBe("0.4");
+  });
+
   it("ignores unrelated keys without preventing default", () => {
     const event = new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true });
     thumb().dispatchEvent(event);
@@ -124,15 +140,15 @@ describe("SliderController", () => {
     expect(thumb().getAttribute("aria-valuenow")).toBe("80");
   });
 
-  // Layer ① — machine-detectable a11y.
+  // Machine-detectable a11y.
   it("has no machine-detectable a11y violations", async () => {
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — speech-order regression. Scoping to the thumb (the `role="slider"`
-  // element) yields a single, deterministic announcement; capturing it before
-  // and after a keyboard step pins role, accessible name, bounds, and the
-  // announced value so a lost role/name or a stale value surfaces as a diff.
+  // Speech-order regression. Scoping to the thumb (the `role="slider"` element)
+  // yields a single, deterministic announcement; capturing it before and after a
+  // keyboard step pins role, accessible name, bounds, and the announced value so
+  // a lost role/name or a stale value surfaces as a diff.
   it("announces the slider role, name, bounds, and value before and after a step", async () => {
     const before = await captureSpeech({ container: thumb(), steps: 0 });
     expect(before).toEqual([
@@ -167,5 +183,65 @@ describe("SliderController", () => {
 
     document.dispatchEvent(new PointerEvent("pointermove", { clientX: 0, bubbles: true }));
     expect(thumb().getAttribute("aria-valuenow")).toBe("80");
+  });
+
+  // A track built from physical CSS does not mirror, so nothing may follow the
+  // writing direction unless the consumer says their track does. `dir="rtl"` is
+  // the authoring contract, but happy-dom does not resolve it into the computed
+  // style, so the direction is set as an inline style instead.
+  describe("writing direction", () => {
+    const pressTrack = (clientX: number) => {
+      const track = document.querySelector<HTMLElement>("[data-stimeo--slider-target='track']");
+      if (!track) throw new Error("track not found");
+      track.getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+      track.dispatchEvent(new PointerEvent("pointerdown", { clientX, bubbles: true }));
+    };
+
+    it("ignores RTL when the track was not declared logical", () => {
+      root().style.direction = "rtl";
+
+      pressTrack(200);
+      expect(thumb().getAttribute("aria-valuenow")).toBe("100");
+
+      press("ArrowLeft");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("90");
+    });
+
+    it("reads the pointer from the right edge on a logical track under RTL", () => {
+      root().setAttribute("data-stimeo--slider-logical-track-value", "true");
+      root().style.direction = "rtl";
+
+      pressTrack(200);
+      expect(thumb().getAttribute("aria-valuenow")).toBe("0");
+
+      pressTrack(0);
+      expect(thumb().getAttribute("aria-valuenow")).toBe("100");
+    });
+
+    it("trades the horizontal arrows on a logical track under RTL", () => {
+      root().setAttribute("data-stimeo--slider-logical-track-value", "true");
+      root().style.direction = "rtl";
+
+      // The greater value sits at the visual left, so ArrowLeft must increase.
+      press("ArrowLeft");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+
+      press("ArrowRight");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("40");
+
+      // The vertical pair names an axis the writing direction does not mirror.
+      press("ArrowUp");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+    });
+
+    it("leaves a logical track alone under LTR", () => {
+      root().setAttribute("data-stimeo--slider-logical-track-value", "true");
+
+      pressTrack(200);
+      expect(thumb().getAttribute("aria-valuenow")).toBe("100");
+
+      press("ArrowLeft");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("90");
+    });
   });
 });

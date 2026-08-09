@@ -95,6 +95,22 @@ describe("RangeSliderController", () => {
     expect(endThumb().getAttribute("aria-valuemin")).toBe("30");
   });
 
+  it("leaves a modified arrow to the browser", () => {
+    // A chorded arrow belongs to the browser (history navigation and friends):
+    // the thumb neither consumes it nor steps.
+    const chord = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+      altKey: true,
+    });
+    startThumb().dispatchEvent(chord);
+
+    expect(chord.defaultPrevented).toBe(false);
+    expect(startThumb().getAttribute("aria-valuenow")).toBe("20");
+    expect(endThumb().getAttribute("aria-valuemin")).toBe("20");
+  });
+
   it("does not let the start thumb cross the end thumb", () => {
     for (let i = 0; i < 10; i += 1) press(startThumb(), "ArrowRight");
     // start clamps at the current end value (80), never past it.
@@ -144,9 +160,9 @@ describe("RangeSliderController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Layer ③ — speech-order regression scoped to each thumb. Pins role, name,
-  // the live mutual bounds, and the value so a lost role/name or a stale bound
-  // surfaces as a diff.
+  // Speech-order regression scoped to each thumb. Pins role, name, the live
+  // mutual bounds, and the value so a lost role/name or a stale bound surfaces
+  // as a diff.
   it("announces each thumb's role, name, bounds, and value", async () => {
     const start = await captureSpeech({ container: startThumb(), steps: 0 });
     expect(start).toEqual([
@@ -173,6 +189,58 @@ describe("RangeSliderController", () => {
     controller.disconnect();
     document.dispatchEvent(new PointerEvent("pointermove", { clientX: 0, bubbles: true }));
     expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+  });
+
+  // A track built from physical CSS does not mirror, so nothing may follow the
+  // writing direction unless the consumer says their track does. `dir="rtl"` is
+  // the authoring contract, but happy-dom does not resolve it into the computed
+  // style, so the direction is set as an inline style instead.
+  describe("writing direction", () => {
+    const pressTrack = (clientX: number) => {
+      const track = document.querySelector<HTMLElement>(
+        "[data-stimeo--range-slider-target='track']",
+      );
+      if (!track) throw new Error("track not found");
+      track.getBoundingClientRect = () => stubRect(200);
+      track.dispatchEvent(new PointerEvent("pointerdown", { clientX, bubbles: true }));
+    };
+    const pressEnd = (key: string) =>
+      endThumb().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+
+    it("ignores RTL when the track was not declared logical", () => {
+      root().style.direction = "rtl";
+
+      pressTrack(180);
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+
+      pressEnd("ArrowLeft");
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("80");
+    });
+
+    it("reads the pointer from the right edge on a logical track under RTL", () => {
+      root().setAttribute("data-stimeo--range-slider-logical-track-value", "true");
+      root().style.direction = "rtl";
+
+      // 180 / 200 mirrors to 0.1, which lands nearest the start thumb.
+      pressTrack(180);
+      expect(startThumb().getAttribute("aria-valuenow")).toBe("10");
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("80");
+    });
+
+    it("trades the horizontal arrows on a logical track under RTL", () => {
+      root().setAttribute("data-stimeo--range-slider-logical-track-value", "true");
+      root().style.direction = "rtl";
+
+      pressEnd("ArrowLeft");
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+
+      pressEnd("ArrowRight");
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("80");
+
+      // The vertical pair names an axis the writing direction does not mirror.
+      pressEnd("ArrowUp");
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+    });
   });
 });
 

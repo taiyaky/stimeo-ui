@@ -112,6 +112,31 @@ describe("CommandPaletteController", () => {
     );
   };
 
+  it("yields a key an enclosing widget already consumed", () => {
+    // A composed widget that claims the key must not ALSO act on it —
+    // composition depends on this yield.
+    //
+    // The claim cannot come from a descendant here: the only binding is
+    // `keydown->…#onKeydown` on the INPUT, and an `<input>` has no children. So
+    // the real shape is an enclosing widget consuming the key in the capture
+    // phase, which is what runs before a bubble-phase handler on the target. A
+    // claiming node placed *beside* the input never reaches `onKeydown` at all
+    // and would exercise nothing.
+    pressHotkey();
+    dialog().addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
+    const before = input().getAttribute("aria-activedescendant");
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    const notCanceled = input().dispatchEvent(event);
+
+    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(input().getAttribute("aria-activedescendant")).toBe(before);
+  });
+
   it("starts closed", () => {
     expect(dialog().hidden).toBe(true);
     expect(input().getAttribute("aria-expanded")).toBe("false");
@@ -154,6 +179,49 @@ describe("CommandPaletteController", () => {
 
     press("ArrowUp");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
+  });
+
+  it("writes aria-selected only where it changed on an arrow move", async () => {
+    // Option counts are authored and unbounded, and this runs on every arrow
+    // repeat, so an unconditional pass costs one attribute mutation per option
+    // per keypress. At most two change: the old active and the new one.
+    pressHotkey();
+    const all = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-stimeo--command-palette-target="option"]'),
+    );
+    let seen = 0;
+    const observer = new MutationObserver((records) => {
+      seen += records.length;
+    });
+    for (const el of all) {
+      observer.observe(el, { attributes: true, attributeFilter: ["aria-selected"] });
+    }
+
+    press("ArrowDown");
+    await Promise.resolve();
+    seen += observer.takeRecords().length;
+    observer.disconnect();
+
+    expect(seen).toBe(2);
+  });
+
+  it("leaves a modified arrow to the browser", () => {
+    // A bare arrow belongs to the palette; a chorded one does not. The active
+    // option stays where it is and the press reaches the browser uncanceled.
+    pressHotkey();
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    input().dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
+    expect(option("cmd-new").getAttribute("aria-selected")).toBe("true");
   });
 
   it("wraps ArrowUp from the first option and ArrowDown from the last", () => {
@@ -311,15 +379,81 @@ describe("CommandPaletteController", () => {
     expect(empty().hidden).toBe(false);
   });
 
-  it("treats authored aria-disabled options as unavailable", () => {
+  it("does not show the empty state when the only match is aria-disabled", () => {
+    // The other side of the split: `aria-disabled` is *visible and reachable*, so
+    // a query that matches only it has a result — announcing "no results" would
+    // deny that the command exists. `data-disabled` keeps the opposite meaning
+    // (the case just above still shows the empty state).
+    option("cmd-delete").setAttribute("aria-disabled", "true");
+    pressHotkey();
+
+    type("Delete");
+
+    expect(option("cmd-delete").hasAttribute("hidden")).toBe(false);
+    expect(empty().hidden).toBe(true);
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
+  });
+
+  it("keeps an authored aria-disabled option reachable but never runs it", () => {
+    // The author's attribute decides, not the widget type. `aria-disabled` marks
+    // a command that must stay *discoverable* — virtual focus lands on it and
+    // `aria-activedescendant` names it, so the reader hears it announced as
+    // unavailable — while activation is suppressed. `data-disabled` is the marker
+    // for "skip this entirely", which is what leaves both meanings expressible.
     option("cmd-delete").setAttribute("aria-disabled", "true");
     pressHotkey();
 
     press("End");
-    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
 
     option("cmd-delete").click();
+    expect(dialog().hidden).toBe(false); // reachable, still not activated
+  });
+
+  it("does not run an aria-disabled option on Enter", () => {
+    // The keyboard half of the same contract. Suppression has to sit on every
+    // activation path, not only the one that happens to consult the predicate:
+    // widening the navigable set is precisely what puts a disabled option within
+    // Enter's reach.
+    const selected: string[] = [];
+    listenForSelection((event) => {
+      selected.push((event as CustomEvent<{ value: string }>).detail.value);
+    });
+    option("cmd-delete").setAttribute("aria-disabled", "true");
+    pressHotkey();
+
+    press("End");
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
+    press("Enter");
+
+    expect(selected).toEqual([]);
     expect(dialog().hidden).toBe(false);
+  });
+
+  it("does not run an aria-disabled option that opens as the active one", () => {
+    // No navigation at all: the reset seeds the active index at 0, so a disabled
+    // first option is active the moment the palette opens.
+    const selected: string[] = [];
+    listenForSelection((event) => {
+      selected.push((event as CustomEvent<{ value: string }>).detail.value);
+    });
+    option("cmd-new").setAttribute("aria-disabled", "true");
+    pressHotkey();
+
+    press("Enter");
+
+    expect(selected).toEqual([]);
+    expect(dialog().hidden).toBe(false);
+  });
+
+  it("still skips a data-disabled option entirely", () => {
+    // The other half of the split: this attribute is the controller's own, so it
+    // keeps meaning "not a destination at all".
+    option("cmd-delete").setAttribute("data-disabled", "true");
+    pressHotkey();
+
+    press("End");
+    expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
   });
 
   it("restores an authored aria-disabled value when the data-disabled override is removed", async () => {
@@ -414,8 +548,8 @@ describe("CommandPaletteController", () => {
   });
 
   it("opens via either Cmd+K or Ctrl+K regardless of platform", async () => {
-    // The documented hotkey is "Cmd+K / Ctrl+K"; both must work everywhere
-    // (e.g. Ctrl+K on macOS, not only Cmd+K).
+    // The hotkey is "Cmd+K / Ctrl+K"; both must work everywhere (e.g. Ctrl+K on
+    // macOS, not only Cmd+K).
     trigger().focus();
 
     pressGlobal("k", true, false); // Ctrl+K
@@ -519,8 +653,216 @@ describe("CommandPaletteController", () => {
     expect(dialog().hidden).toBe(true);
   });
 
+  describe("runtime option removal reconciliation", () => {
+    const activeOptionIds = () =>
+      Array.from(
+        dialog().querySelectorAll<HTMLElement>('[role="option"][aria-selected="true"]'),
+        (candidate) => candidate.id,
+      );
+    const activeMarkerIds = () =>
+      Array.from(
+        dialog().querySelectorAll<HTMLElement>("[data-active]"),
+        (candidate) => candidate.id,
+      );
+    const activatePublish = () => {
+      pressHotkey();
+      press("ArrowDown");
+      expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+    };
+
+    it("keeps the same active command when a preceding option is removed", async () => {
+      activatePublish();
+      const selections: string[] = [];
+      listenForSelection((event) => {
+        selections.push((event as CustomEvent<{ value: string }>).detail.value);
+      });
+
+      option("cmd-new").remove();
+      await tick();
+
+      expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+      expect(activeOptionIds()).toEqual(["cmd-publish"]);
+      expect(activeMarkerIds()).toEqual(["cmd-publish"]);
+
+      press("Enter");
+      expect(selections).toEqual(["publish"]);
+    });
+
+    it("falls forward to the next selectable command when the active target token is removed", async () => {
+      activatePublish();
+      const removedActive = option("cmd-publish");
+      const selections: string[] = [];
+      listenForSelection((event) => {
+        selections.push((event as CustomEvent<{ value: string }>).detail.value);
+      });
+
+      removedActive.removeAttribute("data-stimeo--command-palette-target");
+      await tick();
+
+      expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
+      expect(activeOptionIds()).toEqual(["cmd-delete"]);
+      expect(activeMarkerIds()).toEqual(["cmd-delete"]);
+      expect(removedActive.getAttribute("aria-selected")).toBe("false");
+      expect(removedActive.hasAttribute("data-active")).toBe(false);
+      expect(option("cmd-heading").getAttribute("aria-selected")).toBe("false");
+
+      press("Enter");
+      expect(selections).toEqual(["delete"]);
+    });
+
+    it("ignores a click from a command after its target token is removed", async () => {
+      activatePublish();
+      const removed = option("cmd-publish");
+      const selections: string[] = [];
+      listenForSelection((event) => {
+        selections.push((event as CustomEvent<{ value: string }>).detail.value);
+      });
+
+      removed.removeAttribute("data-stimeo--command-palette-target");
+      await tick();
+      removed.click();
+
+      expect(selections).toEqual([]);
+      expect(dialog().hidden).toBe(false);
+    });
+
+    it("falls back to the previous command when no later selectable survivor remains", async () => {
+      pressHotkey();
+      press("End"); // Delete; the following heading is disabled.
+      const removedActive = option("cmd-delete");
+      const selections: string[] = [];
+      listenForSelection((event) => {
+        selections.push((event as CustomEvent<{ value: string }>).detail.value);
+      });
+
+      removedActive.remove();
+      await tick();
+
+      expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+      expect(activeOptionIds()).toEqual(["cmd-publish"]);
+      expect(activeMarkerIds()).toEqual(["cmd-publish"]);
+      expect(removedActive.getAttribute("aria-selected")).toBe("false");
+      expect(removedActive.hasAttribute("data-active")).toBe(false);
+      expect(option("cmd-heading").getAttribute("aria-selected")).toBe("false");
+
+      press("Enter");
+      expect(selections).toEqual(["publish"]);
+    });
+
+    it("skips hidden and disabled commands while choosing a fallback", async () => {
+      activatePublish();
+      option("cmd-delete").hidden = true;
+      const removedActive = option("cmd-publish");
+      const selections: string[] = [];
+      listenForSelection((event) => {
+        selections.push((event as CustomEvent<{ value: string }>).detail.value);
+      });
+
+      removedActive.removeAttribute("data-stimeo--command-palette-target");
+      await tick();
+
+      expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
+      expect(activeOptionIds()).toEqual(["cmd-new"]);
+      expect(activeMarkerIds()).toEqual(["cmd-new"]);
+      expect(option("cmd-delete").getAttribute("aria-selected")).toBe("false");
+      expect(option("cmd-heading").getAttribute("aria-selected")).toBe("false");
+
+      press("Enter");
+      expect(selections).toEqual(["new"]);
+    });
+
+    it("transfers active state and commit ownership to a same-id replacement", async () => {
+      activatePublish();
+      const original = option("cmd-publish");
+      const replacement = document.createElement("li");
+      replacement.id = original.id;
+      replacement.setAttribute("role", "option");
+      replacement.dataset.value = "publish-v2";
+      replacement.setAttribute("data-stimeo--command-palette-target", "option");
+      replacement.setAttribute("data-action", "click->stimeo--command-palette#selectByClick");
+      replacement.textContent = "Publish version 2";
+      const selections: Array<{ value: string; option: HTMLElement }> = [];
+      listenForSelection((event) => {
+        selections.push((event as CustomEvent<{ value: string; option: HTMLElement }>).detail);
+      });
+
+      original.replaceWith(replacement);
+      await tick();
+
+      expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+      expect(activeOptionIds()).toEqual(["cmd-publish"]);
+      expect(activeMarkerIds()).toEqual(["cmd-publish"]);
+      expect(replacement.getAttribute("aria-selected")).toBe("true");
+      expect(replacement.getAttribute("data-active")).toBe("true");
+      expect(original.getAttribute("aria-selected")).toBe("false");
+      expect(original.hasAttribute("data-active")).toBe(false);
+
+      press("Enter");
+      expect(selections).toEqual([{ value: "publish-v2", option: replacement }]);
+    });
+
+    it("does not adopt stale active markers from a different-id replacement", () => {
+      activatePublish();
+      const original = option("cmd-publish");
+      const replacement = document.createElement("li");
+      replacement.id = "cmd-replacement";
+      replacement.setAttribute("role", "option");
+      replacement.setAttribute("aria-selected", "true");
+      replacement.setAttribute("data-active", "true");
+      replacement.dataset.value = "replacement";
+      replacement.setAttribute("data-stimeo--command-palette-target", "option");
+      replacement.setAttribute("data-action", "click->stimeo--command-palette#selectByClick");
+      replacement.textContent = "Replacement";
+      const selections: string[] = [];
+      listenForSelection((event) => {
+        selections.push((event as CustomEvent<{ value: string }>).detail.value);
+      });
+
+      original.replaceWith(replacement);
+      press("Enter");
+
+      expect(selections).toEqual(["delete"]);
+    });
+
+    it("clears all active state and exposes empty state after the last selectable command is removed", async () => {
+      pressHotkey();
+      type("delete");
+      const lastSelectable = option("cmd-delete");
+      const selections: unknown[] = [];
+      listenForSelection((event) => selections.push(event));
+      expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
+
+      lastSelectable.remove();
+      await tick();
+
+      expect(input().hasAttribute("aria-activedescendant")).toBe(false);
+      expect(activeOptionIds()).toEqual([]);
+      expect(activeMarkerIds()).toEqual([]);
+      expect(lastSelectable.getAttribute("aria-selected")).toBe("false");
+      expect(lastSelectable.hasAttribute("data-active")).toBe(false);
+      expect(empty().hidden).toBe(false);
+
+      press("Enter");
+      expect(selections).toEqual([]);
+      expect(dialog().hidden).toBe(false);
+    });
+
+    it("does not commit a shifted command synchronously before target callbacks run", () => {
+      activatePublish();
+      const selections: string[] = [];
+      listenForSelection((event) => {
+        selections.push((event as CustomEvent<{ value: string }>).detail.value);
+      });
+
+      option("cmd-new").remove();
+      press("Enter");
+
+      expect(selections).toEqual(["publish"]);
+    });
+  });
+
   it("traps Tab focus within the dialog no matter which element has focus", async () => {
-    // A focusable close button inside the dialog, as the real demo has.
+    // A focusable close button inside the dialog, alongside the input.
     const close = document.createElement("button");
     close.id = "close";
     close.textContent = "Close";
@@ -588,7 +930,7 @@ describe("CommandPaletteController", () => {
     expect(document.body.style.overflow).toBe("");
   });
 
-  // --- Layer ① machine a11y ---------------------------------------------------
+  // --- Machine-detectable a11y ------------------------------------------------
 
   it("has no machine-detectable a11y violations while closed", async () => {
     await expectNoA11yViolations(document.body);
@@ -601,7 +943,7 @@ describe("CommandPaletteController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech-order regression -----------------------------------------------
 
   it("announces the listbox options and reflects the active option in order", async () => {
     pressHotkey();
@@ -672,6 +1014,94 @@ describe("CommandPaletteController", () => {
     dialog().dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(dialog().hidden).toBe(true);
   });
+
+  describe("the active option's baseline", () => {
+    it("clears the active option's state when the palette closes", async () => {
+      // `aria-selected` here marks the *active* option, not a committed choice.
+      // Leaving it (and `data-active`) behind after close would make a closed
+      // palette claim an active option for the rest of the session, and would
+      // ride into Turbo's cache.
+      pressHotkey();
+      press("ArrowDown");
+      const activeIds = () =>
+        Array.from(document.querySelectorAll("[data-active]")).map((el) => el.id);
+      const selectedIds = () =>
+        Array.from(document.querySelectorAll('[role="option"][aria-selected="true"]')).map(
+          (el) => el.id,
+        );
+      expect(activeIds().length).toBe(1);
+      expect(selectedIds()).toEqual(activeIds());
+
+      press("Escape");
+
+      expect(activeIds()).toEqual([]);
+      expect(selectedIds()).toEqual([]);
+      expect(input().hasAttribute("aria-activedescendant")).toBe(false);
+    });
+
+    it("clears it on teardown too", async () => {
+      pressHotkey();
+      press("ArrowDown");
+      expect(document.querySelectorAll("[data-active]").length).toBe(1);
+
+      disconnectAndStopApplication(application);
+
+      expect(document.querySelectorAll("[data-active]").length).toBe(0);
+      expect(document.querySelectorAll('[role="option"][aria-selected="true"]').length).toBe(0);
+    });
+
+    it("overwrites an authored aria-selected on an option added while open", async () => {
+      // An authored value cannot mean anything for an attribute that tracks the
+      // active option. The close path is not involved here, so the baseline pass
+      // is the only thing that can stop two options claiming to be active.
+      pressHotkey();
+      press("ArrowDown");
+      const late = document.createElement("li");
+      late.id = "cmd-late";
+      late.setAttribute("role", "option");
+      late.setAttribute("aria-selected", "true");
+      late.dataset.value = "late";
+      late.setAttribute("data-stimeo--command-palette-target", "option");
+      late.textContent = "Late command";
+      (document.getElementById("cmdk-list") as HTMLElement).appendChild(late);
+      await tick();
+
+      expect(late.getAttribute("aria-selected")).toBe("false");
+      expect(document.querySelectorAll('[role="option"][aria-selected="true"]').length).toBe(1);
+    });
+  });
+
+  describe("an option added before the active one", () => {
+    it("keeps the active identity, so Enter runs what AT announced", async () => {
+      pressHotkey();
+      press("ArrowDown");
+      const active = input().getAttribute("aria-activedescendant");
+      expect(active).toBeTruthy();
+
+      const late = document.createElement("li");
+      late.id = "cmd-late";
+      late.setAttribute("role", "option");
+      late.dataset.value = "late";
+      late.setAttribute("data-stimeo--command-palette-target", "option");
+      late.setAttribute("data-action", "click->stimeo--command-palette#selectByClick");
+      late.textContent = "Late command";
+      (document.getElementById("cmdk-list") as HTMLElement).prepend(late);
+      await tick();
+
+      expect(input().getAttribute("aria-activedescendant")).toBe(active);
+
+      // The name promises a commit, so actually commit: Enter must run the very
+      // option `aria-activedescendant` names, not its neighbour.
+      const expected = document.getElementById(active as string) as HTMLElement;
+      const runs: string[] = [];
+      listenForSelection((event) => {
+        runs.push((event as CustomEvent<{ value: string }>).detail.value);
+      });
+      press("Enter");
+
+      expect(runs).toEqual([expected.dataset.value]);
+    });
+  });
 });
 
 describe("CommandPaletteController restore-on-reconnect", () => {
@@ -732,7 +1162,7 @@ describe("CommandPaletteController restore-on-reconnect", () => {
 
   it("opens on connect from the declarative open Value on a fresh (hidden) render", async () => {
     // The markup contract hardcodes `hidden` on the dialog; the DOM-source-of-truth
-    // connect must NOT break the documented `open-value="true"` initial-open: the
+    // connect must NOT break `open-value="true"` as an initial-open switch: the
     // Value is the fallback when the DOM does not already encode an open state.
     await startWith(`data-stimeo--command-palette-open-value="true"`, "hidden");
     expect(dialog().hidden).toBe(false);

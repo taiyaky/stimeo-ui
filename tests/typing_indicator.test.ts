@@ -298,7 +298,7 @@ describe("TypingIndicatorController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech-order regression ------------------------------------------------
 
   it("announces a typing peer through the status live region only", async () => {
     await mount();

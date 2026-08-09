@@ -135,11 +135,11 @@ describe("OptimisticController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech order -----------------------------------------------------------
 
   it("flips the announced face with the optimistic toggle and restores it on rollback", async () => {
-    // Demo-shaped faces: the button is named by its VISIBLE face (no aria-label),
-    // so the optimistic `hidden` flip is exactly what a screen reader hears.
+    // The button is named by its VISIBLE face (no aria-label), so the optimistic
+    // `hidden` flip is exactly what a screen reader hears.
     await mount(`
       <main>
         <form data-controller="stimeo--optimistic" action="/likes" method="post">

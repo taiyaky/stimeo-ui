@@ -324,7 +324,7 @@ describe("ConfirmController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Layer ③ speech-order regression ---------------------------------------
+  // --- Speech-order regression -----------------------------------------------
   // The Turbo-hook bridge routes `data-turbo-confirm` through this accessible
   // alertdialog; freeze the announced role, name, and the injected message in
   // order so a regression in the bridge surfaces as a diff.

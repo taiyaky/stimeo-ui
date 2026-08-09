@@ -1,9 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
+import { isReservedArrowChord } from "../utils/arrow_step";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { scrollOptionIntoView } from "../utils/option_scroll";
-import { SafeTimeout } from "../utils/safe_timeout";
-
-/** How long (ms) typed characters accumulate into one typeahead query. */
-const TYPEAHEAD_TIMEOUT = 500;
+import { findTypeaheadMatch, isTypeaheadKey, Typeahead } from "../utils/typeahead";
 
 /**
  * Headless, accessible select-only listbox behavior.
@@ -71,23 +70,80 @@ export class ListboxController extends Controller<HTMLElement> {
   declare readonly hasListTarget: boolean;
   declare readonly hasFieldTarget: boolean;
 
-  /** Index of the active option, or -1 when none is active. */
-  #activeIndex = -1;
-  /** Accumulated typeahead query, reset after {@link TYPEAHEAD_TIMEOUT} ms. */
-  #typeahead = "";
-  #typeaheadTimer = 0;
-  readonly #timers = new SafeTimeout();
+  /** Stable ID of the active option; DOM targets are resolved afresh before use. */
+  #activeId: string | null = null;
+  /** Target ID order captured while an option is active, used only for removal fallback. */
+  #activeOrder: string[] = [];
+  #connected = false;
+  /** Collapses one mutation batch of target callbacks into a single pass. */
+  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileActive());
+  /** Accumulated typeahead query and its idle-reset timer. */
+  readonly #typeahead = new Typeahead();
 
-  /** Starts closed and registers the outside-click listener. */
+  /** Establishes the ARIA baseline, starts closed, and listens for outside clicks. */
   override connect(): void {
+    this.#normalizeSelection();
     this.close();
-    document.addEventListener("click", this.#onOutsideClick);
+    document.addEventListener("click", this.#onOutsideClick, true);
+    this.#connected = true;
+    this.#reconcile.activate();
+  }
+
+  /**
+   * Establishes an inactive baseline for a late option, re-resolves active
+   * identity, and re-applies the selection baseline.
+   */
+  optionTargetConnected(option: HTMLElement): void {
+    option.removeAttribute("data-active");
+    if (!this.#connected) return;
+    this.#normalizeSelection();
+    this.#queueOptionReconciliation();
+  }
+
+  /** Removes controller-owned active state and reconciles the surviving targets. */
+  optionTargetDisconnected(option: HTMLElement): void {
+    option.removeAttribute("data-active");
+    if (this.#connected) this.#queueOptionReconciliation();
+  }
+
+  /**
+   * Brings the authored DOM to the shape the APG requires, and derives the state
+   * that follows from the initial selection.
+   *
+   * Three things happen, and only these three — which option is chosen is the
+   * author's, and is never changed:
+   *
+   * 1. Every option gets an explicit value. An absent `aria-selected` means "not
+   *    selectable" in ARIA, so a forgotten attribute hides a selectable option
+   *    from assistive technology.
+   * 2. At most one stays `true`. The first in DOM order wins, since that is the
+   *    only deterministic reading of "which one did the author mean".
+   * 3. The trigger label and the hidden field are derived from that selection.
+   *    Without this the widget announces a choice it does not submit: the popup
+   *    says "Banana", the trigger still says "Choose…", and the form posts "".
+   *
+   * No `change` fires — nothing changed, this is the initial state being told
+   * properly. The scan is the `option` target set: a `role="option"` without the
+   * target is outside the contract and is neither counted nor written.
+   */
+  #normalizeSelection(): void {
+    const options = this.optionTargets;
+    const selected = options.find((option) => option.getAttribute("aria-selected") === "true");
+    for (const option of options) {
+      option.setAttribute("aria-selected", option === selected ? "true" : "false");
+    }
+    if (selected) this.#applySelection(selected);
   }
 
   /** Removes the document listener and clears the typeahead timer. */
   override disconnect(): void {
-    document.removeEventListener("click", this.#onOutsideClick);
-    this.#timers.clearAll();
+    this.#connected = false;
+    this.#reconcile.cancel();
+    document.removeEventListener("click", this.#onOutsideClick, true);
+    // The typeahead keeps its idle reset in a `SafeTimeout` of its own, so this is
+    // the only teardown that reaches it — there is no controller-level registry to
+    // fall back on. Every timer this controller can schedule lives in there.
+    this.#typeahead.reset();
   }
 
   /**
@@ -104,10 +160,14 @@ export class ListboxController extends Controller<HTMLElement> {
     }
   }
 
-  /** Routes trigger keyboard interaction per the APG select-only model. */
+  /** Yields claimed keys; otherwise routes the APG select-only keyboard model. */
   onTriggerKeydown(event: KeyboardEvent): void {
-    const length = this.optionTargets.length;
-
+    if (event.defaultPrevented) return;
+    if (isReservedArrowChord(event)) return;
+    if (!this.#isClosed) this.#reconcileActive();
+    const options = this.optionTargets;
+    const length = options.length;
+    const activeIndex = this.#findActiveIndex(options);
     if (this.#isClosed) {
       switch (event.key) {
         case "Enter":
@@ -132,13 +192,11 @@ export class ListboxController extends Controller<HTMLElement> {
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
-        this.#setActive(this.#activeIndex < 0 ? 0 : (this.#activeIndex + 1) % length);
+        this.#setActive(activeIndex < 0 ? 0 : (activeIndex + 1) % length);
         break;
       case "ArrowUp":
         event.preventDefault();
-        this.#setActive(
-          this.#activeIndex < 0 ? length - 1 : (this.#activeIndex - 1 + length) % length,
-        );
+        this.#setActive(activeIndex < 0 ? length - 1 : (activeIndex - 1 + length) % length);
         break;
       case "Home":
         event.preventDefault();
@@ -154,10 +212,10 @@ export class ListboxController extends Controller<HTMLElement> {
         this.#commitActive();
         break;
       case "Escape":
-        // Layered-Escape rule 1: leave a press an inner handler already owned;
-        // a press during IME composition never dismisses (contract uniformity —
-        // the trigger is a button, so composition cannot start here today).
-        if (event.defaultPrevented || event.isComposing) break;
+        // The entry guard already yields a press another handler owned. A press
+        // during IME composition never dismisses, keeping one rule across the
+        // widgets (the trigger is a button, so composition does not start here).
+        if (event.isComposing) break;
         event.preventDefault();
         this.close();
         this.triggerTarget.focus();
@@ -167,9 +225,9 @@ export class ListboxController extends Controller<HTMLElement> {
         this.close();
         break;
       default:
-        if (this.#isPrintable(event)) {
+        if (isTypeaheadKey(event)) {
           event.preventDefault();
-          this.#typeaheadTo(event.key);
+          this.#typeaheadTo(options, activeIndex, event.key);
         }
         break;
     }
@@ -178,7 +236,7 @@ export class ListboxController extends Controller<HTMLElement> {
   /** Selects the clicked option and closes, returning focus to the trigger. */
   select(event: Event): void {
     const option = (event.currentTarget as HTMLElement).closest<HTMLElement>('[role="option"]');
-    if (!option) return;
+    if (!option || !this.optionTargets.includes(option)) return;
     this.#selectOption(option);
     this.close();
     this.triggerTarget.focus();
@@ -206,12 +264,15 @@ export class ListboxController extends Controller<HTMLElement> {
     this.listTarget.hidden = true;
     this.triggerTarget.setAttribute("aria-expanded", "false");
     this.#setActive(-1);
-    this.#resetTypeahead();
+    this.#typeahead.reset();
   }
 
   /** Commits the active option (keyboard) and closes, returning focus. */
   #commitActive(): void {
-    const option = this.#activeIndex < 0 ? undefined : this.optionTargets[this.#activeIndex];
+    this.#reconcileActive();
+    const options = this.optionTargets;
+    const activeIndex = this.#findActiveIndex(options);
+    const option = activeIndex < 0 ? undefined : options[activeIndex];
     if (option) this.#selectOption(option);
     this.close();
     this.triggerTarget.focus();
@@ -219,14 +280,8 @@ export class ListboxController extends Controller<HTMLElement> {
 
   /** Applies selection: `aria-selected`, trigger label, hidden field, `change`. */
   #selectOption(option: HTMLElement): void {
-    for (const candidate of this.optionTargets) {
-      candidate.setAttribute("aria-selected", candidate === option ? "true" : "false");
-    }
-    const label = (option.textContent ?? "").trim();
-    const value = option.dataset.value ?? label;
-    if (this.hasValueTarget) this.valueTarget.textContent = label;
-    if (this.hasFieldTarget && this.fieldTarget.value !== value) {
-      this.fieldTarget.value = value;
+    const { value, fieldChanged } = this.#applySelection(option);
+    if (fieldChanged) {
       // A native bubbling change (matching <select> semantics: only on an actual
       // value change) so form-level behaviors — validation re-checks, auto-submit
       // — hear the commit without knowing this widget.
@@ -236,58 +291,133 @@ export class ListboxController extends Controller<HTMLElement> {
   }
 
   /**
+   * Writes `option` into `aria-selected`, the trigger label and the hidden field.
+   * Emits nothing — {@link #normalizeSelection} reuses this at connect, where the
+   * state is being described rather than changed.
+   */
+  #applySelection(option: HTMLElement): { value: string; fieldChanged: boolean } {
+    for (const candidate of this.optionTargets) {
+      candidate.setAttribute("aria-selected", candidate === option ? "true" : "false");
+    }
+    const label = (option.textContent ?? "").trim();
+    const value = option.dataset.value ?? label;
+    if (this.hasValueTarget) this.valueTarget.textContent = label;
+    const fieldChanged = this.hasFieldTarget && this.fieldTarget.value !== value;
+    if (fieldChanged) this.fieldTarget.value = value;
+    return { value, fieldChanged };
+  }
+
+  /**
    * Marks the option at `index` active via `data-active` and the trigger's
    * `aria-activedescendant`. Pass `-1` to clear it (the attribute is removed, not
    * set to empty, per the APG).
    */
   #setActive(index: number): void {
-    this.#activeIndex = index;
-    const active = index < 0 ? null : this.optionTargets[index];
-    for (const option of this.optionTargets) {
+    const options = this.optionTargets;
+    const active = index < 0 ? null : (options[index] ?? null);
+    // Only the options whose marker actually changes are written, so a held arrow
+    // key costs two attribute writes rather than one per option. The whole set is
+    // still read: that is what makes a stray marker — one a morph left behind on
+    // an element that never re-connected as a target — heal on the next move.
+    for (const option of options) {
+      const marked = option.hasAttribute("data-active");
       if (option === active) {
-        option.setAttribute("data-active", "");
-      } else {
+        if (!marked) option.setAttribute("data-active", "");
+      } else if (marked) {
         option.removeAttribute("data-active");
       }
     }
     if (active?.id) {
+      this.#activeId = active.id;
       this.triggerTarget.setAttribute("aria-activedescendant", active.id);
     } else {
+      this.#activeId = null;
       this.triggerTarget.removeAttribute("aria-activedescendant");
     }
+    this.#activeOrder = active ? options.map((option) => option.id).filter(Boolean) : [];
     // Virtual focus never triggers the browser's native focus-scrolling, so a
     // scrollable list must follow the active option itself (list-only scroll).
     if (active && this.hasListTarget) scrollOptionIntoView(this.listTarget, active);
   }
 
-  /** Appends a character to the typeahead query and activates the first match. */
-  #typeaheadTo(char: string): void {
-    this.#timers.clear(this.#typeaheadTimer);
-    this.#typeahead += char.toLowerCase();
-    this.#typeaheadTimer = this.#timers.set(() => {
-      this.#typeahead = "";
-    }, TYPEAHEAD_TIMEOUT);
-    const index = this.optionTargets.findIndex((option) =>
-      (option.textContent ?? "").trim().toLowerCase().startsWith(this.#typeahead),
-    );
+  /** Resolves active state against the current target collection. */
+  #reconcileActive(): void {
+    if (!this.hasTriggerTarget || this.#isClosed) {
+      if (this.hasTriggerTarget) this.#setActive(-1);
+      return;
+    }
+
+    const options = this.optionTargets;
+    const currentIndex = this.#findActiveIndex(options);
+    if (currentIndex >= 0) {
+      const active = options[currentIndex] ?? null;
+      const marked = options.filter((option) => option.hasAttribute("data-active"));
+      const stateMatches =
+        this.#activeId === (active?.id || null) &&
+        marked.length === 1 &&
+        marked[0] === active &&
+        this.triggerTarget.getAttribute("aria-activedescendant") === (active?.id || null);
+
+      if (stateMatches) {
+        // Keep the deletion fallback snapshot current without re-scrolling the
+        // already-active option before every keyboard command.
+        this.#activeOrder = options.map((option) => option.id).filter(Boolean);
+      } else {
+        this.#setActive(currentIndex);
+      }
+      return;
+    }
+
+    const activeId = this.triggerTarget.getAttribute("aria-activedescendant") ?? this.#activeId;
+    this.#setActive(activeId ? this.#findFallbackIndex(options, activeId) : -1);
+  }
+
+  /** Finds the live target carrying the stable ID, or the active marker for an ID-less option. */
+  #findActiveIndex(options: readonly HTMLElement[]): number {
+    const activeId =
+      (this.hasTriggerTarget ? this.triggerTarget.getAttribute("aria-activedescendant") : null) ??
+      this.#activeId;
+    if (activeId) return options.findIndex((option) => option.id === activeId);
+    return options.findIndex((option) => option.hasAttribute("data-active"));
+  }
+
+  /** Chooses a surviving former successor, then a former predecessor. */
+  #findFallbackIndex(options: readonly HTMLElement[], activeId: string): number {
+    const oldIndex = this.#activeOrder.indexOf(activeId);
+    if (oldIndex < 0) return -1;
+    const indexesById = new Map(options.map((option, index) => [option.id, index]));
+    for (let index = oldIndex + 1; index < this.#activeOrder.length; index += 1) {
+      const fallback = indexesById.get(this.#activeOrder[index] ?? "");
+      if (fallback !== undefined) return fallback;
+    }
+    for (let index = oldIndex - 1; index >= 0; index -= 1) {
+      const fallback = indexesById.get(this.#activeOrder[index] ?? "");
+      if (fallback !== undefined) return fallback;
+    }
+    return -1;
+  }
+
+  /** Coalesces all target callbacks from one MutationObserver batch. */
+  #queueOptionReconciliation(): void {
+    this.#reconcile.schedule();
+  }
+
+  /**
+   * Advances the typeahead query and activates the next matching option.
+   *
+   * The search resumes just after the active option so repeating a character
+   * cycles through the options starting with it, rather than re-activating the
+   * same first match on every press.
+   */
+  #typeaheadTo(options: HTMLElement[], activeIndex: number, char: string): void {
+    const index = findTypeaheadMatch(options, activeIndex, this.#typeahead.push(char));
     if (index !== -1) this.#setActive(index);
   }
 
-  /** Clears the typeahead query and its pending reset timer. */
-  #resetTypeahead(): void {
-    this.#timers.clear(this.#typeaheadTimer);
-    this.#typeahead = "";
-  }
-
-  /** Closes the list when a click lands outside the controller element. */
+  /** Closes on an outside click before an inside handler can detach its target. */
   readonly #onOutsideClick = (event: MouseEvent): void => {
     if (!this.#isClosed && !this.element.contains(event.target as Node)) this.close();
   };
-
-  /** Whether `event.key` is a single printable character (no modifier chord). */
-  #isPrintable(event: KeyboardEvent): boolean {
-    return event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
-  }
 
   /** Whether the list is currently hidden. */
   get #isClosed(): boolean {
