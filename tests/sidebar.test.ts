@@ -77,7 +77,6 @@ const changeViewport = (desktopOrWidth: boolean | number) => {
 const markup = (key = "main") => `
   <p id="background">Background</p>
   <div data-controller="stimeo--sidebar"
-       data-action="turbo:before-cache@document->stimeo--sidebar#beforeCache"
        data-stimeo--sidebar-breakpoint-value="768"
        data-stimeo--sidebar-key-value="${key}">
     <button id="trigger" data-stimeo--sidebar-target="trigger"

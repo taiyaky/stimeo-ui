@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.4.0] - 2026-08-11
+
+The feedback and status components announce through the shared
+`stimeo--announcer` and survive Turbo caching and morphs. The Inspector reads the
+`data:` hashes Rails helpers render. Two public API entries were removed.
+
+### Removed
+
+- **Breaking** — sidebar: the `beforeCache` action. Delete
+  `data-action="turbo:before-cache@document->stimeo--sidebar#beforeCache"`; the
+  behavior is built in, and leaving it makes `stimeo check` report an unknown
+  action.
+- **Breaking** — empty-state: the `announce` boolean, and the `role="status"` /
+  `aria-live="polite"` it applied to the `empty` target. Use `announceText` /
+  `announceFilledText` instead.
+
+### Added
+
+- countdown, empty-state, frame-loading, meter, network-status, progress,
+  skeleton, spinner: `announceText`, plus `announceFilledText` /
+  `announceOnlineText` / `announceReadyText` where a component has two
+  transitions to report. Wording is yours and defaults to empty, and the page
+  needs a `stimeo--announcer` for any of it to be read.
+- spinner: `timeout`, with a `stimeo--spinner:timeout` event. Off by default.
+- stick-to-bottom: `pinOnConnect`. Off by default.
+- Inspector: Stimulus wiring in a Rails helper's literal `data:` hash is checked
+  like static attributes. Re-run `stimeo check` — it can report new diagnostics.
+
+### Changed
+
+- meter, progress: an `aria-valuetext` you authored is preserved across renders.
+- local-time, relative-time: the locale falls back to the nearest ancestor
+  carrying `lang`, not just the element's own and then the document's.
+- countdown: `data-state` is the source of truth for the run state; `autostart`
+  governs only markup that states none.
+
+### Fixed
+
+- Turbo caching and morphs across announcer, color-picker, countdown,
+  date-range-picker, frame-loading, local-time, meter, overflow-menu, progress,
+  range-slider, rating, relative-time, sidebar, spinner, step-indicator: the
+  page is rewound before the snapshot and repaints when values are swapped,
+  instead of restoring stuck state or leaving a stale reading.
+- network-status: transitions are actually announced.
+- countdown: resume steps by one unit, and a settled timer no longer re-emits
+  `complete` on reconnect.
+- step-indicator: runtime step changes re-derive the set, and a non-numeric
+  `current` falls back to the first step.
+- local-time: a `datetime` with a space separator (`2026-06-08 12:30`) parses.
+- relative-time: a malformed `locale` no longer throws.
+- skeleton, frame-loading: a repeated signal no longer restarts or stacks the
+  minimum-duration wait.
+- Empty, inverted, and non-numeric ranges floor to `0` across meter, progress,
+  slider, and range-slider.
+
 ## [0.3.0] - 2026-08-09
 
 Minor release focused on consistent keyboard and selection behavior, resilient
@@ -336,6 +391,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.4.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.4.0
 [0.3.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.3.0
 [0.2.1]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.2.1
 [0.2.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.2.0

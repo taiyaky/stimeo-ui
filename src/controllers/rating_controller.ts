@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { isRtl } from "../utils/logical_scroll";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { RovingTabindex } from "../utils/roving_tabindex";
 
 /**
@@ -62,12 +63,35 @@ export class RatingController extends Controller<HTMLElement> {
   readonly #roving = new RovingTabindex(() => this.symbolTargets);
 
   /** Reflects the initial value, or switches to the non-interactive readonly view. */
-  override connect(): void {
+  /**
+   * Collapses a morph that swaps render inputs into one repaint, and refuses the
+   * pass Stimulus delivers before `connect()`.
+   */
+  readonly #repaint = new MicrotaskCoalescer(() => {
     if (this.readonlyValue) {
       this.#applyReadonly();
       return;
     }
     this.#apply(this.#clamp(this.valueValue), { focus: false });
+  });
+
+  override connect(): void {
+    this.#repaint.activate();
+    if (this.readonlyValue) {
+      this.#applyReadonly();
+      return;
+    }
+    this.#apply(this.#clamp(this.valueValue), { focus: false });
+  }
+
+  /** Closes the window in which a queued repaint may still run. */
+  override disconnect(): void {
+    this.#repaint.cancel();
+  }
+
+  /** Repaints when application code (or a Turbo morph) changes `value` at runtime. */
+  valueValueChanged(): void {
+    this.#repaint.schedule();
   }
 
   /** Selects (or clears) the clicked symbol. Bound via `data-action` (click). */

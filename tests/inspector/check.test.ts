@@ -1613,6 +1613,241 @@ describe("checkSource", () => {
     });
   });
 
+  /**
+   * Rails renders the same wiring two ways, and a checker that reads only the
+   * HTML spelling is worse than silent about the other: it reports the targets
+   * it cannot see as missing while the mistakes inside them go unmentioned.
+   * These cover both directions — the wiring is checked, and what the template
+   * genuinely does not say is a warning rather than a failed build.
+   */
+  describe("Rails data: hashes", () => {
+    it("checks a target name written as a helper's data: hash", () => {
+      const source = `<div data-controller="stimeo--form-field">
+        <%= f.text_area :body, data: { "stimeo--form-field-target": "controlTYPO" } %>
+      </div>`;
+      const [d] = checkSource(source, manifest).filter((x) => x.code === "unknown-target");
+      expect(d?.message).toContain('Unknown target "controlTYPO"');
+      expect(d?.line).toBe(2);
+      // The misspelling and the requirement it leaves unmet are separate facts,
+      // and the same effective markup spelled in HTML reports both — so this
+      // spelling has to as well, or the two disagree about one page.
+      expect(codes(source)).toEqual(["missing-required-target", "unknown-target"]);
+    });
+
+    it("anchors a diagnostic on the Ruby key, the only spelling the file holds", () => {
+      const source = `<%= form_with url: "/x", data: { controller: "stimeo--menuu" } do |f| %>
+        <span>hi</span>
+      <% end %>`;
+      const [d] = checkSource(source, manifest);
+      const start = (d?.column ?? 1) - 1; // the diagnostic sits on line 1
+      expect(source.slice(start, start + (d?.length ?? 0))).toBe("controller");
+    });
+
+    it("checks a controller identifier written as a helper's data: hash", () => {
+      const source = `<%= form_with url: "/x", data: { controller: "stimeo--menuu" } do |f| %>
+        <span>hi</span>
+      <% end %>`;
+      const [d] = checkSource(source, manifest);
+      expect(d?.code).toBe("unknown-controller");
+      expect(d?.suggestion).toBe('Did you mean "stimeo--menu"?');
+    });
+
+    it("checks action descriptors written as a helper's data: hash", () => {
+      const source = `<div data-controller="stimeo--dialog">
+        <%= button_tag "Open", data: { action: "click->stimeo--dialog#opne" } %>
+      </div>`;
+      expect(codes(source)).toContain("unknown-action-method");
+    });
+
+    it("resolves a block helper's scope over the targets written under it", () => {
+      // The whole point of the container: `data-controller` on the helper owns
+      // the markup up to its `<% end %>`, so neither side is reported.
+      const source = `<%= form_with url: "/x", data: { controller: "stimeo--form-field" } do |f| %>
+        <%= f.label :body %>
+        <%= f.text_area :body, data: { "stimeo--form-field-target": "control" } %>
+      <% end %>`;
+      expect(checkSource(source, manifest)).toEqual([]);
+    });
+
+    it("accepts the bare-symbol spelling of a hyphenated target attribute", () => {
+      const source = `<div data-controller="stimeo--form-field">
+        <%= f.text_area :body, data: { stimeo__form_field_target: "control" } %>
+      </div>`;
+      expect(checkSource(source, manifest)).toEqual([]);
+    });
+
+    it("offers a machine fix that rewrites the Ruby string literal in place", () => {
+      const source = `<div data-controller="stimeo--menu">
+        <%= button_tag "x", data: { "stimeo--menu-target": "trigge" } %>
+      </div>`;
+      const d = checkSource(source, manifest).find((x) => x.code === "unknown-target");
+      const fix = d?.fix;
+      expect(fix?.text).toBe("trigger");
+      expect(source.slice(fix?.start, fix?.end)).toBe("trigge");
+    });
+
+    it("honors data-stimeo-ignore written as a hash entry", () => {
+      const source = `<div data-controller="stimeo--form-field">
+        <%= f.text_area :body, data: { "stimeo-ignore": "unknown-target",
+                                       "stimeo--form-field-target": "control" } %>
+        <%= f.text_field :other, data: { "stimeo-ignore": "unknown-target",
+                                         "stimeo--form-field-target": "typo" } %>
+      </div>`;
+      expect(codes(source)).toEqual([]);
+    });
+
+    it("does not let a generated ignore value silence the subtree", () => {
+      // Blanket suppression is the reading of an *empty* list, and a value
+      // nobody can read is not empty — it is unknown.
+      const hash = `<div data-controller="stimeo--form-field">
+        <%= f.text_area :body, data: { "stimeo-ignore": ignored,
+                                       "stimeo--form-field-target": "controlTYPO" } %>
+      </div>`;
+      expect(codes(hash)).toContain("unknown-target");
+      const markup = `<div data-controller="stimeo--form-field" data-stimeo-ignore="<%= ignored %>">
+        <textarea data-stimeo--form-field-target="controlTYPO"></textarea>
+      </div>`;
+      expect(codes(markup)).toContain("unknown-target");
+    });
+
+    describe("what the template does not say", () => {
+      it("warns instead of failing when the data: option is not a literal", () => {
+        const source = `<div data-controller="stimeo--form-field">
+          <%= f.text_area :body, data: field_attrs %>
+        </div>`;
+        const [d] = checkSource(source, manifest);
+        expect(d?.code).toBe("missing-required-target");
+        expect(d?.severity).toBe("warning");
+        expect(d?.suggestion).toContain("may exist at runtime");
+      });
+
+      it("warns instead of failing when the host controller is computed", () => {
+        const source = `<%= tag.div data: { controller: kind } do %>
+          <textarea data-stimeo--form-field-target="control"></textarea>
+        <% end %>`;
+        const [d] = checkSource(source, manifest);
+        expect(d?.code).toBe("orphan-target");
+        expect(d?.severity).toBe("warning");
+      });
+
+      it("warns instead of failing for targets a helper renders itself", () => {
+        // `f.select` emits the whole listbox; none of its targets is authored,
+        // so the scope's target set cannot be read from the template at all.
+        const source = `<%= f.select :x, [], {}, data: { controller: "stimeo--listbox" } %>`;
+        const diagnostics = checkSource(source, manifest);
+        expect(diagnostics).not.toHaveLength(0);
+        expect(diagnostics.every((d) => d.severity === "warning")).toBe(true);
+      });
+
+      it("warns instead of failing when a target's name is generated", () => {
+        // The declaration is there and the runtime may well resolve it as the
+        // required target; only its spelling is out of reach. Both ways of
+        // writing it read the same, or the two spellings disagree about a page.
+        for (const source of [
+          `<div data-controller="stimeo--form-field">
+            <%= f.text_area :body, data: { "stimeo--form-field-target": name } %>
+          </div>`,
+          `<div data-controller="stimeo--form-field">
+            <textarea data-stimeo--form-field-target="<%= name %>"></textarea>
+          </div>`,
+        ]) {
+          const [d] = checkSource(source, manifest);
+          expect(d?.code).toBe("missing-required-target");
+          expect(d?.severity).toBe("warning");
+        }
+      });
+
+      it("keeps an outer scope failing over what its own markup plainly says", () => {
+        // Whatever the helper renders belongs to the inner controller, which is
+        // the nearest owner of anything written under it — so it hides nothing
+        // from the outer one, whose required target is definitely absent.
+        const source = `<div data-controller="stimeo--form-field">
+          <div data-controller="stimeo--form-field">
+            <%= f.text_area :body, data: field_attrs %>
+            <textarea data-stimeo--form-field-target="control"></textarea>
+          </div>
+        </div>`;
+        const [d] = checkSource(source, manifest);
+        expect(d?.code).toBe("missing-required-target");
+        expect(d?.severity).toBe("error");
+      });
+
+      it("keeps ARIA and keyboard rules silent about a helper's rendered tag", () => {
+        // role / aria-* / tabindex are the helper's to emit and never appear in
+        // the template, so their absence here is not evidence of anything.
+        const source = `<div data-controller="stimeo--tabs">
+          <div role="tablist" aria-label="Sections" data-stimeo--tabs-target="list">
+            <%= button_tag "A", data: { "stimeo--tabs-target": "tab" } %>
+          </div>
+          <%= tag.div "A", data: { "stimeo--tabs-target": "panel" } %>
+        </div>`;
+        expect(codes(source)).toEqual([]);
+      });
+    });
+
+    describe("what stays untouched", () => {
+      it("leaves literal markup reporting exactly what it did before", () => {
+        const source = `<div data-controller="stimeo--form-field">
+          <textarea data-stimeo--form-field-target="controlTYPO"></textarea>
+        </div>`;
+        expect(codes(source)).toEqual(["missing-required-target", "unknown-target"]);
+      });
+
+      it("ignores a data: hash in a tag that renders nothing", () => {
+        expect(codes(`<% attrs = { data: { controller: "stimeo--menuu" } } %>`)).toEqual([]);
+      });
+
+      it("ignores a data: hash inside an ERB comment", () => {
+        expect(codes(`<%# data: { controller: "stimeo--menuu" } %>`)).toEqual([]);
+      });
+
+      it("clears an idiomatic Rails form that mixes both spellings", () => {
+        // The shape a ViewComponent template actually takes: a block helper
+        // scope, helper-rendered targets, literal markup for the parts that
+        // need ARIA, and a sibling controller wired through data-action.
+        const source = `<%= form_with url: "/messages", data: { controller: "stimeo--form-field" } do |f| %>
+          <%= f.label :body, "Message" %>
+          <%= f.text_area :body, rows: 3,
+                data: { "stimeo--form-field-target": "control",
+                        action: "input->stimeo--form-field#clearError" } %>
+          <p id="body-help" data-stimeo--form-field-target="description">Markdown supported.</p>
+          <p role="alert" data-stimeo--form-field-target="error"></p>
+        <% end %>`;
+        expect(checkSource(source, manifest)).toEqual([]);
+      });
+
+      it("ends a block helper's scope where the template ends it", () => {
+        // The `<p>` is never closed, but the `<% end %>` is still the last
+        // thing inside the form: the textarea below it is a sibling.
+        const source = `<%= form_with url: "/x", data: { controller: "stimeo--form-field" } do |f| %>
+          <p>Hint
+        <% end %>
+        <textarea data-stimeo--form-field-target="control"></textarea>`;
+        expect(codes(source)).toEqual(["missing-required-target", "orphan-target"]);
+      });
+
+      it("keeps reading a hash that a percent literal or a regexp is written near", () => {
+        const source = `<%= tag.div "x", title: /#/, class: %w[a b], data: { controller: "stimeo--form-field" } do %>
+          <textarea data-stimeo--form-field-target="control"></textarea>
+        <% end %>`;
+        expect(checkSource(source, manifest)).toEqual([]);
+      });
+
+      it("does not read a data: hash written inside a percent literal", () => {
+        expect(codes(`<%= tag.pre %q[data: { controller: "stimeo--menuu" }] %>`)).toEqual([]);
+      });
+
+      it("does not read a helper called inside a start tag as its own element", () => {
+        // Those attributes belong to the surrounding tag; treating the call as
+        // a sibling element would put the controller on the wrong scope.
+        const source = `<div <%= tag.attributes(data: { controller: "stimeo--menu" }) %>>
+          <button data-stimeo--menu-target="trigger"></button>
+        </div>`;
+        expect(codes(source)).toEqual(["orphan-target"]);
+      });
+    });
+  });
+
   describe("machine-applicable fixes (stage 4)", () => {
     /** Applies a diagnostic's fix to the source it was computed from. */
     function applyFix(source: string, diagnostic: Diagnostic | undefined): string {

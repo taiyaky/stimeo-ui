@@ -5,8 +5,12 @@
     current step is updated via the external step:set event (fired by demo.js from the
     prev/next buttons). %>
 <div class="step-indicator-demo">
+  <%# --steps lets the CSS put the track between the first and last dot centres:
+      the library's ratio is "how far along the range", and the range runs from
+      centre to centre, not edge to edge. %>
   <ol
     class="step-indicator"
+    style="--steps: 4"
     data-controller="stimeo--step-indicator"
     aria-label="<%= t("components.step_indicator.demo.label") %>"
     data-stimeo--step-indicator-current-value="1"

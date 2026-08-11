@@ -1,6 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { isRtl } from "../utils/logical_scroll";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { rangeFraction } from "../utils/range";
 
 /** CSS custom properties exposing each thumb's position (0..1) to the consumer. */
 const START_PROPERTY = "--stimeo-range-start";
@@ -82,7 +84,16 @@ export class RangeSliderController extends Controller<HTMLElement> {
   }
 
   /** Normalizes the initial pair (clamped, snapped, ordered) and renders. */
+  /**
+   * Collapses a morph that swaps render inputs into one repaint, and refuses the
+   * pass Stimulus delivers before `connect()`.
+   */
+  readonly #repaint = new MicrotaskCoalescer(() => {
+    this.#render(this.startValue, this.endValue);
+  });
+
   override connect(): void {
+    this.#repaint.activate();
     // Order the initial pair up front so a reversed start/end is corrected by
     // swapping (preserving both values) rather than collapsing one onto the other.
     const lo = Math.min(this.startValue, this.endValue);
@@ -92,8 +103,19 @@ export class RangeSliderController extends Controller<HTMLElement> {
 
   /** Cancels any active pointer drag so document listeners never leak. */
   override disconnect(): void {
+    this.#repaint.cancel();
     this.#dragAbort?.abort();
     this.#dragAbort = null;
+  }
+
+  /** Repaints when application code (or a Turbo morph) changes `min` at runtime. */
+  minValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints when application code (or a Turbo morph) changes `max` at runtime. */
+  maxValueChanged(): void {
+    this.#repaint.schedule();
   }
 
   /** Keyboard stepping for whichever thumb is focused (the action's element). */
@@ -234,14 +256,13 @@ export class RangeSliderController extends Controller<HTMLElement> {
       this.endThumbTarget.setAttribute("aria-valuemax", String(this.maxValue));
       this.endThumbTarget.setAttribute("aria-valuenow", String(end));
     }
-    const span = this.maxValue - this.minValue;
     this.element.style.setProperty(
       START_PROPERTY,
-      String(span > 0 ? (start - this.minValue) / span : 0),
+      String(rangeFraction(start, this.minValue, this.maxValue)),
     );
     this.element.style.setProperty(
       END_PROPERTY,
-      String(span > 0 ? (end - this.minValue) / span : 0),
+      String(rangeFraction(end, this.minValue, this.maxValue)),
     );
   }
 

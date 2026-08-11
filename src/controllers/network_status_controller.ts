@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { announce, fillTemplate } from "../utils/announce";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -24,13 +25,17 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * Behavior only. `navigator.onLine` is the browser's *guess* — it does not
  * guarantee server reachability, which stays the consumer's job. To make the
  * announcement reliable across assistive tech (merely un-hiding a static banner
- * is flaky), the controller re-writes the banner's text on each transition,
+ * is flaky), the controller reveals the banner and *then* re-writes its text on
+ * each transition — a region revealed after its content changed is outside the
+ * accessibility tree while the text changes, so the write has to come second —
  * guarded so an unchanged state never re-announces. The event listeners and the
  * auto-hide timer are removed/cleared on `disconnect()` (Turbo included).
  */
 export class NetworkStatusController extends Controller<HTMLElement> {
   static override targets = ["offline", "online"];
   static override values = {
+    announceText: { type: String, default: "" },
+    announceOnlineText: { type: String, default: "" },
     onlineAutoHide: { type: Number, default: 0 },
   };
   static events = ["change"] as const;
@@ -41,24 +46,18 @@ export class NetworkStatusController extends Controller<HTMLElement> {
   declare readonly hasOnlineTarget: boolean;
 
   declare onlineAutoHideValue: number;
+  declare announceTextValue: string;
+  declare announceOnlineTextValue: string;
 
   readonly #timers = new SafeTimeout();
 
   /** Last known connectivity; guards against duplicate-state re-announcements. */
   #online = true;
-  /** Banner text captured from the markup so transitions can re-write it. */
-  #offlineMessage = "";
-  #onlineMessage = "";
 
   readonly #handleOnline = (): void => this.#update(true);
   readonly #handleOffline = (): void => this.#update(false);
 
   override connect(): void {
-    this.#offlineMessage = this.hasOfflineTarget
-      ? (this.offlineTarget.textContent ?? "").trim()
-      : "";
-    this.#onlineMessage = this.hasOnlineTarget ? (this.onlineTarget.textContent ?? "").trim() : "";
-
     // Normalize initial visibility so a missing `hidden` in the markup cannot
     // strand a stale banner (e.g. an offline notice showing while online).
     if (this.hasOfflineTarget) this.offlineTarget.hidden = true;
@@ -80,7 +79,12 @@ export class NetworkStatusController extends Controller<HTMLElement> {
     this.#timers.clearAll();
   }
 
-  /** Applies a connectivity transition, guarded against duplicate states. */
+  /**
+   * Applies a connectivity transition, guarded against duplicate states.
+   *
+   * The event goes out last, so a listener reading `data-state` or a banner's
+   * visibility sees the state the transition landed on rather than the previous one.
+   */
   #update(online: boolean): void {
     if (online === this.#online) return;
     this.#online = online;
@@ -90,6 +94,11 @@ export class NetworkStatusController extends Controller<HTMLElement> {
     } else {
       this.#showOffline();
     }
+    // The banner is the visual half; reading it out is the announcer's job, because
+    // a region that is only revealed at the moment of the change is not reliably read.
+    announce(fillTemplate(online ? this.announceOnlineTextValue : this.announceTextValue, {}), {
+      assertive: !online,
+    });
     this.dispatch("change", { detail: { online } });
   }
 
@@ -98,7 +107,8 @@ export class NetworkStatusController extends Controller<HTMLElement> {
     this.#timers.clearAll();
     if (this.hasOnlineTarget) this.onlineTarget.hidden = true;
     if (this.hasOfflineTarget) {
-      this.offlineTarget.textContent = this.#offlineMessage;
+      // Reveal before writing: a hidden region is out of the accessibility tree,
+      // so a text change made while it is still hidden is never observed.
       this.offlineTarget.hidden = false;
     }
   }
@@ -107,7 +117,7 @@ export class NetworkStatusController extends Controller<HTMLElement> {
   #showOnline(): void {
     if (this.hasOfflineTarget) this.offlineTarget.hidden = true;
     if (!this.hasOnlineTarget) return;
-    this.onlineTarget.textContent = this.#onlineMessage;
+    // Reveal before writing, same as the offline banner.
     this.onlineTarget.hidden = false;
     if (this.onlineAutoHideValue > 0) {
       this.#timers.set(() => {

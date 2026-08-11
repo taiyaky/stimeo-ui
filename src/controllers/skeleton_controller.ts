@@ -1,4 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { announce, fillTemplate } from "../utils/announce";
+import { MinDurationFloor } from "../utils/min_duration_floor";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -21,12 +23,13 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *
  * @remarks
  * Behavior only — skeleton shapes/animation are the consumer's. The
- * min-duration timer is owned by {@link SafeTimeout} and torn down on
- * `disconnect()` (Turbo navigation included).
+ * min-duration wait is held by {@link MinDurationFloor} on a {@link SafeTimeout}
+ * torn down on `disconnect()` (Turbo navigation included).
  */
 export class SkeletonController extends Controller<HTMLElement> {
   static override targets = ["placeholder", "content"];
   static override values = {
+    announceReadyText: { type: String, default: "" },
     minDuration: { type: Number, default: 0 },
   };
   static actions = ["ready", "reset"] as const;
@@ -38,13 +41,10 @@ export class SkeletonController extends Controller<HTMLElement> {
   declare readonly hasContentTarget: boolean;
 
   declare minDurationValue: number;
+  declare announceReadyTextValue: string;
 
   readonly #timers = new SafeTimeout();
-
-  /** Pending min-duration reveal timer id, or `null` when none is scheduled. */
-  #revealTimerId: number | null = null;
-  /** Epoch ms when the loading state began; `minDuration` is measured from it. */
-  #loadingSince = 0;
+  readonly #floor = new MinDurationFloor(this.#timers);
 
   override connect(): void {
     if (this.#state !== "ready") {
@@ -54,35 +54,26 @@ export class SkeletonController extends Controller<HTMLElement> {
 
   override disconnect(): void {
     this.#timers.clearAll();
-    this.#revealTimerId = null;
+    this.#floor.cancel();
   }
 
   /** Swaps to the real content. Honors `minDuration` to prevent a flash. */
   ready(): void {
-    if (this.#state === "ready" || this.#revealTimerId !== null) return;
-    const remaining = this.minDurationValue - (Date.now() - this.#loadingSince);
-    if (remaining > 0) {
-      this.#revealTimerId = this.#timers.set(() => {
-        this.#revealTimerId = null;
-        this.#reveal();
-      }, remaining);
-    } else {
-      this.#reveal();
-    }
+    // The first signal wins: a repeat while the floor still holds the reveal back
+    // must not restart the wait, or a stream of ready events keeps postponing it.
+    if (this.#state === "ready" || this.#floor.pending) return;
+    this.#floor.schedule(this.minDurationValue, () => this.#reveal());
   }
 
   /** Returns to the loading state (e.g. a Turbo Stream re-fetch). */
   reset(): void {
-    if (this.#revealTimerId !== null) {
-      this.#timers.clear(this.#revealTimerId);
-      this.#revealTimerId = null;
-    }
+    this.#floor.cancel();
     this.#enterLoading();
   }
 
   /** Shows the placeholder, hides content, and marks the region busy. */
   #enterLoading(): void {
-    this.#loadingSince = Date.now();
+    this.#floor.begin();
     if (this.hasPlaceholderTarget) this.placeholderTarget.hidden = false;
     if (this.hasContentTarget) this.contentTarget.hidden = true;
     this.element.setAttribute("aria-busy", "true");
@@ -96,6 +87,8 @@ export class SkeletonController extends Controller<HTMLElement> {
     this.element.setAttribute("aria-busy", "false");
     this.element.setAttribute("data-state", "ready");
     this.dispatch("ready", { detail: {} });
+    // loading → ready is the transition; the skeleton itself carries no words.
+    announce(fillTemplate(this.announceReadyTextValue, {}));
   }
 
   /** Current lifecycle phase as reflected on `data-state`. */

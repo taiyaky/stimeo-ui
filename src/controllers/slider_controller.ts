@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { isRtl } from "../utils/logical_scroll";
+import { rangeFraction } from "../utils/range";
 
 /** Name of the CSS custom property exposing the thumb position (0..1). */
 const FRACTION_PROPERTY = "--stimeo--slider-fraction";
@@ -176,8 +177,7 @@ export class SliderController extends Controller<HTMLElement> {
       this.thumbTarget.setAttribute("aria-valuenow", String(value));
     }
 
-    const span = this.maxValue - this.minValue;
-    const fraction = span > 0 ? (value - this.minValue) / span : 0;
+    const fraction = rangeFraction(value, this.minValue, this.maxValue);
     this.element.style.setProperty(FRACTION_PROPERTY, String(fraction));
 
     if (changed && !silent) this.dispatch("change", { detail: { value } });

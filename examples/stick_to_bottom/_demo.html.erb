@@ -3,8 +3,11 @@
     catalog has no Action Cable / Turbo Stream, so the Add button appends a <li> — exactly
     the mutation a Turbo Stream broadcast would make — and the controller reacts. The jump
     button lives inside the log (a descendant, wired with a plain data-action) and CSS
-    reveals it only while data-has-new. demo.js starts the log scrolled to the bottom. The
-    library only follows/flags and reflects data-pinned / data-has-new; demo.css owns the look.
+    reveals it only while data-has-new. pin-on-connect starts the log at the bottom so the
+    first message is followed rather than flagged — a fresh scroll container renders at the
+    top, and the controller does this on every connect, which a once-per-document page event
+    cannot. The library only follows/flags and reflects data-pinned / data-has-new; demo.css
+    owns the look.
 
     The log scrolls but its only control — the jump button — is hidden until there is
     something to jump to, so most of the time a keyboard user cannot reach it at all
@@ -20,6 +23,7 @@
       class="stb-demo__log"
       data-controller="stimeo--stick-to-bottom"
       data-stimeo--stick-to-bottom-behavior-value="smooth"
+      data-stimeo--stick-to-bottom-pin-on-connect-value="true"
       data-stimeo--scroll-area-target="viewport"
       aria-label="<%= t("components.stick_to_bottom.demo.viewport_label") %>">
       <ul class="stb-demo__messages" data-stimeo--stick-to-bottom-target="content">

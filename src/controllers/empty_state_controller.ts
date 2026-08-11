@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { announce, fillTemplate } from "../utils/announce";
 
 /**
  * Headless empty-state behavior: shows an "empty" placeholder when a list has no
@@ -37,7 +38,8 @@ export class EmptyStateController extends Controller<HTMLElement> {
   static override targets = ["list", "empty"];
   static override values = {
     itemSelector: { type: String, default: "" },
-    announce: { type: Boolean, default: false },
+    announceText: { type: String, default: "" },
+    announceFilledText: { type: String, default: "" },
   };
   static events = ["change"] as const;
 
@@ -47,7 +49,8 @@ export class EmptyStateController extends Controller<HTMLElement> {
   declare readonly hasEmptyTarget: boolean;
 
   declare itemSelectorValue: string;
-  declare announceValue: boolean;
+  declare announceTextValue: string;
+  declare announceFilledTextValue: string;
 
   #observer: MutationObserver | null = null;
   /** Last applied empty state; `null` until the first sync so connect emits nothing. */
@@ -55,10 +58,6 @@ export class EmptyStateController extends Controller<HTMLElement> {
 
   override connect(): void {
     if (!this.hasListTarget) return;
-    if (this.announceValue && this.hasEmptyTarget && !this.#isLiveRegion(this.emptyTarget)) {
-      this.emptyTarget.setAttribute("role", "status");
-      this.emptyTarget.setAttribute("aria-live", "polite");
-    }
     if (typeof MutationObserver !== "undefined") {
       this.#observer = new MutationObserver(() => this.#apply());
       this.#observer.observe(this.listTarget, { childList: true });
@@ -90,6 +89,11 @@ export class EmptyStateController extends Controller<HTMLElement> {
     // not for count changes that stay non-empty, e.g. 2 → 3).
     if (this.#empty !== null && empty !== this.#empty) {
       this.dispatch("change", { detail: { count, empty } });
+      // The crossing is the news, and the page's announcer reads it: a region that
+      // only becomes live when the empty state appears is not reliably announced.
+      announce(
+        fillTemplate(empty ? this.announceTextValue : this.announceFilledTextValue, { count }),
+      );
     }
     this.#empty = empty;
   }
@@ -104,11 +108,5 @@ export class EmptyStateController extends Controller<HTMLElement> {
       // An invalid selector (author typo) must not crash the controller — count all.
       return this.listTarget.childElementCount;
     }
-  }
-
-  #isLiveRegion(el: HTMLElement): boolean {
-    if (el.hasAttribute("aria-live")) return true;
-    const role = el.getAttribute("role");
-    return role === "status" || role === "alert";
   }
 }

@@ -1,3 +1,4 @@
+import { BeforeCacheReset } from "./before_cache_reset";
 import { EscapeLayer } from "./escape_layer";
 
 /**
@@ -135,7 +136,7 @@ export class FocusTrap {
     }
     if (this.#flag(this.#options.isolate, true)) this.#isolateBackground();
     document.addEventListener("keydown", this.#onKeydown);
-    document.addEventListener("turbo:before-cache", this.#onBeforeCache);
+    this.#beforeCache.activate();
     const onEscape = this.#options.onEscape;
     if (onEscape) this.#escapeLayer.activate(document, { onDismiss: () => onEscape() });
     if (this.#flag(this.#options.autoFocus, true)) this.#focusInitial();
@@ -153,7 +154,7 @@ export class FocusTrap {
     this.#activeState = false;
     this.#escapeLayer.deactivate();
     document.removeEventListener("keydown", this.#onKeydown);
-    document.removeEventListener("turbo:before-cache", this.#onBeforeCache);
+    this.#beforeCache.deactivate();
     if (this.#scrollLocked) {
       document.body.style.overflow = this.#previousBodyOverflow;
       this.#scrollLocked = false;
@@ -179,9 +180,7 @@ export class FocusTrap {
    * untouched (restore-open designs reopen against a clean baseline), and focus
    * is left alone mid-navigation. The listener lives only while active.
    */
-  readonly #onBeforeCache = (): void => {
-    this.deactivate({ restoreFocus: false });
-  };
+  readonly #beforeCache = new BeforeCacheReset(() => this.deactivate({ restoreFocus: false }));
 
   /**
    * Handles `Tab` (focus trap) while active. `Escape` dismissal is owned by the

@@ -1,4 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
+import { announce, fillTemplate } from "../utils/announce";
+import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { DetachGate } from "../utils/detach_gate";
+import { MinDurationFloor } from "../utils/min_duration_floor";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -26,13 +30,16 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * targets' `hidden`. The `content` target is marked `inert` while loading to block
  * double-submits, and focus inside the frame is explicitly blurred then restored
  * (when `restoreFocus`) so it is testable without relying on emergent `inert`
- * focus behavior. Listeners and the min-duration timer are torn down on
- * `disconnect()` (Turbo navigation included), which also tidies the hooks so a
- * cached frame is never left busy.
+ * focus behavior. Listeners are torn down on `disconnect()` (Turbo navigation
+ * included) along with the {@link MinDurationFloor} holding the finish back, kept
+ * across an in-page move by {@link DetachGate}; the hooks a cached page would
+ * freeze are rewound by {@link BeforeCacheReset}.
  */
 export class FrameLoadingController extends Controller<HTMLElement> {
   static override targets = ["content", "skeleton", "overlay"];
   static override values = {
+    announceText: { type: String, default: "" },
+    announceReadyText: { type: String, default: "" },
     minDuration: { type: Number, default: 0 },
     restoreFocus: { type: Boolean, default: true },
   };
@@ -47,34 +54,36 @@ export class FrameLoadingController extends Controller<HTMLElement> {
 
   declare minDurationValue: number;
   declare restoreFocusValue: boolean;
+  declare announceTextValue: string;
+  declare announceReadyTextValue: string;
 
   readonly #timeouts = new SafeTimeout();
+  readonly #floor = new MinDurationFloor(this.#timeouts);
+  readonly #gate = new DetachGate();
+  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   #loading = false;
-  #startedAt = 0;
   #inertApplied = false;
   #previousFocus: HTMLElement | null = null;
   /** The id of the retreated element, used to re-find it if the load replaced it. */
   #previousFocusId = "";
 
   readonly #onStart = (): void => {
-    // A (possibly new) fetch began: cancel any pending min-duration finish so the
+    // A (possibly new) fetch began: drop a finish the floor is still holding so the
     // loading state is not torn down mid-load, then begin if not already loading.
-    this.#timeouts.clearAll();
+    this.#floor.cancel();
     if (!this.#loading) this.#begin();
   };
 
   readonly #onEnd = (): void => {
     if (!this.#loading) return;
-    const remaining = this.minDurationValue - (Date.now() - this.#startedAt);
-    if (remaining > 0) {
-      this.#timeouts.clearAll();
-      this.#timeouts.set(() => this.#finish(), remaining);
-    } else {
-      this.#finish();
-    }
+    // The newest end signal owns the finish: the floor replaces whatever it was
+    // holding rather than letting a second wait stack behind the first.
+    this.#floor.schedule(this.minDurationValue, () => this.#finish());
   };
 
   override connect(): void {
+    this.#gate.cancel();
+    this.#beforeCache.activate();
     this.element.addEventListener("turbo:before-fetch-request", this.#onStart);
     this.element.addEventListener("turbo:frame-load", this.#onEnd);
     this.element.addEventListener("turbo:fetch-request-error", this.#onEnd);
@@ -84,22 +93,43 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     this.element.removeEventListener("turbo:before-fetch-request", this.#onStart);
     this.element.removeEventListener("turbo:frame-load", this.#onEnd);
     this.element.removeEventListener("turbo:fetch-request-error", this.#onEnd);
+    this.#beforeCache.deactivate();
+    this.#gate.disconnected(this, () => this.#teardown());
+  }
+
+  /**
+   * Drops the held finish and the loading bookkeeping on a real detach. The markup
+   * keeps whatever it last held: the page being cached is rewound at
+   * `turbo:before-cache` instead, where the frame is still whole.
+   */
+  #teardown(): void {
+    this.#gate.cancel();
     this.#timeouts.clearAll();
-    // Tidy the hooks so a cached frame is not restored mid-loading (no focus move —
-    // the element is leaving the DOM).
-    if (this.#loading) {
-      this.element.removeAttribute("aria-busy");
-      this.element.removeAttribute("data-frame-loading");
-      this.#clearInert();
-    }
+    this.#floor.cancel();
     this.#loading = false;
     this.#previousFocus = null;
+  }
+
+  /**
+   * Returns the frame to its resting hooks for the snapshot Turbo is about to
+   * take, so a page reached with the Back button does not restore a frame that is
+   * busy and inert with nothing left to finish it. State only — no `end` event and
+   * no focus move, because the load did not actually complete. The live page keeps
+   * its held finish, so a navigation that never completes still ends properly.
+   */
+  #rewindForCache(): void {
+    if (!this.#loading) return;
+    this.element.removeAttribute("aria-busy");
+    this.element.removeAttribute("data-frame-loading");
+    if (this.hasSkeletonTarget) this.skeletonTarget.hidden = true;
+    if (this.hasOverlayTarget) this.overlayTarget.hidden = true;
+    this.#clearInert();
   }
 
   /** Enters the loading state: hooks, skeleton/overlay, inert content, focus retreat. */
   #begin(): void {
     this.#loading = true;
-    this.#startedAt = Date.now();
+    this.#floor.begin();
     this.element.setAttribute("aria-busy", "true");
     this.element.setAttribute("data-frame-loading", "true");
     if (this.hasSkeletonTarget) this.skeletonTarget.hidden = false;
@@ -107,6 +137,7 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     this.#applyInert();
     this.#retreatFocus();
     this.dispatch("start", { detail: {} });
+    announce(fillTemplate(this.announceTextValue, {}));
   }
 
   /** Leaves the loading state: restore hooks, hide skeleton/overlay, restore focus. */
@@ -119,6 +150,7 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     this.#clearInert();
     this.#restoreFocus();
     this.dispatch("end", { detail: {} });
+    announce(fillTemplate(this.announceReadyTextValue, {}));
   }
 
   /** Marks the content inert to block double-submits while stale (if we own it). */

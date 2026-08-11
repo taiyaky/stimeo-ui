@@ -54,6 +54,21 @@ describe("CountdownController", () => {
       "stimeo--countdown",
     ) as CountdownController;
 
+  /** Collects what the shared announcer was asked to read during `body`. */
+  const captureAnnouncements = async (body: () => void | Promise<void>): Promise<string[]> => {
+    const seen: string[] = [];
+    const spy = (event: Event) => {
+      seen.push((event as CustomEvent<{ message: string }>).detail.message);
+    };
+    window.addEventListener("stimeo--announcer:announce", spy);
+    try {
+      await body();
+    } finally {
+      window.removeEventListener("stimeo--announcer:announce", spy);
+    }
+    return seen;
+  };
+
   it("renders the initial remaining time into the slots", async () => {
     await start('data-stimeo--countdown-deadline-value="2026-06-06T01:02:03Z"');
     expect(slot("days").textContent).toBe("0");
@@ -63,6 +78,14 @@ describe("CountdownController", () => {
     expect(root().getAttribute("data-state")).toBe("running");
   });
 
+  it("renders whole days into the days slot", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-08T03:04:05Z"');
+    expect(slot("days").textContent).toBe("2");
+    expect(slot("hours").textContent).toBe("03");
+    expect(slot("minutes").textContent).toBe("04");
+    expect(slot("seconds").textContent).toBe("05");
+  });
+
   it("ticks down each interval", async () => {
     await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
     expect(slot("seconds").textContent).toBe("10");
@@ -70,6 +93,20 @@ describe("CountdownController", () => {
     expect(slot("seconds").textContent).toBe("09");
     vi.advanceTimersByTime(3000);
     expect(slot("seconds").textContent).toBe("06");
+  });
+
+  it("ticks at the configured interval", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z" data-stimeo--countdown-interval-value="2500"',
+    );
+    const ticks: number[] = [];
+    root().addEventListener("stimeo--countdown:tick", (event) => {
+      ticks.push((event as CustomEvent<{ remaining: number }>).detail.remaining);
+    });
+    // The interval Value drives the scheduling period, not just the default 1000.
+    vi.advanceTimersByTime(5000);
+    expect(ticks).toEqual([7500, 5000]);
+    expect(slot("seconds").textContent).toBe("05");
   });
 
   it("emits tick with the remaining ms and direction", async () => {
@@ -101,15 +138,31 @@ describe("CountdownController", () => {
     await start(
       'data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" data-stimeo--countdown-complete-label-value="Time up"',
     );
-    let completed = false;
-    root().addEventListener("stimeo--countdown:complete", () => {
-      completed = true;
+    const details: unknown[] = [];
+    root().addEventListener("stimeo--countdown:complete", (event) => {
+      details.push((event as CustomEvent).detail);
     });
     vi.advanceTimersByTime(2000);
-    expect(completed).toBe(true);
+    // Freeze the whole detail, not just "it fired": the payload is empty, so any
+    // key leaking out of the controller has to fail here.
+    expect(details).toEqual([{}]);
     expect(root().getAttribute("data-state")).toBe("complete");
     expect(slot("seconds").textContent).toBe("00");
     expect(slot("status").textContent).toBe("Time up");
+  });
+
+  it("stops ticking once the countdown completes", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z"');
+    const events: string[] = [];
+    root().addEventListener("stimeo--countdown:tick", () => events.push("tick"));
+    root().addEventListener("stimeo--countdown:complete", () => events.push("complete"));
+    vi.advanceTimersByTime(2000);
+    expect(events).toEqual(["tick", "tick", "complete"]);
+    // Completion tears the interval down, so no further tick (nor a repeated
+    // completion) may reach the consumer as wall-clock time keeps running.
+    vi.advanceTimersByTime(5000);
+    expect(events).toEqual(["tick", "tick", "complete"]);
+    expect(root().getAttribute("data-state")).toBe("complete");
   });
 
   it("completes immediately when the deadline is already past", async () => {
@@ -126,6 +179,48 @@ describe("CountdownController", () => {
     // Time passes while paused: the display must not move.
     vi.advanceTimersByTime(5000);
     expect(slot("seconds").textContent).toBe("07");
+    instance().resume();
+    expect(root().getAttribute("data-state")).toBe("running");
+    vi.advanceTimersByTime(1000);
+    expect(slot("seconds").textContent).toBe("06");
+  });
+
+  it("ignores start while already running", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
+    const ticks: number[] = [];
+    root().addEventListener("stimeo--countdown:tick", (event) => {
+      ticks.push((event as CustomEvent<{ remaining: number }>).detail.remaining);
+    });
+    // A redundant start() must not stack a second interval on the running one: the
+    // id field only remembers the last, so the first would tick on as an orphan.
+    instance().start();
+    vi.advanceTimersByTime(2000);
+    expect(ticks).toEqual([9000, 8000]);
+    expect(slot("seconds").textContent).toBe("08");
+  });
+
+  it("ignores pause while already paused", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
+    vi.advanceTimersByTime(3000);
+    instance().pause();
+    expect(slot("seconds").textContent).toBe("07");
+    // A second pause must not re-read the clock: that would discard the offset the
+    // first one captured, so resume() would jump to the wall-clock remainder.
+    vi.advanceTimersByTime(4000);
+    instance().pause();
+    expect(root().getAttribute("data-state")).toBe("paused");
+    expect(slot("seconds").textContent).toBe("07");
+    instance().resume();
+    vi.advanceTimersByTime(1000);
+    expect(slot("seconds").textContent).toBe("06");
+  });
+
+  it("ignores resume while already running", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
+    vi.advanceTimersByTime(3000);
+    expect(slot("seconds").textContent).toBe("07");
+    // Resuming a running timer must not re-anchor from the stale pause amount (0
+    // here, which would settle the countdown immediately).
     instance().resume();
     expect(root().getAttribute("data-state")).toBe("running");
     vi.advanceTimersByTime(1000);
@@ -166,6 +261,21 @@ describe("CountdownController", () => {
     expect(slot("seconds").textContent).toBe("00");
     vi.advanceTimersByTime(10_000); // now 3s past the deadline
     expect(slot("seconds").textContent).toBe("03");
+  });
+
+  it("resumes count-up from the preserved elapsed amount", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:00Z" data-stimeo--countdown-direction-value="up"',
+    );
+    vi.advanceTimersByTime(3000);
+    expect(slot("seconds").textContent).toBe("03");
+    instance().pause();
+    vi.advanceTimersByTime(4000);
+    instance().resume();
+    // Count-up moves the anchor *back* by the preserved amount; using the countdown
+    // arithmetic instead would put the origin in the future and clamp the display to 0.
+    vi.advanceTimersByTime(1000);
+    expect(slot("seconds").textContent).toBe("04");
   });
 
   it("reset re-anchors to the deadline in up-mode (discarding a pause offset)", async () => {
@@ -247,6 +357,252 @@ describe("CountdownController", () => {
     expect(slot("status").textContent).toBe("");
   });
 
+  it("re-arms the tick after reconnecting on a stale running state", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
+    vi.advanceTimersByTime(2000);
+    expect(slot("seconds").textContent).toBe("08");
+    // Turbo caches the snapshot with data-state="running" burned in, so the restored
+    // element reconnects with that attribute already set. start() is a no-op while
+    // "running", so connect() has to drop the stale state for autostart to re-arm.
+    instance().disconnect();
+    instance().connect();
+    expect(root().getAttribute("data-state")).toBe("running");
+    vi.advanceTimersByTime(2000);
+    expect(slot("seconds").textContent).toBe("06");
+  });
+
+  it("does not re-emit complete when reconnecting on a stale complete state", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" data-stimeo--countdown-complete-label-value="Time up"',
+    );
+    const events: string[] = [];
+    root().addEventListener("stimeo--countdown:complete", () => events.push("complete"));
+    vi.advanceTimersByTime(2000);
+    expect(events).toEqual(["complete"]);
+    // Reconnecting on the cached "complete" snapshot must not announce the milestone
+    // a second time: the deadline was reached in the previous visit, not now.
+    instance().disconnect();
+    instance().connect();
+    expect(events).toEqual(["complete"]);
+    expect(root().getAttribute("data-state")).toBe("complete");
+    expect(slot("seconds").textContent).toBe("00");
+  });
+
+  it("resumes from the initial amount when autostart is false", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z" data-stimeo--countdown-autostart-value="false"',
+    );
+    expect(root().getAttribute("data-state")).toBe("paused");
+    const completions: string[] = [];
+    root().addEventListener("stimeo--countdown:complete", () => completions.push("complete"));
+    // The resting state connect() writes is a pause like any other, so resume() must
+    // continue from the displayed amount rather than snapping the anchor to now.
+    instance().resume();
+    expect(completions).toEqual([]);
+    expect(root().getAttribute("data-state")).toBe("running");
+    vi.advanceTimersByTime(1000);
+    expect(slot("seconds").textContent).toBe("09");
+  });
+
+  it("keeps the completion across a reconnect when autostart is off", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" data-stimeo--countdown-autostart-value="false"',
+    );
+    const events: string[] = [];
+    root().addEventListener("stimeo--countdown:complete", () => events.push("complete"));
+    instance().resume();
+    vi.advanceTimersByTime(2000);
+    expect(events).toEqual(["complete"]);
+
+    // Without autostart, connect() writes the resting "paused" — but a snapshot that
+    // already reached zero must keep "complete", or the next resume() crosses zero
+    // again and announces the same milestone twice.
+    instance().disconnect();
+    instance().connect();
+    expect(root().getAttribute("data-state")).toBe("complete");
+    instance().resume();
+    expect(events).toEqual(["complete"]);
+  });
+
+  it("re-arms a completed countdown whose deadline moved into the future", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" data-stimeo--countdown-autostart-value="false"',
+    );
+    instance().resume();
+    vi.advanceTimersByTime(2000);
+    expect(root().getAttribute("data-state")).toBe("complete");
+
+    // The completion is kept only while the countdown is still settled: a deadline
+    // pushed forward makes it a fresh, resumable timer again.
+    root().setAttribute("data-stimeo--countdown-deadline-value", "2026-06-06T00:00:10Z");
+    instance().disconnect();
+    instance().connect();
+    expect(root().getAttribute("data-state")).toBe("paused");
+    instance().resume();
+    expect(root().getAttribute("data-state")).toBe("running");
+  });
+
+  it("completes without a status target present", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--countdown" role="timer" aria-live="off"
+           data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z"
+           data-stimeo--countdown-complete-label-value="Time up">
+        <span data-stimeo--countdown-target="seconds">00</span>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--countdown", CountdownController);
+    await vi.advanceTimersByTimeAsync(0);
+    const events: string[] = [];
+    root().addEventListener("stimeo--countdown:complete", () => events.push("complete"));
+    // `status` is optional in the markup contract, so completing without one must
+    // still announce and settle instead of throwing on a missing target.
+    vi.advanceTimersByTime(2000);
+    expect(events).toEqual(["complete"]);
+    expect(root().getAttribute("data-state")).toBe("complete");
+    expect(slot("seconds").textContent).toBe("00");
+  });
+
+  it("leaves a status message it did not write alone on reset", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
+    slot("status").textContent = "Bring your ticket";
+    // `complete()` declines to write when `completeLabel` is empty, so reset() has
+    // nothing of its own in there to take back — the text is the consumer's.
+    instance().reset();
+    expect(slot("status").textContent).toBe("Bring your ticket");
+  });
+
+  it("follows a deadline swapped in place by a morph", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
+    vi.advanceTimersByTime(2000);
+    expect(slot("seconds").textContent).toBe("08");
+    // A Turbo 8 morph keeps the element and swaps the attribute, so `connect()` never
+    // runs again: without following the Value the timer counts to the old deadline
+    // for the rest of the session.
+    root().setAttribute("data-stimeo--countdown-deadline-value", "2026-06-06T00:00:30Z");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slot("seconds").textContent).toBe("28");
+    expect(root().getAttribute("data-state")).toBe("running");
+    vi.advanceTimersByTime(1000);
+    expect(slot("seconds").textContent).toBe("27");
+  });
+
+  it("follows a direction swapped in place by a morph", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
+    vi.advanceTimersByTime(2000);
+    expect(slot("seconds").textContent).toBe("08");
+    root().setAttribute("data-stimeo--countdown-direction-value", "up");
+    await vi.advanceTimersByTimeAsync(0);
+    // Counting up from a deadline still ahead of now clamps to zero.
+    expect(slot("seconds").textContent).toBe("00");
+  });
+
+  it("does not start or announce anything when a morph swaps the deadline", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z" data-stimeo--countdown-autostart-value="false"',
+    );
+    const events: string[] = [];
+    for (const type of ["stimeo--countdown:tick", "stimeo--countdown:complete"]) {
+      root().addEventListener(type, () => events.push(type));
+    }
+    expect(root().getAttribute("data-state")).toBe("paused");
+    root().setAttribute("data-stimeo--countdown-deadline-value", "2026-06-06T00:00:04Z");
+    await vi.advanceTimersByTimeAsync(0);
+    // Following a render input is a repaint, not a lifecycle event: a paused timer
+    // stays paused and no milestone is replayed.
+    expect(root().getAttribute("data-state")).toBe("paused");
+    expect(events).toEqual([]);
+    expect(slot("seconds").textContent).toBe("04");
+    // The stored amount followed too, so resuming continues from the new deadline.
+    instance().resume();
+    vi.advanceTimersByTime(1000);
+    expect(slot("seconds").textContent).toBe("03");
+  });
+
+  it("ignores pause once the countdown has completed", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z"');
+    vi.advanceTimersByTime(2000);
+    expect(root().getAttribute("data-state")).toBe("complete");
+    // Pausing a timer that is not running has nothing to stop: flipping the state
+    // would hand a settled countdown back to resume() and let it cross zero again.
+    instance().pause();
+    expect(root().getAttribute("data-state")).toBe("complete");
+  });
+
+  it("steps by one unit on the first tick after a resume", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
+    vi.advanceTimersByTime(1000);
+    expect(slot("seconds").textContent).toBe("09");
+    // Pause between ticks: the display still reads 09 while the live amount is
+    // already 8.5s. Storing the live amount would make the first tick after the
+    // resume read 07 — a two-unit jump the user sees as a skipped second.
+    vi.advanceTimersByTime(500);
+    instance().pause();
+    expect(slot("seconds").textContent).toBe("09");
+    instance().resume();
+    vi.advanceTimersByTime(1000);
+    expect(slot("seconds").textContent).toBe("08");
+  });
+
+  it("keeps the user's pause across a reconnect even when autostart is on", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
+    vi.advanceTimersByTime(2000);
+    instance().pause();
+    expect(root().getAttribute("data-state")).toBe("paused");
+    expect(slot("seconds").textContent).toBe("08");
+
+    // The markup is the source of truth for the run state: `autostart` decides only
+    // where a timer whose markup says nothing begins, so a snapshot cached mid-pause
+    // must not resume itself behind the user's back.
+    instance().disconnect();
+    instance().connect();
+    expect(root().getAttribute("data-state")).toBe("paused");
+    vi.advanceTimersByTime(3000);
+    expect(slot("seconds").textContent).toBe("08");
+    instance().resume();
+    vi.advanceTimersByTime(1000);
+    expect(slot("seconds").textContent).toBe("07");
+  });
+
+  it("honors an authored paused state over autostart on the first render", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z" data-state="paused"');
+    // Same rule seen from the other side: markup that states the run state wins, so
+    // a server-rendered pause is not overridden by the declarative default.
+    expect(root().getAttribute("data-state")).toBe("paused");
+    vi.advanceTimersByTime(3000);
+    expect(slot("seconds").textContent).toBe("10");
+  });
+
+  it("re-arms a restored running timer even when autostart is off", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z" data-stimeo--countdown-autostart-value="false" data-state="running"',
+    );
+    // Nothing carries a live interval across the gap, so a restored "running" has to
+    // be re-armed here — `autostart` has no say once the markup states a run state.
+    expect(root().getAttribute("data-state")).toBe("running");
+    vi.advanceTimersByTime(2000);
+    expect(slot("seconds").textContent).toBe("08");
+  });
+
+  it("stays inert and renders zeros without a parseable deadline", async () => {
+    await start("");
+    expect(root().getAttribute("data-state")).toBe("paused");
+    // Date.parse("") is NaN: every amount has to fall back to 0 rather than render NaN.
+    expect(slot("days").textContent).toBe("0");
+    expect(slot("hours").textContent).toBe("00");
+    expect(slot("minutes").textContent).toBe("00");
+    expect(slot("seconds").textContent).toBe("00");
+    const events: string[] = [];
+    root().addEventListener("stimeo--countdown:complete", () => events.push("complete"));
+    root().addEventListener("stimeo--countdown:tick", () => events.push("tick"));
+    // Neither entry point may arm a timer or declare completion off an unusable anchor.
+    instance().start();
+    instance().resume();
+    vi.advanceTimersByTime(3000);
+    expect(events).toEqual([]);
+    expect(root().getAttribute("data-state")).toBe("paused");
+    expect(slot("seconds").textContent).toBe("00");
+  });
+
   it("clears the interval on disconnect", async () => {
     await start('data-stimeo--countdown-deadline-value="2026-06-06T00:01:00Z"');
     const secondsEl = slot("seconds");
@@ -256,6 +612,26 @@ describe("CountdownController", () => {
     vi.advanceTimersByTime(5000);
     // No tick should mutate the slot past its initial value after teardown.
     expect(secondsEl.textContent).toBe("00");
+  });
+
+  it("announces the completion once the consumer supplies wording", async () => {
+    // Only the transition is read out, never the ticking numbers.
+    const spoken = await captureAnnouncements(async () => {
+      await start(
+        'data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z" ' +
+          'data-stimeo--countdown-announce-text-value="Time is up"',
+      );
+      vi.advanceTimersByTime(11_000);
+    });
+    expect(spoken).toEqual(["Time is up"]);
+  });
+
+  it("stays silent about completion when no wording is set", async () => {
+    const spoken = await captureAnnouncements(async () => {
+      await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
+      vi.advanceTimersByTime(11_000);
+    });
+    expect(spoken).toEqual([]);
   });
 });
 

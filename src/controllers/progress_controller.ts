@@ -1,5 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
+import { announce, fillTemplate } from "../utils/announce";
 import { toFiniteNumber } from "../utils/coerce";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { rangeFraction } from "../utils/range";
 
 /**
  * Event shape `setValue` accepts: an action param `amount` or a `detail.value`.
@@ -11,6 +14,13 @@ type SetValueEvent = Event & {
   params?: { amount?: number | string };
   detail?: { value?: number | string };
 };
+
+/**
+ * Marks an `aria-valuetext` this controller wrote, so a render takes back only
+ * its own text. `aria-valuetext` is shared: a consumer may author it instead of
+ * supplying a template, and that text is theirs to keep across renders.
+ */
+const OWNED_VALUE_TEXT = "data-stimeo--progress-owns-valuetext";
 
 /**
  * Headless progress-bar behavior backed by the WAI-ARIA `progressbar` role.
@@ -43,6 +53,7 @@ export class ProgressController extends Controller<HTMLElement> {
     max: { type: Number, default: 100 },
     indeterminate: { type: Boolean, default: false },
     valueText: { type: String, default: "" },
+    announceText: { type: String, default: "" },
   };
   static actions = ["setValue"] as const;
   static events = ["change", "complete"] as const;
@@ -55,9 +66,25 @@ export class ProgressController extends Controller<HTMLElement> {
   declare maxValue: number;
   declare indeterminateValue: boolean;
   declare valueTextValue: string;
+  declare announceTextValue: string;
+
+  /**
+   * Collapses a morph that swaps several render inputs at once into one repaint.
+   * A single update usually rewrites the whole set, and each Value would otherwise
+   * repaint on its own.
+   */
+  readonly #repaint = new MicrotaskCoalescer(() => {
+    this.#render();
+  });
 
   override connect(): void {
+    this.#repaint.activate();
     this.#render();
+  }
+
+  /** Closes the window in which a queued repaint may still run. */
+  override disconnect(): void {
+    this.#repaint.cancel();
   }
 
   /**
@@ -75,14 +102,37 @@ export class ProgressController extends Controller<HTMLElement> {
     this.dispatch("change", { detail: { value, ratio: this.#ratio } });
     if (value >= this.maxValue) {
       this.dispatch("complete", { detail: { value } });
+      // Reaching the end is the transition worth reading out; the running numbers in
+      // between are state the consumer can see, not news.
+      announce(
+        fillTemplate(this.announceTextValue, { value, percent: Math.round(this.#ratio * 100) }),
+      );
     }
   }
 
-  /** Re-render when the indeterminate flag is toggled via its data attribute. */
+  /** Repaints when application code (or a Turbo morph) changes `indeterminate` at runtime. */
   indeterminateValueChanged(): void {
-    // Stimulus fires this once during initialization (before `connect`), where
-    // touching the DOM is still safe; guard nothing.
-    this.#render();
+    this.#repaint.schedule();
+  }
+
+  /** Repaints when application code (or a Turbo morph) changes `value` at runtime. */
+  valueValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints when application code (or a Turbo morph) changes `min` at runtime. */
+  minValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints when application code (or a Turbo morph) changes `max` at runtime. */
+  maxValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints when application code (or a Turbo morph) changes `valueText` at runtime. */
+  valueTextValueChanged(): void {
+    this.#repaint.schedule();
   }
 
   /** Clamps `raw` into the configured `[min, max]` range. */
@@ -92,11 +142,7 @@ export class ProgressController extends Controller<HTMLElement> {
 
   /** Current fraction of the range in `[0, 1]`; `0` when the range is empty. */
   get #ratio(): number {
-    const span = this.maxValue - this.minValue;
-    if (span <= 0) return 0;
-    // Clamp first so an out-of-range value (e.g. an initial value past `max`)
-    // can never push the ratio — and thus the bar width / percent — outside 0–1.
-    return (this.#clamp(this.valueValue) - this.minValue) / span;
+    return rangeFraction(this.valueValue, this.minValue, this.maxValue);
   }
 
   /** Reflects value/range/indeterminate onto ARIA, `data-state`, and the ratio. */
@@ -106,7 +152,10 @@ export class ProgressController extends Controller<HTMLElement> {
 
     if (this.indeterminateValue) {
       this.element.removeAttribute("aria-valuenow");
-      this.element.removeAttribute("aria-valuetext");
+      // `aria-valuetext` outranks `aria-valuenow` for assistive tech, so a text
+      // this controller derived from a value would announce the very number the
+      // indeterminate state drops.
+      this.#clearOwnValueText();
       this.element.style.removeProperty("--stimeo-progress-ratio");
       this.element.setAttribute("data-state", "indeterminate");
       return;
@@ -122,11 +171,13 @@ export class ProgressController extends Controller<HTMLElement> {
   /**
    * Sets `aria-valuetext` from the consumer-provided template, substituting
    * `{value}` and `{percent}`. Left to the consumer so the human-readable text
-   * stays i18n-neutral in the library; cleared when no template is given.
+   * stays i18n-neutral in the library. With no template the attribute belongs to
+   * the consumer, so only a text this controller wrote is taken back
+   * ({@link OWNED_VALUE_TEXT}).
    */
   #applyValueText(value: number): void {
     if (this.valueTextValue.length === 0) {
-      this.element.removeAttribute("aria-valuetext");
+      this.#clearOwnValueText();
       return;
     }
     const percent = Math.round(this.#ratio * 100);
@@ -134,5 +185,13 @@ export class ProgressController extends Controller<HTMLElement> {
       .replaceAll("{value}", String(value))
       .replaceAll("{percent}", String(percent));
     this.element.setAttribute("aria-valuetext", text);
+    this.element.setAttribute(OWNED_VALUE_TEXT, "");
+  }
+
+  /** Removes `aria-valuetext` only when this controller is the one that wrote it. */
+  #clearOwnValueText(): void {
+    if (!this.element.hasAttribute(OWNED_VALUE_TEXT)) return;
+    this.element.removeAttribute("aria-valuetext");
+    this.element.removeAttribute(OWNED_VALUE_TEXT);
   }
 }

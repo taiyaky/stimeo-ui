@@ -69,6 +69,19 @@ describe("ToastController", () => {
     controller(suffix).show(new CustomEvent("show", { detail: { body: text, type } }));
   };
 
+  /**
+   * Disarms auto-dismiss for the fixture. Required by every assertion that runs
+   * on the real clock (axe, the virtual screen reader): those walk the DOM over
+   * many awaited steps, and a toast removed by the fixture's duration timer
+   * mid-walk changes what is being audited. `durationValueChanged` also releases
+   * the timer of any toast already on screen.
+   */
+  const disableAutoDismiss = (suffix = "") => {
+    const instance = controller(suffix);
+    instance.durationValue = 0;
+    instance.durationValueChanged();
+  };
+
   beforeEach(async () => {
     document.body.innerHTML = markup();
     application = Application.start();
@@ -482,12 +495,14 @@ describe("ToastController", () => {
   });
 
   it("has no machine-detectable a11y violations with a live toast present", async () => {
+    disableAutoDismiss();
     triggerShow("Saved successfully");
 
     await expectNoA11yViolations(root());
   });
 
   it("announces listitem, status body, and dismiss button in order", async () => {
+    disableAutoDismiss();
     triggerShow("File saved");
 
     const phrases = await captureSpeech({ container: list(), steps: 7 });

@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { FocusTrap } from "../utils/focus_trap";
 import { readLocalStorage, writeLocalStorage } from "../utils/safe_storage";
 import { TransitionCompletion } from "../utils/transition_completion";
@@ -11,7 +12,6 @@ type Mode = "inline" | "overlay";
  *
  * Markup contract (identifier: `stimeo--sidebar`):
  *   <div data-controller="stimeo--sidebar"
- *        data-action="turbo:before-cache@document->stimeo--sidebar#beforeCache"
  *        data-stimeo--sidebar-breakpoint-value="768"
  *        data-stimeo--sidebar-key-value="main-nav">
  *     <header>
@@ -59,7 +59,7 @@ export class SidebarController extends Controller<HTMLElement> {
     key: { type: String, default: "" },
     collapsed: { type: Boolean, default: false },
   };
-  static actions = ["beforeCache", "close", "open", "toggle"] as const;
+  static actions = ["close", "open", "toggle"] as const;
 
   declare readonly triggerTarget: HTMLElement;
   declare readonly panelTarget: HTMLElement;
@@ -96,6 +96,7 @@ export class SidebarController extends Controller<HTMLElement> {
 
   override connect(): void {
     this.#connected = true;
+    this.#beforeCache.activate();
     this.#activePanel = this.hasPanelTarget ? this.panelTarget : null;
     this.#collapsed = this.#restoreCollapsed();
     this.#mqlQuery = this.#breakpointQuery;
@@ -106,6 +107,7 @@ export class SidebarController extends Controller<HTMLElement> {
 
   override disconnect(): void {
     this.#connected = false;
+    this.#beforeCache.deactivate();
     this.#mql?.removeEventListener("change", this.#onMediaChange);
     this.#mql = null;
     this.#mqlQuery = null;
@@ -166,12 +168,12 @@ export class SidebarController extends Controller<HTMLElement> {
    * closed immediately, and modal side effects are released without moving
    * focus during navigation.
    */
-  beforeCache(): void {
+  readonly #beforeCache = new BeforeCacheReset((): void => {
     if (!this.#connected || !this.#isOverlay) return;
     this.#transition.cancel();
     this.#trap.deactivate({ restoreFocus: false });
     this.#setOverlayClosedImmediate();
-  }
+  });
 
   /** Toggles the panel: inline flips collapsed/expanded, overlay flips open/closed. */
   toggle(): void {

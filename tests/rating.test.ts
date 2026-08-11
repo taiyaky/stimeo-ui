@@ -275,6 +275,16 @@ describe("RatingController", () => {
     await start('data-stimeo--rating-readonly-value="true"');
     await expectNoA11yViolations(root());
   });
+
+  it("follows value swapped in place by a morph", async () => {
+    // A morph keeps the element and swaps the attribute, so `connect()` never runs
+    // again and the symbols would keep advertising the old rating.
+    await start('data-stimeo--rating-value-value="2"');
+    expect(checked()).toEqual(["false", "true", "false"]);
+    root().setAttribute("data-stimeo--rating-value-value", "3");
+    await tick();
+    expect(checked()).toEqual(["false", "false", "true"]);
+  });
 });
 
 /**

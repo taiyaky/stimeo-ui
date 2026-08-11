@@ -6,6 +6,7 @@ import {
   toISODateString,
   toISOMonthString,
 } from "../utils/dates";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /** Number of cells in a six-week month grid (7 × 6). */
@@ -89,7 +90,16 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   readonly #focusTimer = new SafeTimeout();
 
   /** Seeds the range from any pre-filled hidden fields and renders the grid. */
+  /**
+   * Collapses a morph that swaps render inputs into one repaint, and refuses the
+   * pass Stimulus delivers before `connect()`.
+   */
+  readonly #repaint = new MicrotaskCoalescer(() => {
+    this.#render();
+  });
+
   override connect(): void {
+    this.#repaint.activate();
     this.#startDate = this.hasStartFieldTarget ? normalizeISO(this.startFieldTarget.value) : "";
     this.#endDate = this.hasEndFieldTarget ? normalizeISO(this.endFieldTarget.value) : "";
 
@@ -106,7 +116,18 @@ export class DateRangePickerController extends Controller<HTMLElement> {
 
   /** Cancels any pending deferred focus so it never fires on a detached element. */
   override disconnect(): void {
+    this.#repaint.cancel();
     this.#focusTimer.clearAll();
+  }
+
+  /** Repaints when application code (or a Turbo morph) changes `min` at runtime. */
+  minValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints when application code (or a Turbo morph) changes `max` at runtime. */
+  maxValueChanged(): void {
+    this.#repaint.schedule();
   }
 
   /** Navigates to the previous month. */

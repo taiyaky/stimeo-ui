@@ -118,23 +118,36 @@ describe("EmptyStateController", () => {
     expect(empty().hidden).toBe(false);
   });
 
-  it("makes the empty target a polite live region when announce is set", async () => {
-    await mount("", 'data-stimeo--empty-state-announce-value="true"');
-    expect(empty().getAttribute("role")).toBe("status");
-    expect(empty().getAttribute("aria-live")).toBe("polite");
+  it("announces the empty crossing through the shared announcer", async () => {
+    // A region that only becomes live when the empty state appears is not reliably
+    // read; the page's announcer is the one that already exists.
+    const seen: string[] = [];
+    const spy = (event: Event) => {
+      seen.push((event as CustomEvent<{ message: string }>).detail.message);
+    };
+    window.addEventListener("stimeo--announcer:announce", spy);
+    try {
+      await mount("<li>one</li>", 'data-stimeo--empty-state-announce-text-value="No results"');
+      await removeLast();
+      expect(seen).toEqual(["No results"]);
+    } finally {
+      window.removeEventListener("stimeo--announcer:announce", spy);
+    }
   });
 
-  it("does not clobber an authored live-region role on the empty target", async () => {
+  it("leaves the empty target's live-region markup to the consumer", async () => {
+    // Announcing is the announcer's job, so the placeholder's ARIA is untouched:
+    // an authored politeness stands, and none is invented where there was none.
     document.body.innerHTML = `
-      <div data-controller="stimeo--empty-state" data-stimeo--empty-state-announce-value="true">
+      <div data-controller="stimeo--empty-state">
         <ul data-stimeo--empty-state-target="list"></ul>
         <p data-stimeo--empty-state-target="empty" aria-live="assertive" hidden>No items</p>
       </div>`;
     application = Application.start();
     application.register("stimeo--empty-state", EmptyStateController);
     await tick();
-    expect(empty().getAttribute("aria-live")).toBe("assertive"); // preserved
-    expect(empty().hasAttribute("role")).toBe(false); // not added over an existing live region
+    expect(empty().getAttribute("aria-live")).toBe("assertive");
+    expect(empty().hasAttribute("role")).toBe(false);
   });
 
   it("tolerates an invalid itemSelector without crashing (falls back to all children)", async () => {
@@ -157,9 +170,9 @@ describe("EmptyStateController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Speech-order regression: the empty message sits in a polite live region the
-  // controller marks up when the list is empty.
-  it("announces the empty live region when there are no items", async () => {
+  // Speech-order regression: the placeholder the controller reveals for an empty
+  // list reads as its role followed by its authored text.
+  it("reads the empty placeholder as a paragraph when there are no items", async () => {
     await mount("");
     const speech = await captureSpeech({ container: empty(), steps: 1 });
     expect(speech).toEqual(["paragraph", "No items"]);

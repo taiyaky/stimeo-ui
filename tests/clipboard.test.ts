@@ -107,7 +107,10 @@ describe("ClipboardController", () => {
   });
 
   it("announces the completion notice through the live region", async () => {
-    await start();
+    // Zero feedback duration: the virtual reader walks the DOM on the real clock,
+    // so an auto-clear timer could empty the notice mid-walk. Its own scheduling
+    // is covered by the auto-clear cases.
+    await start('data-stimeo--clipboard-feedback-duration-value="0"');
     await instance().copy();
     const spoken = await captureSpeech({ container: feedback(), steps: 1 });
     expect(spoken).toEqual(["status", "Copied"]);

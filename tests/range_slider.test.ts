@@ -242,6 +242,17 @@ describe("RangeSliderController", () => {
       expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
     });
   });
+
+  it.each([
+    ["min", "10", () => startThumb().getAttribute("aria-valuemin"), "10"],
+    ["max", "300", () => endThumb().getAttribute("aria-valuemax"), "300"],
+  ])("follows %s swapped in place by a morph", async (name, next, read, expected) => {
+    // A morph keeps the element and swaps the attribute, so `connect()` never runs
+    // again and the thumbs would keep advertising the old range.
+    root().setAttribute(`data-stimeo--range-slider-${name}-value`, next);
+    await tick();
+    expect(read()).toBe(expected);
+  });
 });
 
 /** A non-zero DOMRect so happy-dom's zero-size geometry doesn't short-circuit. */

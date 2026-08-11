@@ -321,4 +321,16 @@ describe("ColorPickerController", () => {
       "slider, Hue, orientated horizontally, max value 360, min value 0, current value Hue 0 degrees",
     ]);
   });
+
+  it("follows alpha swapped in place by a morph", async () => {
+    // Turning alpha off drops it from the emitted hex, and a morph is the one path
+    // where `connect()` does not run again.
+    await start(
+      'data-stimeo--color-picker-value-value="#3366ccff" data-stimeo--color-picker-alpha-value="true"',
+    );
+    expect(hex().value.length).toBe(9);
+    root().setAttribute("data-stimeo--color-picker-alpha-value", "false");
+    await tick();
+    expect(hex().value.length).toBe(7);
+  });
 });

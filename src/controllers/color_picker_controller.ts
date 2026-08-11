@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { toFiniteNumber } from "../utils/coerce";
 import { isRtl } from "../utils/logical_scroll";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
 /** CSS custom property exposing the current color to consumer CSS. */
 const COLOR_PROPERTY = "--stimeo-color";
@@ -100,7 +101,16 @@ export class ColorPickerController extends Controller<HTMLElement> {
   #dragAbort: AbortController | null = null;
 
   /** Seeds the model from the initial hex value and renders every surface. */
+  /**
+   * Collapses a morph that swaps render inputs into one repaint, and refuses the
+   * pass Stimulus delivers before `connect()`.
+   */
+  readonly #repaint = new MicrotaskCoalescer(() => {
+    this.#render();
+  });
+
   override connect(): void {
+    this.#repaint.activate();
     const parsed = hexToHsla(this.valueValue);
     // When alpha is disabled, drop any alpha carried by an `#RRGGBBAA` value so
     // the model stays opaque — otherwise `hexString()` would emit `#RRGGBB`
@@ -111,8 +121,14 @@ export class ColorPickerController extends Controller<HTMLElement> {
 
   /** Cancels any active pointer drag so document listeners never leak. */
   override disconnect(): void {
+    this.#repaint.cancel();
     this.#dragAbort?.abort();
     this.#dragAbort = null;
+  }
+
+  /** Repaints when application code (or a Turbo morph) changes `alpha` at runtime. */
+  alphaValueChanged(): void {
+    this.#repaint.schedule();
   }
 
   /** Keyboard stepping on the focused channel slider (APG Slider model). */

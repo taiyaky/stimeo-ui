@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { canTakeFocus } from "../utils/focus_candidate";
 import { LayoutObserver } from "../utils/layout_observer";
 import { SafeTimeout } from "../utils/safe_timeout";
@@ -148,10 +149,8 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   /** The `tabindex` this instance lends the root for the focus fallback. */
   readonly #tabindex = new TabindexLoan();
 
-  /** Hands Turbo a pristine snapshot: the cache is written after this event. */
-  readonly #onBeforeCache = (): void => {
-    this.#restoreAll();
-  };
+  /** Hands Turbo a pristine snapshot of the bar, with every item back in place. */
+  readonly #beforeCache = new BeforeCacheReset(() => this.#restoreAll());
 
   override connect(): void {
     if (!this.hasItemsTarget || !this.hasMoreTarget) return;
@@ -161,7 +160,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
       trigger.textContent = this.moreLabelValue;
     }
 
-    document.addEventListener("turbo:before-cache", this.#onBeforeCache);
+    this.#beforeCache.activate();
     this.#layout.observe(this.element);
     this.#layout.observeViewport();
     this.update();
@@ -170,7 +169,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#layout.disconnect();
     this.#timers.clearAll();
-    document.removeEventListener("turbo:before-cache", this.#onBeforeCache);
+    this.#beforeCache.deactivate();
     this.#restoreAll();
     this.#lastHidden = null;
   }

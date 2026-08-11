@@ -445,4 +445,17 @@ describe("DateRangePickerController", () => {
     const spoken = await captureSpeech({ container: cell("2026-06-10"), steps: 0 });
     expect(spoken).toEqual(["gridcell, 10, selected"]);
   });
+
+  it("follows min swapped in place by a morph", async () => {
+    // The bound decides which day cells are disabled, so a morph that tightens it
+    // has to reach the rendered calendar — `connect()` does not run again.
+    await mount();
+    const picker = document.querySelector(
+      "[data-controller='stimeo--date-range-picker']",
+    ) as HTMLElement;
+    expect(cell("2026-06-05").getAttribute("aria-disabled")).toBeNull();
+    picker.setAttribute("data-stimeo--date-range-picker-min-value", "2026-06-10");
+    await tick();
+    expect(cell("2026-06-05").getAttribute("aria-disabled")).toBe("true");
+  });
 });

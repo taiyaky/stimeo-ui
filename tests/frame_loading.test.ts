@@ -190,18 +190,107 @@ describe("FrameLoadingController", () => {
     expect(starts).toBe(1);
   });
 
-  it("tidies hooks and clears timers on disconnect mid-load", async () => {
+  it("clears timers once the frame really leaves", async () => {
     await mount('data-stimeo--frame-loading-min-duration-value="1000"');
     const el = frame();
+    const ends: string[] = [];
+    el.addEventListener("stimeo--frame-loading:end", () => ends.push("end"));
     fire("turbo:before-fetch-request");
     expect(el.getAttribute("aria-busy")).toBe("true");
 
     el.remove();
     await vi.advanceTimersByTimeAsync(0);
-    expect(el.hasAttribute("aria-busy")).toBe(false);
-    expect(el.hasAttribute("data-frame-loading")).toBe(false);
-    // No pending finish timer fires against the detached frame.
-    expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
+    fire("turbo:frame-load", el); // would hold a finish for the remaining floor
+    vi.advanceTimersByTime(2000);
+    // A detached frame keeps the markup it had — the page being cached is rewound at
+    // `turbo:before-cache`, where the frame is still whole — but nothing may fire
+    // against it afterwards.
+    expect(ends).toEqual([]);
+  });
+
+  it("rewinds the frame's hooks for the cached snapshot", async () => {
+    await mount('data-stimeo--frame-loading-min-duration-value="1000"');
+    const ends: string[] = [];
+    frame().addEventListener("stimeo--frame-loading:end", () => ends.push("end"));
+    const inside = query("#inside") as HTMLButtonElement;
+    inside.focus();
+    fire("turbo:before-fetch-request");
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    // A snapshot taken mid-fetch would restore a frame that is busy, inert and
+    // skeletoned with nothing left to finish it. State only: no `end`, and focus
+    // stays put because the load did not complete.
+    expect(frame().hasAttribute("aria-busy")).toBe(false);
+    expect(frame().hasAttribute("data-frame-loading")).toBe(false);
+    expect(skeleton().hidden).toBe(true);
+    expect(content().hasAttribute("inert")).toBe(false);
+    expect(ends).toEqual([]);
+    expect(document.activeElement).not.toBe(inside);
+  });
+
+  it("rewinds an overlay for the cached snapshot too", async () => {
+    await mount(
+      "",
+      '<div data-stimeo--frame-loading-target="overlay" hidden></div><div data-stimeo--frame-loading-target="content">c</div>',
+    );
+    const overlay = query("[data-stimeo--frame-loading-target='overlay']");
+    fire("turbo:before-fetch-request");
+    expect(overlay.hidden).toBe(false);
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    // Both optional targets are the controller's to hide, so a snapshot must not
+    // keep an overlay up over content that is no longer loading.
+    expect(overlay.hidden).toBe(true);
+  });
+
+  it("leaves an idle frame's markup alone on the cached snapshot", async () => {
+    await mount(
+      "",
+      '<div data-stimeo--frame-loading-target="skeleton"></div><div data-stimeo--frame-loading-target="content">c</div>',
+    );
+    // No fetch has started, so the visible skeleton is the consumer's own render.
+    // The rewind only undoes what this controller applied.
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(skeleton().hidden).toBe(false);
+  });
+
+  it("keeps a load in flight across an in-page move", async () => {
+    await mount('data-stimeo--frame-loading-min-duration-value="1000"');
+    const ends: string[] = [];
+    frame().addEventListener("stimeo--frame-loading:end", () => ends.push("end"));
+    fire("turbo:before-fetch-request");
+
+    // A consumer re-inserting the frame disconnects and reconnects the SAME
+    // instance; the fetch is still running, so the loading state has to survive.
+    const controller = application.getControllerForElementAndIdentifier(
+      frame(),
+      "stimeo--frame-loading",
+    ) as FrameLoadingController;
+    controller.disconnect();
+    controller.connect();
+    expect(frame().getAttribute("aria-busy")).toBe("true");
+
+    fire("turbo:frame-load");
+    vi.advanceTimersByTime(1000);
+    expect(frame().hasAttribute("aria-busy")).toBe(false);
+    expect(ends).toEqual(["end"]);
+  });
+
+  it("keeps the held finish across an in-page move", async () => {
+    await mount('data-stimeo--frame-loading-min-duration-value="1000"');
+    fire("turbo:before-fetch-request");
+    vi.advanceTimersByTime(300);
+    fire("turbo:frame-load"); // holds the finish until +700
+
+    const controller = application.getControllerForElementAndIdentifier(
+      frame(),
+      "stimeo--frame-loading",
+    ) as FrameLoadingController;
+    controller.disconnect();
+    controller.connect();
+    vi.advanceTimersByTime(700);
+    // Losing this timer strands the frame busy and inert for the rest of the session.
+    expect(frame().hasAttribute("aria-busy")).toBe(false);
+    expect(skeleton().hidden).toBe(true);
   });
 
   it("has no a11y violations", async () => {

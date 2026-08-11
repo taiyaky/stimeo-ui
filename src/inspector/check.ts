@@ -1,4 +1,4 @@
-import { neutralizeErb } from "./erb";
+import { erbElements, erbRanges, neutralizeErb } from "./erb";
 import {
   actionDescriptors,
   controllerIdentifiers,
@@ -74,24 +74,24 @@ import {
  */
 export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
-  const tree = parseHtml(neutralizeErb(source));
+  const tree = parseHtml(neutralizeErb(source), erbElements(source));
   const known = manifest.controllers;
   const knownIdentifiers = Object.keys(known);
 
   /** `[start, end)` offsets of every ERB tag in the raw source. */
-  const erbRanges = [...source.matchAll(/<%[\s\S]*?%>/g)].map(
-    (m) => [m.index ?? 0, (m.index ?? 0) + m[0].length] as const,
-  );
+  const ranges = erbRanges(source);
 
   /**
    * Whether the attribute's value text was (even partially) ERB-generated.
    * Neutralization preserves offsets, so the parser's value range maps 1:1
-   * onto the raw source.
+   * onto the raw source. An attribute decoded from a Rails `data:` hash lives
+   * inside an ERB tag by construction and answers for itself instead.
    */
   const isDynamicValue = (attr: ParsedAttr): boolean => {
+    if (attr.dynamicValue !== undefined) return attr.dynamicValue;
     const { valueStart, valueEnd } = attr;
     if (valueStart === undefined || valueEnd === undefined) return false;
-    return erbRanges.some(([start, end]) => start < valueEnd && end > valueStart);
+    return ranges.some(([start, end]) => start < valueEnd && end > valueStart);
   };
 
   /**
@@ -116,7 +116,17 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
     return when.equals.includes(hostAttr ? hostAttr.value.trim() : when.default);
   };
 
-  /** True when `node` or an ancestor opts out of `code` via the ignore attr. */
+  /**
+   * True when `node` or an ancestor opts out of `code` via the ignore attr.
+   *
+   * The blanket form — an ignore attribute with no codes — has to be *written*
+   * to hold. A generated value reads as empty here whatever it renders as
+   * (`data-stimeo-ignore="<%= codes %>"`, or the same hash entry set to an
+   * expression), and taking that for the blanket form would let a value nobody
+   * can read silence every diagnostic in the subtree, including the definite
+   * ones this engine exists to report. Codes that *are* spelled out still
+   * suppress themselves, generated neighbors or not.
+   */
   const suppressed = (node: ElementNode, code: DiagnosticCode): boolean => {
     if (code === "unknown-ignore-code") return false; // meta-diagnostic: never suppressible
     let current: ElementNode | null = node;
@@ -124,7 +134,9 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       const ignore = current.attrs.find((a) => a.name === IGNORE_ATTR);
       if (ignore) {
         const codes = ignore.value.trim();
-        if (codes.length === 0 || codes.split(/\s+/).includes(code)) return true;
+        if (codes.length === 0) {
+          if (!isDynamicValue(ignore)) return true;
+        } else if (codes.split(/\s+/).includes(code)) return true;
       }
       current = current.parent;
     }
@@ -134,6 +146,60 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   /** Suppression-aware diagnostic sink; `owner` anchors the ignore lookup. */
   const report: Reporter = (owner, code, severity, message, at, suggestion, fix): void => {
     if (!suppressed(owner, code)) push(diagnostics, code, severity, message, at, suggestion, fix);
+  };
+
+  /**
+   * Elements that may carry wiring the checker cannot name: a helper whose
+   * `data:` option is not a literal hash, and markup whose `data-controller`
+   * value is ERB-generated. Either one can host a controller or declare a
+   * target that never reaches the tree, which makes an *absence* around it
+   * undecidable rather than wrong — so the structural diagnostics that rest on
+   * absence drop to warnings instead of failing a build over markup nobody can
+   * see. Names that *are* written stay fully checked; only the conclusions
+   * drawn from silence are softened.
+   */
+  const unresolved = new Set<ElementNode>();
+
+  /**
+   * Target declarations whose *name* is generated. The element is there and the
+   * controller does own it — only which target it registers as is unknown, so
+   * it hides one name from the set below without hiding the element.
+   */
+  const unnamedTargets: Array<{ node: ElementNode; identifier: string }> = [];
+
+  /**
+   * Whether `container` may hold a target of `identifier` that belongs to
+   * `scope` and cannot be read.
+   *
+   * Ownership is what makes this answerable: a helper nobody can enumerate
+   * hides targets from the **nearest** enclosing controller of that identifier
+   * and from no other, because that is the one the runtime would hand them to.
+   * An outer scope of the same identifier is therefore still judged on what the
+   * template plainly says.
+   */
+  const targetsUnreadable = (
+    container: ElementNode,
+    scope: ElementNode,
+    identifier: string,
+  ): boolean => {
+    for (const node of unresolved) {
+      if (isWithin(node, container) && findOwner(node, identifier) === scope) return true;
+    }
+    for (const { node, identifier: hidden } of unnamedTargets) {
+      if (hidden !== identifier) continue;
+      if (isWithin(node, container) && findOwner(node, identifier) === scope) return true;
+    }
+    return false;
+  };
+
+  /** Whether `node` or one of its ancestors is unresolved. */
+  const unresolvedAbove = (node: ElementNode): boolean => {
+    let current: ElementNode | null = node;
+    while (current && current.tag !== "#root") {
+      if (unresolved.has(current)) return true;
+      current = current.parent;
+    }
+    return false;
   };
 
   /** Controller scope registrations: a node declaring `data-controller`. */
@@ -254,6 +320,10 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   const declarationCandidates: ElementNode[] = [];
 
   walk(tree, (node) => {
+    const declaredController = node.attrs.find((a) => a.name === "data-controller");
+    if (node.opaque || (declaredController && isDynamicValue(declaredController))) {
+      unresolved.add(node);
+    }
     if (declarationAttrs.size > 0 && node.attrs.some((a) => declarationAttrs.has(a.name))) {
       declarationCandidates.push(node);
     }
@@ -376,14 +446,22 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           if (targetName.length > 0) {
             recordPresence(owner, targetIdentifier, targetName);
             recordTargetNode(owner, targetIdentifier, targetName, node);
+          } else if (isDynamicValue(attr)) {
+            // The declaration is real; only its name is generated. Counting it
+            // as absent would report a target the page may well register.
+            unnamedTargets.push({ node, identifier: targetIdentifier });
           }
         } else if (!inDeclaredFragment(node, targetIdentifier)) {
+          // An unresolved ancestor is the one place the host could still be,
+          // so the target is unplaced rather than orphaned.
+          const uncertain = unresolvedAbove(node);
           report(
             node,
             "orphan-target",
-            "error",
+            uncertain ? "warning" : "error",
             `Target "${attr.name}" has no enclosing controller "${targetIdentifier}".`,
             attr,
+            uncertain ? UNRESOLVED_HOST_HINT : undefined,
           );
         }
         continue;
@@ -452,19 +530,38 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
     }
   });
 
+  /**
+   * Whether the targets of `identifier` that `scope` owns can be read
+   * exhaustively from within `container` (the scope itself, or one of its
+   * container targets when a rule counts per container).
+   *
+   * A scope declared on a Rails helper cannot be: the helper's own rendered
+   * subtree is invisible, so a `data:`-declared `stimeo--listbox` on `f.select`
+   * would otherwise be reported as missing every target the helper itself
+   * emits. Anything unreadable that the same scope would own hides targets the
+   * same way.
+   */
+  const scopeIsComplete = (
+    container: ElementNode,
+    scope: ElementNode,
+    identifier: string,
+  ): boolean => container.origin === "markup" && !targetsUnreadable(container, scope, identifier);
+
   // --- Stage 2: required targets per scope ---------------------------------
   for (const { node, identifier } of scopes) {
     const controller = known[identifier];
     if (!controller) continue;
+    const complete = scopeIsComplete(node, node, identifier);
     const present = presence.get(node)?.get(identifier) ?? new Set<string>();
     for (const required of controller.requiredTargets) {
       if (!present.has(required)) {
         report(
           node,
           "missing-required-target",
-          "error",
+          complete ? "error" : "warning",
           `"${identifier}" is missing required target "${required}".`,
           node,
+          complete ? undefined : UNRESOLVED_TARGET_HINT,
         );
       }
     }
@@ -477,6 +574,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   for (const { node, identifier } of scopes) {
     const controller = known[identifier];
     if (!controller) continue;
+    const complete = scopeIsComplete(node, node, identifier);
     const present = presence.get(node)?.get(identifier) ?? new Set<string>();
     for (const rule of controller.conditionalTargets) {
       if (!present.has(rule.whenPresent)) continue;
@@ -485,10 +583,10 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       report(
         node,
         "missing-conditional-target",
-        "error",
+        complete ? "error" : "warning",
         `"${identifier}" has a "${rule.whenPresent}" target, which also requires ${list(missing)}.`,
         node,
-        rule.suggestion,
+        complete ? rule.suggestion : UNRESOLVED_TARGET_HINT,
       );
     }
   }
@@ -518,6 +616,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
         ? "error"
         : (req.severity ?? "error");
       for (const el of elements) {
+        if (!hasReadableMarkup(el)) continue;
         // Contents are judged per element: two sibling menus of one menubar can
         // legitimately disagree about whether the requirement applies to them.
         if (!contentHolds(node, identifier, el, req.whenContains)) continue;
@@ -539,6 +638,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       const reach = req.reach ?? "tab";
       const elements = targetNodes.get(node)?.get(identifier)?.get(req.target) ?? [];
       for (const el of elements) {
+        if (!hasReadableMarkup(el)) continue;
         if (!isFocusable(el, reach)) {
           const problem =
             reach === "tab"
@@ -568,6 +668,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           : (targetNodes.get(node)?.get(identifier)?.get(rule.target) ?? []);
       const where = rule.target === "" ? "scope element" : `"${rule.target}" target`;
       for (const el of elements) {
+        if (!hasReadableMarkup(el)) continue;
         for (const name of rule.attrs) {
           const attr = el.attrs.find((a) => a.name === name);
           if (!attr) continue;
@@ -600,6 +701,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           : (targetNodes.get(node)?.get(identifier)?.get(rule.target) ?? []);
       const where = rule.target === "" ? "scope element" : `"${rule.target}" target`;
       for (const el of elements) {
+        if (!hasReadableMarkup(el)) continue;
         if (!contentHolds(node, identifier, el, rule.whenContains)) continue;
         for (const name of rule.attrs) {
           const attr = el.attrs.find((a) => a.name === name);
@@ -645,6 +747,9 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       if (conditionHolds(node, identifier, when) !== true) continue;
       const hostContext = when ? ` (${when.value} ${list(when.equals)})` : "";
       for (const el of elements) {
+        // An unenumerable `data:` hash may hold the co-controller's value
+        // attribute itself, so its absence cannot be read as a default.
+        if (el.opaque) continue;
         const declared = el.attrs.find((a) => a.name === "data-controller");
         if (!declared || !controllerIdentifiers(declared.value).includes(rule.coController)) {
           continue;
@@ -698,6 +803,9 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           : (targetNodes.get(node)?.get(identifier)?.get(rule.target) ?? []);
       const where = rule.target === "" ? "scope element" : `"${rule.target}" target`;
       for (const el of elements) {
+        // Same reason as the composition pass: a hash nobody can enumerate may
+        // already name the companion.
+        if (el.opaque) continue;
         const declared = el.attrs.find((a) => a.name === "data-controller");
         if (declared && isDynamicValue(declared)) continue;
         if (declared && controllerIdentifiers(declared.value).includes(rule.controller)) continue;
@@ -818,15 +926,19 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           }
         }
         if (rule.min !== undefined && matched.length < rule.min) {
+          // A short count only means "short" where every element is visible: a
+          // container rendered by a helper may hold the missing ones. Over-count
+          // needs no such guard — the literal elements stand on their own.
+          const complete = scopeIsComplete(container, node, identifier);
           // Nothing to point at when the count is short, so the container is
           // the anchor — it is also the element the author has to fix.
           report(
             container,
             "cardinality-violation",
-            "error",
+            complete ? "error" : "warning",
             `"${identifier}" requires at least ${rule.min} ${what} per ${where}, but found ${matched.length}.`,
             container,
-            rule.suggestion,
+            complete ? rule.suggestion : UNRESOLVED_TARGET_HINT,
           );
         }
       }
@@ -876,6 +988,28 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
 
   diagnostics.sort((a, b) => a.line - b.line || a.column - b.column);
   return diagnostics;
+}
+
+/**
+ * Why a structural check stopped at a warning. Both hints say "the checker
+ * cannot see this", never "the markup is wrong" — the reader needs the
+ * difference, because the two call for opposite fixes.
+ */
+const UNRESOLVED_TARGET_HINT =
+  "Part of this scope is rendered by a helper or a non-literal data: hash, so the target may exist at runtime.";
+/** See {@link UNRESOLVED_TARGET_HINT}. */
+const UNRESOLVED_HOST_HINT =
+  "An enclosing helper's data: option is not a literal hash, so the host controller may be declared at runtime.";
+
+/**
+ * Whether the element's *whole* attribute set is readable from the template.
+ * An element decoded from a Rails `data:` hash carries exactly its `data-*`
+ * attributes: its tag name, `role`, `aria-*` and `tabindex` are supplied by the
+ * helper and never appear in the source, so their absence is not evidence and a
+ * rule that reads them has to stay silent rather than report the whole helper.
+ */
+function hasReadableMarkup(el: ElementNode): boolean {
+  return el.origin === "markup";
 }
 
 /**
@@ -1142,9 +1276,12 @@ function inDeclaredFragment(node: ElementNode, identifier: string): boolean {
 
 /**
  * Length of the token an anchor points at: the attribute name, or the opening
- * `<tag` (the `<` plus the tag name) for element anchors.
+ * `<tag` (the `<` plus the tag name) for element anchors. Both are the text the
+ * source holds — except where the source spells the anchor differently from the
+ * value carried here, in which case it says so with `sourceLength`.
  */
 function anchorLength(at: Anchor): number {
+  if (at.sourceLength !== undefined) return at.sourceLength;
   return "name" in at ? at.name.length : at.tag.length + 1;
 }
 
