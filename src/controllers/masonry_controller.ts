@@ -2,7 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { LayoutObserver } from "../utils/layout_observer";
 
 /** CSS custom property exposing the current column count to consumer CSS. */
-const COLUMNS_PROPERTY = "--stimeo-masonry-columns";
+const COLUMNS_PROPERTY = "--stimeo--masonry-columns";
 
 /**
  * Headless **Masonry** layout helper: assigns each item to the shortest column so
@@ -20,7 +20,7 @@ const COLUMNS_PROPERTY = "--stimeo-masonry-columns";
  * The column count is derived responsively from the container width and
  * `minColumnWidth`; each item is then placed into whichever column is currently
  * shortest (measured from item heights). The count is published on the controller
- * element as the `--stimeo-masonry-columns` custom property and each item gets a
+ * element as the `--stimeo--masonry-columns` custom property and each item gets a
  * `data-column` index, so the consumer's CSS owns the actual placement.
  *
  * @remarks

@@ -178,6 +178,8 @@ export class MeterController extends Controller<HTMLElement> {
    * Reflects value/range onto ARIA, the segment onto `data-state`, and the ratio.
    * The reading is derived once and returned, so the `change` detail reports the
    * same numbers the DOM just received.
+   *
+   * @stimeoRenderRoot
    */
   #render(): MeterReading {
     const value = this.#clamp(this.valueValue);
@@ -189,7 +191,7 @@ export class MeterController extends Controller<HTMLElement> {
     this.element.setAttribute("aria-valuemin", String(this.minValue));
     this.element.setAttribute("aria-valuemax", String(this.maxValue));
     this.element.setAttribute("aria-valuenow", String(reading.value));
-    this.element.style.setProperty("--stimeo-meter-ratio", String(reading.ratio));
+    this.element.style.setProperty("--stimeo--meter-ratio", String(reading.ratio));
     this.element.setAttribute("data-state", reading.state);
     this.#applyValueText(reading);
     return reading;

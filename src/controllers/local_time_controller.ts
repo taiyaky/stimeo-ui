@@ -110,6 +110,8 @@ export class LocalTimeController extends Controller<HTMLElement> {
    * its condition is that formatting was applied, and a repaint applies it with a
    * new result. A pass that cannot format writes nothing and emits nothing, so the
    * authored absolute text stays as the fallback.
+   *
+   * @stimeoRenderRoot
    */
   #render(): void {
     const date = this.#parse();

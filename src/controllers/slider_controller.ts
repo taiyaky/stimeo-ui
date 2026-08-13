@@ -1,7 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { isRtl } from "../utils/logical_scroll";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { OwnedPointerSession } from "../utils/owned_pointer_session";
 import { rangeFraction } from "../utils/range";
+import { snapSteppedValue, stepSteppedValue } from "../utils/stepped_value";
 
 /** Name of the CSS custom property exposing the thumb position (0..1). */
 const FRACTION_PROPERTY = "--stimeo--slider-fraction";
@@ -17,7 +20,7 @@ const FRACTION_PROPERTY = "--stimeo--slider-fraction";
  *        data-stimeo--slider-value-value="40">
  *     <div data-stimeo--slider-target="track"
  *          data-action="pointerdown->stimeo--slider#onPointerDown">
- *       <div data-stimeo--slider-target="thumb" role="slider" tabindex="0"
+ *       <div data-stimeo--slider-target="thumb" role="slider" tabindex="0" aria-label="Volume"
  *            aria-valuemin="0" aria-valuemax="100" aria-valuenow="40"
  *            data-action="keydown->stimeo--slider#onKeydown"></div>
  *     </div>
@@ -37,6 +40,8 @@ const FRACTION_PROPERTY = "--stimeo--slider-fraction";
  * - `ArrowRight`/`ArrowUp` increase and `ArrowLeft`/`ArrowDown` decrease by one
  *   step; `Home`/`End` jump to the min/max; `PageUp`/`PageDown` move by ten steps.
  * - Pointer press/drag on the track sets the value from the pointer position.
+ * - `step` must be finite and positive; invalid runtime input falls back to `1`.
+ *   Finite endpoints remain allowed even when they do not align to the step grid.
  *
  * The fraction is a value ratio, not a position, so only the consumer knows
  * whether their track mirrors under RTL. Set `logicalTrack` to declare that it
@@ -65,8 +70,11 @@ export class SliderController extends Controller<HTMLElement> {
   declare valueValue: number;
   declare logicalTrackValue: boolean;
 
-  /** Aborts in-progress pointer-drag listeners when the drag ends or on teardown. */
-  #dragAbort: AbortController | null = null;
+  /** One initiating pointer owns each live drag and its stable target snapshot. */
+  #drag: SliderDrag | null = null;
+
+  /** Collapses a morph that swaps several render Values into one silent repaint. */
+  readonly #repaint = new MicrotaskCoalescer(() => this.#render());
 
   /** Whether the consumer declared a mirroring track and the direction mirrors it. */
   get #mirrored(): boolean {
@@ -75,36 +83,80 @@ export class SliderController extends Controller<HTMLElement> {
 
   /** Clamps the initial value and renders the starting position. */
   override connect(): void {
-    this.#setValue(this.valueValue, { silent: true });
+    this.#repaint.activate();
+    this.#commit(this.valueValue, false);
   }
 
   /** Cancels any active pointer drag so document listeners never leak. */
   override disconnect(): void {
-    this.#dragAbort?.abort();
-    this.#dragAbort = null;
+    this.#repaint.cancel();
+    this.#endDrag();
+  }
+
+  /** Silently repaints a minimum changed by application code or a Turbo morph. */
+  minValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Silently repaints a maximum changed by application code or a Turbo morph. */
+  maxValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Silently repaints a step changed by application code or a Turbo morph. */
+  stepValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Silently repaints a value changed by application code or a Turbo morph. */
+  valueValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Hydrates a thumb inserted or replaced at runtime with the current ARIA state. */
+  thumbTargetConnected(thumb: HTMLElement): void {
+    const value = this.#currentValue();
+    this.#renderThumb(thumb, value);
+    this.#renderFraction(value);
+    if (this.#drag && this.#drag.thumb === null) {
+      this.#drag.thumb = thumb;
+      thumb.focus();
+    }
+    this.#repaint.schedule();
+  }
+
+  /** Drops the stale focus owner while allowing a live track gesture to continue. */
+  thumbTargetDisconnected(thumb: HTMLElement): void {
+    if (this.#drag?.thumb === thumb) this.#drag.thumb = null;
+  }
+
+  /** Ends a gesture whose geometry target disappeared or ceased being a target. */
+  trackTargetDisconnected(track: HTMLElement): void {
+    if (this.#drag?.track === track) this.#endDrag();
   }
 
   /** Handles keyboard stepping per the APG slider model. */
   onKeydown(event: KeyboardEvent): void {
     if (isReservedArrowChord(event)) return;
-    const big = this.stepValue * 10;
     let next: number | null = null;
+    const current = this.#currentValue();
+    const range = this.#steppedRange;
     // On a mirrored track the greater value sits at the visual left, so the
     // horizontal pair trades places; the vertical pair passes through.
     switch (this.#mirrored ? logicalArrowKey(event.key, this.element) : event.key) {
       case "ArrowRight":
       case "ArrowUp":
-        next = this.valueValue + this.stepValue;
+        next = stepSteppedValue(current, 1, range);
         break;
       case "ArrowLeft":
       case "ArrowDown":
-        next = this.valueValue - this.stepValue;
+        next = stepSteppedValue(current, -1, range);
         break;
       case "PageUp":
-        next = this.valueValue + big;
+        next = stepSteppedValue(current, 10, range);
         break;
       case "PageDown":
-        next = this.valueValue - big;
+        next = stepSteppedValue(current, -10, range);
         break;
       case "Home":
         next = this.minValue;
@@ -116,70 +168,122 @@ export class SliderController extends Controller<HTMLElement> {
         return;
     }
     event.preventDefault();
-    this.#setValue(next);
+    this.#commit(next, true);
   }
 
   /** Begins a pointer drag: sets the value and tracks subsequent movement. */
   onPointerDown(event: PointerEvent): void {
-    if (!this.hasTrackTarget) return;
-    event.preventDefault();
+    if (event.button !== 0 || this.#drag || !this.hasTrackTarget || !this.hasThumbTarget) return;
+    const track = this.trackTarget;
+    const thumb = this.thumbTarget;
     // Resolve the direction once for the whole gesture: reading it per move
     // would query computed style on every frame, and a drag that flipped
     // mid-gesture would be incoherent anyway.
     const mirrored = this.#mirrored;
-    this.#updateFromClientX(event.clientX, mirrored);
-    if (this.hasThumbTarget) this.thumbTarget.focus();
+    const value = this.#valueFromClientX(event.clientX, mirrored, track);
+    if (value === null) return;
+    event.preventDefault();
+    this.#commit(value, true);
+    thumb.focus();
 
-    this.#dragAbort?.abort();
-    const abort = new AbortController();
-    this.#dragAbort = abort;
-    const onMove = (move: PointerEvent): void => this.#updateFromClientX(move.clientX, mirrored);
-    const onUp = (): void => {
-      abort.abort();
-      this.#dragAbort = null;
-    };
-    document.addEventListener("pointermove", onMove, { signal: abort.signal });
-    document.addEventListener("pointerup", onUp, { signal: abort.signal });
-    // pointercancel fires when the gesture is interrupted (OS gesture, scroll
-    // takeover, device switch); clean up the same way so no listener leaks.
-    document.addEventListener("pointercancel", onUp, { signal: abort.signal });
+    const drag: SliderDrag = { pointer: null, track, thumb };
+    drag.pointer = new OwnedPointerSession(event, track, {
+      move: (move) => {
+        if (!track.isConnected) {
+          this.#endDrag();
+          return;
+        }
+        const moved = this.#valueFromClientX(move.clientX, mirrored, track);
+        if (moved !== null) this.#commit(moved, true);
+      },
+      end: () => {
+        if (this.#drag === drag) this.#drag = null;
+      },
+    });
+    this.#drag = drag;
   }
 
-  /** Maps a pointer X coordinate to a value using the track's geometry. */
-  #updateFromClientX(clientX: number, mirrored: boolean): void {
-    const rect = this.trackTarget.getBoundingClientRect();
-    if (rect.width === 0) return;
+  /** Maps a pointer X coordinate to a raw value using a stable track snapshot. */
+  #valueFromClientX(clientX: number, mirrored: boolean, track: HTMLElement): number | null {
+    const rect = track.getBoundingClientRect();
+    if (rect.width === 0) return null;
     const offset = (clientX - rect.left) / rect.width;
     const fraction = mirrored ? 1 - offset : offset;
-    this.#setValue(this.minValue + fraction * (this.maxValue - this.minValue));
+    return this.minValue + fraction * (this.maxValue - this.minValue);
   }
 
   /**
-   * Clamps `raw` to `[min, max]`, snaps it to the nearest step, stores it, and
-   * reflects the new state on the thumb's ARIA attributes and the fraction
-   * custom property. Dispatches `change` (detail `{ value }`) on a real value
-   * change — symmetric with `range-slider` — unless `silent` (the initial
-   * connect render, which is not a user edit).
+   * Stores a normalized value and renders synchronously for responsive input.
+   * Morph callbacks use {@link #render} instead, so they never write Values back
+   * or dispatch a user-facing change event.
    */
-  #setValue(raw: number, { silent = false }: { silent?: boolean } = {}): void {
-    const clamped = Math.min(this.maxValue, Math.max(this.minValue, raw));
-    const stepped =
-      this.stepValue > 0
-        ? Math.round((clamped - this.minValue) / this.stepValue) * this.stepValue + this.minValue
-        : clamped;
-    const value = Math.min(this.maxValue, Math.max(this.minValue, stepped));
-    const changed = value !== this.valueValue;
-    this.valueValue = value;
-
-    if (this.hasThumbTarget) {
-      this.thumbTarget.setAttribute("aria-valuemin", String(this.minValue));
-      this.thumbTarget.setAttribute("aria-valuemax", String(this.maxValue));
-      this.thumbTarget.setAttribute("aria-valuenow", String(value));
-    }
-
-    const fraction = rangeFraction(value, this.minValue, this.maxValue);
-    this.element.style.setProperty(FRACTION_PROPERTY, String(fraction));
-
-    if (changed && !silent) this.dispatch("change", { detail: { value } });
+  #commit(raw: number, notify: boolean): void {
+    const previous = this.#currentValue();
+    const value = snapSteppedValue(raw, this.#steppedRange);
+    if (!Object.is(this.valueValue, value)) this.valueValue = value;
+    this.#renderValue(value);
+    if (notify && value !== previous) this.dispatch("change", { detail: { value } });
   }
+
+  /**
+   * Reflects the normalized current Value without mutating or dispatching it.
+   *
+   * @stimeoRenderRoot
+   */
+  #render(): void {
+    this.#renderValue(this.#currentValue());
+  }
+
+  /** Reflects one normalized value on the current target and CSS output. */
+  #renderValue(value: number): void {
+    if (this.hasThumbTarget) {
+      this.#renderThumb(this.thumbTarget, value);
+    }
+    this.#renderFraction(value);
+  }
+
+  /** Writes only ARIA values that differ, including on a replacement target. */
+  #renderThumb(thumb: HTMLElement, value: number): void {
+    const attributes = {
+      "aria-valuemin": String(this.minValue),
+      "aria-valuemax": String(this.maxValue),
+      "aria-valuenow": String(value),
+    };
+    for (const [name, next] of Object.entries(attributes)) {
+      if (thumb.getAttribute(name) !== next) thumb.setAttribute(name, next);
+    }
+  }
+
+  /** Writes the behavior-only positioning hook only when its value changed. */
+  #renderFraction(value: number): void {
+    const fraction = rangeFraction(value, this.minValue, this.maxValue);
+    const next = String(fraction);
+    if (this.element.style.getPropertyValue(FRACTION_PROPERTY) !== next) {
+      this.element.style.setProperty(FRACTION_PROPERTY, next);
+    }
+  }
+
+  /** Current normalized value derived from the live declarative inputs. */
+  #currentValue(): number {
+    return snapSteppedValue(this.valueValue, this.#steppedRange);
+  }
+
+  /** Shared range configuration; finite endpoints remain allowed off the grid. */
+  get #steppedRange() {
+    return { min: this.minValue, max: this.maxValue, step: this.stepValue };
+  }
+
+  /** Ends the current pointer session without dispatching another change. */
+  #endDrag(): void {
+    const drag = this.#drag;
+    this.#drag = null;
+    drag?.pointer?.end();
+  }
+}
+
+/** Stable DOM and gesture state owned for the duration of one pointer drag. */
+interface SliderDrag {
+  pointer: OwnedPointerSession | null;
+  readonly track: HTMLElement;
+  thumb: HTMLElement | null;
 }

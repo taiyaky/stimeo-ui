@@ -21,7 +21,7 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  * @remarks
  * Behavior only. Each step `<li>` gets a `data-state` (`complete`/`current`/
  * `upcoming`) derived from the current index; the consumer draws the circles,
- * lines, and numbers from those hooks. A `--stimeo-step-indicator-ratio`
+ * lines, and numbers from those hooks. A `--stimeo--step-indicator-ratio`
  * (0–1) custom property on the root expresses overall progress for CSS.
  *
  * Behavior provided:
@@ -108,6 +108,8 @@ export class StepIndicatorController extends Controller<HTMLElement> {
    * A pure function of the step set and `current`, so running it again writes the
    * same values — which is what lets the action path paint synchronously (the event
    * goes out after the DOM is updated) while a coalesced pass may still follow.
+   *
+   * @stimeoRenderRoot
    */
   #render(): void {
     const total = this.stepTargets.length;
@@ -122,7 +124,7 @@ export class StepIndicatorController extends Controller<HTMLElement> {
       }
     });
     const ratio = total > 1 ? current / (total - 1) : 0;
-    this.element.style.setProperty("--stimeo-step-indicator-ratio", String(ratio));
+    this.element.style.setProperty("--stimeo--step-indicator-ratio", String(ratio));
   }
 
   /**

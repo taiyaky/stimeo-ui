@@ -167,7 +167,11 @@ export class PaginationController extends Controller<HTMLElement> {
     this.#render();
   }
 
-  /** Syncs `aria-current` on the page buttons and the prev/next `disabled` state. */
+  /**
+   * Syncs `aria-current` on the page buttons and the prev/next `disabled` state.
+   *
+   * @stimeoRenderRoot
+   */
   #render(): void {
     const page = this.#page;
     for (const button of this.pageTargets) {

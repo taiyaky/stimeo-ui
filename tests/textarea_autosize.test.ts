@@ -80,7 +80,7 @@ describe("TextareaAutosizeController", () => {
     const el = await mount();
     type(el, "a\nb\nc");
     expect(el.style.height).toBe(`${LINE * 3}px`);
-    expect(el.style.getPropertyValue("--stimeo-textarea-rows")).toBe("3");
+    expect(el.style.getPropertyValue("--stimeo--textarea-rows")).toBe("3");
   });
 
   it("never shrinks below minRows", async () => {

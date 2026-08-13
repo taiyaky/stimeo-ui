@@ -1,6 +1,6 @@
 <%# Markup for the progress (progress bar) demo.
     The library syncs role="progressbar" and aria-value*, and exposes the ratio as
-    --stimeo-progress-ratio (0–1). The bar's width and color live in demo.css.
+    --stimeo--progress-ratio (0–1). The bar's width and color live in demo.css.
     The control buttons sit outside the progressbar (a progressbar must not contain
     interactive children), so they can't drive it through a Stimulus data-action —
     that only binds inside the controller's own element. Instead they dispatch the
@@ -17,6 +17,8 @@
     aria-valuenow="40"
     data-stimeo--progress-value-value="40"
     data-stimeo--progress-value-text-value="<%= t('components.progress.demo.value_text') %>"
+    data-stimeo--progress-announce-text-value="<%=
+      t('components.progress.demo.announce_complete') %>"
     data-action="progress:set->stimeo--progress#setValue">
     <div class="progress__bar" data-stimeo--progress-target="bar"></div>
   </div>
@@ -46,5 +48,12 @@
     aria-valuemax="100"
     data-stimeo--progress-indeterminate-value="true">
     <div class="progress__bar" data-stimeo--progress-target="bar"></div>
+  </div>
+
+  <%# Shared announcer: aria-valuenow is state a reader can query, not a notification.
+      Only reaching the end is news, so that is the one thing read out. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

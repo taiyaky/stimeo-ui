@@ -325,7 +325,11 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     this.#render();
   }
 
-  /** Builds the six-week grid and binds range/roving/disabled state per cell. */
+  /**
+   * Builds the six-week grid and binds range/roving/disabled state per cell.
+   *
+   * @stimeoRenderRoot
+   */
   #render(): void {
     const info = parseISOMonthString(this.#viewMonth);
     if (!info) return;

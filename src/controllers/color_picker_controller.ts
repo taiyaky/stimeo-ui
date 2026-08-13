@@ -5,7 +5,7 @@ import { isRtl } from "../utils/logical_scroll";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
 /** CSS custom property exposing the current color to consumer CSS. */
-const COLOR_PROPERTY = "--stimeo-color";
+const COLOR_PROPERTY = "--stimeo--color";
 
 /** A color channel slider, identified by its `data-channel` attribute. */
 type Channel = "hue" | "saturation" | "lightness" | "alpha";
@@ -50,12 +50,12 @@ interface Hsla {
  * adjustment is keyboard- and screen-reader-operable. Each slider exposes
  * `aria-valuenow` and a human-readable `aria-valuetext` (e.g. "Hue 210 degrees");
  * the hex input stays two-way synced; the current color is published on the
- * preview and root as the `--stimeo-color` custom property and mirrored into a
+ * preview and root as the `--stimeo--color` custom property and mirrored into a
  * hidden form field.
  *
  * @remarks
  * Behavior only — the swatch/gradient visuals are the consumer's CSS/canvas, fed
- * by `--stimeo-color`. Only the consumer knows whether a channel track mirrors
+ * by `--stimeo--color`. Only the consumer knows whether a channel track mirrors
  * under RTL: set `logicalTrack` to declare that it does, and the pointer mapping
  * and horizontal arrow pair follow the writing direction. Left unset, nothing
  * here reads `direction`. A gradient has no logical `to` keyword, so mirroring
@@ -225,7 +225,11 @@ export class ColorPickerController extends Controller<HTMLElement> {
     this.#render();
   }
 
-  /** Reflects the model onto sliders, the hex input, preview, and form field. */
+  /**
+   * Reflects the model onto sliders, the hex input, preview, and form field.
+   *
+   * @stimeoRenderRoot
+   */
   #render(): void {
     for (const slider of this.sliderTargets) {
       const channel = this.#channelOf(slider);

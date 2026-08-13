@@ -19,8 +19,10 @@ import {
   type DiagnosticSeverity,
   type DocumentCondition,
   type ElementCondition,
+  type HostRequirement,
   type Manifest,
   type ValueCondition,
+  type ValueConstraint,
 } from "./types";
 
 /**
@@ -31,6 +33,8 @@ import {
  * The check runs in staged passes:
  * - **Stage 1 (names/spelling):** every `stimeo--*` controller, target, value,
  *   and `data-action` controller **and method** must exist in the manifest.
+ *   Literal Values must also satisfy their declared semantic constraints and
+ *   statically decidable cross-Value relationships.
  * - **Stage 2 (structure):** required targets must be present within their
  *   controller scope, and targets must have an owning controller.
  * - **Stage 3 (accessibility):** ARIA the controller relies on but does not set
@@ -114,6 +118,50 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
     );
     if (hostAttr && isDynamicValue(hostAttr)) return null;
     return when.equals.includes(hostAttr ? hostAttr.value.trim() : when.default);
+  };
+
+  /**
+   * Resolves the inherited `contenteditable` state from statically readable
+   * markup. Missing and invalid values inherit; `false` is a boundary.
+   */
+  const isContentEditable = (element: ElementNode): boolean | null => {
+    let current: ElementNode | null = element;
+    while (current && current.tag !== "#root") {
+      const attr = current.attrs.find((candidate) => candidate.name === "contenteditable");
+      if (attr) {
+        if (isDynamicValue(attr)) return null;
+        const value = attr.value.trim().toLowerCase();
+        if (value === "false") return false;
+        if (value === "" || value === "true" || value === "plaintext-only") return true;
+      }
+      current = current.parent;
+    }
+    return false;
+  };
+
+  /**
+   * Whether one statically readable element satisfies a host contract.
+   * `null` means an ERB-generated attribute controls the answer, so reporting
+   * either success or failure would be a guess.
+   */
+  const hostIsAllowed = (element: ElementNode, rule: HostRequirement): boolean | null => {
+    if (element.tag === "button") {
+      if (rule.mode === "non-interactive") return false;
+      const type = element.attrs.find((attr) => attr.name === "type");
+      if (type && isDynamicValue(type)) return null;
+      // HTML defaults a missing, empty, or invalid button type to `submit`.
+      const effectiveType = type?.value.trim().toLowerCase() || "submit";
+      return (rule.buttonTypes ?? []).includes(effectiveType);
+    }
+
+    if (ALWAYS_INTERACTIVE_HOSTS.has(element.tag)) return false;
+    if ((element.tag === "a" || element.tag === "area") && hasAttr(element, "href")) return false;
+    if ((element.tag === "audio" || element.tag === "video") && hasAttr(element, "controls")) {
+      return false;
+    }
+
+    const editable = isContentEditable(element);
+    return editable === null ? null : !editable;
   };
 
   /**
@@ -335,6 +383,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
         focusableRoleTally.set(role, (focusableRoleTally.get(role) ?? 0) + 1);
       }
     }
+    const authoredValueIdentifiers = new Set<string>();
     for (const attr of node.attrs) {
       // --- suppression declaration: data-stimeo-ignore ---------------------
       if (attr.name === IGNORE_ATTR) {
@@ -480,6 +529,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
               attr,
             );
           } else {
+            authoredValueIdentifiers.add(parsed.identifier);
             const controller = known[parsed.identifier];
             const valid =
               controller?.values.some((v) => dasherize(v) === parsed.valueToken) ?? false;
@@ -492,6 +542,20 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
                 attr,
                 didYouMean(parsed.valueToken, (controller?.values ?? []).map(dasherize)),
               );
+            } else if (!isDynamicValue(attr)) {
+              const constraint = controller?.valueConstraints.find(
+                (candidate) => dasherize(candidate.value) === parsed.valueToken,
+              );
+              if (constraint && !valueSatisfiesConstraint(attr.value, constraint)) {
+                report(
+                  node,
+                  "invalid-value",
+                  "error",
+                  `Invalid value "${attr.value.trim()}" for "${parsed.identifier}.${parsed.valueToken}". Expected ${describeValueConstraint(constraint)}.`,
+                  attr,
+                  constraint.suggestion,
+                );
+              }
             }
           }
           continue;
@@ -526,6 +590,46 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
             );
           }
         }
+      }
+    }
+
+    // --- relationships between literal Values -----------------------------
+    // Run once per element rather than once per attribute so an invalid pair
+    // produces one actionable diagnostic. Missing attributes use the public
+    // defaults declared by the rule; dynamic or non-finite peers defer to the
+    // runtime fallback and the scalar finite-value diagnostics respectively.
+    for (const identifier of authoredValueIdentifiers) {
+      const controller = known[identifier];
+      if (!controller) continue;
+      for (const relation of controller.valueRelations) {
+        const leftAttr = node.attrs.find(
+          (attr) => attr.name === `data-${identifier}-${dasherize(relation.left)}-value`,
+        );
+        const rightAttr = node.attrs.find(
+          (attr) => attr.name === `data-${identifier}-${dasherize(relation.right)}-value`,
+        );
+        const at = rightAttr ?? leftAttr;
+        if (
+          !at ||
+          (leftAttr && isDynamicValue(leftAttr)) ||
+          (rightAttr && isDynamicValue(rightAttr))
+        ) {
+          continue;
+        }
+
+        const left = leftAttr ? decodeNumericValue(leftAttr.value) : relation.leftDefault;
+        const right = rightAttr ? decodeNumericValue(rightAttr.value) : relation.rightDefault;
+        if (!Number.isFinite(left) || !Number.isFinite(right)) continue;
+        if (relation.operator === "less-than-or-equal" && left <= right) continue;
+
+        report(
+          node,
+          "invalid-value",
+          "error",
+          `Invalid values for "${identifier}": "${relation.left}" (${left}) must be less than or equal to "${relation.right}" (${right}).`,
+          at,
+          relation.suggestion,
+        );
       }
     }
   });
@@ -653,6 +757,40 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
             req.suggestion,
           );
         }
+      }
+    }
+  }
+
+  // --- Stage 3: supported host elements per scope --------------------------
+  // A native interactive host contributes its own activation model. Unless a
+  // rule explicitly admits a non-submitting button, composing that model with
+  // controller-owned key handling creates duplicate activation or an unrelated
+  // side effect such as form submission.
+  for (const { node, identifier } of scopes) {
+    const controller = known[identifier];
+    if (!controller) continue;
+    for (const rule of controller.hosts) {
+      const elements =
+        rule.target === ""
+          ? [node]
+          : (targetNodes.get(node)?.get(identifier)?.get(rule.target) ?? []);
+      const where = rule.target === "" ? "scope element" : `"${rule.target}" target`;
+      for (const element of elements) {
+        if (!hasReadableMarkup(element)) continue;
+        if (hostIsAllowed(element, rule) !== false) continue;
+        const type = element.attrs.find((attr) => attr.name === "type");
+        const detail =
+          element.tag === "button"
+            ? `the unsupported ${type ? `type="${type.value}"` : 'implicit type="submit"'}`
+            : `an unsupported interactive <${element.tag}>`;
+        report(
+          element,
+          "invalid-host",
+          "error",
+          `The ${where} of "${identifier}" uses ${detail} host.`,
+          type ?? element,
+          rule.suggestion,
+        );
       }
     }
   }
@@ -990,6 +1128,29 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   return diagnostics;
 }
 
+/** Decodes a Number Value exactly as Stimulus does, then applies its contract. */
+function valueSatisfiesConstraint(raw: string, constraint: ValueConstraint): boolean {
+  const value = decodeNumericValue(raw);
+  if (Number.isNaN(value)) return false;
+  if (constraint.finite && !Number.isFinite(value)) return false;
+  if (constraint.greaterThan !== undefined && !(value > constraint.greaterThan)) return false;
+  return true;
+}
+
+/** Decodes a Number Value exactly as Stimulus does. */
+function decodeNumericValue(raw: string): number {
+  return Number(raw.replace(/_/g, ""));
+}
+
+/** Human-readable numeric expectation used in the diagnostic message. */
+function describeValueConstraint(constraint: ValueConstraint): string {
+  const parts = [constraint.finite ? "a finite number" : "a number"];
+  if (constraint.greaterThan !== undefined) {
+    parts.push(`greater than ${constraint.greaterThan}`);
+  }
+  return parts.join(" ");
+}
+
 /**
  * Why a structural check stopped at a warning. Both hints say "the checker
  * cannot see this", never "the markup is wrong" — the reader needs the
@@ -1150,6 +1311,24 @@ function describeCounted(
 
 /** Tags focusable without an authored `tabindex` (input handled separately). */
 const NATIVE_FOCUSABLE_TAGS = new Set(["button", "select", "textarea", "summary"]);
+
+/** Native interactive hosts a controller must never repurpose wholesale. */
+const ALWAYS_INTERACTIVE_HOSTS = new Set([
+  "input",
+  "select",
+  "textarea",
+  "label",
+  "summary",
+  "details",
+  "iframe",
+  "object",
+  "embed",
+]);
+
+/** Presence check for boolean and ordinary attributes alike. */
+function hasAttr(element: ElementNode, name: string): boolean {
+  return element.attrs.some((attr) => attr.name === name);
+}
 
 /**
  * Whether the tag is natively focusable **as authored**. `input` is focusable

@@ -1,11 +1,13 @@
 /**
- * Collapses many target callbacks from one DOM mutation into a single pass.
+ * Collapses many Stimulus lifecycle callbacks from one DOM mutation into a
+ * single pass.
  *
- * Stimulus fires `<name>TargetConnected` / `Disconnected` once per element, so
- * replacing a list of N options delivers N callbacks — but the useful unit of
- * work is "reconcile against the DOM that resulted", once, after the batch has
- * settled. Every controller that owns a reconcilable target set needs the same
- * shape: a `queued` flag plus `queueMicrotask`.
+ * Stimulus fires `<name>TargetConnected` / `Disconnected` once per element and
+ * `<name>ValueChanged` once per changed attribute. Replacing a list of N options
+ * or morphing several render Values therefore delivers N callbacks — but the
+ * useful unit of work is "reconcile against the resulting declarative input",
+ * once, after the batch has settled. Every controller with reconcilable targets
+ * or render Values needs the same shape: a `queued` flag plus `queueMicrotask`.
  *
  * **A microtask is the right horizon, and the reason is specific.** Stimulus
  * drives these callbacks from a `MutationObserver`, whose own callback already
@@ -17,8 +19,8 @@
  * **The two guards are not the same guard.** Scheduling is refused before the
  * controller connects, and running is refused after it disconnects:
  *
- * - **Before `connect()`** — Stimulus delivers the *initial* target callbacks
- *   ahead of `connect()`. Reconciling there would compute a fallback against a
+ * - **Before `connect()`** — Stimulus delivers initial target and Value callbacks
+ *   ahead of `connect()`. Reconciling there would compute output against a
  *   controller whose own state has not been initialised, and `connect()` is
  *   about to do a full pass anyway.
  * - **After `disconnect()`** — Stimulus fires a callback for **every** target

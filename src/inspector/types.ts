@@ -25,6 +25,14 @@ export interface ControllerManifest {
   /** Value names (camelCase) declared via `static values`. */
   readonly values: readonly string[];
   /**
+   * Authoring constraints for literal Stimulus Values (stage 1). Reflection can
+   * expose a Value's name and decoder, but not semantic bounds such as a
+   * strictly positive step, so those contracts stay explicit and reviewable.
+   */
+  readonly valueConstraints: readonly ValueConstraint[];
+  /** Statically decidable relationships between literal Stimulus Values. */
+  readonly valueRelations: readonly ValueRelation[];
+  /**
    * Public action method names declared via `static actions`, wired by
    * consumers as `data-action="…-><identifier>#<action>"`.
    */
@@ -58,6 +66,13 @@ export interface ControllerManifest {
    * toolbar, radio group, …) are deliberately excluded.
    */
   readonly keyboard: readonly KeyboardRequirement[];
+  /**
+   * Host-element contracts (stage 3): scope or target elements that must avoid
+   * native interactive semantics the controller cannot safely compose with.
+   * A rule may explicitly admit non-submitting buttons when the controller
+   * delegates their native activation to the browser.
+   */
+  readonly hosts: readonly HostRequirement[];
   /**
    * Author-futile attributes (stage 3): ARIA the controller recomputes
    * wholesale at runtime, where an authored value can neither
@@ -338,6 +353,28 @@ export interface KeyboardRequirement {
 }
 
 /**
+ * A host-element contract (stage 3): the element carrying a controller or one
+ * of its targets must use semantics the controller can own without competing
+ * with another native interaction.
+ *
+ * `"non-interactive"` admits only generic, non-interactive elements.
+ * `"non-interactive-or-button"` additionally admits a `<button>` whose
+ * literal `type` is listed in {@link buttonTypes}. The explicit type matters:
+ * a missing or invalid button type defaults to `submit`, so treating it as an
+ * ordinary action button would silently submit an enclosing form.
+ */
+export interface HostRequirement {
+  /** Target name; the empty string `""` means the controller scope element. */
+  readonly target: string;
+  /** Static host shapes the controller supports. */
+  readonly mode: "non-interactive" | "non-interactive-or-button";
+  /** Literal button types admitted by `"non-interactive-or-button"`. */
+  readonly buttonTypes?: readonly string[];
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
+/**
  * An author-futile attribute rule (stage 3): authoring any of {@link attrs} on
  * the {@link target} element draws a `managed-aria` **warning** — the
  * controller recomputes the attribute wholesale, so the authored value is dead
@@ -581,6 +618,47 @@ export interface ConditionalTargetRule {
   readonly suggestion: string;
 }
 
+/**
+ * A statically checkable numeric contract on one declared Stimulus Value.
+ *
+ * The Inspector decodes literals like Stimulus (`Number(raw.replace(/_/g,
+ * ""))`) before applying these bounds. ERB-generated values are undecidable and
+ * skipped rather than guessed.
+ */
+export interface ValueConstraint {
+  /** Value name (camelCase, as declared in `static values`). */
+  readonly value: string;
+  /** Decoder family. Numeric bounds are the first supported semantic family. */
+  readonly type: "number";
+  /** Reject `NaN` and infinities when true. */
+  readonly finite?: boolean;
+  /** Require a decoded number strictly greater than this bound. */
+  readonly greaterThan?: number;
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
+/**
+ * A statically checkable relationship between two numeric Stimulus Values.
+ *
+ * Missing attributes use the controller's public defaults. If either authored
+ * value is dynamic, the Inspector skips the relation rather than guessing.
+ */
+export interface ValueRelation {
+  /** Value on the left side of the comparison (camelCase). */
+  readonly left: string;
+  /** Supported numeric comparison. */
+  readonly operator: "less-than-or-equal";
+  /** Value on the right side of the comparison (camelCase). */
+  readonly right: string;
+  /** Effective left value when its attribute is absent. */
+  readonly leftDefault: number;
+  /** Effective right value when its attribute is absent. */
+  readonly rightDefault: number;
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
 /** Hand-written structure rules, merged into the reflected manifest. */
 export type StructureRules = Readonly<
   Record<
@@ -592,11 +670,20 @@ export type StructureRules = Readonly<
   >
 >;
 
+/** Hand-written literal Value constraints, merged into the manifest. */
+export type ValueConstraintRules = Readonly<Record<string, readonly ValueConstraint[]>>;
+
+/** Hand-written relationships between literal Values, merged into the manifest. */
+export type ValueRelationRules = Readonly<Record<string, readonly ValueRelation[]>>;
+
 /** Hand-written accessibility rules (stage 3), merged into the manifest. */
 export type A11yRules = Readonly<Record<string, readonly A11yRequirement[]>>;
 
 /** Hand-written keyboard prerequisites (stage 3), merged into the manifest. */
 export type KeyboardRules = Readonly<Record<string, readonly KeyboardRequirement[]>>;
+
+/** Hand-written host-element contracts (stage 3), merged into the manifest. */
+export type HostRules = Readonly<Record<string, readonly HostRequirement[]>>;
 
 /** Hand-written author-futile attribute rules, merged into the manifest. */
 export type ManagedAriaRules = Readonly<Record<string, readonly ManagedAriaRule[]>>;
@@ -628,6 +715,7 @@ export const DIAGNOSTIC_CODES = [
   "unknown-controller",
   "unknown-target",
   "unknown-value",
+  "invalid-value",
   "unknown-action-controller",
   "unknown-action-method",
   "orphan-target",
@@ -636,6 +724,7 @@ export const DIAGNOSTIC_CODES = [
   "missing-aria",
   "invalid-aria-value",
   "keyboard-inaccessible",
+  "invalid-host",
   "unresolved-idref",
   "managed-aria",
   "composition-mismatch",

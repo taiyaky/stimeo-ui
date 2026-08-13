@@ -19,6 +19,7 @@
     data-stimeo--meter-low-value="50"
     data-stimeo--meter-high-value="80"
     data-stimeo--meter-value-text-value="<%= t('components.meter.demo.value_text') %>"
+    data-stimeo--meter-announce-text-value="<%= t('components.meter.demo.announce_state') %>"
     data-action="meter:set->stimeo--meter#setValue">
     <div class="meter__bar" data-stimeo--meter-target="bar"></div>
   </div>
@@ -33,5 +34,12 @@
         <%= amount %>
       </button>
     <% end %>
+  </div>
+
+  <%# Shared announcer: reading every value would be unusable, so only a move into
+      another segment is read out. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

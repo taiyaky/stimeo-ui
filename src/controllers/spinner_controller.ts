@@ -1,34 +1,40 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { setDefaultAttribute } from "../utils/default_attribute";
 import { DetachGate } from "../utils/detach_gate";
 import { MinDurationFloor } from "../utils/min_duration_floor";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
- * Headless loading-indicator behavior built on the live-region + `aria-busy`
- * practice (no dedicated APG pattern).
+ * Headless loading-indicator behavior built on the `aria-busy` practice (no
+ * dedicated APG pattern).
  *
  * Markup contract (identifier: `stimeo--spinner`):
  *   <div data-controller="stimeo--spinner"
  *        data-stimeo--spinner-delay-value="150"
  *        data-stimeo--spinner-min-duration-value="500"
  *        data-stimeo--spinner-timeout-value="0"
+ *        data-stimeo--spinner-announce-text-value="Loading…"
+ *        data-stimeo--spinner-announce-ready-text-value="Loading finished."
  *        data-action="loading:start->stimeo--spinner#start
  *                     loading:stop->stimeo--spinner#stop">
- *     <div role="status" aria-live="polite" hidden
- *          data-stimeo--spinner-target="indicator">
+ *     <div hidden data-stimeo--spinner-target="indicator">
  *       <span data-stimeo--spinner-target="message">Loading…</span>
  *     </div>
  *     <div aria-busy="false" data-stimeo--spinner-target="region"></div>
  *   </div>
  *
- * The indicator is a `role="status"` live region carrying *text* (never an icon
- * alone) so screen readers announce loading; the controlled `region` mirrors the
- * busy state via `aria-busy`. Two timers tame flicker: `delay` suppresses the
- * spinner for fast operations, and `minDuration` keeps it visible long enough to
- * be perceived once shown. `timeout` is the opt-in safety net for the case the
- * consumer's `stop` never arrives.
+ * The indicator is the visual half — its text plus a spinner the consumer marks
+ * `aria-hidden="true"` — and the controlled `region` mirrors the busy state via
+ * `aria-busy`. Assistive tech hears the transition through `announceText` /
+ * `announceReadyText`, which go to the page's announcer: an indicator that only
+ * becomes visible at the moment of the change is not reliably read, and giving it
+ * live-region semantics on top of the announcement would say it twice. Two timers
+ * tame flicker: `delay` suppresses the spinner for fast operations, and
+ * `minDuration` keeps it visible long enough to be perceived once shown.
+ * `timeout` is the opt-in safety net for the case the consumer's `stop` never
+ * arrives.
  *
  * Events (all with an empty `detail`):
  * - `stimeo--spinner:show` — the indicator became visible, after `delay`.
@@ -90,9 +96,7 @@ export class SpinnerController extends Controller<HTMLElement> {
       this.element.setAttribute("data-state", "idle");
       return;
     }
-    if (!this.element.hasAttribute("data-state")) {
-      this.element.setAttribute("data-state", "idle");
-    }
+    setDefaultAttribute(this.element, "data-state", "idle");
   }
 
   /**

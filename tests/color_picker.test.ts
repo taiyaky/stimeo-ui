@@ -8,7 +8,7 @@ import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ColorPickerController}: per-channel APG Slider
- * values, HSL↔hex two-way sync, the `--stimeo-color` custom property, the hidden
+ * values, HSL↔hex two-way sync, the `--stimeo--color` custom property, the hidden
  * field mirror, `aria-valuetext`, and the `change` event.
  */
 
@@ -68,7 +68,7 @@ describe("ColorPickerController", () => {
     document.querySelector<HTMLInputElement>(
       "[data-stimeo--color-picker-target='field']",
     ) as HTMLInputElement;
-  const color = () => root().style.getPropertyValue("--stimeo-color");
+  const color = () => root().style.getPropertyValue("--stimeo--color");
   const press = (el: HTMLElement, key: string) =>
     el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
 

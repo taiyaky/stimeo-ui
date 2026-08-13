@@ -9,7 +9,7 @@ import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ProgressController}: ARIA value-attribute sync,
- * `--stimeo-progress-ratio`, the indeterminate state, and the change/complete
+ * `--stimeo--progress-ratio`, the indeterminate state, and the change/complete
  * events.
  */
 
@@ -44,7 +44,7 @@ describe("ProgressController", () => {
   it("reflects the initial value onto ARIA and the ratio on connect", async () => {
     await start('data-stimeo--progress-value-value="40"');
     expect(root().getAttribute("aria-valuenow")).toBe("40");
-    expect(root().style.getPropertyValue("--stimeo-progress-ratio")).toBe("0.4");
+    expect(root().style.getPropertyValue("--stimeo--progress-ratio")).toBe("0.4");
     expect(root().getAttribute("data-state")).toBe("determinate");
   });
 
@@ -55,7 +55,7 @@ describe("ProgressController", () => {
     expect(root().getAttribute("aria-valuenow")).toBe("0");
     expect(root().getAttribute("aria-valuemin")).toBe("0");
     expect(root().getAttribute("aria-valuemax")).toBe("100");
-    expect(root().style.getPropertyValue("--stimeo-progress-ratio")).toBe("0");
+    expect(root().style.getPropertyValue("--stimeo--progress-ratio")).toBe("0");
     expect(root().getAttribute("data-state")).toBe("determinate");
   });
 
@@ -63,7 +63,7 @@ describe("ProgressController", () => {
     await start();
     root().dispatchEvent(new CustomEvent("progress:set", { detail: { value: 25 } }));
     expect(root().getAttribute("aria-valuenow")).toBe("25");
-    expect(root().style.getPropertyValue("--stimeo-progress-ratio")).toBe("0.25");
+    expect(root().style.getPropertyValue("--stimeo--progress-ratio")).toBe("0.25");
   });
 
   // Both bounds are read from the configured range, so the fixture uses a
@@ -83,13 +83,13 @@ describe("ProgressController", () => {
     await start();
     instance().setValue({ params: { amount: "60" } } as unknown as Event);
     expect(root().getAttribute("aria-valuenow")).toBe("60");
-    expect(root().style.getPropertyValue("--stimeo-progress-ratio")).toBe("0.6");
+    expect(root().style.getPropertyValue("--stimeo--progress-ratio")).toBe("0.6");
   });
 
   it("clamps an out-of-range initial value when computing the ratio", async () => {
     await start('data-stimeo--progress-value-value="250"');
     expect(root().getAttribute("aria-valuenow")).toBe("100");
-    expect(root().style.getPropertyValue("--stimeo-progress-ratio")).toBe("1");
+    expect(root().style.getPropertyValue("--stimeo--progress-ratio")).toBe("1");
   });
 
   // A non-zero `min` is what pins the subtraction in `(value - min) / span`: with
@@ -104,7 +104,7 @@ describe("ProgressController", () => {
     expect(root().getAttribute("aria-valuemin")).toBe("20");
     expect(root().getAttribute("aria-valuemax")).toBe("120");
     expect(root().getAttribute("aria-valuenow")).toBe("45");
-    expect(root().style.getPropertyValue("--stimeo-progress-ratio")).toBe("0.25");
+    expect(root().style.getPropertyValue("--stimeo--progress-ratio")).toBe("0.25");
     expect(root().getAttribute("aria-valuetext")).toBe("25%");
   });
 
@@ -114,7 +114,7 @@ describe("ProgressController", () => {
     await start(
       'data-stimeo--progress-min-value="5" data-stimeo--progress-max-value="5" data-stimeo--progress-value-value="5" data-stimeo--progress-value-text-value="{percent}%"',
     );
-    expect(root().style.getPropertyValue("--stimeo-progress-ratio")).toBe("0");
+    expect(root().style.getPropertyValue("--stimeo--progress-ratio")).toBe("0");
     expect(root().getAttribute("aria-valuetext")).toBe("0%");
   });
 
@@ -124,7 +124,7 @@ describe("ProgressController", () => {
     await start(
       'data-stimeo--progress-min-value="80" data-stimeo--progress-max-value="20" data-stimeo--progress-value-value="50"',
     );
-    expect(root().style.getPropertyValue("--stimeo-progress-ratio")).toBe("0");
+    expect(root().style.getPropertyValue("--stimeo--progress-ratio")).toBe("0");
   });
 
   it("dispatches change on every update with value and ratio", async () => {
@@ -269,7 +269,7 @@ describe("ProgressController", () => {
     const style = root().style;
     const original = style.setProperty.bind(style);
     style.setProperty = (...args: Parameters<CSSStyleDeclaration["setProperty"]>) => {
-      if (args[0] === "--stimeo-progress-ratio") repaints += 1;
+      if (args[0] === "--stimeo--progress-ratio") repaints += 1;
       original(...args);
     };
     root().setAttribute("data-stimeo--progress-value-value", "60");

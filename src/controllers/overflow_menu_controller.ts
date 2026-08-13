@@ -15,7 +15,7 @@ const BOUNDARY = "data-stimeo--overflow-menu-boundary";
 /** Authored values saved while an item wears menu semantics ("" = attribute was absent). */
 const SAVED_ROLE = "data-stimeo--overflow-menu-role";
 const SAVED_TABINDEX = "data-stimeo--overflow-menu-tabindex";
-const SAVED_MENU_TARGET = "data-stimeo--overflow-menu-menu-target";
+const SAVED_MENU_TARGET = "data-stimeo--overflow-menu-saved-menu";
 /** Menu's target attribute — set to `item` while banked so Menu drives the item. */
 const MENU_TARGET = "data-stimeo--menu-target";
 /** Everything this controller writes on an item; all removed on the way back to the bar. */

@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { setDefaultAttribute } from "../utils/default_attribute";
 import { FOCUSABLE } from "../utils/focus_trap";
 import type { FormFieldController } from "./form_field_controller";
 
@@ -200,8 +201,7 @@ export class FormValidationController extends Controller<HTMLFormElement> {
 
   /** Suppresses native bubbles and binds the submit / blur / input listeners. */
   override connect(): void {
-    if (!this.element.hasAttribute("novalidate")) {
-      this.element.setAttribute("novalidate", "");
+    if (setDefaultAttribute(this.element, "novalidate", "")) {
       this.element.setAttribute(FormValidationController.#NOVALIDATE_MARKER, "");
     }
     // Capture phase on the document so we run before any submit listener bound to

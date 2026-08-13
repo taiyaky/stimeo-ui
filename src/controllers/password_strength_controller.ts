@@ -35,7 +35,7 @@ const STRENGTH_BANDS = ["weak", "fair", "good", "strong"] as const;
  * On each input the controller scores the password (length milestones + character
  * variety, capped for trivial repetition), syncs the meter's `aria-valuenow`,
  * reflects a stable band on `data-strength`, the `0–1` fill on
- * `--stimeo-password-strength`, and (when `minScore` is set) `data-below-min`,
+ * `--stimeo--password-strength`, and (when `minScore` is set) `data-below-min`,
  * and writes the level label into the label target.
  *
  * @remarks
@@ -149,7 +149,7 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
     // threshold. `minScore` defaults to 0, leaving the hook inert until set positive.
     this.#toggle("data-below-min", "true", score > 0 && score < this.minScoreValue);
     const ratio = max > 0 ? score / max : 0;
-    this.element.style.setProperty("--stimeo-password-strength", String(ratio));
+    this.element.style.setProperty("--stimeo--password-strength", String(ratio));
   }
 
   #writeLabel(label: string): void {

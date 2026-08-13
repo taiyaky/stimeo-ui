@@ -24,9 +24,11 @@ const SECOND_MS = 1000;
  * Computes the time remaining to `deadline` (or elapsed since it, in
  * `direction="up"`), formats it into the day/hour/minute/second slots, and ticks
  * on `interval`. `aria-live="off"` is recommended so the timer is not announced
- * every second; only the milestone (completion) is surfaced — via the optional
- * `status` live region when a `completeLabel` is provided, or the `complete`
- * event for the consumer to handle.
+ * every second; only the milestone (completion) is surfaced — read out through
+ * `announceText`, shown in the optional `status` slot when a `completeLabel` is
+ * provided, and handed to the consumer as the `complete` event. Keep the `status`
+ * slot free of live-region semantics: with `announceText` set it would say the
+ * same thing twice.
  *
  * @remarks
  * Behavior only — slot text is updated, not styled. Pause/resume shifts an
@@ -195,11 +197,11 @@ export class CountdownController extends Controller<HTMLElement> {
     this.#initReference();
     const amount = this.#currentAmount();
     this.#render(amount);
-    // A prior complete() may have written a completion message into the status live
-    // region; clear it so a reset timer does not keep showing (and announcing to a
-    // screen reader) the stale "finished" text. Only that message is ours to take
-    // back — `complete()` declines to write when `completeLabel` is empty, so
-    // anything else in there belongs to the consumer.
+    // A prior complete() may have written a completion message into the status
+    // slot; clear it so a reset timer does not keep showing the stale "finished"
+    // text. Only that message is ours to take back — `complete()` declines to write
+    // when `completeLabel` is empty, so anything else in there belongs to the
+    // consumer.
     if (this.hasStatusTarget && this.statusTarget.textContent === this.completeLabelValue) {
       this.statusTarget.textContent = "";
     }
@@ -273,7 +275,11 @@ export class CountdownController extends Controller<HTMLElement> {
     return Math.max(0, raw);
   }
 
-  /** Writes the amount into the day/hour/minute/second slots. */
+  /**
+   * Writes the amount into the day/hour/minute/second slots.
+   *
+   * @stimeoRenderRoot
+   */
   #render(amount: number): void {
     const totalSeconds = Math.floor(amount / SECOND_MS);
     this.#renderedAmount = totalSeconds * SECOND_MS;

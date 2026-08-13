@@ -7,29 +7,31 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * dedicated APG pattern).
  *
  * Markup contract (identifier: `stimeo--network-status`):
- *   <div data-controller="stimeo--network-status">
- *     <div role="alert" hidden data-stimeo--network-status-target="offline">
+ *   <div data-controller="stimeo--network-status"
+ *        data-stimeo--network-status-announce-text-value="You are offline."
+ *        data-stimeo--network-status-announce-online-text-value="Back online.">
+ *     <div hidden data-stimeo--network-status-target="offline">
  *       You are offline.
  *     </div>
- *     <div role="status" hidden data-stimeo--network-status-target="online">
+ *     <div hidden data-stimeo--network-status-target="online">
  *       Back online.
  *     </div>
  *   </div>
  *
  * Reads `navigator.onLine` on connect and subscribes to the `window`
- * `online`/`offline` events, toggling the matching banner. The offline banner is
- * `role="alert"` (assertive) because losing connectivity is urgent; the recovery
- * banner is `role="status"` (polite).
+ * `online`/`offline` events, toggling the matching banner. The banners are the
+ * visual half; assistive tech hears the transition through `announceText`
+ * (assertive, because losing connectivity is urgent) and `announceOnlineText`
+ * (polite), which go to the page's announcer.
  *
  * @remarks
  * Behavior only. `navigator.onLine` is the browser's *guess* — it does not
- * guarantee server reachability, which stays the consumer's job. To make the
- * announcement reliable across assistive tech (merely un-hiding a static banner
- * is flaky), the controller reveals the banner and *then* re-writes its text on
- * each transition — a region revealed after its content changed is outside the
- * accessibility tree while the text changes, so the write has to come second —
- * guarded so an unchanged state never re-announces. The event listeners and the
- * auto-hide timer are removed/cleared on `disconnect()` (Turbo included).
+ * guarantee server reachability, which stays the consumer's job. A banner that is
+ * merely un-hidden at the moment of the change is not reliably read, which is why
+ * the wording goes to the page's announcer — a region that stands in the document
+ * independently of this component. The transition is guarded so an unchanged
+ * state never re-announces. The event listeners and the auto-hide timer are
+ * removed/cleared on `disconnect()` (Turbo included).
  */
 export class NetworkStatusController extends Controller<HTMLElement> {
   static override targets = ["offline", "online"];
@@ -106,18 +108,13 @@ export class NetworkStatusController extends Controller<HTMLElement> {
   #showOffline(): void {
     this.#timers.clearAll();
     if (this.hasOnlineTarget) this.onlineTarget.hidden = true;
-    if (this.hasOfflineTarget) {
-      // Reveal before writing: a hidden region is out of the accessibility tree,
-      // so a text change made while it is still hidden is never observed.
-      this.offlineTarget.hidden = false;
-    }
+    if (this.hasOfflineTarget) this.offlineTarget.hidden = false;
   }
 
   /** Shows the recovery banner, optionally auto-hiding it after `onlineAutoHide`. */
   #showOnline(): void {
     if (this.hasOfflineTarget) this.offlineTarget.hidden = true;
     if (!this.hasOnlineTarget) return;
-    // Reveal before writing, same as the offline banner.
     this.onlineTarget.hidden = false;
     if (this.onlineAutoHideValue > 0) {
       this.#timers.set(() => {

@@ -107,8 +107,8 @@ describe("ContextMenuController", () => {
     contextmenu(120, 80);
     expect(menu().hidden).toBe(false);
     expect(region().getAttribute("data-state")).toBe("open");
-    expect(menu().style.getPropertyValue("--stimeo-context-menu-x")).toBe("120px");
-    expect(menu().style.getPropertyValue("--stimeo-context-menu-y")).toBe("80px");
+    expect(menu().style.getPropertyValue("--stimeo--context-menu-x")).toBe("120px");
+    expect(menu().style.getPropertyValue("--stimeo--context-menu-y")).toBe("80px");
     expect(document.activeElement).toBe(query("#copy"));
   });
 

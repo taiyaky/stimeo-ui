@@ -204,11 +204,11 @@ describe("ScrollAreaController", () => {
     await start(markup());
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 300 });
     expect(root().getAttribute("data-scroll")).toBe("middle");
-    expect(root().style.getPropertyValue("--stimeo-scroll-progress")).toBe("0.5");
+    expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("0.5");
 
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 600 });
     expect(root().getAttribute("data-scroll")).toBe("end");
-    expect(root().style.getPropertyValue("--stimeo-scroll-progress")).toBe("1");
+    expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("1");
   });
 
   it("reports logical progress from start to end in a horizontal RTL viewport", async () => {
@@ -229,12 +229,12 @@ describe("ScrollAreaController", () => {
     window.dispatchEvent(new Event("resize"));
 
     expect(root().getAttribute("data-scroll")).toBe("middle");
-    expect(root().style.getPropertyValue("--stimeo-scroll-progress")).toBe("0.5");
+    expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("0.5");
 
     Object.defineProperty(viewport(), "scrollLeft", { configurable: true, value: -600 });
     viewport().dispatchEvent(new Event("scroll"));
     expect(root().getAttribute("data-scroll")).toBe("end");
-    expect(root().style.getPropertyValue("--stimeo-scroll-progress")).toBe("1");
+    expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("1");
   });
 
   it("dispatches reach once per edge arrival", async () => {

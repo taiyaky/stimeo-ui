@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
+import { setDefaultAttribute } from "../utils/default_attribute";
 
 /**
  * Headless **Separator** behavior. The normative source depends on the case:
@@ -55,22 +56,16 @@ export class SeparatorController extends Controller<HTMLElement> {
   declare stepValue: number;
 
   override connect(): void {
-    if (!this.element.hasAttribute("role")) {
-      this.element.setAttribute("role", "separator");
-    }
-    if (!this.element.hasAttribute("aria-orientation")) {
-      this.element.setAttribute("aria-orientation", this.orientationValue);
-    }
+    setDefaultAttribute(this.element, "role", "separator");
+    setDefaultAttribute(this.element, "aria-orientation", this.orientationValue);
 
     if (this.focusableValue) {
-      if (!this.element.hasAttribute("tabindex")) {
-        this.element.setAttribute("tabindex", "0");
-      }
+      setDefaultAttribute(this.element, "tabindex", "0");
       // A value-bearing separator needs a bounded range; default it if the
       // consumer left any bound off so arrow keys have something to clamp to.
-      this.#setDefault("aria-valuemin", "0");
-      this.#setDefault("aria-valuemax", "100");
-      this.#setDefault("aria-valuenow", String(this.#clamp(this.#value)));
+      setDefaultAttribute(this.element, "aria-valuemin", "0");
+      setDefaultAttribute(this.element, "aria-valuemax", "100");
+      setDefaultAttribute(this.element, "aria-valuenow", String(this.#clamp(this.#value)));
     }
   }
 
@@ -135,11 +130,5 @@ export class SeparatorController extends Controller<HTMLElement> {
   #numericAttr(name: string, fallback: number): number {
     const parsed = Number.parseFloat(this.element.getAttribute(name) ?? "");
     return Number.isNaN(parsed) ? fallback : parsed;
-  }
-
-  #setDefault(name: string, value: string): void {
-    if (!this.element.hasAttribute(name)) {
-      this.element.setAttribute(name, value);
-    }
   }
 }

@@ -299,7 +299,11 @@ export class BreadcrumbController extends Controller<HTMLElement> {
     return this.listTarget.scrollWidth > this.listTarget.clientWidth + OVERFLOW_EPSILON;
   }
 
-  /** Applies the collapsed/expanded state to the items, ellipsis, and trigger. */
+  /**
+   * Applies the collapsed/expanded state to the items, ellipsis, and trigger.
+   *
+   * @stimeoRenderRoot
+   */
   #render(): void {
     const collapsed = this.#overflowing && !this.#expanded;
     const showEllipsis = this.#overflowing && this.collapsibleTargets.length > 0;

@@ -28,7 +28,7 @@ describe("CountdownController", () => {
         <span data-stimeo--countdown-target="hours">00</span>
         <span data-stimeo--countdown-target="minutes">00</span>
         <span data-stimeo--countdown-target="seconds">00</span>
-        <span role="status" data-stimeo--countdown-target="status"></span>
+        <span data-stimeo--countdown-target="status"></span>
       </div>`;
     application = Application.start();
     application.register("stimeo--countdown", CountdownController);

@@ -79,6 +79,17 @@ export class DetachGate {
   #pending = false;
 
   /**
+   * True while a probe is queued — the last disconnect was ambiguous and no
+   * reconnect has cancelled it yet. Read it from `connect()` to tell the
+   * reconnect half of an in-page move from a first connect: a controller whose
+   * initialisation restarts a measurement (a min-duration floor, an elapsed
+   * counter) must skip it for the move, where nothing actually restarted.
+   */
+  get pending(): boolean {
+    return this.#pending;
+  }
+
+  /**
    * True when the disconnect is definitely a real detach — the element left
    * the document, or `data-controller` no longer lists the identifier. False
    * means ambiguous (in-page move or observed-root exit), NOT "alive".

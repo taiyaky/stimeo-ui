@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.5.0] - 2026-08-13
+
+### Changed
+
+- **Breaking** — every CSS custom property the library writes now carries the
+  `--stimeo--` namespace (two hyphens). Rename them in your stylesheets: a name
+  you miss raises no error, it just falls back to `var()`'s default and the bar
+  or thumb stops moving.
+  - `--stimeo-range-start` / `--stimeo-range-end` →
+    `--stimeo--range-slider-start` / `--stimeo--range-slider-end`
+  - `--stimeo-<name>` → `--stimeo--<name>` for `aspect-ratio`,
+    `collapsible-content-height`, `color`, `context-menu-x`, `context-menu-y`,
+    `masonry-columns`, `meter-ratio`, `password-strength`, `progress-ratio`,
+    `scroll-progress`, `step-indicator-ratio`, `textarea-rows`,
+    `upload-progress`
+- **Breaking** — spinner's `indicator`, the network-status banners, and
+  countdown's `status` slot are no longer live regions. Drop `role="status"` /
+  `role="alert"` / `aria-live` from them and set `announceText` (and its
+  siblings) with a `stimeo--announcer` on the page; keeping the role reads the
+  change twice.
+- time-picker: committing a field change dispatches a native `change` from the
+  `field` target, and `stimeo--time-picker:change` reports the composed value
+  even when no `field` target is present.
+- tree-view: more native elements count as nested-interactive (`label`,
+  `summary`, `details`, `area[href]`, media with `controls`, `iframe`, `object`,
+  `embed`), so a click or key inside one is left alone instead of moving the
+  tree selection.
+
+### Added
+
+- Inspector: the manifest advances from schema v8 to **v11** — tools that read it
+  raw must accept the new `valueConstraints`, `hosts`, and `valueRelations`
+  fields. Two diagnostics are new, so **re-run `stimeo check` before deploying;
+  it can report errors on views that passed under 0.4.0**:
+  - `invalid-value` — slider, range-slider, and number-input need a finite,
+    positive `step`; range-slider needs finite `min`, `max`, `start`, and `end`
+    with `min` at or below `max`.
+  - `invalid-host` — switch, time-picker, and tree-view report an unsupported
+    host element before it reaches the browser.
+
+### Fixed
+
+- range-slider: two thumbs resting on the same value can be pulled apart with
+  the pointer again, and invalid or reversed bounds fall back to a finite
+  ordered range.
+- slider, range-slider, number-input: an endpoint that does not sit on the step
+  grid is reachable, and an invalid `step` falls back to `1`.
+- slider, range-slider: a Turbo morph that swaps a value repaints instead of
+  freezing, a replaced thumb or track picks up the current state, and a drag
+  stays with the pointer that started it.
+- switch: holding Space no longer scrolls a non-`<button>` host, and an ancestor
+  `fieldset[disabled]` or `aria-disabled` blocks activation.
+- flash: hover and focus pause the auto-dismiss independently, a flash paused
+  after its deadline dismisses instead of staying forever, a second dismiss on a
+  leaving flash is ignored, and a replaced `region` target is picked up.
+- frame-loading: `aria-busy`, the skeleton, and `inert` are rolled back when the
+  controller is detached, instead of burning in with nothing left to finish the
+  load.
+- empty-state: a replaced `list` or `empty` element and a runtime `itemSelector`
+  change are followed, so the placeholder no longer sticks beside a filled list.
+- highlight: a highlight that outlives a Turbo navigation is cleaned up on the
+  way back instead of staying marked.
+- idle: `data-idle` is cleared when a new measurement cycle connects, and
+  `disconnect()` removes the listeners it actually registered even when `events`
+  changed while connected.
+- skeleton: a skeleton moved within the page keeps its ready intent.
+
 ## [0.4.0] - 2026-08-11
 
 The feedback and status components announce through the shared
@@ -391,6 +458,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.5.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.5.0
 [0.4.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.4.0
 [0.3.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.3.0
 [0.2.1]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.2.1

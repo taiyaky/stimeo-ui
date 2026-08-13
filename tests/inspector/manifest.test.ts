@@ -6,12 +6,16 @@ import { cardinalityRules } from "../../src/inspector/cardinality_rules";
 import { companionRules } from "../../src/inspector/companion_rules";
 import { compositionRules } from "../../src/inspector/composition_rules";
 import { forbiddenAriaRules } from "../../src/inspector/forbidden_aria_rules";
+import { hostRules } from "../../src/inspector/host_rules";
 import { keyboardRules } from "../../src/inspector/keyboard_rules";
 import { managedAriaRules } from "../../src/inspector/managed_aria_rules";
 import { buildManifest, SCHEMA_VERSION } from "../../src/inspector/manifest";
+import { isCompatibleManifest } from "../../src/inspector/manifest_io";
 import { structureRules } from "../../src/inspector/structure_rules";
 import { targetDeclarationRules } from "../../src/inspector/target_declaration_rules";
 import type { ContentCondition, ValueCondition } from "../../src/inspector/types";
+import { valueConstraintRules } from "../../src/inspector/value_constraint_rules";
+import { valueRelationRules } from "../../src/inspector/value_relation_rules";
 import { positioningControllers } from "../../src/positioning";
 
 /** Tests for the reflection-based manifest generator. */
@@ -29,6 +33,34 @@ describe("buildManifest", () => {
   it("stamps schema and package versions", () => {
     expect(manifest.schemaVersion).toBe(SCHEMA_VERSION);
     expect(manifest.packageVersion).toBe("1.2.3");
+  });
+
+  it("rejects manifests missing the Value-constraint field consumed by the engine", () => {
+    expect(isCompatibleManifest(manifest)).toBe(true);
+    const legacy = structuredClone(manifest) as unknown as {
+      controllers: Record<string, Record<string, unknown>>;
+    };
+    const slider = legacy.controllers["stimeo--slider"];
+    if (slider) delete slider.valueConstraints;
+    expect(isCompatibleManifest(legacy)).toBe(false);
+  });
+
+  it("requires the schema-v11 Value-relation field when loading a manifest", () => {
+    const legacy = structuredClone(manifest) as unknown as {
+      controllers: Record<string, Record<string, unknown>>;
+    };
+    const rangeSlider = legacy.controllers["stimeo--range-slider"];
+    if (rangeSlider) delete rangeSlider.valueRelations;
+    expect(isCompatibleManifest(legacy)).toBe(false);
+  });
+
+  it("requires the schema-v10 host-contract field when loading a manifest", () => {
+    const legacy = structuredClone(manifest) as unknown as {
+      controllers: Record<string, Record<string, unknown>>;
+    };
+    const switchContract = legacy.controllers["stimeo--switch"];
+    if (switchContract) delete switchContract.hosts;
+    expect(isCompatibleManifest(legacy)).toBe(false);
   });
 
   it("includes every core, positioning, and cable controller identifier", () => {
@@ -60,6 +92,86 @@ describe("buildManifest", () => {
   it("reflects static value names (camelCase keys)", () => {
     expect(manifest.controllers["stimeo--calendar"]?.values).toContain("weekStart");
     expect(manifest.controllers["stimeo--switch"]?.values).toEqual([]);
+  });
+
+  it("merges semantic Value constraints and keeps them on declared Values", () => {
+    expect(manifest.controllers["stimeo--slider"]?.valueConstraints).toEqual([
+      {
+        value: "step",
+        type: "number",
+        finite: true,
+        greaterThan: 0,
+        suggestion: "Set step to a finite number greater than 0.",
+      },
+    ]);
+    expect(manifest.controllers["stimeo--range-slider"]?.valueConstraints).toEqual([
+      {
+        value: "min",
+        type: "number",
+        finite: true,
+        suggestion: "Set min to a finite number.",
+      },
+      {
+        value: "max",
+        type: "number",
+        finite: true,
+        suggestion: "Set max to a finite number.",
+      },
+      {
+        value: "step",
+        type: "number",
+        finite: true,
+        greaterThan: 0,
+        suggestion: "Set step to a finite number greater than 0.",
+      },
+      {
+        value: "start",
+        type: "number",
+        finite: true,
+        suggestion: "Set start to a finite number.",
+      },
+      {
+        value: "end",
+        type: "number",
+        finite: true,
+        suggestion: "Set end to a finite number.",
+      },
+    ]);
+    expect(manifest.controllers["stimeo--number-input"]?.valueConstraints).toEqual(
+      manifest.controllers["stimeo--slider"]?.valueConstraints,
+    );
+    expect(manifest.controllers["stimeo--switch"]?.valueConstraints).toEqual([]);
+
+    for (const [identifier, rules] of Object.entries(valueConstraintRules)) {
+      expect(allControllers).toHaveProperty(identifier);
+      const values = manifest.controllers[identifier]?.values ?? [];
+      for (const rule of rules) expect(values).toContain(rule.value);
+    }
+  });
+
+  it("merges cross-Value relationships and keeps both sides on declared Values", () => {
+    expect(manifest.controllers["stimeo--range-slider"]?.valueRelations).toEqual([
+      {
+        left: "min",
+        operator: "less-than-or-equal",
+        right: "max",
+        leftDefault: 0,
+        rightDefault: 100,
+        suggestion: "Set min to a finite number less than or equal to max.",
+      },
+    ]);
+    expect(manifest.controllers["stimeo--slider"]?.valueRelations).toEqual([]);
+
+    for (const [identifier, rules] of Object.entries(valueRelationRules)) {
+      expect(allControllers).toHaveProperty(identifier);
+      const values = manifest.controllers[identifier]?.values ?? [];
+      for (const rule of rules) {
+        expect(values).toContain(rule.left);
+        expect(values).toContain(rule.right);
+        expect(Number.isFinite(rule.leftDefault)).toBe(true);
+        expect(Number.isFinite(rule.rightDefault)).toBe(true);
+      }
+    }
   });
 
   it("reflects static actions, defaulting to [] when undeclared", () => {
@@ -148,6 +260,27 @@ describe("buildManifest", () => {
     expect(manifest.controllers["stimeo--tabs"]?.keyboard).toEqual([]);
   });
 
+  it("merges hand-written host contracts, defaulting to [] when undeclared", () => {
+    expect(manifest.controllers["stimeo--switch"]?.hosts).toEqual([
+      {
+        target: "",
+        mode: "non-interactive-or-button",
+        buttonTypes: ["button"],
+        suggestion:
+          'Use <button type="button">, or move stimeo--switch to a non-interactive host such as <div>.',
+      },
+    ]);
+    expect(manifest.controllers["stimeo--tree-view"]?.hosts).toEqual([
+      {
+        target: "item",
+        mode: "non-interactive",
+        suggestion:
+          'Place the "item" target on a non-interactive element such as <li> or <div>; put links and buttons inside it.',
+      },
+    ]);
+    expect(manifest.controllers["stimeo--menu"]?.hosts).toEqual([]);
+  });
+
   it("merges hand-written managed-aria rules, defaulting to [] when undeclared", () => {
     const combobox = manifest.controllers["stimeo--combobox"]?.managedAria ?? [];
     expect(combobox.map((rule) => `${rule.target}:${rule.attrs.join("/")}`)).toEqual([
@@ -159,11 +292,21 @@ describe("buildManifest", () => {
     expect(manifest.controllers["stimeo--switch"]?.managedAria).toEqual([]);
   });
 
-  it("declares keyboard / managed-aria rules on targets the controller understands", () => {
+  it("declares keyboard / host / managed-aria rules on targets the controller understands", () => {
     for (const entry of Object.values(manifest.controllers)) {
       for (const req of entry.keyboard) {
         expect(entry.targets).toContain(req.target);
         expect(req.suggestion.length).toBeGreaterThan(0);
+      }
+      for (const rule of entry.hosts) {
+        if (rule.target !== "") expect(entry.targets).toContain(rule.target);
+        expect(rule.suggestion.length).toBeGreaterThan(0);
+        if (rule.mode === "non-interactive-or-button") {
+          expect(rule.buttonTypes?.length).toBeGreaterThan(0);
+          for (const type of rule.buttonTypes ?? []) expect(type).toBe(type.toLowerCase());
+        } else {
+          expect(rule.buttonTypes).toBeUndefined();
+        }
       }
       for (const rule of entry.managedAria) {
         if (rule.target !== "") expect(entry.targets).toContain(rule.target);
@@ -173,9 +316,10 @@ describe("buildManifest", () => {
     }
   });
 
-  it("only writes keyboard / managed-aria / composition rules for known controllers", () => {
+  it("only writes keyboard / host / managed-aria / composition rules for known controllers", () => {
     for (const id of [
       ...Object.keys(keyboardRules),
+      ...Object.keys(hostRules),
       ...Object.keys(managedAriaRules),
       ...Object.keys(compositionRules),
     ]) {

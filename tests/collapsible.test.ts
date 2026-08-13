@@ -64,7 +64,7 @@ describe("CollapsibleController", () => {
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
     expect(content().hidden).toBe(false);
     expect(content().getAttribute("data-state")).toBe("open");
-    expect(content().style.getPropertyValue("--stimeo-collapsible-content-height")).toMatch(/px$/);
+    expect(content().style.getPropertyValue("--stimeo--collapsible-content-height")).toMatch(/px$/);
   });
 
   it("closes on a second click: reapplies hidden and data-state closed", () => {

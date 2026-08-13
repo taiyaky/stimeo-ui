@@ -73,6 +73,13 @@ describe("readDataOption", () => {
   });
 
   describe("value readings", () => {
+    it("decodes decimal numeric literals used by Stimulus Values", () => {
+      expect(decode(`tag.div data: { stimeo__slider_step_value: -1.5e2, count: 1_000 }`)).toEqual({
+        "data-stimeo--slider-step-value": "-1.5e2",
+        "data-count": "1_000",
+      });
+    });
+
     it("keeps a single-quoted value", () => {
       expect(decode(`tag.div data: { controller: 'stimeo--menu' }`)).toEqual({
         "data-controller": "stimeo--menu",

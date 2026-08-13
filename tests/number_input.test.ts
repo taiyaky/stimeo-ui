@@ -4,7 +4,7 @@ import { NumberInputController } from "../src/controllers/number_input_controlle
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link NumberInputController}: the APG Spinbutton contract
@@ -58,11 +58,38 @@ describe("NumberInputController", () => {
     ) as HTMLButtonElement;
   const press = (k: string) =>
     input().dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--number-input",
+    ) as NumberInputController;
 
   it("disables the decrement button at the minimum on connect", () => {
     expect(input().value).toBe("0");
     expect(decrementBtn().disabled).toBe(true);
     expect(incrementBtn().disabled).toBe(false);
+  });
+
+  it("stays inert without an input target, including after a Value change", async () => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = `
+      <div data-controller="stimeo--number-input"
+           data-stimeo--number-input-min-value="0">
+        <button type="button" data-stimeo--number-input-target="increment">+</button>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--number-input", NumberInputController);
+    await tick();
+    const orphanRoot = document.querySelector<HTMLElement>(
+      "[data-controller='stimeo--number-input']",
+    ) as HTMLElement;
+    const orphanButton = orphanRoot.querySelector("button") as HTMLButtonElement;
+    const down = new Event("pointerdown", { bubbles: true, cancelable: true });
+
+    expect(() => orphanButton.dispatchEvent(down)).not.toThrow();
+    expect(down.defaultPrevented).toBe(false);
+    orphanRoot.setAttribute("data-stimeo--number-input-min-value", "10");
+    await flushMicrotasks();
   });
 
   it("never re-enables an author-disabled step button", async () => {
@@ -127,12 +154,88 @@ describe("NumberInputController", () => {
     expect(input().value).toBe("0");
   });
 
+  it("uses an authored page step in both directions", () => {
+    root().setAttribute("data-stimeo--number-input-page-step-value", "25");
+    input().value = "50";
+
+    press("PageUp");
+    expect(input().value).toBe("80");
+    press("PageDown");
+    expect(input().value).toBe("60");
+  });
+
   it("jumps to min/max with Home/End", () => {
     press("End");
     expect(input().value).toBe("100");
     expect(incrementBtn().disabled).toBe(true);
     press("Home");
     expect(input().value).toBe("0");
+  });
+
+  it("leaves Home and End unhandled when their bounds are infinite", async () => {
+    root().removeAttribute("data-stimeo--number-input-min-value");
+    root().removeAttribute("data-stimeo--number-input-max-value");
+    input().value = "50";
+    controller().minValueChanged();
+    controller().maxValueChanged();
+    await flushMicrotasks();
+
+    for (const key of ["Home", "End"]) {
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      input().dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(input().value).toBe("50");
+    }
+  });
+
+  it("reaches an off-grid maximum through keyboard and button stepping", async () => {
+    root().setAttribute("data-stimeo--number-input-max-value", "94");
+    input().value = "90";
+    controller().maxValueChanged();
+    await flushMicrotasks();
+
+    press("End");
+    expect(input().value).toBe("94");
+    press("ArrowDown");
+    expect(input().value).toBe("90");
+    incrementBtn().click();
+    expect(input().value).toBe("94");
+    expect(incrementBtn().disabled).toBe(true);
+  });
+
+  it("uses step one when an invalid step is supplied", async () => {
+    root().setAttribute("data-stimeo--number-input-step-value", "0");
+    input().value = "2.6";
+    controller().stepValueChanged();
+    await flushMicrotasks();
+
+    expect(input().value).toBe("3");
+    incrementBtn().click();
+    expect(input().value).toBe("4");
+  });
+
+  it("uses a runtime step change without rewiring button listeners", async () => {
+    root().setAttribute("data-stimeo--number-input-step-value", "5");
+    controller().stepValueChanged();
+    await flushMicrotasks();
+
+    incrementBtn().click();
+    expect(input().value).toBe("5");
+  });
+
+  it("silently reconciles a morphed range without dispatching change", async () => {
+    const changes = vi.fn();
+    root().addEventListener("stimeo--number-input:change", changes);
+    input().value = "90";
+    root().setAttribute("data-stimeo--number-input-max-value", "54");
+    root().setAttribute("data-stimeo--number-input-step-value", "5");
+    controller().maxValueChanged();
+    controller().stepValueChanged();
+    await flushMicrotasks();
+
+    expect(input().value).toBe("54");
+    expect(incrementBtn().disabled).toBe(true);
+    expect(changes).not.toHaveBeenCalled();
   });
 
   it("clamps at the maximum and disables increment there", () => {
@@ -148,6 +251,39 @@ describe("NumberInputController", () => {
     expect(input().value).toBe("20");
   });
 
+  it("preserves a blank input on change", () => {
+    const changes = vi.fn();
+    root().addEventListener("stimeo--number-input:change", changes);
+    input().value = "";
+
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(input().value).toBe("");
+    expect(changes).not.toHaveBeenCalled();
+  });
+
+  it("uses the finite minimum to derive button state for a blank input", async () => {
+    root().setAttribute("data-stimeo--number-input-min-value", "-10");
+    input().value = "";
+    controller().minValueChanged();
+    await flushMicrotasks();
+
+    expect(decrementBtn().disabled).toBe(true);
+    expect(incrementBtn().disabled).toBe(false);
+  });
+
+  it("uses zero to derive button state for a blank unbounded input", async () => {
+    root().removeAttribute("data-stimeo--number-input-min-value");
+    root().removeAttribute("data-stimeo--number-input-max-value");
+    input().value = "";
+    controller().minValueChanged();
+    controller().maxValueChanged();
+    await flushMicrotasks();
+
+    expect(decrementBtn().disabled).toBe(false);
+    expect(incrementBtn().disabled).toBe(false);
+  });
+
   it("keeps focus on the input after using a step button", () => {
     incrementBtn().click();
     expect(document.activeElement).toBe(input());
@@ -157,9 +293,12 @@ describe("NumberInputController", () => {
     input().value = "90";
     input().dispatchEvent(new Event("change", { bubbles: true }));
     incrementBtn().focus();
+    const disabledStatesAtFocus: boolean[] = [];
+    input().addEventListener("focus", () => disabledStatesAtFocus.push(incrementBtn().disabled));
     incrementBtn().click(); // 90 -> 100, increment becomes disabled
     expect(incrementBtn().disabled).toBe(true);
     expect(document.activeElement).toBe(input());
+    expect(disabledStatesAtFocus).toEqual([false]);
   });
 
   it("dispatches change with the committed value", () => {
@@ -173,10 +312,14 @@ describe("NumberInputController", () => {
   });
 
   it("suppresses pointerdown on buttons and releases it on disconnect", () => {
-    const button = incrementBtn();
-    const down = new Event("pointerdown", { bubbles: true, cancelable: true });
-    button.dispatchEvent(down);
-    expect(down.defaultPrevented).toBe(true);
+    input().value = "50";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    for (const button of [incrementBtn(), decrementBtn()]) {
+      const down = new Event("pointerdown", { bubbles: true, cancelable: true });
+      button.dispatchEvent(down);
+      expect(down.defaultPrevented).toBe(true);
+      window.dispatchEvent(new Event("pointerup"));
+    }
 
     // Invoke disconnect directly instead of racing happy-dom's async MutationObserver.
     const controller = application.getControllerForElementAndIdentifier(
@@ -186,7 +329,7 @@ describe("NumberInputController", () => {
     controller.disconnect();
 
     const after = new Event("pointerdown", { bubbles: true, cancelable: true });
-    button.dispatchEvent(after);
+    incrementBtn().dispatchEvent(after);
     expect(after.defaultPrevented).toBe(false);
   });
 
@@ -295,6 +438,10 @@ describe("NumberInputController press-and-hold", () => {
     document.querySelector<HTMLButtonElement>(
       "[data-stimeo--number-input-target='increment']",
     ) as HTMLButtonElement;
+  const decrementBtn = () =>
+    document.querySelector<HTMLButtonElement>(
+      "[data-stimeo--number-input-target='decrement']",
+    ) as HTMLButtonElement;
   const controller = () =>
     application.getControllerForElementAndIdentifier(
       root(),
@@ -330,6 +477,17 @@ describe("NumberInputController press-and-hold", () => {
     expect(input().value).toBe("40");
   });
 
+  it("auto-repeats decrement and swallows its trailing click", () => {
+    input().value = "50";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    pointerdown(decrementBtn());
+    vi.advanceTimersByTime(400 + 80); // 40, 30
+    releaseOutside();
+    decrementBtn().click();
+
+    expect(input().value).toBe("30");
+  });
+
   it("does not poison the next legitimate click after a hold", () => {
     pointerdown(incrementBtn());
     vi.advanceTimersByTime(400 + 80); // -> 10, 20
@@ -360,6 +518,28 @@ describe("NumberInputController press-and-hold", () => {
     expect(event.defaultPrevented).toBe(false); // hold was not armed
     vi.advanceTimersByTime(2000);
     expect(input().value).toBe("0"); // no step from a right-click hold
+  });
+
+  it("does not arm a hold from a disabled bound button", () => {
+    const event = new Event("pointerdown", { bubbles: true, cancelable: true });
+
+    decrementBtn().dispatchEvent(event);
+    vi.advanceTimersByTime(2000);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(input().value).toBe("0");
+  });
+
+  it("ignores an extra release after the trailing click was consumed", () => {
+    pointerdown(incrementBtn());
+    vi.advanceTimersByTime(400); // -> 10
+    releaseOutside();
+    incrementBtn().click(); // consume the trailing-click suppression
+    expect(input().value).toBe("10");
+
+    releaseOutside(); // no hold is active, so this must be a no-op
+    incrementBtn().click();
+    expect(input().value).toBe("20");
   });
 
   it("does not swallow the first click after a disconnect during a suppressed window", () => {

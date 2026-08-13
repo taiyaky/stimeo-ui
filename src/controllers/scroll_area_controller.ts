@@ -39,7 +39,7 @@ interface VisibilityCheckable {
  * own, the viewport is made keyboard-scrollable (`tabindex="0"`, plus `role="region"`
  * when it already has an accessible name). Scroll position is published as
  * `data-scroll` (`start`/`middle`/`end`), overflow as `data-overflow`, and progress
- * as `--stimeo-scroll-progress` (0–1) so consumer CSS can draw scroll shadows.
+ * as `--stimeo--scroll-progress` (0–1) so consumer CSS can draw scroll shadows.
  *
  * @remarks
  * Behavior only. The `scroll` listener and {@link LayoutObserver} (element +
@@ -131,7 +131,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
 
     const { position, progress } = this.#measurePosition(vp);
     this.element.setAttribute("data-scroll", position);
-    this.element.style.setProperty("--stimeo-scroll-progress", String(progress));
+    this.element.style.setProperty("--stimeo--scroll-progress", String(progress));
 
     const edge = position === "start" ? "start" : position === "end" ? "end" : null;
     if (overflowing && edge && edge !== this.#lastEdge) {

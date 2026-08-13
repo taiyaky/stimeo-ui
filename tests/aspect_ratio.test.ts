@@ -8,7 +8,7 @@ import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link AspectRatioController}: ratio parsing into the
- * `--stimeo-aspect-ratio` custom property, the default, dynamic re-reflection,
+ * `--stimeo--aspect-ratio` custom property, the default, dynamic re-reflection,
  * and rejection of unparseable values.
  */
 
@@ -35,7 +35,7 @@ describe("AspectRatioController", () => {
 
   const root = () =>
     document.querySelector<HTMLElement>("[data-controller='stimeo--aspect-ratio']") as HTMLElement;
-  const ratioVar = () => root().style.getPropertyValue("--stimeo-aspect-ratio");
+  const ratioVar = () => root().style.getPropertyValue("--stimeo--aspect-ratio");
 
   it("reflects a w/h ratio as a normalized custom property", async () => {
     await start(markup("16/9"));

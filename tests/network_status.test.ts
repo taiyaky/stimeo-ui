@@ -39,8 +39,8 @@ describe("NetworkStatusController", () => {
     await tick();
   };
 
-  const OFFLINE_BANNER = `<div role="alert" hidden data-stimeo--network-status-target="offline">Offline</div>`;
-  const ONLINE_BANNER = `<div role="status" hidden data-stimeo--network-status-target="online">Back online</div>`;
+  const OFFLINE_BANNER = `<div hidden data-stimeo--network-status-target="offline">Offline</div>`;
+  const ONLINE_BANNER = `<div hidden data-stimeo--network-status-target="online">Back online</div>`;
 
   const start = (attrs = "") => startWith(`${OFFLINE_BANNER}${ONLINE_BANNER}`, attrs);
 
@@ -71,8 +71,8 @@ describe("NetworkStatusController", () => {
   it("normalizes banner visibility on connect even if the markup omits hidden", async () => {
     document.body.innerHTML = `
       <div data-controller="stimeo--network-status">
-        <div role="alert" data-stimeo--network-status-target="offline">Offline</div>
-        <div role="status" data-stimeo--network-status-target="online">Back online</div>
+        <div data-stimeo--network-status-target="offline">Offline</div>
+        <div data-stimeo--network-status-target="online">Back online</div>
       </div>`;
     application = Application.start();
     application.register("stimeo--network-status", NetworkStatusController);
@@ -201,8 +201,8 @@ describe("NetworkStatusController", () => {
     document.body.innerHTML = `
       <div data-controller="stimeo--network-status"
            data-stimeo--network-status-online-auto-hide-value="1000">
-        <div role="alert" hidden data-stimeo--network-status-target="offline">Offline</div>
-        <div role="status" hidden data-stimeo--network-status-target="online">Back online</div>
+        <div hidden data-stimeo--network-status-target="offline">Offline</div>
+        <div hidden data-stimeo--network-status-target="online">Back online</div>
       </div>`;
     application = Application.start();
     application.register("stimeo--network-status", NetworkStatusController);
@@ -222,8 +222,8 @@ describe("NetworkStatusController", () => {
     document.body.innerHTML = `
       <div data-controller="stimeo--network-status"
            data-stimeo--network-status-online-auto-hide-value="1000">
-        <div role="alert" hidden data-stimeo--network-status-target="offline">Offline</div>
-        <div role="status" hidden data-stimeo--network-status-target="online">Back online</div>
+        <div hidden data-stimeo--network-status-target="offline">Offline</div>
+        <div hidden data-stimeo--network-status-target="online">Back online</div>
       </div>`;
     application = Application.start();
     application.register("stimeo--network-status", NetworkStatusController);
@@ -305,24 +305,25 @@ describe("NetworkStatusController", () => {
     expect(el.hidden).toBe(true);
   });
 
-  // Going offline must announce the alert text through its live region.
-  it("announces the offline alert through the live region", async () => {
+  // The offline banner is the visual half: the announcer carries the wording, so a
+  // live-region role here would say it twice.
+  it("reads the shown offline banner as plain text, not a live region", async () => {
     await start();
     window.dispatchEvent(new Event("offline"));
     const spoken = await captureSpeech({ container: offline(), steps: 1 });
-    // Freeze the whole ordered array (not a name-only `toContain`): the live region
-    // must keep its `alert` role and announce the offline message, in order.
-    expect(spoken).toEqual(["alert", "Offline"]);
+    // Freeze the whole ordered array (not a name-only `toContain`): a generic
+    // container yields its own text and then the node's, and what matters is that no
+    // live-region role is spoken alongside them.
+    expect(spoken).toEqual(["Offline", "Offline"]);
   });
 
-  // Coming back online must announce the recovery text through its polite region.
-  it("announces the recovery message through the live region", async () => {
+  // The polite counterpart: the recovery banner is visual too.
+  it("reads the shown recovery banner as plain text, not a live region", async () => {
     setOnline(false);
     await start();
     window.dispatchEvent(new Event("online"));
     const spoken = await captureSpeech({ container: online(), steps: 1 });
-    // The polite counterpart of the alert case: role kept, message written.
-    expect(spoken).toEqual(["status", "Back online"]);
+    expect(spoken).toEqual(["Back online", "Back online"]);
   });
 
   it("has no machine-detectable a11y violations", async () => {
@@ -330,8 +331,8 @@ describe("NetworkStatusController", () => {
     document.body.innerHTML = `
       <main>
         <div data-controller="stimeo--network-status">
-          <div role="alert" hidden data-stimeo--network-status-target="offline">Offline</div>
-          <div role="status" hidden data-stimeo--network-status-target="online">Back online</div>
+          <div hidden data-stimeo--network-status-target="offline">Offline</div>
+          <div hidden data-stimeo--network-status-target="online">Back online</div>
         </div>
       </main>`;
     application = Application.start();

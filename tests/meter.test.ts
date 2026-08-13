@@ -9,7 +9,7 @@ import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link MeterController}: ARIA value-attribute sync, the
- * `--stimeo-meter-ratio`, threshold-based `data-state` segmentation, the
+ * `--stimeo--meter-ratio`, threshold-based `data-state` segmentation, the
  * `aria-valuetext` template, and the change event.
  */
 
@@ -40,7 +40,7 @@ describe("MeterController", () => {
   it("reflects the initial value onto ARIA and the ratio", async () => {
     await start('data-stimeo--meter-value-value="72"');
     expect(root().getAttribute("aria-valuenow")).toBe("72");
-    expect(root().style.getPropertyValue("--stimeo-meter-ratio")).toBe("0.72");
+    expect(root().style.getPropertyValue("--stimeo--meter-ratio")).toBe("0.72");
   });
 
   it("classifies values into low/medium/high by threshold", async () => {
@@ -84,7 +84,7 @@ describe("MeterController", () => {
     expect(root().getAttribute("aria-valuenow")).toBe("300");
     expect(root().getAttribute("aria-valuemin")).toBe("200");
     expect(root().getAttribute("aria-valuemax")).toBe("400");
-    expect(root().style.getPropertyValue("--stimeo-meter-ratio")).toBe("0.5");
+    expect(root().style.getPropertyValue("--stimeo--meter-ratio")).toBe("0.5");
   });
 
   // An empty range would divide by zero. The template is part of the assertion
@@ -93,7 +93,7 @@ describe("MeterController", () => {
     await start(
       'data-stimeo--meter-min-value="50" data-stimeo--meter-max-value="50" data-stimeo--meter-value-value="50" data-stimeo--meter-value-text-value="{percent}% ({state})"',
     );
-    expect(root().style.getPropertyValue("--stimeo-meter-ratio")).toBe("0");
+    expect(root().style.getPropertyValue("--stimeo--meter-ratio")).toBe("0");
     expect(root().getAttribute("aria-valuetext")).toBe("0% (medium)");
   });
 
@@ -101,7 +101,7 @@ describe("MeterController", () => {
     await start(
       'data-stimeo--meter-min-value="80" data-stimeo--meter-max-value="20" data-stimeo--meter-value-value="50"',
     );
-    expect(root().style.getPropertyValue("--stimeo-meter-ratio")).toBe("0");
+    expect(root().style.getPropertyValue("--stimeo--meter-ratio")).toBe("0");
   });
 
   it("dispatches change with value, ratio, and state", async () => {
@@ -216,7 +216,7 @@ describe("MeterController", () => {
     const style = root().style;
     const original = style.setProperty.bind(style);
     style.setProperty = (...args: Parameters<CSSStyleDeclaration["setProperty"]>) => {
-      if (args[0] === "--stimeo-meter-ratio") repaints += 1;
+      if (args[0] === "--stimeo--meter-ratio") repaints += 1;
       original(...args);
     };
     root().setAttribute("data-stimeo--meter-value-value", "60");

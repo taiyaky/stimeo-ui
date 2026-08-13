@@ -32,8 +32,10 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * (when `restoreFocus`) so it is testable without relying on emergent `inert`
  * focus behavior. Listeners are torn down on `disconnect()` (Turbo navigation
  * included) along with the {@link MinDurationFloor} holding the finish back, kept
- * across an in-page move by {@link DetachGate}; the hooks a cached page would
- * freeze are rewound by {@link BeforeCacheReset}.
+ * across an in-page move by {@link DetachGate}. A detach that keeps the element
+ * returns the frame to its idle form, as does {@link BeforeCacheReset} for the
+ * snapshot a cached page freezes; a frame render that swaps the targets mid-load
+ * re-arms them.
  */
 export class FrameLoadingController extends Controller<HTMLElement> {
   static override targets = ["content", "skeleton", "overlay"];
@@ -62,7 +64,17 @@ export class FrameLoadingController extends Controller<HTMLElement> {
   readonly #gate = new DetachGate();
   readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   #loading = false;
-  #inertApplied = false;
+  /**
+   * The optional targets this controller revealed, and the content it marked inert.
+   * Held as references rather than re-resolved on the way out: a detach that keeps
+   * the element takes the identifier off `data-controller` first, and a scope
+   * without its identifier stops resolving targets — the elements to tidy would be
+   * unreachable exactly when the tidying matters. They double as the ownership
+   * marker, so a `hidden` or an `inert` the consumer wrote is never taken over.
+   */
+  #revealedSkeleton: HTMLElement | null = null;
+  #revealedOverlay: HTMLElement | null = null;
+  #inertTarget: HTMLElement | null = null;
   #previousFocus: HTMLElement | null = null;
   /** The id of the retreated element, used to re-find it if the load replaced it. */
   #previousFocusId = "";
@@ -98,32 +110,95 @@ export class FrameLoadingController extends Controller<HTMLElement> {
   }
 
   /**
-   * Drops the held finish and the loading bookkeeping on a real detach. The markup
-   * keeps whatever it last held: the page being cached is rewound at
-   * `turbo:before-cache` instead, where the frame is still whole.
+   * Drops the held finish and the loading bookkeeping on a real detach, returning
+   * the frame to its idle form. No reconnect is coming, so nothing is left that
+   * could finish the load and clear the hooks — a detach that keeps the element
+   * (a morph dropping the identifier, an exit from a scoped observed root) would
+   * otherwise strand it busy and inert. Focus is left where it is: the element is
+   * leaving this controller's care, and moving it now would be an unexplained jump.
    */
   #teardown(): void {
     this.#gate.cancel();
     this.#timeouts.clearAll();
     this.#floor.cancel();
+    if (this.#loading) this.#rewindHooks();
     this.#loading = false;
     this.#previousFocus = null;
   }
 
   /**
-   * Returns the frame to its resting hooks for the snapshot Turbo is about to
-   * take, so a page reached with the Back button does not restore a frame that is
-   * busy and inert with nothing left to finish it. State only — no `end` event and
-   * no focus move, because the load did not actually complete. The live page keeps
-   * its held finish, so a navigation that never completes still ends properly.
+   * Returns the frame to its idle form for the snapshot Turbo is about to take, so
+   * a page reached with the Back button does not restore a frame that is busy and
+   * inert with nothing left to finish it. State only — no `end` event and no focus
+   * move, because the load did not actually complete.
+   *
+   * The load is abandoned rather than paused, so the flag and any finish the floor
+   * still holds drop along with the hooks. A kept finish would surface after the
+   * rewind as exactly the three things this pass exists to avoid — an `end`, a
+   * completion announcement, and a focus move — and a kept flag would leave the
+   * next fetch on a page that survives a cancelled visit skipping the loading
+   * state, its idempotence guard already satisfied.
    */
   #rewindForCache(): void {
     if (!this.#loading) return;
+    this.#loading = false;
+    this.#floor.cancel();
+    this.#rewindHooks();
+  }
+
+  /**
+   * Clears every hook the loading state writes. Shared by the three ways a load can
+   * stop — completion, detach, snapshot — so none of them can drift into tidying
+   * only part of it.
+   */
+  #rewindHooks(): void {
     this.element.removeAttribute("aria-busy");
     this.element.removeAttribute("data-frame-loading");
-    if (this.hasSkeletonTarget) this.skeletonTarget.hidden = true;
-    if (this.hasOverlayTarget) this.overlayTarget.hidden = true;
+    if (this.#revealedSkeleton) this.#revealedSkeleton.hidden = true;
+    if (this.#revealedOverlay) this.#revealedOverlay.hidden = true;
+    this.#revealedSkeleton = null;
+    this.#revealedOverlay = null;
     this.#clearInert();
+  }
+
+  /**
+   * Re-shows a `skeleton` that arrived mid-load. Turbo's frame renderer empties the
+   * frame and re-inserts the response's children, so a response's authored (hidden)
+   * skeleton can land while a later fetch is still running, and only the controller
+   * knows the frame is still busy.
+   */
+  skeletonTargetConnected(): void {
+    if (this.#loading) this.#revealSkeleton();
+  }
+
+  /** Re-shows an `overlay` that arrived mid-load — the same swap as the skeleton. */
+  overlayTargetConnected(): void {
+    if (this.#loading) this.#revealOverlay();
+  }
+
+  /**
+   * Re-blocks a `content` that arrived mid-load, so the stale copy stays unusable.
+   * The element that left is released first and ownership is then decided afresh, so
+   * an `inert` the replacement authored stays the consumer's.
+   */
+  contentTargetConnected(): void {
+    if (!this.#loading) return;
+    this.#clearInert();
+    this.#applyInert();
+  }
+
+  /** Reveals the optional `skeleton`, noting it as this controller's to hide again. */
+  #revealSkeleton(): void {
+    if (!this.hasSkeletonTarget) return;
+    this.#revealedSkeleton = this.skeletonTarget;
+    this.skeletonTarget.hidden = false;
+  }
+
+  /** Reveals the optional `overlay`, noting it as this controller's to hide again. */
+  #revealOverlay(): void {
+    if (!this.hasOverlayTarget) return;
+    this.#revealedOverlay = this.overlayTarget;
+    this.overlayTarget.hidden = false;
   }
 
   /** Enters the loading state: hooks, skeleton/overlay, inert content, focus retreat. */
@@ -132,8 +207,8 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     this.#floor.begin();
     this.element.setAttribute("aria-busy", "true");
     this.element.setAttribute("data-frame-loading", "true");
-    if (this.hasSkeletonTarget) this.skeletonTarget.hidden = false;
-    if (this.hasOverlayTarget) this.overlayTarget.hidden = false;
+    this.#revealSkeleton();
+    this.#revealOverlay();
     this.#applyInert();
     this.#retreatFocus();
     this.dispatch("start", { detail: {} });
@@ -143,11 +218,7 @@ export class FrameLoadingController extends Controller<HTMLElement> {
   /** Leaves the loading state: restore hooks, hide skeleton/overlay, restore focus. */
   #finish(): void {
     this.#loading = false;
-    this.element.removeAttribute("aria-busy");
-    this.element.removeAttribute("data-frame-loading");
-    if (this.hasSkeletonTarget) this.skeletonTarget.hidden = true;
-    if (this.hasOverlayTarget) this.overlayTarget.hidden = true;
-    this.#clearInert();
+    this.#rewindHooks();
     this.#restoreFocus();
     this.dispatch("end", { detail: {} });
     announce(fillTemplate(this.announceReadyTextValue, {}));
@@ -157,13 +228,12 @@ export class FrameLoadingController extends Controller<HTMLElement> {
   #applyInert(): void {
     if (!this.hasContentTarget || this.contentTarget.hasAttribute("inert")) return;
     this.contentTarget.setAttribute("inert", "");
-    this.#inertApplied = true;
+    this.#inertTarget = this.contentTarget;
   }
 
   #clearInert(): void {
-    if (!this.#inertApplied) return;
-    this.#inertApplied = false;
-    if (this.hasContentTarget) this.contentTarget.removeAttribute("inert");
+    this.#inertTarget?.removeAttribute("inert");
+    this.#inertTarget = null;
   }
 
   /** Saves and blurs focus if it sits inside the frame about to go stale. */

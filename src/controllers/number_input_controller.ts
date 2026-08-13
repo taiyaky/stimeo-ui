@@ -1,6 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { SafeInterval, SafeTimeout } from "../utils/safe_timeout";
+import { snapSteppedValue, stepSteppedValue } from "../utils/stepped_value";
 
 /**
  * Headless, accessible number / spin-button behavior.
@@ -44,6 +46,8 @@ import { SafeInterval, SafeTimeout } from "../utils/safe_timeout";
  *   never double-steps — the trailing click after a hold is swallowed.
  * - Typed input is clamped and snapped to the step grid on `change`;
  *   `stimeo--number-input:change` is dispatched on every committed change.
+ * - `step` must be finite and positive; invalid runtime input falls back to `1`,
+ *   while finite range endpoints remain reachable off the grid.
  */
 export class NumberInputController extends Controller<HTMLElement> {
   static override targets = ["input", "increment", "decrement"];
@@ -91,19 +95,18 @@ export class NumberInputController extends Controller<HTMLElement> {
   #repeatedDuringHold = false;
   /** True when the next `click` is the trailing one after a hold and must be ignored. */
   #suppressNextClick = false;
+  /** Collapses runtime range/step changes into one silent input reconciliation. */
+  readonly #repaint = new MicrotaskCoalescer(() => this.#reconcile());
 
   /** Normalizes any initial value and wires the focus/hold pointer guards. */
   override connect(): void {
+    this.#repaint.activate();
     if (!this.hasInputTarget) return;
-    if (this.inputTarget.value.trim() !== "") {
-      this.#write(this.#normalize(this.#currentValue()));
-    } else {
-      this.#updateButtons(this.#currentValue());
-    }
+    this.#reconcile();
     this.#guards = new AbortController();
     const { signal } = this.#guards;
-    if (this.hasIncrementTarget) this.#wireButton(this.incrementTarget, this.stepValue, signal);
-    if (this.hasDecrementTarget) this.#wireButton(this.decrementTarget, -this.stepValue, signal);
+    if (this.hasIncrementTarget) this.#wireButton(this.incrementTarget, 1, signal);
+    if (this.hasDecrementTarget) this.#wireButton(this.decrementTarget, -1, signal);
     // A pointer released or focus lost anywhere stops a running hold, even when
     // the button stopped receiving its own pointerup (e.g. it became disabled at
     // the bound, or the pointer was released off it).
@@ -114,6 +117,7 @@ export class NumberInputController extends Controller<HTMLElement> {
 
   /** Releases the pointer guards and tears down every pending timer and hold state. */
   override disconnect(): void {
+    this.#repaint.cancel();
     this.#guards?.abort();
     this.#guards = null;
     this.#holdActive = false;
@@ -123,17 +127,32 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.#holdIntervals.clearAll();
   }
 
+  /** Silently reconciles a minimum changed by application code or a Turbo morph. */
+  minValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Silently reconciles a maximum changed by application code or a Turbo morph. */
+  maxValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Silently reconciles a step changed by application code or a Turbo morph. */
+  stepValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
   /** Increases by one step. Bound via `data-action` (click). */
   increment(): void {
     if (this.#consumeSuppressedClick()) return;
-    this.#commit(this.#currentValue() + this.stepValue);
+    this.#commitStep(1);
     this.inputTarget.focus();
   }
 
   /** Decreases by one step. Bound via `data-action` (click). */
   decrement(): void {
     if (this.#consumeSuppressedClick()) return;
-    this.#commit(this.#currentValue() - this.stepValue);
+    this.#commitStep(-1);
     this.inputTarget.focus();
   }
 
@@ -146,20 +165,25 @@ export class NumberInputController extends Controller<HTMLElement> {
   /** Keyboard stepping per the APG spinbutton model. */
   onKeydown(event: KeyboardEvent): void {
     if (isReservedArrowChord(event)) return;
-    const page = this.pageStepValue > 0 ? this.pageStepValue : this.stepValue * 10;
     let next: number | null = null;
     switch (event.key) {
       case "ArrowUp":
-        next = this.#currentValue() + this.stepValue;
+        next = stepSteppedValue(this.#currentValue(), 1, this.#steppedRange);
         break;
       case "ArrowDown":
-        next = this.#currentValue() - this.stepValue;
+        next = stepSteppedValue(this.#currentValue(), -1, this.#steppedRange);
         break;
       case "PageUp":
-        next = this.#currentValue() + page;
+        next =
+          this.pageStepValue > 0
+            ? this.#currentValue() + this.pageStepValue
+            : stepSteppedValue(this.#currentValue(), 10, this.#steppedRange);
         break;
       case "PageDown":
-        next = this.#currentValue() - page;
+        next =
+          this.pageStepValue > 0
+            ? this.#currentValue() - this.pageStepValue
+            : stepSteppedValue(this.#currentValue(), -10, this.#steppedRange);
         break;
       case "Home":
         if (!Number.isFinite(this.minValue)) return;
@@ -181,15 +205,15 @@ export class NumberInputController extends Controller<HTMLElement> {
    * hold; leaving the button while held stops it (the global listeners cover
    * release/cancel/blur).
    */
-  #wireButton(button: HTMLButtonElement, delta: number, signal: AbortSignal): void {
-    button.addEventListener("pointerdown", (event) => this.#armHold(event, button, delta), {
+  #wireButton(button: HTMLButtonElement, direction: number, signal: AbortSignal): void {
+    button.addEventListener("pointerdown", (event) => this.#armHold(event, button, direction), {
       signal,
     });
     button.addEventListener("pointerleave", this.#stopHold, { signal });
   }
 
   /** Starts a hold: focus the input, then schedule the first repeat after a delay. */
-  #armHold(event: Event, button: HTMLButtonElement, delta: number): void {
+  #armHold(event: Event, button: HTMLButtonElement, direction: number): void {
     // Ignore secondary buttons (right/middle) when the event exposes one.
     const pointerButton = (event as PointerEvent).button;
     if (typeof pointerButton === "number" && pointerButton !== 0) return;
@@ -202,13 +226,13 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.#repeatedDuringHold = false;
     this.#suppressNextClick = false;
     this.#holdTimeouts.set(() => {
-      if (!this.#commit(this.#currentValue() + delta)) {
+      if (!this.#commitStep(direction)) {
         this.#stopHold();
         return;
       }
       this.#repeatedDuringHold = true;
       this.#holdIntervals.set(() => {
-        if (!this.#commit(this.#currentValue() + delta)) this.#stopHold();
+        if (!this.#commitStep(direction)) this.#stopHold();
       }, NumberInputController.#HOLD_REPEAT_MS);
     }, NumberInputController.#HOLD_DELAY_MS);
   }
@@ -251,6 +275,25 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.#write(value);
     if (changed) this.dispatch("change", { detail: { value } });
     return changed;
+  }
+
+  /** Commits an adjacent endpoint/grid value and reports whether it moved. */
+  #commitStep(count: number): boolean {
+    return this.#commit(stepSteppedValue(this.#currentValue(), count, this.#steppedRange));
+  }
+
+  /**
+   * Silently reflects the current value after a range or step morph.
+   *
+   * @stimeoRenderRoot
+   */
+  #reconcile(): void {
+    if (!this.hasInputTarget) return;
+    if (this.inputTarget.value.trim() !== "") {
+      this.#write(this.#normalize(this.#currentValue()));
+    } else {
+      this.#updateButtons(this.#currentValue());
+    }
   }
 
   /** Reflects `value` on the input (and ARIA for non-native hosts) and the buttons. */
@@ -303,10 +346,11 @@ export class NumberInputController extends Controller<HTMLElement> {
 
   /** Clamps to `[min, max]` and snaps to the step grid anchored at a finite min (else 0). */
   #normalize(raw: number): number {
-    const clamped = Math.min(this.maxValue, Math.max(this.minValue, raw));
-    if (this.stepValue <= 0) return clamped;
-    const base = Number.isFinite(this.minValue) ? this.minValue : 0;
-    const stepped = Math.round((clamped - base) / this.stepValue) * this.stepValue + base;
-    return Math.min(this.maxValue, Math.max(this.minValue, stepped));
+    return snapSteppedValue(raw, this.#steppedRange);
+  }
+
+  /** Shared range configuration; finite endpoints remain allowed off the grid. */
+  get #steppedRange() {
+    return { min: this.minValue, max: this.maxValue, step: this.stepValue };
   }
 }

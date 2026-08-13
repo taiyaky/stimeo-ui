@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
+import { DetachGate } from "../utils/detach_gate";
 import { MinDurationFloor } from "../utils/min_duration_floor";
 import { SafeTimeout } from "../utils/safe_timeout";
 
@@ -23,8 +24,8 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *
  * @remarks
  * Behavior only — skeleton shapes/animation are the consumer's. The
- * min-duration wait is held by {@link MinDurationFloor} on a {@link SafeTimeout}
- * torn down on `disconnect()` (Turbo navigation included).
+ * min-duration wait is held by {@link MinDurationFloor} on a {@link SafeTimeout},
+ * kept across an in-page move and dropped on a real detach via {@link DetachGate}.
  */
 export class SkeletonController extends Controller<HTMLElement> {
   static override targets = ["placeholder", "content"];
@@ -45,16 +46,23 @@ export class SkeletonController extends Controller<HTMLElement> {
 
   readonly #timers = new SafeTimeout();
   readonly #floor = new MinDurationFloor(this.#timers);
+  readonly #gate = new DetachGate();
 
   override connect(): void {
-    if (this.#state !== "ready") {
+    // A probe still queued means this is the reconnect half of an in-page move.
+    // The placeholder never left the screen, so the loading hooks already hold
+    // the values `#enterLoading()` would write and the floor is still measuring
+    // from the moment the skeleton actually appeared — restarting it here would
+    // hold the reveal back for longer than `minDuration` asks.
+    const moved = this.#gate.pending;
+    this.#gate.cancel();
+    if (!moved && this.#state !== "ready") {
       this.#enterLoading();
     }
   }
 
   override disconnect(): void {
-    this.#timers.clearAll();
-    this.#floor.cancel();
+    this.#gate.disconnected(this, () => this.#teardown());
   }
 
   /** Swaps to the real content. Honors `minDuration` to prevent a flash. */
@@ -89,6 +97,18 @@ export class SkeletonController extends Controller<HTMLElement> {
     this.dispatch("ready", { detail: {} });
     // loading → ready is the transition; the skeleton itself carries no words.
     announce(fillTemplate(this.announceReadyTextValue, {}));
+  }
+
+  /**
+   * Drops the held reveal on a real detach. The markup keeps whatever it last
+   * held: an element on its way out of the document has no reader left, and one
+   * whose `data-controller` dropped the identifier no longer resolves its own
+   * targets, so the rollback could only ever be partial.
+   */
+  #teardown(): void {
+    this.#gate.cancel();
+    this.#timers.clearAll();
+    this.#floor.cancel();
   }
 
   /** Current lifecycle phase as reflected on `data-state`. */

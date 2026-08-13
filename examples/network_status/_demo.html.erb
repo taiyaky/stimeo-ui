@@ -1,9 +1,11 @@
 <%# Markup for the network-status (offline-detection banner) demo.
     The library checks navigator.onLine initially and subscribes to the window's
-    online/offline events, toggling the corresponding banner's hidden. Offline uses
-    role="alert" (assertive); coming back online uses role="status" (polite). Since real
-    online/offline is environment-dependent, the demo's demo.js fakes the window events
-    to reproduce the behavior. %>
+    online/offline events, toggling the corresponding banner's hidden. The banners are
+    the visual half only: a region revealed at the moment of the change is not reliably
+    read, so the wording goes to the shared announcer instead — assertively when the
+    connection drops, politely when it comes back. Since real online/offline is
+    environment-dependent, the demo's demo.js fakes the window events to reproduce the
+    behavior. %>
 <div class="network-demo">
   <div class="network-demo__controls">
     <button class="demo-trigger" type="button" data-network-demo="offline">
@@ -15,21 +17,32 @@
   </div>
 
   <div data-controller="stimeo--network-status"
-       data-stimeo--network-status-online-auto-hide-value="3000">
+       data-stimeo--network-status-online-auto-hide-value="3000"
+       data-stimeo--network-status-announce-text-value="<%=
+         t("components.network_status.demo.offline_message") %>"
+       data-stimeo--network-status-announce-online-text-value="<%=
+         t("components.network_status.demo.online_message") %>">
     <div
       class="network-banner network-banner--offline"
-      role="alert"
       hidden
       data-stimeo--network-status-target="offline">
       <%= t("components.network_status.demo.offline_message") %>
     </div>
     <div
       class="network-banner network-banner--online"
-      role="status"
       hidden
       data-stimeo--network-status-target="online">
       <%= t("components.network_status.demo.online_message") %>
     </div>
+  </div>
+
+  <%# Shared announcer: losing the connection interrupts (assertive), regaining it
+      waits its turn (polite). %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="assertive" aria-live="assertive" aria-atomic="true"></div>
   </div>
 
   <p class="network-demo__note"><%= t("components.network_status.demo.note") %></p>

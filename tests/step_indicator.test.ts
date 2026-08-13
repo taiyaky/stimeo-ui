@@ -62,7 +62,7 @@ describe("StepIndicatorController", () => {
   const currents = () => steps().map((step) => step.getAttribute("aria-current"));
   const setStep = (current: unknown) =>
     root().dispatchEvent(new CustomEvent("step:set", { detail: { current } }));
-  const ratio = () => root().style.getPropertyValue("--stimeo-step-indicator-ratio");
+  const ratio = () => root().style.getPropertyValue("--stimeo--step-indicator-ratio");
   const recordChanges = () => {
     const seen: Array<{ current: number; total: number }> = [];
     root().addEventListener("stimeo--step-indicator:change", (event) => {
@@ -79,11 +79,11 @@ describe("StepIndicatorController", () => {
 
   it("exposes the progress ratio as a custom property", async () => {
     await start(0);
-    expect(root().style.getPropertyValue("--stimeo-step-indicator-ratio")).toBe("0");
+    expect(root().style.getPropertyValue("--stimeo--step-indicator-ratio")).toBe("0");
     setStep(2);
     expect(ratio()).toBe("1");
     setStep(1);
-    expect(root().style.getPropertyValue("--stimeo-step-indicator-ratio")).toBe("0.5");
+    expect(root().style.getPropertyValue("--stimeo--step-indicator-ratio")).toBe("0.5");
   });
 
   it("updates state when setCurrent fires", async () => {
@@ -250,7 +250,7 @@ describe("StepIndicatorController", () => {
     root().setAttribute("data-stimeo--step-indicator-current-value", "3");
     await tick();
     expect(states()).toEqual(["complete", "complete", "complete", "current"]);
-    expect(root().style.getPropertyValue("--stimeo-step-indicator-ratio")).toBe("1");
+    expect(root().style.getPropertyValue("--stimeo--step-indicator-ratio")).toBe("1");
   });
 
   it("repaints once when a batch of steps arrives together", async () => {
@@ -261,7 +261,7 @@ describe("StepIndicatorController", () => {
     const style = root().style;
     const original = style.setProperty.bind(style);
     style.setProperty = (...args: Parameters<CSSStyleDeclaration["setProperty"]>) => {
-      if (args[0] === "--stimeo-step-indicator-ratio") repaints += 1;
+      if (args[0] === "--stimeo--step-indicator-ratio") repaints += 1;
       original(...args);
     };
     const batch = document.createDocumentFragment();

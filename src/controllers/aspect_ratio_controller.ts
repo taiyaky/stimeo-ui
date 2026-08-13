@@ -11,8 +11,8 @@ import { Controller } from "@hotwired/stimulus";
  *          data-stimeo--aspect-ratio-target="content" />
  *   </div>
  *
- * Supplies the requested ratio as the `--stimeo-aspect-ratio` custom property on
- * the host so consumer CSS can drive the box (`aspect-ratio: var(--stimeo-aspect-ratio)`)
+ * Supplies the requested ratio as the `--stimeo--aspect-ratio` custom property on
+ * the host so consumer CSS can drive the box (`aspect-ratio: var(--stimeo--aspect-ratio)`)
  * or a padding-hack fallback. The drawing itself — `aspect-ratio`, `object-fit`,
  * cropping — stays in the consumer's stylesheet.
  *
@@ -32,7 +32,7 @@ export class AspectRatioController extends Controller<HTMLElement> {
 
   /** Applies the ratio on connect and whenever the value changes. */
   ratioValueChanged(): void {
-    this.element.style.setProperty("--stimeo-aspect-ratio", this.#normalizeRatio(this.ratioValue));
+    this.element.style.setProperty("--stimeo--aspect-ratio", this.#normalizeRatio(this.ratioValue));
   }
 
   /**

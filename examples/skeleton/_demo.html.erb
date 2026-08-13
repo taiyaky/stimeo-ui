@@ -29,6 +29,8 @@
     data-controller="stimeo--skeleton"
     aria-busy="true"
     data-stimeo--skeleton-min-duration-value="400"
+    data-stimeo--skeleton-announce-ready-text-value="<%=
+      t("components.skeleton.demo.announce_ready") %>"
     data-action="content:ready->stimeo--skeleton#ready skeleton:reset->stimeo--skeleton#reset">
     <div
       class="skeleton"
@@ -43,5 +45,13 @@
       <h3 class="skeleton-content__title"><%= t("components.skeleton.demo.title") %></h3>
       <p><%= t("components.skeleton.demo.body") %></p>
     </div>
+  </div>
+
+  <%# Shared announcer: aria-busy going false is state, not a notification, so the
+      arrival of the content is read out through a region that stands in the page
+      independently of the card. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

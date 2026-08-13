@@ -215,6 +215,37 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
     id: { type: "string", description: 'Controller identifier, e.g. "stimeo--tabs".' },
     targets: STRING_ARRAY,
     values: STRING_ARRAY,
+    valueConstraints: {
+      type: "array",
+      description: "Statically checkable semantic bounds on authored Stimulus Values.",
+      items: {
+        type: "object",
+        properties: {
+          value: { type: "string", description: "Camel-case declared Value name." },
+          type: { type: "string", enum: ["number"] },
+          finite: { type: "boolean" },
+          greaterThan: { type: "number" },
+          suggestion: { type: "string" },
+        },
+        required: ["value", "type", "suggestion"],
+      },
+    },
+    valueRelations: {
+      type: "array",
+      description: "Statically checkable relationships between authored Stimulus Values.",
+      items: {
+        type: "object",
+        properties: {
+          left: { type: "string", description: "Camel-case left Value name." },
+          operator: { type: "string", enum: ["less-than-or-equal"] },
+          right: { type: "string", description: "Camel-case right Value name." },
+          leftDefault: { type: "number" },
+          rightDefault: { type: "number" },
+          suggestion: { type: "string" },
+        },
+        required: ["left", "operator", "right", "leftDefault", "rightDefault", "suggestion"],
+      },
+    },
     actions: STRING_ARRAY,
     events: STRING_ARRAY,
     requiredTargets: {
@@ -301,6 +332,32 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
           suggestion: { type: "string" },
         },
         required: ["target", "suggestion"],
+      },
+    },
+    hosts: {
+      type: "array",
+      description:
+        "Scope or target host-element contracts that prevent the controller from competing " +
+        "with an incompatible native interaction.",
+      items: {
+        type: "object",
+        properties: {
+          target: {
+            type: "string",
+            description: 'Target name; "" means the data-controller element itself.',
+          },
+          mode: {
+            type: "string",
+            enum: ["non-interactive", "non-interactive-or-button"],
+            description: "Supported static host family.",
+          },
+          buttonTypes: {
+            ...STRING_ARRAY,
+            description: "Literal button types admitted by non-interactive-or-button.",
+          },
+          suggestion: { type: "string" },
+        },
+        required: ["target", "mode", "suggestion"],
       },
     },
     managedAria: {
@@ -450,12 +507,15 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
     "id",
     "targets",
     "values",
+    "valueConstraints",
+    "valueRelations",
     "actions",
     "events",
     "requiredTargets",
     "conditionalTargets",
     "a11y",
     "keyboard",
+    "hosts",
     "managedAria",
     "compositions",
     "companions",
@@ -571,8 +631,8 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
       "the headless, accessible Stimulus UI component library for Rails. " +
       "Returns a CheckReport with diagnostics — unknown controllers/targets/values/action " +
       "methods, missing required targets, missing or invalid author-supplied ARIA, " +
-      "keyboard-focusability prerequisites, and misaligned cross-controller composition " +
-      "values — each with a fix suggestion when available. " +
+      "keyboard-focusability prerequisites, incompatible interactive hosts, and misaligned " +
+      "cross-controller composition values — each with a fix suggestion when available. " +
       "Call this to validate any Rails view, ERB template, or HTML you write or edit with " +
       "these components, before finalizing it; ok=true means no errors.",
     annotations: READ_ONLY_ANNOTATIONS,
@@ -620,8 +680,9 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
       "Fetch the full usage contract of one Stimeo UI controller by identifier " +
       '(e.g. "stimeo--tabs"): targets, values, actions, events, required targets, and the ' +
       "accessibility contract — author-supplied ARIA requirements, keyboard-focusability " +
-      "prerequisites, the ARIA attributes the controller manages at runtime (which the " +
-      "author must NOT hardcode), and cross-controller composition value alignments. " +
+      "prerequisites, supported host-element shapes, the ARIA attributes the controller " +
+      "manages at runtime (which the author must NOT hardcode), and cross-controller " +
+      "composition value alignments. " +
       "Use it after stimeo_catalog to write correct, accessible Rails ERB or HTML markup " +
       "for that Stimulus component.",
     annotations: READ_ONLY_ANNOTATIONS,

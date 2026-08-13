@@ -152,6 +152,8 @@ export class RelativeTimeController extends Controller<HTMLElement> {
    * polling can stop: a *past* timestamp that fell back to the absolute text can
    * never leave it again, and a locale the runtime rejects has nothing to render
    * until that value is corrected.
+   *
+   * @stimeoRenderRoot
    */
   #applyAndComputeDelay(): number | null {
     const deltaMs = this.#targetMs - Date.now();

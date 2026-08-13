@@ -135,4 +135,37 @@ describe("DetachGate", () => {
       expect(teardown).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe("pending", () => {
+    it("is false before any disconnect", () => {
+      expect(new DetachGate().pending).toBe(false);
+    });
+
+    it("is true only while the ambiguous probe is queued", async () => {
+      const gate = new DetachGate();
+      gate.disconnected(connectedHost(), vi.fn());
+      // The window a consumer reads from `connect()`: a reconnect landing here
+      // is the in-page move, and whatever the connect would restart must not be.
+      expect(gate.pending).toBe(true);
+      await flushMicrotasks();
+      expect(gate.pending).toBe(false);
+    });
+
+    it("stays false on the synchronous fast path", () => {
+      const gate = new DetachGate();
+      const h = connectedHost();
+      h.element.remove();
+      gate.disconnected(h, vi.fn());
+      // A definite detach never queues a probe, so a later connect is a fresh
+      // attachment rather than the other half of a move.
+      expect(gate.pending).toBe(false);
+    });
+
+    it("is false once the reconnect cancels the probe", () => {
+      const gate = new DetachGate();
+      gate.disconnected(connectedHost(), vi.fn());
+      gate.cancel();
+      expect(gate.pending).toBe(false);
+    });
+  });
 });

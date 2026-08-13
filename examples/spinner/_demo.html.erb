@@ -1,13 +1,17 @@
 <%# Markup for the spinner (loading indicator) demo.
-    The indicator holds text in a role="status" live region, with the visual spinner
-    placed alongside as aria-hidden="true". The region reflects aria-busy. A show delay
-    and a minimum display time suppress flicker. The Start/Stop buttons call the
-    controller's methods directly. %>
+    The indicator is the visual half — its text plus a spinner marked aria-hidden="true" —
+    and the controlled region reflects aria-busy. An indicator revealed at the moment of
+    the change is not reliably read, so the loading / ready wording goes to the shared
+    announcer and is said exactly once. A show delay and a minimum display time suppress
+    flicker. The Start/Stop buttons call the controller's methods directly. %>
 <div
   class="spinner-demo"
   data-controller="stimeo--spinner"
   data-stimeo--spinner-delay-value="150"
-  data-stimeo--spinner-min-duration-value="600">
+  data-stimeo--spinner-min-duration-value="600"
+  data-stimeo--spinner-announce-text-value="<%= t("components.spinner.demo.loading") %>"
+  data-stimeo--spinner-announce-ready-text-value="<%=
+    t("components.spinner.demo.announce_ready") %>">
   <div class="spinner-demo__controls">
     <button
       class="demo-trigger"
@@ -25,10 +29,9 @@
 
   <p class="spinner-demo__hint"><%= t("components.spinner.demo.hint") %></p>
 
+  <%# Visual only: the announcer says this once, so a live region here would repeat it. %>
   <div
     class="spinner"
-    role="status"
-    aria-live="polite"
     hidden
     data-stimeo--spinner-target="indicator">
     <span class="spinner__icon" aria-hidden="true"></span>
@@ -40,5 +43,12 @@
     aria-busy="false"
     data-stimeo--spinner-target="region">
     <%= t("components.spinner.demo.content") %>
+  </div>
+
+  <%# Shared announcer: loading ↔ ready is the transition worth reading; aria-busy is
+      state the reader can query, not a notification. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

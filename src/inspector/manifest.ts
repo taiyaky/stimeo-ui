@@ -6,18 +6,21 @@ import { cardinalityRules } from "./cardinality_rules";
 import { companionRules } from "./companion_rules";
 import { compositionRules } from "./composition_rules";
 import { forbiddenAriaRules } from "./forbidden_aria_rules";
+import { hostRules } from "./host_rules";
 import { keyboardRules } from "./keyboard_rules";
 import { managedAriaRules } from "./managed_aria_rules";
 import { structureRules } from "./structure_rules";
 import { targetDeclarationRules } from "./target_declaration_rules";
 import type { ControllerManifest, Manifest } from "./types";
+import { valueConstraintRules } from "./value_constraint_rules";
+import { valueRelationRules } from "./value_relation_rules";
 
 /**
  * Current manifest *format* version, stamped onto every generated manifest as
  * `schemaVersion`. Bump on breaking schema changes; a reader compares it with
  * the shape its own engine knows how to consume.
  */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 11;
 
 /**
  * Minimal structural view of a Stimulus controller class, exposing only the
@@ -78,12 +81,15 @@ export function buildManifest(packageVersion: string): Manifest {
     controllers[identifier] = {
       targets: [...(reflect.targets ?? [])],
       values: Object.keys(reflect.values ?? {}),
+      valueConstraints: [...(valueConstraintRules[identifier] ?? [])],
+      valueRelations: [...(valueRelationRules[identifier] ?? [])],
       actions: [...(reflect.actions ?? [])],
       events: [...(reflect.events ?? [])],
       requiredTargets: [...(rule?.requiredTargets ?? [])],
       conditionalTargets: [...(rule?.conditionalTargets ?? [])],
       a11y: [...(allA11yRules[identifier] ?? [])],
       keyboard: [...(keyboardRules[identifier] ?? [])],
+      hosts: [...(hostRules[identifier] ?? [])],
       managedAria: [...(allManagedAriaRules[identifier] ?? [])],
       compositions: [...(compositionRules[identifier] ?? [])],
       companions: [...(companionRules[identifier] ?? [])],

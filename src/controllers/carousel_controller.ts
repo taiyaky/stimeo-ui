@@ -244,7 +244,11 @@ export class CarouselController extends Controller<HTMLElement> {
     if (changed) this.dispatch("change", { detail: { index, total: this.slideTargets.length } });
   }
 
-  /** Reflects `this.#index` onto slides and pickers (state hooks + roving). */
+  /**
+   * Reflects `this.#index` onto slides and pickers (state hooks + roving).
+   *
+   * @stimeoRenderRoot
+   */
   #render({ focus }: { focus: boolean }): void {
     this.slideTargets.forEach((slide, i) => {
       const active = i === this.#index;

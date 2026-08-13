@@ -23,7 +23,7 @@ import { TransitionCompletion } from "../utils/transition_completion";
  * The controller keeps the open lifecycle ordered so `hidden` (effectively
  * `display:none`) never blocks measurement or the transition:
  * - **Open**: drop `hidden` → measure the natural height into
- *   `--stimeo-collapsible-content-height` → set `data-state="open"`.
+ *   `--stimeo--collapsible-content-height` → set `data-state="open"`.
  * - **Close**: set `data-state="closed"` (CSS shrinks the height) → re-apply
  *   `hidden` once the transition settles. With no transition (or reduced motion,
  *   which the consumer's CSS expresses as a zero duration) it is applied
@@ -152,7 +152,10 @@ export class CollapsibleController extends Controller<HTMLElement> {
       content.hidden = false;
       // Measure the natural height only once it is laid out (hidden removed) so
       // the consumer's `height` transition has a concrete target to animate to.
-      content.style.setProperty("--stimeo-collapsible-content-height", `${content.scrollHeight}px`);
+      content.style.setProperty(
+        "--stimeo--collapsible-content-height",
+        `${content.scrollHeight}px`,
+      );
       content.setAttribute("data-state", "open");
       return;
     }

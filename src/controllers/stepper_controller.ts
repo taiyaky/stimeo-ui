@@ -114,6 +114,8 @@ export class StepperController extends Controller<HTMLElement> {
    * `aria-current="step"` is placed on the step's **first** `<button>`; the markup
    * contract assumes one operable button per step. If a step needs multiple
    * buttons, mark the navigational one first (or this would target the wrong one).
+   *
+   * @stimeoRenderRoot
    */
   #render(current: number): void {
     this.stepTargets.forEach((step, index) => {

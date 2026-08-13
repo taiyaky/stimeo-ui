@@ -1,8 +1,9 @@
 <%# Markup for the countdown (timer) demo.
     Fills the days/hours/minutes/seconds slots with the time remaining until the
     deadline, updating every interval (default 1000ms). role="timer" + aria-live="off"
-    avoids per-second announcements; completion is announced by writing text into
-    status (aria-live="polite"). The deadline is computed in ERB to always be in the future.
+    avoids per-second announcements; the status slot carries the completion text
+    visually and the shared announcer reads it out, so it is said exactly once.
+    The deadline is computed in ERB to always be in the future.
     The pause/resume/reset buttons sit outside the timer (a role="timer" live region
     should not wrap unrelated controls), so they drive it through the countdown:* events
     the controller listens for (see demo.js) instead of a Stimulus data-action, which
@@ -21,6 +22,7 @@
     aria-live="off"
     data-stimeo--countdown-deadline-value="<%= countdown_duration.from_now.iso8601 %>"
     data-stimeo--countdown-complete-label-value="<%= t('components.countdown.demo.complete') %>"
+    data-stimeo--countdown-announce-text-value="<%= t('components.countdown.demo.complete') %>"
     data-action="
       countdown:pause->stimeo--countdown#pause
       countdown:resume->stimeo--countdown#resume
@@ -41,8 +43,8 @@
       <span class="countdown__value" data-stimeo--countdown-target="seconds">00</span>
       <span class="countdown__label"><%= t("components.countdown.demo.seconds") %></span>
     </span>
-    <span class="countdown__status" role="status" aria-live="polite"
-          data-stimeo--countdown-target="status"></span>
+    <%# Visual only: the announcer says this once, so a live region here would repeat it. %>
+    <span class="countdown__status" data-stimeo--countdown-target="status"></span>
   </div>
 
   <div class="countdown-demo__controls">
@@ -55,5 +57,12 @@
     <button class="demo-trigger" type="button" data-countdown-reset>
       <%= t("components.countdown.demo.reset") %>
     </button>
+  </div>
+
+  <%# Shared announcer: reaching zero is the transition worth reading; the ticking
+      numbers in between are state the reader can query. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

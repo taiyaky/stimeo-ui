@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { setDefaultAttribute } from "../utils/default_attribute";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -61,9 +62,7 @@ export class ClipboardController extends Controller<HTMLElement> {
   #resetTimerId: number | null = null;
 
   override connect(): void {
-    if (!this.element.hasAttribute("data-state")) {
-      this.element.setAttribute("data-state", "idle");
-    }
+    setDefaultAttribute(this.element, "data-state", "idle");
   }
 
   override disconnect(): void {

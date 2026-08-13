@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { canTakeFocus } from "../utils/focus_candidate";
+import { INTERACTIVE_HOST_SELECTOR, isInteractiveHost } from "../utils/interactive_host";
 import { isRtl } from "../utils/logical_scroll";
 import { RovingTabindex } from "../utils/roving_tabindex";
 import { SafeTimeout } from "../utils/safe_timeout";
@@ -16,8 +17,7 @@ import { findTypeaheadMatch, isTypeaheadKey, Typeahead, typeaheadLabel } from ".
  * contract (see the class TSDoc), and the tree then stands down completely
  * rather than responding to some keys and not others.
  */
-const NESTED_INTERACTIVE =
-  'input, textarea, select, button, a[href], [contenteditable]:not([contenteditable="false"])';
+const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
 
 /**
  * Headless, accessible single-select tree view.
@@ -75,8 +75,7 @@ const NESTED_INTERACTIVE =
  *   `Enter` / click / `select` redefined first.
  * - An out-of-contract host makes `onKeydown` and `onClick` stand down
  *   **entirely** — no movement, no selection, no `select` — rather than respond
- *   partially. `stimeo check` cannot flag it: the rule schema states which
- *   attributes are required and cannot forbid an element shape.
+ *   partially. `stimeo check` reports the unsupported host before runtime.
  *
  * Consumer contract — controls nested inside a row:
  * - Keep them out of the Tab sequence (`tabindex="-1"`); the tree is one Tab
@@ -383,6 +382,7 @@ export class TreeViewController extends Controller<HTMLElement> {
     if (target.closest('[role="treeitem"]') !== item) return null;
     const control = target.closest<HTMLElement>(NESTED_INTERACTIVE);
     if (control && item.contains(control)) return null;
+    if (isInteractiveHost(target)) return null;
     return item;
   }
 

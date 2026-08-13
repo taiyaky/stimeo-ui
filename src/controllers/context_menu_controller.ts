@@ -29,7 +29,7 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *
  * @remarks
  * Behavior only — the controller reflects the click coordinate as the CSS custom
- * properties `--stimeo-context-menu-x` / `--stimeo-context-menu-y` on the menu
+ * properties `--stimeo--context-menu-x` / `--stimeo--context-menu-y` on the menu
  * so the consumer's CSS can place it (works standalone, no positioning module
  * required). Viewport-edge flip/shift is delegated to the opt-in
  * `stimeo-ui/positioning` module, which this controller never imports.
@@ -172,8 +172,8 @@ export class ContextMenuController extends Controller<HTMLElement> {
       onDismiss: () => this.#closeAndRestore(),
       claims: claimsWhileFocusWithin(this.element),
     });
-    this.menuTarget.style.setProperty("--stimeo-context-menu-x", `${x}px`);
-    this.menuTarget.style.setProperty("--stimeo-context-menu-y", `${y}px`);
+    this.menuTarget.style.setProperty("--stimeo--context-menu-x", `${x}px`);
+    this.menuTarget.style.setProperty("--stimeo--context-menu-y", `${y}px`);
     this.menuTarget.hidden = false;
     if (this.hasRegionTarget) this.regionTarget.setAttribute("data-state", "open");
     this.#navigableItems[0]?.focus();

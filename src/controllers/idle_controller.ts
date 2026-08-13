@@ -23,7 +23,8 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * Behavior only — it renders no warning UI (pair with Dialog/Confirm) and never
  * touches the server session. Timers are owned by {@link SafeTimeout} and the
  * listeners are removed on `disconnect()` (Turbo navigation included). Place one on
- * the root element; `data-turbo-permanent` keeps the count running across visits.
+ * the root element. Every visit reconnects the controller and re-arms the timeout
+ * from that moment — `data-turbo-permanent` keeps the element, not the elapsed count.
  */
 export class IdleController extends Controller<HTMLElement> {
   static override values = {
@@ -45,6 +46,12 @@ export class IdleController extends Controller<HTMLElement> {
   #prompted = false;
   /** Timestamp of the last activity; the timers self-reschedule against it. */
   #lastActivity = 0;
+  /**
+   * Activity types actually registered on `document`, so `disconnect()` unbinds the
+   * same set even when `events` changed while connected (a Turbo morph can rewrite
+   * the Value in place, and the removal must match the registration, not the Value).
+   */
+  #boundEvents: string[] = [];
 
   readonly #onActivity = (): void => {
     // Hot path (fires on every mousemove/scroll/wheel): just record the time. The
@@ -68,7 +75,15 @@ export class IdleController extends Controller<HTMLElement> {
   };
 
   override connect(): void {
-    for (const type of this.eventsValue) {
+    // Connecting always starts a fresh cycle (#arm() re-bases the clock), so an idle
+    // marker that arrived with the DOM — a restored Turbo snapshot, a moved element —
+    // describes a period this instance is not in. Drop it, or `data-idle` claims the
+    // user is idle for the whole next active window with no `active` to correct it.
+    this.#idle = false;
+    this.#prompted = false;
+    this.element.removeAttribute("data-idle");
+    this.#boundEvents = [...this.eventsValue];
+    for (const type of this.#boundEvents) {
       document.addEventListener(type, this.#onActivity, { passive: true, capture: true });
     }
     document.addEventListener("visibilitychange", this.#onVisibility);
@@ -76,9 +91,10 @@ export class IdleController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
-    for (const type of this.eventsValue) {
+    for (const type of this.#boundEvents) {
       document.removeEventListener(type, this.#onActivity, { capture: true });
     }
+    this.#boundEvents = [];
     document.removeEventListener("visibilitychange", this.#onVisibility);
     this.#timeouts.clearAll();
   }

@@ -10,7 +10,11 @@
   <div
     class="frame-demo__frame"
     data-controller="stimeo--frame-loading"
-    data-stimeo--frame-loading-min-duration-value="600">
+    data-stimeo--frame-loading-min-duration-value="600"
+    data-stimeo--frame-loading-announce-text-value="<%=
+      t("components.frame_loading.demo.announce_loading") %>"
+    data-stimeo--frame-loading-announce-ready-text-value="<%=
+      t("components.frame_loading.demo.announce_ready") %>">
     <div class="frame-demo__skeleton" data-stimeo--frame-loading-target="skeleton" hidden>
       <span class="visually-hidden"><%= t("components.frame_loading.demo.loading") %></span>
       <span class="frame-demo__bar"></span>
@@ -28,5 +32,12 @@
       </button>
       <span class="frame-demo__result" data-frame-demo-result role="status"></span>
     </div>
+  </div>
+
+  <%# Shared announcer: the frame's own skeleton is revealed at the moment of the
+      change, which is not reliably read, so the loading / ready wording goes here. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

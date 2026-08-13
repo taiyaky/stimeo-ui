@@ -37,7 +37,7 @@ const OWNED_VALUE_TEXT = "data-stimeo--progress-owns-valuetext";
  * deliberately distinct from {@link MeterController}'s point-in-time `meter`. The
  * controller owns value normalization and ARIA value-attribute synchronization;
  * the bar's width/animation is the consumer's, driven off the
- * `--stimeo-progress-ratio` (0–1) custom property and `data-state`.
+ * `--stimeo--progress-ratio` (0–1) custom property and `data-state`.
  *
  * @remarks
  * Behavior only — no styling is emitted. An indeterminate bar drops
@@ -145,7 +145,11 @@ export class ProgressController extends Controller<HTMLElement> {
     return rangeFraction(this.valueValue, this.minValue, this.maxValue);
   }
 
-  /** Reflects value/range/indeterminate onto ARIA, `data-state`, and the ratio. */
+  /**
+   * Reflects value/range/indeterminate onto ARIA, `data-state`, and the ratio.
+   *
+   * @stimeoRenderRoot
+   */
   #render(): void {
     this.element.setAttribute("aria-valuemin", String(this.minValue));
     this.element.setAttribute("aria-valuemax", String(this.maxValue));
@@ -156,14 +160,14 @@ export class ProgressController extends Controller<HTMLElement> {
       // this controller derived from a value would announce the very number the
       // indeterminate state drops.
       this.#clearOwnValueText();
-      this.element.style.removeProperty("--stimeo-progress-ratio");
+      this.element.style.removeProperty("--stimeo--progress-ratio");
       this.element.setAttribute("data-state", "indeterminate");
       return;
     }
 
     const value = this.#clamp(this.valueValue);
     this.element.setAttribute("aria-valuenow", String(value));
-    this.element.style.setProperty("--stimeo-progress-ratio", String(this.#ratio));
+    this.element.style.setProperty("--stimeo--progress-ratio", String(this.#ratio));
     this.element.setAttribute("data-state", "determinate");
     this.#applyValueText(value);
   }

@@ -35,6 +35,9 @@ const PM = 1;
  * (and, when `wrap` is set, carrying minutes→hours and seconds→minutes). Typing
  * digits enters a value directly and advances after two digits. AM/PM is modeled
  * as a `meridiem` spinbutton that toggles; the hidden field is always 24-hour.
+ * A committed field-value change dispatches a bubbling native `change` from
+ * that field, while `stimeo--time-picker:change` reports the composed widget
+ * state even when no field target is present.
  */
 export class TimePickerController extends Controller<HTMLElement> {
   static override targets = ["segment", "field"];
@@ -160,7 +163,6 @@ export class TimePickerController extends Controller<HTMLElement> {
 
   /** Propagates a wrap carry from `kind` into the next larger segment. */
   #carry(kind: SegmentKind, amount: number): void {
-    if (amount === 0) return;
     if (kind === "second") this.#step("minute", amount);
     else if (kind === "minute") this.#step("hour", amount);
     // Hours wrap on their own (no day rollover); meridiem has no carry.
@@ -234,18 +236,24 @@ export class TimePickerController extends Controller<HTMLElement> {
     segment.textContent = text;
   }
 
-  /** Composes `HH:MM[:SS]` (24-hour) into the hidden field; dispatches `change`. */
+  /** Composes `HH:MM[:SS]` and notifies both native-form and widget consumers. */
   #syncField(notify: boolean): void {
     const h24 = this.#hours24();
     const parts = [pad(h24), pad(this.#state.minute)];
     if (this.secondsValue) parts.push(pad(this.#state.second));
     const value = parts.join(":");
 
-    if (this.hasFieldTarget && this.fieldTarget.value !== value) {
+    const fieldChanged = this.hasFieldTarget && this.fieldTarget.value !== value;
+    if (fieldChanged) {
       this.fieldTarget.value = value;
     }
-    // Dispatch only when the composed value actually changed, so a no-op step
-    // (e.g. Home at the minimum) does not emit a redundant event.
+    if (notify && fieldChanged) {
+      // Match a native form control: only a real committed value change bubbles
+      // to form validation, dirty tracking, and auto-submit consumers.
+      this.fieldTarget.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    // The widget event describes its composed state and remains available even
+    // when no form field target exists.
     if (notify && value !== this.#lastValue) this.dispatch("change", { detail: { value } });
     this.#lastValue = value;
   }

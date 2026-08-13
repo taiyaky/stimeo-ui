@@ -9,7 +9,7 @@ import { tick } from "./helpers/timing";
 /**
  * Behavioral tests for {@link MasonryController}: responsive column count derived
  * from container width, shortest-column assignment exposed via `data-column`, the
- * `--stimeo-masonry-columns` custom property, the `layout` event, and — crucially
+ * `--stimeo--masonry-columns` custom property, the `layout` event, and — crucially
  * — that DOM (reading/focus) order is never reordered (WCAG 1.3.2).
  */
 
@@ -43,7 +43,7 @@ describe("MasonryController", () => {
     document.querySelector<HTMLElement>("[data-controller='stimeo--masonry']") as HTMLElement;
   const items = () =>
     Array.from(document.querySelectorAll<HTMLElement>("[data-stimeo--masonry-target='item']"));
-  const columns = () => root().style.getPropertyValue("--stimeo-masonry-columns");
+  const columns = () => root().style.getPropertyValue("--stimeo--masonry-columns");
 
   it("falls back to a single column when the width is unmeasurable", async () => {
     await start(3);

@@ -2,7 +2,8 @@
     controller observes the list with a MutationObserver, toggles hidden on the
     list / empty targets at the 0 <-> 1+ boundary, and reflects data-empty / data-count.
     demo.js adds/removes <li> (standing in for Turbo Stream rows). This demo only styles
-    it; the empty placeholder's copy is owned here. %>
+    it; the empty placeholder's copy is owned here, and the crossing is read out through
+    the shared announcer at the bottom. %>
 <div
   class="empty-state-demo"
   data-controller="stimeo--empty-state"
@@ -29,4 +30,12 @@
   <p class="empty-state-demo__empty" data-stimeo--empty-state-target="empty" hidden>
     <%= t("components.empty_state.demo.empty") %>
   </p>
+
+  <%# Shared announcer: the crossing is read out without moving focus. A placeholder
+      that only becomes visible at the moment of the change is not reliably read, so the
+      wording goes to a region that stands in the page independently of it. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
+  </div>
 </div>

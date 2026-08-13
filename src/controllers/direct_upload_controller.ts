@@ -31,7 +31,7 @@ const REMOVE_DELAY = 4000;
  *
  * For each upload it clones the `row` template into `list`, then updates
  * `aria-valuenow`, the `[data-field="percent"]` text, and the
- * `--stimeo-upload-progress` custom property as `direct-upload:progress` arrives,
+ * `--stimeo--upload-progress` custom property as `direct-upload:progress` arrives,
  * and flips `data-upload-state` to `done` / `error`. Completion and failure are
  * announced into the optional `status` live region using the consumer-provided
  * `doneLabel` / `errorLabel` (so copy stays localizable); per-tick progress is not
@@ -119,7 +119,7 @@ export class DirectUploadController extends Controller<HTMLElement> {
     const clamped = Math.max(0, Math.min(100, percent));
     row.setAttribute("aria-valuenow", String(clamped));
     row.setAttribute("aria-valuetext", `${clamped}%`);
-    row.style.setProperty("--stimeo-upload-progress", `${clamped}%`);
+    row.style.setProperty("--stimeo--upload-progress", `${clamped}%`);
     this.#setField(row, "percent", `${clamped}%`);
     this.#syncAggregate();
     this.dispatch("progress", { detail: { id, percent: clamped } });
@@ -165,7 +165,7 @@ export class DirectUploadController extends Controller<HTMLElement> {
     }
     clone.setAttribute("aria-valuenow", "0");
     clone.setAttribute("data-upload-state", "uploading");
-    clone.style.setProperty("--stimeo-upload-progress", "0%");
+    clone.style.setProperty("--stimeo--upload-progress", "0%");
     this.listTarget.appendChild(clone);
     this.#rows.set(key, clone);
     return clone;
@@ -191,7 +191,7 @@ export class DirectUploadController extends Controller<HTMLElement> {
     }
     const overall = Math.round(total / this.#rows.size);
     this.element.setAttribute("data-upload-progress", String(overall));
-    this.element.style.setProperty("--stimeo-upload-progress", `${overall}%`);
+    this.element.style.setProperty("--stimeo--upload-progress", `${overall}%`);
   }
 
   /** Writes a consumer label (with `%{name}` substituted) to the status region. */

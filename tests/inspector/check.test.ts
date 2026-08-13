@@ -70,6 +70,113 @@ describe("checkSource", () => {
       expect(codeList).not.toContain("unknown-value");
     });
 
+    describe("literal Value constraints", () => {
+      it.each(["stimeo--slider", "stimeo--range-slider", "stimeo--number-input"])(
+        "rejects a non-positive step for %s",
+        (identifier) => {
+          const diagnostic = checkSource(
+            `<div data-${identifier}-step-value="0"></div>`,
+            manifest,
+          ).find((candidate) => candidate.code === "invalid-value");
+
+          expect(diagnostic).toMatchObject({
+            severity: "error",
+            suggestion: "Set step to a finite number greater than 0.",
+          });
+          expect(diagnostic?.message).toContain(`"${identifier}.step"`);
+        },
+      );
+
+      it.each(["-1", "Infinity", "NaN", "not-a-number"])(
+        "rejects the invalid Slider step %s",
+        (step) => {
+          expect(codes(`<div data-stimeo--slider-step-value="${step}"></div>`)).toContain(
+            "invalid-value",
+          );
+        },
+      );
+
+      it.each(["min", "max", "start", "end"])("rejects a non-finite Range Slider %s", (value) => {
+        const diagnostic = checkSource(
+          `<div data-stimeo--range-slider-${value}-value="NaN"></div>`,
+          manifest,
+        ).find((candidate) => candidate.code === "invalid-value");
+
+        expect(diagnostic).toMatchObject({
+          severity: "error",
+          suggestion: `Set ${value} to a finite number.`,
+        });
+      });
+
+      it("rejects a Range Slider minimum greater than its maximum", () => {
+        const diagnostics = checkSource(
+          `<div data-stimeo--range-slider-min-value="80" data-stimeo--range-slider-max-value="20"></div>`,
+          manifest,
+        ).filter((candidate) => candidate.code === "invalid-value");
+
+        expect(diagnostics).toHaveLength(1);
+        expect(diagnostics[0]).toMatchObject({
+          severity: "error",
+          suggestion: "Set min to a finite number less than or equal to max.",
+        });
+        expect(diagnostics[0]?.message).toContain('"min" (80)');
+        expect(diagnostics[0]?.message).toContain('"max" (20)');
+      });
+
+      it("checks a Range Slider bound against the missing peer's public default", () => {
+        expect(codes(`<div data-stimeo--range-slider-min-value="101"></div>`)).toContain(
+          "invalid-value",
+        );
+        expect(codes(`<div data-stimeo--range-slider-max-value="-1"></div>`)).toContain(
+          "invalid-value",
+        );
+      });
+
+      it("accepts equal Range Slider bounds and skips a dynamic peer", () => {
+        expect(
+          codes(
+            `<div data-stimeo--range-slider-min-value="20" data-stimeo--range-slider-max-value="20"></div>`,
+          ),
+        ).not.toContain("invalid-value");
+        expect(
+          codes(
+            `<div data-stimeo--range-slider-min-value="80" data-stimeo--range-slider-max-value="<%= max %>"></div>`,
+          ),
+        ).not.toContain("invalid-value");
+      });
+
+      it("accepts positive decimal and Stimulus underscore spellings", () => {
+        expect(codes(`<div data-stimeo--slider-step-value="0.25"></div>`)).not.toContain(
+          "invalid-value",
+        );
+        expect(codes(`<div data-stimeo--slider-step-value="1_000"></div>`)).not.toContain(
+          "invalid-value",
+        );
+      });
+
+      it("skips an ERB-generated value whose numeric result is undecidable", () => {
+        expect(codes(`<div data-stimeo--slider-step-value="<%= step %>"></div>`)).not.toContain(
+          "invalid-value",
+        );
+      });
+
+      it("checks numeric literals in a Rails helper data hash", () => {
+        const source = `<%= tag.div data: {
+          controller: "stimeo--slider",
+          stimeo__slider_step_value: 0
+        } %>`;
+        expect(codes(source)).toContain("invalid-value");
+      });
+
+      it("is suppressible by its stable diagnostic code", () => {
+        expect(
+          codes(
+            `<div data-stimeo-ignore="invalid-value" data-stimeo--slider-step-value="0"></div>`,
+          ),
+        ).not.toContain("invalid-value");
+      });
+    });
+
     it("flags an unknown controller referenced from data-action", () => {
       const codeList = codes(
         `<div data-controller="stimeo--menu"><button data-stimeo--menu-target="trigger" data-action="click->stimeo--menoo#toggle"></button><ul data-stimeo--menu-target="menu"></ul></div>`,
@@ -413,24 +520,24 @@ describe("checkSource", () => {
     });
 
     describe("alternative groups (or)", () => {
-      const spinner = (indicator: string) => `
-        <div data-controller="stimeo--spinner">
-          ${indicator}
-          <div data-stimeo--spinner-target="region"></div>
-        </div>`;
+      const sortable = (status: string) => `
+        <ul data-controller="stimeo--sortable">
+          <li data-stimeo--sortable-target="item">A</li>
+          ${status}
+        </ul>`;
 
-      it("accepts either spelling of a live indicator", () => {
+      it("accepts either spelling of a live status region", () => {
         expect(
-          codes(spinner(`<div role="status" data-stimeo--spinner-target="indicator"></div>`)),
+          codes(sortable(`<span role="status" data-stimeo--sortable-target="status"></span>`)),
         ).toEqual([]);
         expect(
-          codes(spinner(`<div aria-live="polite" data-stimeo--spinner-target="indicator"></div>`)),
+          codes(sortable(`<span aria-live="polite" data-stimeo--sortable-target="status"></span>`)),
         ).toEqual([]);
       });
 
-      it("flags an indicator with neither spelling, naming all alternatives", () => {
+      it("flags a status region with neither spelling, naming all alternatives", () => {
         const d = checkSource(
-          spinner(`<div data-stimeo--spinner-target="indicator"></div>`),
+          sortable(`<span data-stimeo--sortable-target="status"></span>`),
           manifest,
         ).find((x) => x.code === "missing-aria");
         expect(d?.message).toContain("role or aria-live");
@@ -438,8 +545,8 @@ describe("checkSource", () => {
 
       it("flags a wrong value even when the other group is satisfied", () => {
         // aria-live="off" silences the region regardless of the valid role.
-        const source = spinner(
-          `<div role="status" aria-live="off" data-stimeo--spinner-target="indicator"></div>`,
+        const source = sortable(
+          `<span role="status" aria-live="off" data-stimeo--sortable-target="status"></span>`,
         );
         expect(codes(source)).toContain("invalid-aria-value");
       });
@@ -485,6 +592,8 @@ describe("checkSource", () => {
             "stimeo--demo": {
               targets: ["box"],
               values: [],
+              valueConstraints: [],
+              valueRelations: [],
               actions: [],
               events: [],
               requiredTargets: [],
@@ -499,6 +608,7 @@ describe("checkSource", () => {
                 },
               ],
               keyboard: [],
+              hosts: [],
               managedAria: [],
               compositions: [],
               companions: [],
@@ -622,6 +732,78 @@ describe("checkSource", () => {
             ),
           ),
         ).toEqual([]);
+      });
+    });
+
+    describe("host-element contracts", () => {
+      it.each([
+        '<button type="button" data-controller="stimeo--switch"></button>',
+        '<button type="BUTTON" data-controller="stimeo--switch"></button>',
+        '<div data-controller="stimeo--switch"></div>',
+        '<a data-controller="stimeo--switch"></a>',
+        '<div contenteditable="false" data-controller="stimeo--switch"></div>',
+        '<div contenteditable="FALSE" data-controller="stimeo--switch"></div>',
+        '<div contenteditable="not-a-keyword" data-controller="stimeo--switch"></div>',
+        '<div contenteditable="true"><div contenteditable="false" data-controller="stimeo--switch"></div></div>',
+      ])("accepts a supported switch host: %s", (source) => {
+        expect(codes(source)).not.toContain("invalid-host");
+      });
+
+      it.each([
+        '<button data-controller="stimeo--switch"></button>',
+        '<button type="submit" data-controller="stimeo--switch"></button>',
+        '<button type="reset" data-controller="stimeo--switch"></button>',
+        '<button type="not-a-type" data-controller="stimeo--switch"></button>',
+        '<input type="checkbox" data-controller="stimeo--switch">',
+        '<label for="field" data-controller="stimeo--switch">Notifications</label>',
+        '<a href="/settings" data-controller="stimeo--switch"></a>',
+        '<area href="/settings" data-controller="stimeo--switch">',
+        '<audio controls data-controller="stimeo--switch"></audio>',
+        '<div contenteditable data-controller="stimeo--switch"></div>',
+        '<div contenteditable="plaintext-only" data-controller="stimeo--switch"></div>',
+        '<div contenteditable="true"><div data-controller="stimeo--switch"></div></div>',
+        '<div contenteditable="true"><div contenteditable="invalid" data-controller="stimeo--switch"></div></div>',
+      ])("rejects an interactive or submitting switch host: %s", (source) => {
+        const diagnostic = checkSource(source, manifest).find(
+          (candidate) => candidate.code === "invalid-host",
+        );
+        expect(diagnostic?.severity).toBe("error");
+        expect(diagnostic?.suggestion).toContain('<button type="button">');
+      });
+
+      it("skips a switch host whose decisive attribute is ERB-generated", () => {
+        expect(
+          codes('<button type="<%= button_type %>" data-controller="stimeo--switch"></button>'),
+        ).not.toContain("invalid-host");
+        expect(
+          codes('<div contenteditable="<%= editable %>" data-controller="stimeo--switch"></div>'),
+        ).not.toContain("invalid-host");
+        expect(
+          codes(
+            '<div contenteditable="<%= editable %>">' +
+              '<div data-controller="stimeo--switch"></div></div>',
+          ),
+        ).not.toContain("invalid-host");
+      });
+
+      it("requires treeitem targets to use non-interactive hosts", () => {
+        const tree = (item: string) =>
+          '<ul role="tree" aria-label="Files" data-controller="stimeo--tree-view">' +
+          item +
+          "</ul>";
+        const target = 'data-stimeo--tree-view-target="item" role="treeitem"';
+
+        expect(codes(tree(`<li ${target}>src</li>`))).not.toContain("invalid-host");
+        expect(
+          codes(tree(`<li ${target}>src <button type="button">Rename</button></li>`)),
+        ).not.toContain("invalid-host");
+        for (const item of [
+          `<button type="button" ${target}>src</button>`,
+          `<a href="/src" ${target}>src</a>`,
+          `<div contenteditable ${target}>src</div>`,
+        ]) {
+          expect(codes(tree(item))).toContain("invalid-host");
+        }
       });
     });
 

@@ -61,7 +61,7 @@ describe("PasswordStrengthController", () => {
     expect(meter().getAttribute("aria-valuenow")).toBe("0");
     expect(root().hasAttribute("data-strength")).toBe(false);
     expect(root().hasAttribute("data-below-min")).toBe(false); // no minimum configured
-    expect(root().style.getPropertyValue("--stimeo-password-strength")).toBe("0");
+    expect(root().style.getPropertyValue("--stimeo--password-strength")).toBe("0");
     expect(label().textContent).toBe("");
   });
 
@@ -94,9 +94,9 @@ describe("PasswordStrengthController", () => {
   it("normalizes the level onto the custom property (0–1)", async () => {
     await start();
     type("Password1"); // score 2 of 4
-    expect(root().style.getPropertyValue("--stimeo-password-strength")).toBe("0.5");
+    expect(root().style.getPropertyValue("--stimeo--password-strength")).toBe("0.5");
     type("Password1!longer"); // score 4 of 4
-    expect(root().style.getPropertyValue("--stimeo-password-strength")).toBe("1");
+    expect(root().style.getPropertyValue("--stimeo--password-strength")).toBe("1");
   });
 
   it("clears the level hooks when the field is emptied", async () => {
@@ -106,7 +106,7 @@ describe("PasswordStrengthController", () => {
     type("");
     expect(root().hasAttribute("data-strength")).toBe(false);
     expect(meter().getAttribute("aria-valuenow")).toBe("0");
-    expect(root().style.getPropertyValue("--stimeo-password-strength")).toBe("0");
+    expect(root().style.getPropertyValue("--stimeo--password-strength")).toBe("0");
   });
 
   it("dispatches change immediately with score, level, max, and meetsMin", async () => {

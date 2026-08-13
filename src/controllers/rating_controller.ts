@@ -166,6 +166,8 @@ export class RatingController extends Controller<HTMLElement> {
    * Applies `value` (already clamped) everywhere, then dispatches `change`.
    * Use for user-driven changes; on connect call `#apply` directly so
    * initialization mirrors state without emitting an event.
+   *
+   * @stimeoRenderRoot
    */
   #render(value: number, { focus }: { focus: boolean }): void {
     this.#apply(value, { focus });

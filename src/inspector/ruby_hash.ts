@@ -39,7 +39,7 @@ import {
 export interface DataAttribute {
   /** Rendered attribute name, e.g. `data-controller` (underscores dasherized). */
   readonly name: string;
-  /** Decoded string value, or `null` when the entry's value is an expression. */
+  /** Decoded literal value, or `null` when the entry's value is an expression. */
   readonly value: string | null;
   /** Absolute source offset of the entry's key. */
   readonly keyStart: number;
@@ -253,6 +253,31 @@ function readEntry(code: string, start: number, base: number): HashEntry {
           valueEnd: literal.verbatim ? base + literal.contentEnd : undefined,
         },
         end: literal.end,
+      };
+    }
+  }
+
+  // Rails serializes a numeric data-hash literal as deterministically as a
+  // quoted string. Decode decimal/exponent spellings so semantic Inspector
+  // rules (for example `step > 0`) also cover idiomatic helper markup. Bases
+  // and expressions stay undecidable rather than being partially interpreted.
+  const number = /^[+-]?\d(?:_?\d)*(?:\.\d(?:_?\d)*)?(?:[eE][+-]?\d(?:_?\d)*)?/.exec(
+    code.slice(valueStart),
+  )?.[0];
+  if (number !== undefined) {
+    const end = valueStart + number.length;
+    const after = skipTrivia(code, end);
+    const whole = after >= code.length || code[after] === "," || code[after] === "}";
+    if (whole) {
+      return {
+        attr: {
+          name,
+          value: number,
+          ...anchor,
+          valueStart: base + valueStart,
+          valueEnd: base + end,
+        },
+        end,
       };
     }
   }

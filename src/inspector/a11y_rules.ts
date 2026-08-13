@@ -866,15 +866,6 @@ export const a11yRules: A11yRules = {
       suggestion: 'Add role="status" (or aria-live="polite") to the status target.',
     },
   ],
-  "stimeo--spinner": [
-    {
-      target: "indicator",
-      attrs: ["role"],
-      values: ["status", "alert"],
-      or: [{ attrs: ["aria-live"], values: ["polite", "assertive"] }],
-      suggestion: 'Add role="status" (or aria-live="polite") to the indicator target.',
-    },
-  ],
   // Opt-in cable controller: the "X is typing…" copy must reach AT (WCAG 4.1.3)
   // and the controller only writes textContent — the live-region semantics on
   // the (optional) status target are the author's to supply.

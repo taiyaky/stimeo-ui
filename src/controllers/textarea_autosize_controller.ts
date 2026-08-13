@@ -88,7 +88,7 @@ export class TextareaAutosizeController extends Controller<HTMLTextAreaElement> 
     } else {
       el.removeAttribute("data-at-max-rows");
     }
-    el.style.setProperty("--stimeo-textarea-rows", String(rows));
+    el.style.setProperty("--stimeo--textarea-rows", String(rows));
 
     if (height !== this.#lastHeight) {
       this.#lastHeight = height;

@@ -70,7 +70,7 @@ describe("DirectUploadController", () => {
     expect(row.getAttribute("aria-label")).toBe("a.png");
     expect(row.getAttribute("aria-valuenow")).toBe("0");
     expect(row.getAttribute("data-upload-state")).toBe("uploading");
-    expect(row.style.getPropertyValue("--stimeo-upload-progress")).toBe("0%");
+    expect(row.style.getPropertyValue("--stimeo--upload-progress")).toBe("0%");
   });
 
   it("updates progress and emits progress", async () => {
@@ -85,7 +85,7 @@ describe("DirectUploadController", () => {
     const row = firstRow();
     expect(row.getAttribute("aria-valuenow")).toBe("42");
     expect(row.querySelector("[data-field='percent']")?.textContent).toBe("42%");
-    expect(row.style.getPropertyValue("--stimeo-upload-progress")).toBe("42%");
+    expect(row.style.getPropertyValue("--stimeo--upload-progress")).toBe("42%");
     expect(events.at(-1)).toEqual({ id: "1", percent: 42 });
   });
 

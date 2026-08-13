@@ -19,7 +19,7 @@ describe("SpinnerController", () => {
   const start = async (attrs = "", markupState = "") => {
     document.body.innerHTML = `
       <div data-controller="stimeo--spinner" ${attrs} ${markupState}>
-        <div role="status" aria-live="polite" hidden
+        <div hidden
              data-stimeo--spinner-target="indicator">
           <span data-stimeo--spinner-target="message">Loading…</span>
         </div>
@@ -505,7 +505,7 @@ describe("SpinnerController accessibility", () => {
   const start = async () => {
     document.body.innerHTML = `
       <div data-controller="stimeo--spinner">
-        <div role="status" aria-live="polite" hidden
+        <div hidden
              data-stimeo--spinner-target="indicator">
           <span data-stimeo--spinner-target="message">Loading…</span>
         </div>
@@ -535,12 +535,14 @@ describe("SpinnerController accessibility", () => {
     await expectNoA11yViolations(document.body, { rules: { region: { enabled: false } } });
   });
 
-  it("announces the loading status through the live region", async () => {
+  it("reads the shown indicator as plain text, not a live region", async () => {
     await start();
     instance().start();
     const spoken = await captureSpeech({ container: indicator(), steps: 1 });
-    // Freeze the whole ordered array (not a name-only `toContain`): the live region
-    // must keep its `status` role and announce the loading message, in order.
-    expect(spoken).toEqual(["status", "Loading…"]);
+    // Freeze the whole ordered array (not a name-only `toContain`): the transition is
+    // read out by the shared announcer, so an indicator that also carried `status`
+    // would say it twice. A generic container yields its own text and then the
+    // message span's; what matters is that no live-region role is spoken.
+    expect(spoken).toEqual(["Loading…", "Loading…"]);
   });
 });

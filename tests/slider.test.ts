@@ -1,10 +1,10 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SliderController } from "../src/controllers/slider_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link SliderController}: the APG Slider contract —
@@ -43,6 +43,10 @@ describe("SliderController", () => {
     document.querySelector<HTMLElement>("[data-controller='stimeo--slider']") as HTMLElement;
   const thumb = () =>
     document.querySelector<HTMLElement>("[data-stimeo--slider-target='thumb']") as HTMLElement;
+  const track = () =>
+    document.querySelector<HTMLElement>("[data-stimeo--slider-target='track']") as HTMLElement;
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(root(), "stimeo--slider") as SliderController;
   const press = (key: string) =>
     thumb().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
   const fraction = () => root().style.getPropertyValue("--stimeo--slider-fraction");
@@ -52,6 +56,88 @@ describe("SliderController", () => {
     expect(thumb().getAttribute("aria-valuemin")).toBe("0");
     expect(thumb().getAttribute("aria-valuemax")).toBe("100");
     expect(fraction()).toBe("0.4");
+  });
+
+  it("uses the public Value defaults when every data Value is omitted", async () => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = `
+      <div data-controller="stimeo--slider">
+        <div data-stimeo--slider-target="track"
+             data-action="pointerdown->stimeo--slider#onPointerDown">
+          <div data-stimeo--slider-target="thumb" role="slider" tabindex="0"
+               aria-label="Volume"
+               data-action="keydown->stimeo--slider#onKeydown"></div>
+        </div>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--slider", SliderController);
+    await tick();
+
+    expect(thumb().getAttribute("aria-valuemin")).toBe("0");
+    expect(thumb().getAttribute("aria-valuemax")).toBe("100");
+    expect(thumb().getAttribute("aria-valuenow")).toBe("0");
+    expect(fraction()).toBe("0");
+  });
+
+  it("silently reconciles a batch of render Values swapped by a morph", async () => {
+    const values: number[] = [];
+    root().addEventListener("stimeo--slider:change", (event) => {
+      values.push((event as CustomEvent<{ value: number }>).detail.value);
+    });
+    root().setAttribute("data-stimeo--slider-min-value", "10");
+    root().setAttribute("data-stimeo--slider-max-value", "94");
+    root().setAttribute("data-stimeo--slider-step-value", "10");
+    root().setAttribute("data-stimeo--slider-value-value", "94");
+
+    // Drive the callback contract directly: happy-dom may drop the Stimulus
+    // MutationObserver delivery under full-suite load.
+    controller().minValueChanged();
+    controller().maxValueChanged();
+    controller().stepValueChanged();
+    controller().valueValueChanged();
+    await flushMicrotasks();
+
+    expect(thumb().getAttribute("aria-valuemin")).toBe("10");
+    expect(thumb().getAttribute("aria-valuemax")).toBe("94");
+    expect(thumb().getAttribute("aria-valuenow")).toBe("94");
+    expect(fraction()).toBe("1");
+    expect(values).toEqual([]);
+  });
+
+  it("hydrates a replacement thumb with current ARIA without dispatching change", async () => {
+    const changes = vi.fn();
+    root().addEventListener("stimeo--slider:change", changes);
+    const replacement = document.createElement("div");
+    replacement.setAttribute("data-stimeo--slider-target", "thumb");
+    replacement.setAttribute("role", "slider");
+    replacement.setAttribute("tabindex", "0");
+    replacement.setAttribute("aria-label", "Volume");
+    thumb().replaceWith(replacement);
+
+    controller().thumbTargetConnected(replacement);
+    await flushMicrotasks();
+
+    expect(replacement.getAttribute("aria-valuemin")).toBe("0");
+    expect(replacement.getAttribute("aria-valuemax")).toBe("100");
+    expect(replacement.getAttribute("aria-valuenow")).toBe("40");
+    expect(changes).not.toHaveBeenCalled();
+  });
+
+  it("transfers focus to a replacement thumb during an active drag", () => {
+    const activeTrack = track();
+    const previousThumb = thumb();
+    activeTrack.getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    activeTrack.dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 80, pointerId: 11, bubbles: true }),
+    );
+    const replacement = previousThumb.cloneNode(true) as HTMLElement;
+    previousThumb.replaceWith(replacement);
+
+    controller().thumbTargetDisconnected(previousThumb);
+    controller().thumbTargetConnected(replacement);
+
+    expect(document.activeElement).toBe(replacement);
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 11, bubbles: true }));
   });
 
   it("dispatches change with the new value on a real change, not at connect or bounds", () => {
@@ -140,6 +226,175 @@ describe("SliderController", () => {
     expect(thumb().getAttribute("aria-valuenow")).toBe("80");
   });
 
+  it("moves focus to the thumb when a primary pointer interaction starts", () => {
+    track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+
+    track().dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 150, pointerId: 1, bubbles: true }),
+    );
+
+    expect(document.activeElement).toBe(thumb());
+  });
+
+  it("ignores secondary pointer buttons without moving or focusing", () => {
+    track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    const event = new PointerEvent("pointerdown", {
+      button: 2,
+      clientX: 180,
+      pointerId: 2,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    track().dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(thumb().getAttribute("aria-valuenow")).toBe("40");
+    expect(document.activeElement).not.toBe(thumb());
+  });
+
+  it("owns the initiating pointer through move and termination", () => {
+    track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    track().dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 20, pointerId: 7, bubbles: true }),
+    );
+    expect(thumb().getAttribute("aria-valuenow")).toBe("10");
+
+    document.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 180, pointerId: 8, bubbles: true }),
+    );
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 8, bubbles: true }));
+    expect(thumb().getAttribute("aria-valuenow")).toBe("10");
+
+    document.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 100, pointerId: 7, bubbles: true }),
+    );
+    expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+  });
+
+  it("keeps simultaneous sliders isolated by pointer identity", async () => {
+    const second = root().cloneNode(true) as HTMLElement;
+    second.setAttribute("data-stimeo--slider-value-value", "90");
+    root().after(second);
+    await tick();
+    const roots = [...document.querySelectorAll<HTMLElement>("[data-controller='stimeo--slider']")];
+    const tracks = roots.map((element) =>
+      element.querySelector<HTMLElement>("[data-stimeo--slider-target='track']"),
+    );
+    const thumbs = roots.map((element) =>
+      element.querySelector<HTMLElement>("[data-stimeo--slider-target='thumb']"),
+    );
+    if (!tracks[0] || !tracks[1] || !thumbs[0] || !thumbs[1]) throw new Error("fixture missing");
+    tracks[0].getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    tracks[1].getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    tracks[0].dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 20, pointerId: 1, bubbles: true }),
+    );
+    tracks[1].dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 180, pointerId: 2, bubbles: true }),
+    );
+
+    document.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 100, pointerId: 1, bubbles: true }),
+    );
+
+    expect(thumbs[0].getAttribute("aria-valuenow")).toBe("50");
+    expect(thumbs[1].getAttribute("aria-valuenow")).toBe("90");
+  });
+
+  it("ends safely when the active track is removed mid-drag", () => {
+    const activeTrack = track();
+    const activeThumb = thumb();
+    activeTrack.getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    activeTrack.dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 160, pointerId: 4, bubbles: true }),
+    );
+    expect(activeThumb.getAttribute("aria-valuenow")).toBe("80");
+
+    activeTrack.remove();
+    controller().trackTargetDisconnected(activeTrack);
+
+    expect(() =>
+      document.dispatchEvent(
+        new PointerEvent("pointermove", { clientX: 0, pointerId: 4, bubbles: true }),
+      ),
+    ).not.toThrow();
+    expect(activeThumb.getAttribute("aria-valuenow")).toBe("80");
+  });
+
+  it("ends when the live track remains connected but ceases to be a target", () => {
+    const activeTrack = track();
+    const activeThumb = thumb();
+    activeTrack.getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    activeTrack.dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 160, pointerId: 12, bubbles: true }),
+    );
+    expect(activeThumb.getAttribute("aria-valuenow")).toBe("80");
+
+    activeTrack.removeAttribute("data-stimeo--slider-target");
+    controller().trackTargetDisconnected(activeTrack);
+    document.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 0, pointerId: 12, bubbles: true }),
+    );
+
+    expect(activeThumb.getAttribute("aria-valuenow")).toBe("80");
+  });
+
+  it("reaches an off-grid maximum from keyboard and pointer input", async () => {
+    root().setAttribute("data-stimeo--slider-max-value", "94");
+    root().setAttribute("data-stimeo--slider-value-value", "90");
+    controller().maxValueChanged();
+    controller().valueValueChanged();
+    await flushMicrotasks();
+
+    press("End");
+    expect(thumb().getAttribute("aria-valuenow")).toBe("94");
+    expect(fraction()).toBe("1");
+    press("ArrowLeft");
+    expect(thumb().getAttribute("aria-valuenow")).toBe("90");
+    press("ArrowRight");
+    expect(thumb().getAttribute("aria-valuenow")).toBe("94");
+
+    track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    track().dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 200, pointerId: 5, bubbles: true }),
+    );
+    expect(thumb().getAttribute("aria-valuenow")).toBe("94");
+  });
+
+  it("falls back to step one when the authored step is invalid", async () => {
+    root().setAttribute("data-stimeo--slider-step-value", "0");
+    root().setAttribute("data-stimeo--slider-value-value", "2.6");
+    controller().stepValueChanged();
+    controller().valueValueChanged();
+    await flushMicrotasks();
+
+    expect(thumb().getAttribute("aria-valuenow")).toBe("3");
+    press("ArrowRight");
+    expect(thumb().getAttribute("aria-valuenow")).toBe("4");
+  });
+
+  it("avoids repeated DOM writes while a snapped value stays unchanged", () => {
+    const activeTrack = track();
+    const activeThumb = thumb();
+    activeTrack.getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    const attributeWrites = vi.spyOn(activeThumb, "setAttribute");
+    const fractionWrites = vi.spyOn(root().style, "setProperty");
+    activeTrack.dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 80, pointerId: 6, bubbles: true }),
+    );
+    for (let index = 0; index < 20; index += 1) {
+      document.dispatchEvent(
+        new PointerEvent("pointermove", { clientX: 100, pointerId: 6, bubbles: true }),
+      );
+    }
+
+    expect(attributeWrites.mock.calls.filter(([name]) => name === "aria-valuenow")).toHaveLength(1);
+    expect(
+      fractionWrites.mock.calls.filter(([name]) => name === "--stimeo--slider-fraction"),
+    ).toHaveLength(1);
+  });
+
   // Machine-detectable a11y.
   it("has no machine-detectable a11y violations", async () => {
     await expectNoA11yViolations(root());
@@ -194,7 +449,10 @@ describe("SliderController", () => {
       const track = document.querySelector<HTMLElement>("[data-stimeo--slider-target='track']");
       if (!track) throw new Error("track not found");
       track.getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
-      track.dispatchEvent(new PointerEvent("pointerdown", { clientX, bubbles: true }));
+      track.dispatchEvent(
+        new PointerEvent("pointerdown", { clientX, pointerId: 1, bubbles: true }),
+      );
+      document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, bubbles: true }));
     };
 
     it("ignores RTL when the track was not declared logical", () => {
