@@ -2,10 +2,15 @@
     Enter or a comma (delimiter) turns the input value into a tag, blocking duplicates /
     empties / over-limit. Tag remove buttons move via roving (left/right keys), and
     Backspace on an empty input deletes the previous tag. The library handles tag
-    create/remove, hidden-field sync, focus handoff, and live announcements. %>
+    create/remove, hidden-field sync, focus handoff, and shared announcements. %>
+<% announce_added = t("components.tags_input.demo.announce_added") %>
+<% announce_removed = t("components.tags_input.demo.announce_removed") %>
+<% remove_label = t("components.tags_input.demo.remove_label") %>
 <div class="tags-input" data-controller="stimeo--tags-input"
      data-stimeo--tags-input-delimiter-value=","
-     data-stimeo--tags-input-name-value="frameworks[]">
+     data-stimeo--tags-input-name-value="frameworks[]"
+     data-stimeo--tags-input-announce-text-value="<%= announce_added %>"
+     data-stimeo--tags-input-announce-removed-text-value="<%= announce_removed %>">
   <ul
     class="tags-input__tags"
     role="list"
@@ -24,25 +29,27 @@
     <%= t("components.tags_input.demo.help") %>
   </span>
 
-  <span
-    role="status"
-    aria-live="polite"
-    class="tags-input__status visually-hidden"
-    data-stimeo--tags-input-target="status"></span>
-
   <%# The library creates and syncs the submit hidden inputs as name="frameworks[]". %>
   <div hidden data-stimeo--tags-input-target="fields"></div>
 
   <template data-stimeo--tags-input-target="tagTemplate">
     <li class="tags-input__tag" role="listitem" data-stimeo--tags-input-target="tag">
-      <span data-tags-input-slot="label"></span>
+      <span data-stimeo--tags-input-target="label"></span>
       <%# Removal is handled by a delegated listener on the tags container, so it
           works instantly without waiting on Stimulus wiring a data-action onto the
           dynamically-added button. %>
       <button
         type="button"
         class="tags-input__remove"
-        tabindex="-1">×</button>
+        tabindex="-1"
+        aria-label="<%= remove_label %>"
+        data-stimeo--tags-input-target="remove">×</button>
     </li>
   </template>
+
+  <%# Tag announcements go to the shared announcer that lives in the page. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden" data-stimeo--announcer-target="polite"
+         aria-live="polite" aria-atomic="true"></div>
+  </div>
 </div>

@@ -1,11 +1,14 @@
 import { Controller } from "@hotwired/stimulus";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { parseStringList } from "../utils/string_list";
 
 /** Field controls this controller can persist. */
 type PersistField = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
 
 /** Input types that carry no meaningful, restorable value. */
 const NON_VALUE_TYPES = new Set(["file", "submit", "reset", "button", "image"]);
+/** Field types and names skipped unless the consumer declares its own list. */
+const DEFAULT_EXCLUDE = ["password"];
 /** localStorage key prefix so drafts never clobber unrelated app storage. */
 const STORAGE_PREFIX = "stimeo--persist:";
 /** Separator for disambiguating repeated same-name fields (cannot occur in a real field name). */
@@ -14,7 +17,7 @@ const OCCURRENCE_SEP = "\u0000";
 /**
  * Headless draft-autosave behavior: persists a form's field values to
  * `localStorage` and restores them across Turbo navigations and reloads (no APG
- * pattern; a state-holding utility). The Alpine `persist` equivalent.
+ * pattern; a state-holding utility).
  *
  * Markup contract (identifier: `stimeo--persist`):
  *   <form data-controller="stimeo--persist"
@@ -39,7 +42,10 @@ export class PersistController extends Controller<HTMLElement> {
   static override values = {
     key: { type: String, default: "" },
     debounce: { type: Number, default: 400 },
-    exclude: { type: Array, default: ["password"] },
+    // A JSON list read through `parseStringList` rather than Stimulus's `Array`
+    // type: that reader throws out of the value observer before any callback
+    // runs, so one malformed attribute would stop the controller connecting.
+    exclude: { type: String, default: "" },
     clearOn: { type: String, default: "" },
   };
   static actions = ["clear"] as const;
@@ -50,7 +56,7 @@ export class PersistController extends Controller<HTMLElement> {
 
   declare keyValue: string;
   declare debounceValue: number;
-  declare excludeValue: string[];
+  declare excludeValue: string;
   declare clearOnValue: string;
 
   readonly #timeouts = new SafeTimeout();
@@ -207,16 +213,19 @@ export class PersistController extends Controller<HTMLElement> {
     const candidates = this.hasFieldTarget
       ? this.fieldTargets
       : Array.from(this.element.querySelectorAll<PersistField>("input, textarea, select"));
-    return candidates.filter((field) => this.#persistable(field));
+    // The exclusion list is fixed for the pass, so it is read once here rather
+    // than per candidate.
+    const excluded = parseStringList(this.excludeValue, DEFAULT_EXCLUDE);
+    return candidates.filter((field) => this.#persistable(field, excluded));
   }
 
   /** Whether a field carries a restorable, non-excluded value. */
-  #persistable(field: PersistField): boolean {
+  #persistable(field: PersistField, excluded: readonly string[]): boolean {
     if (this.#keyOf(field) === null) return false;
     const type = field instanceof HTMLInputElement ? field.type : "";
     if (NON_VALUE_TYPES.has(type)) return false;
-    if (this.excludeValue.includes(type)) return false;
-    if (field.name.length > 0 && this.excludeValue.includes(field.name)) return false;
+    if (excluded.includes(type)) return false;
+    if (field.name.length > 0 && excluded.includes(field.name)) return false;
     return true;
   }
 

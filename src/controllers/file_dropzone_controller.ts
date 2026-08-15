@@ -38,7 +38,8 @@ import { Controller } from "@hotwired/stimulus";
  *   `stimeo--file-dropzone:change` with the current `File[]`.
  * - Removing a file revokes its `objectURL` and moves focus to the next (else
  *   previous) remove button, falling back to the trigger; `disconnect()` revokes
- *   every outstanding `objectURL`.
+ *   every outstanding `objectURL`. Replacing the `list` target rebinds delegated
+ *   removal and moves the client-only previews into the replacement.
  */
 export class FileDropzoneController extends Controller<HTMLElement> {
   static override targets = ["zone", "trigger", "input", "list", "item", "itemTemplate", "status"];
@@ -52,6 +53,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
 
   declare readonly inputTarget: HTMLInputElement;
   declare readonly listTarget: HTMLElement;
+  declare readonly listTargets: HTMLElement[];
   declare readonly triggerTarget: HTMLElement;
   declare readonly itemTemplateTarget: HTMLTemplateElement;
   declare readonly statusTarget: HTMLElement;
@@ -68,19 +70,42 @@ export class FileDropzoneController extends Controller<HTMLElement> {
 
   /** Selected files paired with their rendered item and any preview objectURL. */
   readonly #entries: Array<{ file: File; item: HTMLElement; url?: string }> = [];
+  /** Prevents initial and teardown target callbacks from binding outside controller lifetime. */
+  #connected = false;
 
   /** Wires file removal as a delegated listener on the list container. */
   override connect(): void {
-    if (this.hasListTarget) this.listTarget.addEventListener("click", this.#onItemClick);
+    this.#connected = true;
+    if (this.hasListTarget) this.#bindList(this.listTarget);
   }
 
   /** Revokes any outstanding preview URLs so none leaks across navigations. */
   override disconnect(): void {
-    if (this.hasListTarget) this.listTarget.removeEventListener("click", this.#onItemClick);
+    this.#connected = false;
+    for (const list of this.listTargets) list.removeEventListener("click", this.#onItemClick);
     for (const entry of this.#entries) {
       if (entry.url) URL.revokeObjectURL(entry.url);
     }
     this.#entries.length = 0;
+  }
+
+  /** Rebinds removal and restores client-only previews when Turbo replaces the list target. */
+  listTargetConnected(list: HTMLElement): void {
+    if (!this.#connected) return;
+    this.#bindList(list);
+  }
+
+  /** Releases only the list target that actually disconnected. */
+  listTargetDisconnected(list: HTMLElement): void {
+    list.removeEventListener("click", this.#onItemClick);
+  }
+
+  /** Binds delegated removal once and moves live preview items into the current list. */
+  #bindList(list: HTMLElement): void {
+    list.addEventListener("click", this.#onItemClick);
+    for (const entry of this.#entries) {
+      if (!list.contains(entry.item)) list.appendChild(entry.item);
+    }
   }
 
   /** Opens the native file dialog. Bound via `data-action` (trigger click). */
@@ -120,8 +145,18 @@ export class FileDropzoneController extends Controller<HTMLElement> {
    * an item is appended without waiting on Stimulus to wire a freshly created element.
    */
   readonly #onItemClick = (event: MouseEvent): void => {
+    const list = event.currentTarget as HTMLElement | null;
     const button = (event.target as HTMLElement).closest("button");
-    if (!button || !this.hasListTarget || !this.listTarget.contains(button)) return;
+    if (
+      !this.#connected ||
+      !list ||
+      !button ||
+      !this.hasListTarget ||
+      list !== this.listTarget ||
+      !list.contains(button)
+    ) {
+      return;
+    }
     const index = this.#entries.findIndex((entry) => entry.item.contains(button));
     if (index !== -1) this.#removeAt(index);
   };

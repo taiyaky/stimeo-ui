@@ -74,6 +74,21 @@ describe("IdleController", () => {
     return counter;
   };
 
+  it("still arms when the activity-events declaration is malformed", async () => {
+    // Stimulus's own Array reader throws out of the value observer before any
+    // callback runs, which would stop the controller connecting at all.
+    await mount(
+      'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-events-value="[not json"',
+    );
+
+    vi.advanceTimersByTime(1000);
+    expect(root().hasAttribute("data-idle")).toBe(true);
+
+    // The default activity signals are still bound, so a real event recovers.
+    document.dispatchEvent(new Event("keydown"));
+    expect(root().hasAttribute("data-idle")).toBe(false);
+  });
+
   it("fires idle and marks the element after the timeout elapses", async () => {
     await mount('data-stimeo--idle-timeout-value="1000"');
     const idle = collect("idle");

@@ -70,6 +70,11 @@ interface Hsla {
  * exactly bijective: a typed hex can normalize to a near (not identical) value
  * once the HSL sliders are touched. This keeps the model small and zero-dep; use a
  * dedicated color library on the consumer side if exact hex preservation matters.
+ *
+ * A color the user set through a slider or the hex input is reported as
+ * `stimeo--color-picker:change`. Toggling `alpha` at runtime can move the
+ * committed color without a user edit, and that arrives as
+ * `stimeo--color-picker:reconcile` with the same detail. Neither fires on connect.
  */
 export class ColorPickerController extends Controller<HTMLElement> {
   static override targets = ["slider", "hex", "preview", "field"];
@@ -79,7 +84,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
     logicalTrack: { type: Boolean, default: false },
   };
   static actions = ["onHexInput", "onKeydown", "onPointerDown"] as const;
-  static events = ["change"] as const;
+  static events = ["change", "reconcile"] as const;
 
   declare readonly sliderTargets: HTMLElement[];
   declare readonly hexTarget: HTMLInputElement;
@@ -99,16 +104,16 @@ export class ColorPickerController extends Controller<HTMLElement> {
   #color: Hsla = { hue: 0, saturation: 0, lightness: 0, alpha: 100 };
   /** Aborts in-progress pointer-drag listeners on drag end / teardown. */
   #dragAbort: AbortController | null = null;
+  /** Color the last repaint settled on, so a configuration-driven move is reported once. */
+  #committedHex: string | null = null;
 
-  /** Seeds the model from the initial hex value and renders every surface. */
   /**
    * Collapses a morph that swaps render inputs into one repaint, and refuses the
    * pass Stimulus delivers before `connect()`.
    */
-  readonly #repaint = new MicrotaskCoalescer(() => {
-    this.#render();
-  });
+  readonly #repaint = new MicrotaskCoalescer(() => this.#reconcileColor());
 
+  /** Seeds the model from the initial hex value and renders every surface. */
   override connect(): void {
     this.#repaint.activate();
     const parsed = hexToHsla(this.valueValue);
@@ -216,13 +221,26 @@ export class ColorPickerController extends Controller<HTMLElement> {
       return;
     }
     this.#color = this.alphaValue ? parsed : { ...parsed, alpha: 100 };
-    this.#render();
+    this.#commitColor();
   }
 
   /** Clamps and snaps one channel to an integer, then re-renders + emits change. */
   #setChannel(channel: Channel, raw: number, min: number, max: number): void {
     this.#color[channel] = Math.round(Math.min(max, Math.max(min, raw)));
+    this.#commitColor();
+  }
+
+  /**
+   * Renders the model and reports a color the user actually moved. A key pressed
+   * at a bound, a pointer that lands on the step already showing, and a re-confirmed
+   * hex all leave the committed color where it was, so no `change` describes them.
+   */
+  #commitColor(): void {
+    const previous = this.#committedHex;
     this.#render();
+    if (this.#committedHex !== previous) {
+      this.dispatch("change", { detail: this.#settledDetail() });
+    }
   }
 
   /**
@@ -240,15 +258,33 @@ export class ColorPickerController extends Controller<HTMLElement> {
     }
 
     const hex = this.#hexString();
+    this.#committedHex = hex;
     if (this.hasHexTarget) this.hexTarget.value = hex;
     for (const field of this.fieldTargets) field.value = hex;
     for (const preview of this.previewTargets) preview.style.setProperty(COLOR_PROPERTY, hex);
     this.element.style.setProperty(COLOR_PROPERTY, hex);
+  }
 
+  /**
+   * Repaints after `alpha` changed at runtime and reports a color this controller
+   * settled on. Disabling alpha drops it from the model, so the committed color can
+   * move without a user edit; `change` stays reserved for the picker's own actions.
+   */
+  #reconcileColor(): void {
+    // Compared against the last rendered color, not against the model: the Value
+    // callback that scheduled this pass has already moved `alphaValue`, so
+    // re-deriving the "before" state here would always match the "after" one.
+    const previous = this.#committedHex;
+    this.#render();
+    if (previous !== null && this.#committedHex !== previous) {
+      this.dispatch("reconcile", { detail: this.#settledDetail() });
+    }
+  }
+
+  /** The settled color as event detail, shared by both report paths. */
+  #settledDetail(): { value: string; rgba: { r: number; g: number; b: number; a: number } } {
     const rgb = hslToRgb(this.#color.hue, this.#color.saturation, this.#color.lightness);
-    this.dispatch("change", {
-      detail: { value: hex, rgba: { ...rgb, a: this.#color.alpha / 100 } },
-    });
+    return { value: this.#hexString(), rgba: { ...rgb, a: this.#color.alpha / 100 } };
   }
 
   /** The current color as `#RRGGBB`, or `#RRGGBBAA` when alpha is enabled. */

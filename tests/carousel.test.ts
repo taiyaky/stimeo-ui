@@ -410,6 +410,102 @@ describe("CarouselController", () => {
         "false",
         "false",
       ]);
+      expect(pickers().map((picker) => picker.tabIndex)).toEqual([0, -1, -1, -1]);
+    });
+
+    it("re-establishes selection and the Tab stop when the active pair is removed", async () => {
+      await start();
+      pickers()[2]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(states()).toEqual(["inactive", "inactive", "active"]);
+
+      slides()[2]?.remove();
+      pickers()[2]?.remove();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(states()).toEqual(["inactive", "active"]);
+      expect(selected()).toEqual(["false", "true"]);
+      expect(pickers().map((picker) => picker.tabIndex)).toEqual([-1, 0]);
+    });
+
+    it("reports a slide clamped by removal as reconcile, not change", async () => {
+      await start();
+      pickers()[2]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      const changes: unknown[] = [];
+      const repairs: unknown[] = [];
+      root().addEventListener("stimeo--carousel:change", (event) => {
+        changes.push((event as CustomEvent).detail);
+      });
+      root().addEventListener("stimeo--carousel:reconcile", (event) => {
+        repairs.push((event as CustomEvent).detail);
+      });
+
+      slides()[2]?.remove();
+      pickers()[2]?.remove();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The clamp onto the nearest surviving slide is the controller's decision.
+      expect(repairs).toEqual([{ index: 1, total: 2 }]);
+      expect(changes).toEqual([]);
+    });
+
+    /** Appends a bare slide so a reconciliation runs against a changed target set. */
+    const appendSlide = () => {
+      const slide = document.createElement("div");
+      slide.setAttribute("role", "tabpanel");
+      slide.setAttribute("data-stimeo--carousel-target", "slide");
+      (
+        document.querySelector('[data-stimeo--carousel-target="viewport"]') as HTMLElement
+      ).appendChild(slide);
+    };
+
+    it("keeps the live active slide when a picker claims a different one", async () => {
+      await start();
+      pickers()[2]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(states()).toEqual(["inactive", "inactive", "active"]);
+
+      // The page marks a second picker selected. What the reader is actually
+      // looking at is the live slide, so it outranks the picker's claim.
+      pickers()[0]?.setAttribute("aria-selected", "true");
+      appendSlide();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(states()).toEqual(["inactive", "inactive", "active", "inactive"]);
+    });
+
+    it("falls back to the selected picker when no slide is marked active", async () => {
+      await start();
+      // A render can arrive with the picker marked and no slide state yet.
+      for (const slide of slides()) slide.removeAttribute("data-state");
+      pickers()[0]?.setAttribute("aria-selected", "false");
+      pickers()[2]?.setAttribute("aria-selected", "true");
+      appendSlide();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(states()).toEqual(["inactive", "inactive", "active", "inactive"]);
+    });
+
+    it("falls back to the first position when every slide is removed", async () => {
+      await start();
+      for (const slide of slides()) slide.remove();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // No slide survives, but the tablist still needs exactly one Tab stop.
+      expect(pickers().filter((picker) => picker.tabIndex === 0)).toHaveLength(1);
+      expect(selected()).toEqual(["true", "false", "false"]);
+    });
+
+    it("keeps one Tab stop when only the active picker leaves", async () => {
+      await start();
+      pickers()[2]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(states()).toEqual(["inactive", "inactive", "active"]);
+
+      // The slide stays and only its picker leaves, so the picker set is shorter
+      // than the slide set and the active index falls outside it.
+      pickers()[2]?.remove();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(pickers().filter((picker) => picker.tabIndex === 0)).toHaveLength(1);
+      expect(selected().filter((state) => state === "true")).toHaveLength(1);
     });
   });
 });

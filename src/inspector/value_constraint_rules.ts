@@ -9,6 +9,13 @@ const POSITIVE_STEP: ValueConstraint = {
   suggestion: "Set step to a finite number greater than 0.",
 };
 
+/** Minute segments expose integral values, so their step cannot be fractional. */
+const POSITIVE_INTEGER_STEP: ValueConstraint = {
+  ...POSITIVE_STEP,
+  integer: true,
+  suggestion: "Set step to a positive integer.",
+};
+
 /** Builds the finite-number contract shared by Range Slider's public Values. */
 function finiteRangeValue(value: "min" | "max" | "start" | "end"): ValueConstraint {
   return {
@@ -30,4 +37,5 @@ export const valueConstraintRules: ValueConstraintRules = {
     finiteRangeValue("end"),
   ],
   "stimeo--slider": [POSITIVE_STEP],
+  "stimeo--time-picker": [POSITIVE_INTEGER_STEP],
 };

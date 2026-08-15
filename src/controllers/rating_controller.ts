@@ -1,234 +1,320 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
+import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { isRtl } from "../utils/logical_scroll";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { RovingTabindex } from "../utils/roving_tabindex";
+import { TabindexLoan } from "../utils/tabindex_loan";
 
 /**
- * Headless, accessible rating (star) behavior.
+ * Headless, accessible rating behavior over an ordinal symbol sequence.
  *
  * Markup contract (identifier: `stimeo--rating`):
  *   <div data-controller="stimeo--rating" role="radiogroup" aria-label="Rating"
- *        data-stimeo--rating-value-value="3" data-stimeo--rating-max-value="5">
+ *        data-stimeo--rating-value-value="3">
  *     <span role="radio" aria-checked="false" aria-label="1 star" tabindex="-1"
- *           data-rating-value="1" data-stimeo--rating-target="symbol"
+ *           data-stimeo--rating-target="symbol"
  *           data-action="click->stimeo--rating#select
  *                        mouseenter->stimeo--rating#preview
  *                        mouseleave->stimeo--rating#endPreview
  *                        focus->stimeo--rating#preview
  *                        blur->stimeo--rating#endPreview
  *                        keydown->stimeo--rating#onKeydown">★</span>
- *     <!-- symbols 2..max; the selected one (or the first when unrated) tabindex=0 -->
+ *     <!-- later symbols continue the 1..N scale in DOM order -->
  *     <input type="hidden" data-stimeo--rating-target="field" />
  *   </div>
  *
- * Implements the WAI-ARIA APG **Radio Group** pattern (an ordinal scale): exactly
- * one symbol is `aria-checked`. Unlike a generic radio group it deliberately does
- * **not** wrap — being ordinal, arrows clamp at the bounds.
+ * Implements the WAI-ARIA APG **Radio Group** pattern as an ordinal scale. The
+ * live DOM order is the sole source of symbol values: the first symbol is 1 and
+ * the last is N. Unlike a generic radio group, arrows deliberately clamp rather
+ * than wrap because the values have an ordered lower and upper bound.
  *
  * @remarks
- * Behavior only — symbols are styled by the consumer off `[aria-checked]` and the
- * `data-rating-hover` fill hook. In `readonly` mode the group becomes
- * `role="img"`: because Stimeo never emits human-readable prose, the accessible
- * name (e.g. "Rated 3 of 5") is the consumer's `aria-label`/`aria-labelledby`.
+ * Behavior only — consumers style `[aria-checked]` and `data-rating-hover`. In
+ * `readonly` mode the group becomes `role="img"`; the consumer supplies the
+ * human-readable accessible name (for example, "Rated 3 of 5"). Focus standing on
+ * a symbol when that mode begins lands on the root and returns to the Tab stop
+ * when it ends, so it is never left on a node outside the accessibility tree.
  *
- * Behavior provided:
- * - Click selects a symbol; clicking the selected symbol clears to 0 when
- *   `clearable`.
- * - `ArrowRight`/`ArrowUp` raise and `ArrowLeft`/`ArrowDown` lower the value
- *   (clamped, down to 0 when `clearable`); `Home`/`End` jump to min/max;
- *   `Space`/`Enter` select the focused symbol.
- * - Hover/focus previews a fill range via `data-rating-hover`; leaving restores
- *   the selected range. `stimeo--rating:change` is dispatched on every change.
+ * `stimeo--rating:change` is reserved for a user operation that changes the
+ * committed value. A DOM or configuration reconciliation that clamps the value
+ * emits `stimeo--rating:reconcile` instead. Initial reflection emits neither.
  */
 export class RatingController extends Controller<HTMLElement> {
   static override targets = ["symbol", "field"];
   static override values = {
     value: { type: Number, default: 0 },
-    max: { type: Number, default: 5 },
     clearable: { type: Boolean, default: true },
     readonly: { type: Boolean, default: false },
   };
   static actions = ["endPreview", "onKeydown", "preview", "select"] as const;
-  static events = ["change"] as const;
+  static events = ["change", "reconcile"] as const;
 
   declare readonly symbolTargets: HTMLElement[];
   declare readonly fieldTarget: HTMLInputElement;
   declare readonly hasFieldTarget: boolean;
   declare valueValue: number;
-  declare maxValue: number;
   declare clearableValue: boolean;
   declare readonlyValue: boolean;
 
   readonly #roving = new RovingTabindex(() => this.symbolTargets);
+  readonly #rootRole = new AttributeLease<HTMLElement>("role");
+  readonly #symbolRole = new AttributeLease<HTMLElement>("role");
+  readonly #symbolAriaHidden = new AttributeLease<HTMLElement>("aria-hidden");
+  readonly #rootTabindex = new TabindexLoan();
+  readonly #repaint = new MicrotaskCoalescer(() => this.#reconcileScale());
+  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+  #connected = false;
+  #rescuedFocus = false;
 
-  /** Reflects the initial value, or switches to the non-interactive readonly view. */
-  /**
-   * Collapses a morph that swaps render inputs into one repaint, and refuses the
-   * pass Stimulus delivers before `connect()`.
-   */
-  readonly #repaint = new MicrotaskCoalescer(() => {
-    if (this.readonlyValue) {
-      this.#applyReadonly();
-      return;
-    }
-    this.#apply(this.#clamp(this.valueValue), { focus: false });
-  });
-
+  /** Reflects declarative state without announcing an initial user change. */
   override connect(): void {
     this.#repaint.activate();
-    if (this.readonlyValue) {
-      this.#applyReadonly();
-      return;
-    }
-    this.#apply(this.#clamp(this.valueValue), { focus: false });
+    this.#beforeCache.activate();
+    this.#apply(this.#normalize(this.valueValue), { focus: false });
+    this.#connected = true;
   }
 
-  /** Closes the window in which a queued repaint may still run. */
+  /** Drops a queued reconciliation and hands every borrowed attribute back. */
   override disconnect(): void {
+    this.#connected = false;
     this.#repaint.cancel();
+    this.#beforeCache.deactivate();
+    this.#releaseReadonly();
   }
 
-  /** Repaints when application code (or a Turbo morph) changes `value` at runtime. */
+  /** Removes a runtime-added symbol's authored Tab stop before the batch repaint. */
+  symbolTargetConnected(symbol: HTMLElement): void {
+    if (this.#connected === false) return;
+    symbol.tabIndex = -1;
+    this.#repaint.schedule();
+  }
+
+  /** Releases readonly ownership and reconciles the remaining DOM-ordered scale. */
+  symbolTargetDisconnected(symbol: HTMLElement): void {
+    this.#symbolRole.return(symbol);
+    this.#symbolAriaHidden.return(symbol);
+    this.#repaint.schedule();
+  }
+
+  /** Reflects into a hidden field added or replaced after connection. */
+  fieldTargetConnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Reconciles after a hidden field is removed or replaced. */
+  fieldTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints when application code or a Turbo morph changes `value`. */
   valueValueChanged(): void {
     this.#repaint.schedule();
   }
 
-  /** Selects (or clears) the clicked symbol. Bound via `data-action` (click). */
+  /** Repaints when application code changes whether value 0 is permitted. */
+  clearableValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints when application code enters or leaves the readonly snapshot. */
+  readonlyValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Selects or clears the clicked symbol. Bound via `data-action` (click). */
   select(event: Event): void {
     if (this.readonlyValue) return;
-    // Clamp the clicked value so a malformed data-rating-value can never push the
-    // roving Tab stop out of range.
-    const value = this.#clamp(this.#symbolValue(event.currentTarget as HTMLElement));
-    if (this.clearableValue && value === this.valueValue) {
-      // Clicking the selected symbol clears the rating; focus returns to the first.
-      this.#render(0, { focus: true });
-    } else {
-      this.#render(value, { focus: false });
-    }
+    const ordinal = this.#symbolOrdinal(event.currentTarget);
+    if (ordinal === null) return;
+    const current = this.#normalize(this.valueValue);
+    this.#commit(this.clearableValue && ordinal === current ? 0 : ordinal, {
+      focus: ordinal === current,
+    });
   }
 
-  /** Previews a fill range on hover/focus. Bound via `data-action` (mouseenter/focus). */
+  /** Previews a fill range on hover or focus without committing it. */
   preview(event: Event): void {
     if (this.readonlyValue) return;
-    this.#setFillRange(this.#clamp(this.#symbolValue(event.currentTarget as HTMLElement)));
+    const ordinal = this.#symbolOrdinal(event.currentTarget);
+    if (ordinal !== null) this.#setFillRange(ordinal);
   }
 
-  /** Restores the fill range to the selected value. Bound via `data-action` (mouseleave/blur). */
+  /** Restores the fill range after hover or focus leaves a symbol. */
   endPreview(): void {
     if (this.readonlyValue) return;
-    this.#setFillRange(this.valueValue);
+    this.#setFillRange(this.#normalize(this.valueValue));
   }
 
-  /** Arrow/Home/End/Space keyboard control, clamped (no wrap). */
+  /** Arrow/Home/End/Space/Delete keyboard control, clamped without wrapping. */
   onKeydown(event: KeyboardEvent): void {
-    // A descendant widget that already claimed the key must not ALSO change the rating —
-    // composition depends on this yield.
-    if (event.defaultPrevented) return;
-    if (isReservedArrowChord(event)) return;
-    if (this.readonlyValue) return;
+    if (event.defaultPrevented || isReservedArrowChord(event) || this.readonlyValue) return;
+
+    const current = this.#normalize(this.valueValue);
     let next: number | null = null;
-    // Logical, not physical, for the horizontal pair only: the stars are an
-    // ordered row, so which one is "next" follows the writing direction.
-    //
-    // The shared `logicalArrowStep` is deliberately not used here. It encodes the
-    // list-order convention (`ArrowDown` = next), and this widget pairs the arrows
-    // by *value* instead — `ArrowUp` means "more" — so borrowing it would silently
-    // invert the vertical axis.
     const rtl = isRtl(this.element);
+
+    // Horizontal keys follow writing direction. Vertical keys express value:
+    // ArrowUp is always more and ArrowDown is always less.
     switch (event.key) {
       case "ArrowRight":
       case "ArrowUp":
-        next = this.valueValue + (event.key === "ArrowRight" && rtl ? -1 : 1);
+        next = current + (event.key === "ArrowRight" && rtl ? -1 : 1);
         break;
       case "ArrowLeft":
       case "ArrowDown":
-        next = this.valueValue - (event.key === "ArrowLeft" && rtl ? -1 : 1);
+        next = current - (event.key === "ArrowLeft" && rtl ? -1 : 1);
         break;
       case "Home":
         next = this.#minValue;
         break;
       case "End":
-        next = this.maxValue;
+        next = this.symbolTargets.length;
         break;
       case " ":
       case "Enter":
-        next = this.#symbolValue(event.currentTarget as HTMLElement);
+        next = this.#symbolOrdinal(event.currentTarget);
+        break;
+      case "Delete":
+      case "Backspace":
+        // A pointer clears by pressing the committed symbol again. This is the
+        // keyboard's way to the same state, kept off Space so that a symbol
+        // announced as a radio still answers Space the way a radio does.
+        if (!this.clearableValue) return;
+        next = 0;
         break;
       default:
         return;
     }
+
+    if (next === null) return;
     event.preventDefault();
-    this.#render(this.#clamp(next), { focus: true });
+    this.#commit(next, { focus: true });
   }
 
   /**
-   * Applies `value` (already clamped) everywhere, then dispatches `change`.
-   * Use for user-driven changes; on connect call `#apply` directly so
-   * initialization mirrors state without emitting an event.
+   * Repaints one settled target/Value mutation batch and reports only a value
+   * this controller had to normalize.
    *
    * @stimeoRenderRoot
    */
-  #render(value: number, { focus }: { focus: boolean }): void {
+  #reconcileScale(): void {
+    const requested = this.valueValue;
+    const value = this.#normalize(requested);
+    this.#apply(value, { focus: false });
+    if (!Object.is(value, requested)) {
+      this.dispatch("reconcile", { detail: { value } });
+    }
+  }
+
+  /** Applies one user operation and emits only when its committed value changes. */
+  #commit(raw: number, { focus }: { focus: boolean }): void {
+    const previous = this.#normalize(this.valueValue);
+    const value = this.#normalize(raw);
     this.#apply(value, { focus });
-    this.dispatch("change", { detail: { value } });
+    if (value !== previous) this.dispatch("change", { detail: { value } });
   }
 
-  /**
-   * Stores `value`, syncs `aria-checked` and the roving Tab stop, the hidden
-   * field, and the fill range — without dispatching `change`. Idempotent and
-   * safe on connect (and across Turbo morphing).
-   */
+  /** Synchronizes value, ARIA, roving focus, form state, and the visual fill hook. */
   #apply(value: number, { focus }: { focus: boolean }): void {
-    this.valueValue = value;
-    this.symbolTargets.forEach((symbol) => {
-      symbol.setAttribute(
-        "aria-checked",
-        value > 0 && this.#symbolValue(symbol) === value ? "true" : "false",
-      );
+    if (!Object.is(this.valueValue, value)) this.valueValue = value;
+    this.symbolTargets.forEach((symbol, index) => {
+      symbol.setAttribute("aria-checked", value > 0 && index + 1 === value ? "true" : "false");
     });
-    // The selected symbol is the Tab stop; when unrated, the first symbol is.
-    this.#roving.setActive(value > 0 ? value - 1 : 0, { focus });
+
+    if (this.readonlyValue) {
+      this.#applyReadonly();
+    } else {
+      const returning = this.#releaseReadonly();
+      this.#roving.setActive(value > 0 ? value - 1 : 0, { focus: focus || returning });
+    }
+
     if (this.hasFieldTarget) this.fieldTarget.value = String(value);
     this.#setFillRange(value);
   }
 
-  /** Marks symbols up to `range` with `data-rating-hover` (the consumer's fill hook). */
+  /** Marks the first `range` symbols with the consumer-owned fill hook. */
   #setFillRange(range: number): void {
-    for (const symbol of this.symbolTargets) {
-      if (this.#symbolValue(symbol) <= range && range > 0) {
-        symbol.setAttribute("data-rating-hover", "");
-      } else {
-        symbol.removeAttribute("data-rating-hover");
-      }
-    }
-  }
-
-  /** Turns the group into a non-interactive `role="img"` snapshot of the value. */
-  #applyReadonly(): void {
-    const value = this.#clamp(this.valueValue);
-    this.valueValue = value;
-    this.element.setAttribute("role", "img");
-    for (const symbol of this.symbolTargets) {
-      // Drop the interactive radio role so the img has no nested interactive
-      // descendants; aria-hidden removes them from the tree entirely.
-      symbol.removeAttribute("role");
-      symbol.setAttribute("aria-hidden", "true");
-      symbol.tabIndex = -1;
-    }
-    if (this.hasFieldTarget) this.fieldTarget.value = String(value);
-    this.#setFillRange(value);
+    this.symbolTargets.forEach((symbol, index) => {
+      symbol.toggleAttribute("data-rating-hover", range > 0 && index < range);
+    });
   }
 
   /**
-   * Clamps `value` to `[min, max]` (min is 0 when clearable, else 1). The upper
-   * bound is also capped at the number of symbols so the roving Tab stop
-   * (`value - 1`) always maps to a real symbol — even if the consumer's `max`
-   * value and rendered symbol count disagree, the tabbable item is never lost.
+   * Temporarily turns the radiogroup into a non-interactive image snapshot.
+   *
+   * Each lease is returned before it is taken again, so a value the consumer
+   * wrote while readonly becomes the value the lease restores on release. The
+   * return is a no-op on an attribute still holding this controller's own
+   * write, which is the ordinary case.
    */
-  #clamp(value: number): number {
-    const max = Math.min(this.maxValue, this.symbolTargets.length);
-    return Math.min(max, Math.max(this.#minValue, value));
+  #applyReadonly(): void {
+    this.#rescueFocus();
+    this.#rootRole.return(this.element);
+    this.#rootRole.write(this.element, "img");
+    for (const symbol of this.symbolTargets) {
+      this.#symbolRole.return(symbol);
+      this.#symbolRole.write(symbol, null);
+      this.#symbolAriaHidden.return(symbol);
+      this.#symbolAriaHidden.write(symbol, "true");
+    }
+    this.#roving.setActive(-1);
+  }
+
+  /**
+   * Hands every readonly borrowing back before Turbo clones the page.
+   *
+   * The snapshot is taken while the controller is still connected, so an
+   * element left as `role="img"` with hidden symbols is what a restored page
+   * connects against — and that markup would be read as the authored one,
+   * leaving no way back to the radiogroup. Rewinding first keeps the cached
+   * copy identical to what the consumer wrote.
+   */
+  #rewindForCache(): void {
+    this.#releaseReadonly();
+    const value = this.#normalize(this.valueValue);
+    this.#roving.setActive(value > 0 ? value - 1 : 0);
+  }
+
+  /**
+   * Lands focus on the root before the symbols leave the accessibility tree.
+   *
+   * A symbol holding focus when readonly begins would keep it while losing its
+   * role and gaining `aria-hidden`, stranding the user on a node no longer in
+   * the tree. The root is the one element that survives the transition named:
+   * it carries the consumer's accessible name under `role="img"`.
+   */
+  #rescueFocus(): void {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || active === this.element) return;
+    if (!this.element.contains(active)) return;
+    this.#rootTabindex.lend(this.element);
+    this.element.focus();
+    this.#rescuedFocus = true;
+  }
+
+  /**
+   * Restores authored roles and visibility after leaving readonly mode.
+   *
+   * @returns whether focus is standing on the root because {@link #rescueFocus}
+   *   put it there, and therefore belongs back on the Tab stop.
+   */
+  #releaseReadonly(): boolean {
+    const returning = this.#rescuedFocus && document.activeElement === this.element;
+    this.#rescuedFocus = false;
+    this.#rootRole.return(this.element);
+    this.#symbolRole.returnAll();
+    this.#symbolAriaHidden.returnAll();
+    this.#rootTabindex.returnAll();
+    return returning;
+  }
+
+  /** Normalizes a raw value to an integer ordinal in the live DOM range. */
+  #normalize(raw: number): number {
+    const maximum = this.symbolTargets.length;
+    const ordinal = Number.isFinite(raw) ? Math.round(raw) : this.#minValue;
+    return Math.min(maximum, Math.max(this.#minValue, ordinal));
   }
 
   /** Lowest selectable value: 0 when clearable, otherwise 1. */
@@ -236,9 +322,10 @@ export class RatingController extends Controller<HTMLElement> {
     return this.clearableValue ? 0 : 1;
   }
 
-  /** A symbol's ordinal value (`data-rating-value`, defaulting to its position). */
-  #symbolValue(symbol: HTMLElement): number {
-    const raw = Number(symbol.getAttribute("data-rating-value"));
-    return Number.isFinite(raw) && raw > 0 ? raw : this.symbolTargets.indexOf(symbol) + 1;
+  /** Returns a target's 1-based position, or null when the action host is invalid. */
+  #symbolOrdinal(target: EventTarget | null): number | null {
+    const targets: readonly (EventTarget | null)[] = this.symbolTargets;
+    const index = targets.indexOf(target);
+    return index < 0 ? null : index + 1;
   }
 }

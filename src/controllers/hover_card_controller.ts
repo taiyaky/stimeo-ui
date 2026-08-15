@@ -47,8 +47,8 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  * - Open/closed flips the trigger's `aria-expanded`, the card's `hidden`, and a
  *   `data-state` (`open`/`closed`). Focus is never stolen on open.
  * - Opt-in **dismiss on scroll** (`closeOnScroll`): while open, scrolling a tracked
- *   scroll-parent ancestor (or the window) closes the card — the Radix / floating-ui
- *   convention. Covers keyboard/programmatic scroll and scrollbar-drag, which the
+ *   scroll-parent ancestor (or the window) closes the card, the usual convention for
+ *   anchored popups. Covers keyboard/programmatic scroll and scrollbar-drag, which the
  *   pointer-leave close cannot. Off by default.
  */
 export class HoverCardController extends Controller<HTMLElement> {

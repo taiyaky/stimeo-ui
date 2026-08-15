@@ -1,8 +1,12 @@
 import { Controller } from "@hotwired/stimulus";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { parseStringList } from "../utils/string_list";
 
 /** Character classes that contribute to password variety (one point each beyond the first). */
 const CLASS_PATTERNS: readonly RegExp[] = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/];
+
+/** Strength labels used unless the consumer declares its own scale. */
+const DEFAULT_LEVELS = ["weak", "fair", "good", "strong"];
 
 /** Length milestones that each add a strength point. */
 const LENGTH_MILESTONES: readonly number[] = [8, 12, 16];
@@ -57,7 +61,10 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
   static override targets = ["input", "meter", "label"];
   static override values = {
     minScore: { type: Number, default: 0 },
-    levels: { type: Array, default: ["weak", "fair", "good", "strong"] },
+    // A JSON list read through `parseStringList` rather than Stimulus's `Array`
+    // type: that reader throws out of the value observer before any callback
+    // runs, so one malformed attribute would stop the meter connecting.
+    levels: { type: String, default: "" },
   };
   static actions = ["evaluate"] as const;
   static events = ["change"] as const;
@@ -70,7 +77,7 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
   declare readonly hasLabelTarget: boolean;
 
   declare minScoreValue: number;
-  declare levelsValue: string[];
+  declare levelsValue: string;
 
   /** Delay (ms) before the polite live-region label is written, to throttle SR flooding. */
   static readonly #announceDelay = 200;
@@ -101,7 +108,7 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
    */
   #update(options: { announce?: boolean } = {}): void {
     const password = this.hasInputTarget ? this.inputTarget.value : "";
-    const labels = this.levelsValue;
+    const labels = parseStringList(this.levelsValue, DEFAULT_LEVELS);
     const max = labels.length;
     const score = this.#score(password, max);
     const label = score > 0 ? (labels[score - 1] ?? "") : "";

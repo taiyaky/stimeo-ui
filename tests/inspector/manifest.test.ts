@@ -87,11 +87,82 @@ describe("buildManifest", () => {
 
   it("reflects static targets from the controller classes", () => {
     expect(manifest.controllers["stimeo--menu"]?.targets).toEqual(["trigger", "menu", "item"]);
+    expect(manifest.controllers["stimeo--aspect-ratio"]?.targets).toEqual([]);
   });
 
   it("reflects static value names (camelCase keys)", () => {
     expect(manifest.controllers["stimeo--calendar"]?.values).toContain("weekStart");
     expect(manifest.controllers["stimeo--switch"]?.values).toEqual([]);
+  });
+
+  it("reflects the multi-select hidden-field and shared-announcement contract", () => {
+    expect(manifest.controllers["stimeo--multi-select"]?.targets).toEqual([
+      "input",
+      "list",
+      "option",
+      "tags",
+      "tag",
+      "tagTemplate",
+      "label",
+      "remove",
+      "fields",
+    ]);
+    expect(manifest.controllers["stimeo--multi-select"]?.values).toEqual([
+      "max",
+      "name",
+      "form",
+      "announceText",
+      "announceRemovedText",
+    ]);
+    // Chips display the selection rather than holding it, so the template and
+    // its parts are conditional on the author declaring one.
+    expect(manifest.controllers["stimeo--multi-select"]?.requiredTargets).toEqual([
+      "input",
+      "list",
+      "tags",
+    ]);
+    expect(manifest.controllers["stimeo--multi-select"]?.conditionalTargets).toEqual([
+      {
+        whenPresent: "tagTemplate",
+        require: ["tag", "label", "remove"],
+        requireInside: true,
+        suggestion:
+          'Complete the chip template: inside it, it needs a "tag" root, a "label" element for the option text, and a "remove" button. Parts declared outside the template never reach the clone, so no selection can commit.',
+      },
+    ]);
+  });
+
+  it("reflects the complete tags-input template and reconciliation contract", () => {
+    expect(manifest.controllers["stimeo--tags-input"]?.targets).toEqual([
+      "input",
+      "tags",
+      "tag",
+      "tagTemplate",
+      "label",
+      "remove",
+      "fields",
+    ]);
+    // The template is mandatory, and its parts are required *inside* it: a
+    // clone only carries what the template contains.
+    expect(manifest.controllers["stimeo--tags-input"]?.requiredTargets).toEqual([
+      "input",
+      "tags",
+      "tagTemplate",
+    ]);
+    expect(manifest.controllers["stimeo--tags-input"]?.conditionalTargets).toEqual([
+      {
+        whenPresent: "tagTemplate",
+        require: ["tag", "label", "remove"],
+        requireInside: true,
+        suggestion:
+          'Complete the chip template: inside it, it needs a "tag" root, a "label" element for the entered text, and a "remove" button. Parts declared outside the template never reach the clone, so no tag can commit.',
+      },
+    ]);
+    expect(manifest.controllers["stimeo--tags-input"]?.events).toEqual([
+      "change",
+      "reconcile",
+      "reject",
+    ]);
   });
 
   it("merges semantic Value constraints and keeps them on declared Values", () => {
@@ -140,6 +211,16 @@ describe("buildManifest", () => {
     expect(manifest.controllers["stimeo--number-input"]?.valueConstraints).toEqual(
       manifest.controllers["stimeo--slider"]?.valueConstraints,
     );
+    expect(manifest.controllers["stimeo--time-picker"]?.valueConstraints).toEqual([
+      {
+        value: "step",
+        type: "number",
+        finite: true,
+        greaterThan: 0,
+        integer: true,
+        suggestion: "Set step to a positive integer.",
+      },
+    ]);
     expect(manifest.controllers["stimeo--switch"]?.valueConstraints).toEqual([]);
 
     for (const [identifier, rules] of Object.entries(valueConstraintRules)) {
@@ -194,6 +275,7 @@ describe("buildManifest", () => {
     expect(manifest.controllers["stimeo--menu"]?.requiredTargets).toEqual(["trigger", "menu"]);
     expect(manifest.controllers["stimeo--tabs"]?.requiredTargets).toEqual(["tab", "panel", "list"]);
     expect(manifest.controllers["stimeo--switch"]?.requiredTargets).toEqual([]);
+    expect(manifest.controllers["stimeo--avatar"]?.requiredTargets).toEqual([]);
   });
 
   it("defines exactly one structure rule for every public controller", () => {
@@ -229,6 +311,11 @@ describe("buildManifest", () => {
     ]);
     // switch sets its own ARIA, so it carries no authoring requirements.
     expect(manifest.controllers["stimeo--switch"]?.a11y).toEqual([]);
+    expect(
+      manifest.controllers["stimeo--toggle-group"]?.a11y.map(
+        (requirement) => `${requirement.target}:${requirement.attrs.join("/")}`,
+      ),
+    ).toEqual([":role", "item:role", ":aria-labelledby/aria-label"]);
   });
 
   it("only writes a11y rules for known controllers", () => {
@@ -276,6 +363,24 @@ describe("buildManifest", () => {
         mode: "non-interactive",
         suggestion:
           'Place the "item" target on a non-interactive element such as <li> or <div>; put links and buttons inside it.',
+      },
+    ]);
+    expect(manifest.controllers["stimeo--toggle-group"]?.hosts).toEqual([
+      {
+        target: "item",
+        mode: "non-interactive-or-button",
+        buttonTypes: ["button"],
+        suggestion:
+          'Use <button type="button">, or place the "item" target on a non-interactive host such as <div role="button">.',
+      },
+    ]);
+    expect(manifest.controllers["stimeo--radio-group"]?.hosts).toEqual([
+      {
+        target: "radio",
+        mode: "non-interactive-or-button",
+        buttonTypes: ["button"],
+        suggestion:
+          'Use <button type="button">, or place the "radio" target on a non-interactive host such as <div role="radio">.',
       },
     ]);
     expect(manifest.controllers["stimeo--menu"]?.hosts).toEqual([]);
@@ -385,6 +490,10 @@ describe("buildManifest", () => {
   });
 
   it("merges hand-written cardinality rules, defaulting to [] when undeclared", () => {
+    const checkbox = manifest.controllers["stimeo--checkbox"]?.cardinality ?? [];
+    expect(checkbox.map((rule) => `${rule.target}:${rule.min}-${rule.max}`)).toEqual([
+      "parent:undefined-1",
+    ]);
     const nav = manifest.controllers["stimeo--navigation-menu"]?.cardinality ?? [];
     expect(nav.map((rule) => `${rule.within}:${rule.target}:${rule.min}-${rule.max}`)).toEqual([
       "hoverArea:trigger:1-1",
@@ -393,7 +502,16 @@ describe("buildManifest", () => {
     expect(listbox.map((rule) => `${rule.target}:${rule.attr}:${rule.max}`)).toEqual([
       "option:aria-selected:1",
     ]);
+    const radioGroup = manifest.controllers["stimeo--radio-group"]?.cardinality ?? [];
+    expect(radioGroup.map((rule) => `${rule.target}:${rule.attr}:${rule.max}`)).toEqual([
+      "radio:aria-checked:1",
+    ]);
     expect(manifest.controllers["stimeo--switch"]?.cardinality).toEqual([]);
+  });
+
+  it("keeps the checkbox parent optional while bounding it to one", () => {
+    expect(manifest.controllers["stimeo--checkbox"]?.requiredTargets).toEqual([]);
+    expect(manifest.controllers["stimeo--checkbox"]?.targets).toEqual(["parent", "child"]);
   });
 
   it("only writes companion / target-declaration / cardinality rules for known controllers", () => {
@@ -578,16 +696,20 @@ describe("buildManifest", () => {
     expect(gaps).toEqual([]);
   });
 
-  it("declares conditional targets that name real, optional targets", () => {
-    // Both halves have to be targets the controller actually understands, and the
-    // trigger must be *optional* — if it were in requiredTargets the rule would
-    // fire unconditionally, which is the thing `requiredTargets` already does.
+  it("declares conditional targets that name real targets", () => {
+    // Both halves have to be targets the controller actually understands. A
+    // presence rule also needs an *optional* trigger — with a required one it
+    // would fire unconditionally, which is the thing `requiredTargets` already
+    // does. A placement rule is exempt: "inside this element" is something
+    // `requiredTargets` cannot say, so a mandatory trigger still adds a check.
     for (const [id, entry] of Object.entries(manifest.controllers)) {
       for (const rule of entry.conditionalTargets) {
         expect(entry.targets, `${id}: whenPresent`).toContain(rule.whenPresent);
-        expect(entry.requiredTargets, `${id}: whenPresent must be optional`).not.toContain(
-          rule.whenPresent,
-        );
+        if (!rule.requireInside) {
+          expect(entry.requiredTargets, `${id}: whenPresent must be optional`).not.toContain(
+            rule.whenPresent,
+          );
+        }
         expect(rule.require.length, `${id}: require must not be empty`).toBeGreaterThan(0);
         for (const target of rule.require) {
           expect(entry.targets, `${id}: require`).toContain(target);

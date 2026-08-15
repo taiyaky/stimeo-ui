@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AspectRatioController } from "../src/controllers/aspect_ratio_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
@@ -15,7 +15,7 @@ import { tick } from "./helpers/timing";
 const markup = (ratio = "16/9") => `
   <div data-controller="stimeo--aspect-ratio"
        data-stimeo--aspect-ratio-ratio-value="${ratio}">
-    <img src="/cover.jpg" alt="Cover" data-stimeo--aspect-ratio-target="content" />
+    <img src="/cover.jpg" alt="Cover" />
   </div>`;
 
 describe("AspectRatioController", () => {
@@ -37,19 +37,15 @@ describe("AspectRatioController", () => {
     document.querySelector<HTMLElement>("[data-controller='stimeo--aspect-ratio']") as HTMLElement;
   const ratioVar = () => root().style.getPropertyValue("--stimeo--aspect-ratio");
 
-  it("reflects a w/h ratio as a normalized custom property", async () => {
-    await start(markup("16/9"));
-    expect(ratioVar()).toBe("16 / 9");
-  });
-
-  it("accepts a bare number ratio", async () => {
-    await start(markup("1.5"));
-    expect(ratioVar()).toBe("1.5");
-  });
-
-  it("tolerates whitespace around the slash", async () => {
-    await start(markup("4 / 3"));
-    expect(ratioVar()).toBe("4 / 3");
+  it.each([
+    ["16/9", "16 / 9"],
+    ["4 / 3", "4 / 3"],
+    ["1.5", "1.5"],
+    [".5", "0.5"],
+    ["1e2/1e1", "100 / 10"],
+  ])("normalizes the positive CSS ratio %s to %s", async (ratio, expected) => {
+    await start(markup(ratio));
+    expect(ratioVar()).toBe(expected);
   });
 
   it("defaults to 1 / 1 when no ratio is set", async () => {
@@ -60,26 +56,35 @@ describe("AspectRatioController", () => {
     expect(ratioVar()).toBe("1 / 1");
   });
 
-  it("falls back to 1 / 1 for an unparseable or non-positive ratio", async () => {
-    await start(markup("abc"));
-    expect(ratioVar()).toBe("1 / 1");
-    root().setAttribute("data-stimeo--aspect-ratio-ratio-value", "0/5");
-    await tick();
+  it.each([
+    "abc",
+    "",
+    "0/5",
+    "5/0",
+    "-1/2",
+    "1.5rem",
+    "16px/9px",
+    "16/9/2",
+    "Infinity",
+    "0x10",
+    "1.",
+  ])("falls back to 1 / 1 for the invalid ratio %j", async (ratio) => {
+    await start(markup(ratio));
     expect(ratioVar()).toBe("1 / 1");
   });
 
-  it("re-reflects when the ratio value changes", async () => {
+  it("re-reflects a valid ratio through Stimulus's Value observer", async () => {
     await start(markup("16/9"));
-    const controller = application.getControllerForElementAndIdentifier(
-      root(),
-      "stimeo--aspect-ratio",
-    ) as AspectRatioController;
     root().setAttribute("data-stimeo--aspect-ratio-ratio-value", "21/9");
-    // Drive the reflect directly: Stimulus's value-change observer is
-    // MutationObserver-based and intermittently misses the change under parallel
-    // load in happy-dom. ratioValueChanged re-reads the (now updated) value getter.
-    controller.ratioValueChanged();
-    expect(ratioVar()).toBe("21 / 9");
+    await vi.waitFor(() => expect(ratioVar()).toBe("21 / 9"));
+  });
+
+  it("replaces a valid ratio with the fallback through Stimulus's Value observer", async () => {
+    await start(markup("16/9"));
+    expect(ratioVar()).toBe("16 / 9");
+
+    root().setAttribute("data-stimeo--aspect-ratio-ratio-value", "16px/9px");
+    await vi.waitFor(() => expect(ratioVar()).toBe("1 / 1"));
   });
 
   it("has no machine-detectable a11y violations", async () => {

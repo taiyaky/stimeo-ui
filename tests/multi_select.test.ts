@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MultiSelectController } from "../src/controllers/multi_select_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
@@ -33,12 +33,11 @@ const markup = (attrs = "") => `
       ${option("banana", "Banana")}
       ${option("cherry", "Cherry")}
     </ul>
-    <span role="status" aria-live="polite" class="visually-hidden"
-          data-stimeo--multi-select-target="status"></span>
     <template data-stimeo--multi-select-target="tagTemplate">
       <li data-stimeo--multi-select-target="tag">
-        <span data-multi-select-slot="label"></span>
-        <button type="button" tabindex="-1">×</button>
+        <span data-stimeo--multi-select-target="label"></span>
+        <button type="button" tabindex="-1" aria-label="Remove {label}"
+                data-stimeo--multi-select-target="remove">×</button>
       </li>
     </template>
   </div>`;
@@ -62,19 +61,28 @@ const markupWithFields = (attrs = "", preselected = "") => `
           data-value="banana" data-stimeo--multi-select-target="option"
           data-action="click->stimeo--multi-select#toggleOption">Banana</li>
     </ul>
-    <span role="status" aria-live="polite" class="visually-hidden"
-          data-stimeo--multi-select-target="status"></span>
     <div data-stimeo--multi-select-target="fields"></div>
     <template data-stimeo--multi-select-target="tagTemplate">
       <li data-stimeo--multi-select-target="tag">
-        <span data-multi-select-slot="label"></span>
-        <button type="button" tabindex="-1">×</button>
+        <span data-stimeo--multi-select-target="label"></span>
+        <button type="button" tabindex="-1" aria-label="Remove {label}"
+                data-stimeo--multi-select-target="remove">×</button>
       </li>
     </template>
   </div>`;
 
 describe("MultiSelectController", () => {
   let application: Application;
+  let announcements: Array<{ message: string; assertive: boolean }>;
+
+  const onAnnouncement = (event: Event) => {
+    announcements.push((event as CustomEvent).detail);
+  };
+
+  beforeEach(() => {
+    announcements = [];
+    window.addEventListener("stimeo--announcer:announce", onAnnouncement);
+  });
 
   const mount = async (attrs = "") => {
     document.body.innerHTML = markup(attrs);
@@ -98,6 +106,7 @@ describe("MultiSelectController", () => {
     );
 
   afterEach(() => {
+    window.removeEventListener("stimeo--announcer:announce", onAnnouncement);
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
   });
@@ -209,6 +218,16 @@ describe("MultiSelectController", () => {
     expect(input().getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("repairs a stale authored expanded state when it starts closed", async () => {
+    document.body.innerHTML = markup().replace('aria-expanded="false"', 'aria-expanded="true"');
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+
+    expect(list().hidden).toBe(true);
+    expect(input().getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("filters options by substring and dispatches filter", async () => {
     await mount();
     const queries: string[] = [];
@@ -227,6 +246,12 @@ describe("MultiSelectController", () => {
     filterTo("zzz");
     expect(root().hasAttribute("data-stimeo--multi-select-empty")).toBe(true);
     expect(active()).toBeNull();
+
+    controller().close();
+    expect(root().hasAttribute("data-stimeo--multi-select-empty")).toBe(false);
+
+    controller().open();
+    expect(root().hasAttribute("data-stimeo--multi-select-empty")).toBe(true);
   });
 
   it("opens and moves the active option with arrows (wrapping)", async () => {
@@ -245,6 +270,32 @@ describe("MultiSelectController", () => {
     expect(active()).toBe("ms-cherry");
   });
 
+  it("chooses the directional edge when an open list has no active option", async () => {
+    await mount();
+
+    list().hidden = false;
+    input().setAttribute("aria-expanded", "true");
+    key("ArrowUp");
+    expect(active()).toBe("ms-cherry");
+
+    controller().close();
+    list().hidden = false;
+    input().setAttribute("aria-expanded", "true");
+    key("ArrowDown");
+    expect(active()).toBe("ms-apple");
+  });
+
+  it("does not rewrite virtual-focus attributes for an unrelated key with no active option", async () => {
+    await mount();
+    const toggle = vi.spyOn(options()[0] as HTMLElement, "toggleAttribute");
+    const remove = vi.spyOn(input(), "removeAttribute");
+
+    key("a");
+
+    expect(toggle).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalledWith("aria-activedescendant");
+  });
+
   it("toggles selection with Enter and keeps the list open, adding a chip", async () => {
     await mount();
     const changes: string[][] = [];
@@ -257,10 +308,35 @@ describe("MultiSelectController", () => {
     expect(list().hidden).toBe(false);
     expect(tags().map((t) => t.dataset.value)).toEqual(["apple"]);
     expect(buttons()[0]?.getAttribute("aria-label")).toBe("Remove Apple");
+    expect(buttons().map((button) => button.tabIndex)).toEqual([0]);
     key("Enter"); // toggle apple off
     expect(selected()).toEqual(["false", "false", "false"]);
     expect(tags()).toHaveLength(0);
     expect(changes).toEqual([["apple"], []]);
+  });
+
+  it("announces selection and removal with localized state and count templates", async () => {
+    await mount(
+      'data-stimeo--multi-select-announce-text-value="Selected {label} ({value}); {count} total" ' +
+        'data-stimeo--multi-select-announce-removed-text-value="Removed {label} ({value}); {count} total"',
+    );
+
+    options()[0]?.click();
+    options()[0]?.click();
+
+    expect(announcements).toEqual([
+      { message: "Selected Apple (apple); 1 total", assertive: false },
+      { message: "Removed Apple (apple); 0 total", assertive: false },
+    ]);
+  });
+
+  it("stays silent when announcement templates are not authored", async () => {
+    await mount();
+
+    options()[0]?.click();
+    options()[0]?.click();
+
+    expect(announcements).toEqual([]);
   });
 
   it("honors the standard per-event IME signal", async () => {
@@ -467,6 +543,35 @@ describe("MultiSelectController", () => {
     expect(fields()[0]?.getAttribute("form")).toBe("composer");
   });
 
+  it("rebuilds hidden fields when name and form values change at runtime", async () => {
+    await mountFields("", "apple");
+    expect(fields()[0]?.name).toBe("options[]");
+    expect(fields()[0]?.hasAttribute("form")).toBe(false);
+
+    root().setAttribute("data-stimeo--multi-select-name-value", "fruits[]");
+    root().setAttribute("data-stimeo--multi-select-form-value", "composer");
+    await tick();
+
+    expect(fields()[0]?.name).toBe("fruits[]");
+    expect(fields()[0]?.getAttribute("form")).toBe("composer");
+
+    root().removeAttribute("data-stimeo--multi-select-form-value");
+    await tick();
+    expect(fields()[0]?.hasAttribute("form")).toBe(false);
+  });
+
+  it("seeds a fields target inserted after connect", async () => {
+    await mount();
+    options()[0]?.click();
+
+    const container = document.createElement("div");
+    container.setAttribute("data-stimeo--multi-select-target", "fields");
+    root().append(container);
+    await tick();
+
+    expect(fields().map((field) => field.value)).toEqual(["apple"]);
+  });
+
   it("enforces the max selection cap", async () => {
     await mount('data-stimeo--multi-select-max-value="1"');
     input().dispatchEvent(new FocusEvent("focus"));
@@ -476,19 +581,204 @@ describe("MultiSelectController", () => {
     expect(tags()).toHaveLength(1);
   });
 
+  it("normalizes an over-cap initial selection in DOM order without announcing", async () => {
+    await mountFields('data-stimeo--multi-select-max-value="1"', "apple banana");
+
+    expect(selected()).toEqual(["true", "false"]);
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
+    expect(fields().map((field) => field.value)).toEqual(["apple"]);
+    expect(announcements).toEqual([]);
+  });
+
+  it("floors a positive fractional max", async () => {
+    await mount('data-stimeo--multi-select-max-value="1.9"');
+
+    options()[0]?.click();
+    options()[1]?.click();
+
+    expect(selected()).toEqual(["true", "false", "false"]);
+  });
+
+  it("keeps current chip order when max is lowered at runtime", async () => {
+    await mount();
+    options()[1]?.click(); // Banana was selected first.
+    options()[0]?.click(); // Apple is earlier in option DOM order.
+    const changes: string[][] = [];
+    const repairs: string[][] = [];
+    root().addEventListener("stimeo--multi-select:change", (event) => {
+      changes.push((event as CustomEvent).detail.values);
+    });
+    root().addEventListener("stimeo--multi-select:reconcile", (event) => {
+      repairs.push((event as CustomEvent).detail.values);
+    });
+
+    root().setAttribute("data-stimeo--multi-select-max-value", "1");
+    await tick();
+
+    expect(selected()).toEqual(["false", "true", "false"]);
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["banana"]);
+    // Lowering `max` is this controller's own eviction, not a user edit.
+    expect(repairs).toEqual([["banana"]]);
+    expect(changes).toEqual([]);
+  });
+
+  it("rejects a newly selected runtime option when existing selections fill max", async () => {
+    await mount('data-stimeo--multi-select-max-value="1"');
+    options()[0]?.click();
+    const changes: string[][] = [];
+    root().addEventListener("stimeo--multi-select:change", (event) => {
+      changes.push((event as CustomEvent).detail.values);
+    });
+
+    const late = document.createElement("li");
+    late.setAttribute("role", "option");
+    late.setAttribute("aria-selected", "true");
+    late.dataset.value = "date";
+    late.setAttribute("data-stimeo--multi-select-target", "option");
+    late.textContent = "Date";
+    list().append(late);
+    await tick();
+
+    expect(late.getAttribute("aria-selected")).toBe("false");
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
+    expect(changes).toEqual([]);
+  });
+
+  it("accepts a runtime replacement selection within max and emits once", async () => {
+    await mountFields(
+      'data-stimeo--multi-select-max-value="1" ' +
+        'data-stimeo--multi-select-announce-text-value="{label} selected; {count} total" ' +
+        'data-stimeo--multi-select-announce-removed-text-value="{label} removed; {count} total"',
+      "apple",
+    );
+    const changes: string[][] = [];
+    const repairs: string[][] = [];
+    root().addEventListener("stimeo--multi-select:change", (event) => {
+      changes.push((event as CustomEvent).detail.values);
+    });
+    root().addEventListener("stimeo--multi-select:reconcile", (event) => {
+      repairs.push((event as CustomEvent).detail.values);
+    });
+
+    options()[0]?.setAttribute("aria-selected", "false");
+    const late = document.createElement("li");
+    late.setAttribute("role", "option");
+    late.setAttribute("aria-selected", "true");
+    late.dataset.value = "date";
+    late.setAttribute("data-stimeo--multi-select-target", "option");
+    late.textContent = "Date";
+    list().append(late);
+    await tick();
+
+    expect(selected()).toEqual(["false", "false", "true"]);
+    expect(fields().map((field) => field.value)).toEqual(["date"]);
+    // A swapped-in option set is reconciled, so only the repair event reports it.
+    expect(repairs).toEqual([["date"]]);
+    expect(changes).toEqual([]);
+    expect(announcements).toEqual([
+      { message: "Apple removed; 1 total", assertive: false },
+      { message: "Date selected; 1 total", assertive: false },
+    ]);
+  });
+
+  it("announces only the newly selected option during runtime reconciliation", async () => {
+    await mountFields(
+      'data-stimeo--multi-select-announce-text-value="{label} selected; {count} total"',
+      "apple",
+    );
+    const late = document.createElement("li");
+    late.setAttribute("role", "option");
+    late.setAttribute("aria-selected", "true");
+    late.dataset.value = "date";
+    late.setAttribute("data-stimeo--multi-select-target", "option");
+    late.textContent = "Date";
+
+    list().append(late);
+    await tick();
+
+    expect(announcements).toEqual([{ message: "Date selected; 2 total", assertive: false }]);
+  });
+
+  it("rebinds chip interaction when the tags target is replaced", async () => {
+    await mount();
+    options()[0]?.click();
+    const previous = root().querySelector<HTMLElement>(
+      "[data-stimeo--multi-select-target='tags']",
+    ) as HTMLElement;
+    const replacement = document.createElement("ul");
+    replacement.setAttribute("aria-label", "Selected");
+    replacement.setAttribute("data-stimeo--multi-select-target", "tags");
+
+    previous.replaceWith(replacement);
+    await tick();
+
+    const remove = replacement.querySelector<HTMLButtonElement>("button");
+    expect(remove).not.toBeNull();
+    remove?.click();
+    expect(selected()).toEqual(["false", "false", "false"]);
+    expect(tags()).toEqual([]);
+  });
+
+  it("stops delegating safely when the tags target token is removed", async () => {
+    await mount();
+    options()[0]?.click();
+    const row = root().querySelector<HTMLElement>(
+      "[data-stimeo--multi-select-target='tags']",
+    ) as HTMLElement;
+    const remove = row.querySelector<HTMLButtonElement>("button") as HTMLButtonElement;
+
+    row.removeAttribute("data-stimeo--multi-select-target");
+    await tick();
+
+    expect(() => remove.click()).not.toThrow();
+    expect(options()[0]?.getAttribute("aria-selected")).toBe("true");
+
+    const event = new Event("click");
+    Object.defineProperty(event, "currentTarget", { value: options()[1] });
+    expect(() => controller().toggleOption(event)).not.toThrow();
+    expect(options()[1]?.getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("ignores sibling buttons that are not part of a declared chip", async () => {
+    await mount();
+    const row = root().querySelector<HTMLElement>(
+      "[data-stimeo--multi-select-target='tags']",
+    ) as HTMLElement;
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.textContent = "Clear all";
+    row.append(clear);
+    options()[0]?.click();
+
+    clear.click();
+    const keydown = new KeyboardEvent("keydown", {
+      key: "Delete",
+      bubbles: true,
+      cancelable: true,
+    });
+    clear.dispatchEvent(keydown);
+
+    expect(keydown.defaultPrevented).toBe(false);
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
+  });
+
   it("removes the last chip on Backspace when the input is empty", async () => {
     await mount();
     input().dispatchEvent(new FocusEvent("focus"));
     options()[0]?.click();
     options()[1]?.click();
     input().value = "";
+    input().focus();
     key("Backspace");
     expect(selected()).toEqual(["true", "false", "false"]);
     expect(tags().map((t) => t.dataset.value)).toEqual(["apple"]);
+    expect(document.activeElement).toBe(input());
   });
 
   it("removes a chip by its button, deselecting the option and re-homing focus", async () => {
-    await mount();
+    await mount(
+      'data-stimeo--multi-select-announce-removed-text-value="Removed {label} ({value}); {count} total"',
+    );
     input().dispatchEvent(new FocusEvent("focus"));
     options()[0]?.click();
     options()[1]?.click();
@@ -496,6 +786,237 @@ describe("MultiSelectController", () => {
     expect(selected()).toEqual(["false", "true", "false"]);
     expect(tags().map((t) => t.dataset.value)).toEqual(["banana"]);
     expect(document.activeElement).toBe(buttons()[0]);
+    expect(announcements.at(-1)).toEqual({
+      message: "Removed Apple (apple); 1 total",
+      assertive: false,
+    });
+  });
+
+  it("falls back to the chip value when its backing option disappears before removal", async () => {
+    await mount(
+      'data-stimeo--multi-select-announce-removed-text-value="Removed {label} ({value}); {count} total"',
+    );
+    options()[0]?.click();
+    announcements = [];
+    const apple = options()[0] as HTMLElement;
+    const remove = buttons()[0] as HTMLButtonElement;
+    apple.removeAttribute("data-stimeo--multi-select-target");
+
+    expect(() => remove.click()).not.toThrow();
+    expect(announcements).toEqual([
+      { message: "Removed apple (apple); 0 total", assertive: false },
+    ]);
+  });
+
+  // Chips display the selection rather than holding it, so a field authored
+  // without a template is a supported configuration, not a broken one.
+  it("keeps option state and events usable when the chip template is absent", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    document.body.innerHTML = markup().replace(
+      /\s*<template data-stimeo--multi-select-target="tagTemplate">[\s\S]*?<\/template>/,
+      "",
+    );
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+    const changes: string[][] = [];
+    root().addEventListener("stimeo--multi-select:change", (event) => {
+      changes.push((event as CustomEvent).detail.values);
+    });
+
+    options()[0]?.click();
+
+    expect(selected()).toEqual(["true", "false", "false"]);
+    expect(tags()).toEqual([]);
+    expect(changes).toEqual([["apple"]]);
+    // A supported configuration must not be reported as an authoring mistake.
+    expect(warn).not.toHaveBeenCalled();
+
+    options()[0]?.click();
+    expect(selected()).toEqual(["false", "false", "false"]);
+    expect(changes).toEqual([["apple"], []]);
+    warn.mockRestore();
+  });
+
+  it("mirrors a chipless selection into the hidden fields", async () => {
+    document.body.innerHTML = markupWithFields().replace(
+      /\s*<template data-stimeo--multi-select-target="tagTemplate">[\s\S]*?<\/template>/,
+      "",
+    );
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+
+    options()[0]?.click();
+
+    expect(fields().map((field) => field.value)).toEqual(["apple"]);
+  });
+
+  it("keeps selection unchanged and warns when the remove-button name is empty", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    document.body.innerHTML = markup().replace('aria-label="Remove {label}"', 'aria-label="  "');
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+
+    options()[0]?.click();
+
+    expect(selected()).toEqual(["false", "false", "false"]);
+    expect(tags()).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain('non-empty aria-label on its "remove" target');
+    warn.mockRestore();
+  });
+
+  it("keeps selection unchanged when the chip template has no tag root", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    document.body.innerHTML = markup().replace(
+      '<li data-stimeo--multi-select-target="tag">',
+      "<li>",
+    );
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+    const changes: string[][] = [];
+    root().addEventListener("stimeo--multi-select:change", (event) => {
+      changes.push((event as CustomEvent).detail.values);
+    });
+
+    options()[0]?.click();
+
+    expect(selected()).toEqual(["false", "false", "false"]);
+    expect(tags()).toEqual([]);
+    expect(changes).toEqual([]);
+    expect(warn.mock.calls[0]?.[0]).toContain('"tag" target');
+    warn.mockRestore();
+  });
+
+  it("keeps selection unchanged when the chip template has no label element", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    document.body.innerHTML = markup().replace(
+      '<span data-stimeo--multi-select-target="label"></span>',
+      "<span></span>",
+    );
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+    const changes: string[][] = [];
+    root().addEventListener("stimeo--multi-select:change", (event) => {
+      changes.push((event as CustomEvent).detail.values);
+    });
+
+    options()[0]?.click();
+
+    expect(selected()).toEqual(["false", "false", "false"]);
+    expect(tags()).toEqual([]);
+    expect(changes).toEqual([]);
+    expect(warn.mock.calls[0]?.[0]).toContain('"label" target');
+    warn.mockRestore();
+  });
+
+  // Without a template the controller renders no chips, so the row is the
+  // author's to fill: connecting must leave whatever the server wrote alone.
+  it("leaves server-rendered chips alone when the chip template is absent", async () => {
+    document.body.innerHTML = markup()
+      .replace(
+        /\s*<template data-stimeo--multi-select-target="tagTemplate">[\s\S]*?<\/template>/,
+        "",
+      )
+      .replace(
+        '<ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>',
+        `<ul data-stimeo--multi-select-target="tags" aria-label="Selected">
+          <li data-value="apple" data-stimeo--multi-select-target="tag">
+            <span data-stimeo--multi-select-target="label">Server Apple</span>
+            <button type="button" aria-label="Remove Server Apple"
+                    data-stimeo--multi-select-target="remove">×</button>
+          </li>
+        </ul>`,
+      );
+    const authored = document.querySelector<HTMLElement>(
+      '[data-stimeo--multi-select-target="tag"]',
+    ) as HTMLElement;
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+
+    expect(authored.isConnected).toBe(true);
+    expect(tags()).toEqual([authored]);
+  });
+
+  it("keeps selection unchanged when the chip template has no remove button", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    document.body.innerHTML = markup().replace(
+      /<button[\s\S]*?data-stimeo--multi-select-target="remove"[\s\S]*?<\/button>/,
+      '<span aria-hidden="true">×</span>',
+    );
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+    const changes: string[][] = [];
+    root().addEventListener("stimeo--multi-select:change", (event) => {
+      changes.push((event as CustomEvent).detail.values);
+    });
+
+    options()[0]?.click();
+
+    expect(selected()).toEqual(["false", "false", "false"]);
+    expect(tags()).toEqual([]);
+    expect(changes).toEqual([]);
+    expect(warn.mock.calls[0]?.[0]).toContain('"remove" target <button>');
+    warn.mockRestore();
+  });
+
+  it("preserves server-rendered chips when initial template validation fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    document.body.innerHTML = markupWithFields("", "apple")
+      .replace(
+        '<ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>',
+        `<ul data-stimeo--multi-select-target="tags" aria-label="Selected">
+          <li data-value="apple" data-stimeo--multi-select-target="tag">
+            <span data-stimeo--multi-select-target="label">Server Apple</span>
+            <button type="button" aria-label="Remove Server Apple"
+                    data-stimeo--multi-select-target="remove">×</button>
+          </li>
+        </ul>`,
+      )
+      .replace(' aria-label="Remove {label}"', "");
+    const authored = document.querySelector<HTMLElement>(
+      '[data-stimeo--multi-select-target="tag"]',
+    ) as HTMLElement;
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+
+    expect(authored.isConnected).toBe(true);
+    expect(tags()).toEqual([authored]);
+    expect(selected()).toEqual(["true", "false"]);
+    expect(fields().map((field) => field.value)).toEqual(["apple"]);
+    expect(warn.mock.calls[0]?.[0]).toContain('non-empty aria-label on its "remove" target');
+    warn.mockRestore();
+  });
+
+  it("preserves server-rendered chips when the tags container target is absent", async () => {
+    document.body.innerHTML = markupWithFields("", "apple").replace(
+      '<ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>',
+      `<ul aria-label="Selected">
+          <li data-value="apple" data-stimeo--multi-select-target="tag">
+            <span data-stimeo--multi-select-target="label">Server Apple</span>
+            <button type="button" aria-label="Remove Server Apple"
+                    data-stimeo--multi-select-target="remove">×</button>
+          </li>
+        </ul>`,
+    );
+    const authored = document.querySelector<HTMLElement>(
+      '[data-stimeo--multi-select-target="tag"]',
+    ) as HTMLElement;
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+
+    expect(authored.isConnected).toBe(true);
+    expect(tags()).toEqual([authored]);
+    expect(selected()).toEqual(["true", "false"]);
+    expect(fields().map((field) => field.value)).toEqual(["apple"]);
   });
 
   it("navigates chips and returns to the input past the end", async () => {
@@ -516,9 +1037,11 @@ describe("MultiSelectController", () => {
     expect(list().hidden).toBe(false);
     key("Escape");
     expect(list().hidden).toBe(true);
+    expect(input().getAttribute("aria-expanded")).toBe("false");
     key("ArrowDown");
     document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(list().hidden).toBe(true);
+    expect(input().getAttribute("aria-expanded")).toBe("false");
   });
 
   it("hands off between two instances when the second input is clicked", async () => {
@@ -604,11 +1127,10 @@ describe("MultiSelectController", () => {
 
   it("announces the combobox by its accessible name", async () => {
     await mount();
-    const phrases = await captureSpeech({ container: root(), steps: 2 });
+    const phrases = await captureSpeech({ container: root(), steps: 1 });
     expect(phrases).toEqual([
       "list, Selected",
       "combobox, Fruits, has popup listbox, not expanded, autocomplete in list, 1 control",
-      "status",
     ]);
   });
 
@@ -636,7 +1158,9 @@ describe("MultiSelectController", () => {
 
   it("supports options without data-value, keying chips and announce by label", async () => {
     document.body.innerHTML = `
-      <div data-controller="stimeo--multi-select">
+      <div data-controller="stimeo--multi-select"
+           data-stimeo--multi-select-announce-text-value="{label} selected; {count} total"
+           data-stimeo--multi-select-announce-removed-text-value="{label} removed; {count} total">
         <ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>
         <input type="text" role="combobox" aria-expanded="false" aria-autocomplete="list"
                aria-controls="ms-list2" aria-label="Fruits"
@@ -650,12 +1174,11 @@ describe("MultiSelectController", () => {
               data-stimeo--multi-select-target="option"
               data-action="click->stimeo--multi-select#toggleOption">Apple</li>
         </ul>
-        <span role="status" aria-live="polite" class="visually-hidden"
-              data-stimeo--multi-select-target="status"></span>
         <template data-stimeo--multi-select-target="tagTemplate">
           <li data-stimeo--multi-select-target="tag">
-            <span data-multi-select-slot="label"></span>
-            <button type="button" tabindex="-1">×</button>
+            <span data-stimeo--multi-select-target="label"></span>
+            <button type="button" tabindex="-1" aria-label="Remove {label}"
+                    data-stimeo--multi-select-target="remove">×</button>
           </li>
         </template>
       </div>`;
@@ -668,12 +1191,12 @@ describe("MultiSelectController", () => {
     expect(tags().map((t) => t.dataset.value)).toEqual(["Apple"]); // chip keyed by label
     expect(options()[0]?.getAttribute("aria-selected")).toBe("true");
 
-    const status = document.querySelector<HTMLElement>(
-      "[data-stimeo--multi-select-target='status']",
-    );
     buttons()[0]?.click(); // remove the chip
     expect(options()[0]?.getAttribute("aria-selected")).toBe("false"); // option found by label
-    expect(status?.textContent).toBe("Apple"); // announce uses the display label
+    expect(announcements).toEqual([
+      { message: "Apple selected; 1 total", assertive: false },
+      { message: "Apple removed; 0 total", assertive: false },
+    ]);
   });
 
   it("jumps the active option to the first on Home and the last on End", async () => {
@@ -761,13 +1284,12 @@ describe("MultiSelectController", () => {
               data-stimeo--multi-select-target="option"
               data-action="click->stimeo--multi-select#toggleOption">Banana</li>
         </ul>
-        <span role="status" aria-live="polite" class="visually-hidden"
-              data-stimeo--multi-select-target="status"></span>
         <div data-stimeo--multi-select-target="fields"></div>
         <template data-stimeo--multi-select-target="tagTemplate">
           <li data-stimeo--multi-select-target="tag">
-            <span data-multi-select-slot="label"></span>
-            <button type="button" tabindex="-1">×</button>
+            <span data-stimeo--multi-select-target="label"></span>
+            <button type="button" tabindex="-1" aria-label="Remove {label}"
+                    data-stimeo--multi-select-target="remove">×</button>
           </li>
         </template>
       </div>`;
@@ -873,6 +1395,18 @@ describe("MultiSelectController", () => {
       expect(root().hasAttribute("tabindex")).toBe(false);
     });
 
+    it("returns a borrowed tab stop before Turbo snapshots the page", async () => {
+      await mountLate();
+      const button = buttons()[0];
+      button?.focus();
+      button?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+      expect(root().getAttribute("tabindex")).toBe("-1");
+
+      document.dispatchEvent(new Event("turbo:before-cache"));
+
+      expect(root().hasAttribute("tabindex")).toBe(false);
+    });
+
     it("keeps a consumer-authored tabindex of -1 on the root", async () => {
       // Both layers of the ownership check earn their keep. The value alone is
       // ambiguous — `-1` is exactly what a borrow looks like — so the flag has to
@@ -974,6 +1508,19 @@ describe("MultiSelectController", () => {
 
       expect(() => controller().open()).not.toThrow();
       expect(() => controller().close()).not.toThrow();
+    });
+
+    it("does not throw from filtering or keyboard actions without an input", async () => {
+      await mountLate();
+      const event = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+
+      expect(() => controller().filter()).not.toThrow();
+      expect(() => controller().onKeydown(event)).not.toThrow();
+      expect(event.defaultPrevented).toBe(false);
     });
   });
 
@@ -1105,6 +1652,25 @@ describe("MultiSelectController", () => {
   });
 
   describe("runtime option removal", () => {
+    it("does not create virtual focus while the list is closed", async () => {
+      await mount();
+      const first = options()[0] as HTMLElement;
+      first.remove();
+      const late = document.createElement("li");
+      late.id = "ms-date";
+      late.setAttribute("role", "option");
+      late.setAttribute("aria-selected", "false");
+      late.dataset.value = "date";
+      late.setAttribute("data-stimeo--multi-select-target", "option");
+      late.textContent = "Date";
+      list().append(late);
+      await tick();
+
+      expect(list().hidden).toBe(true);
+      expect(active()).toBeNull();
+      expect(options().some((candidate) => candidate.hasAttribute("data-active"))).toBe(false);
+    });
+
     it("keeps the surviving active option when an earlier option is removed", async () => {
       await mount();
       key("ArrowDown"); // Apple
@@ -1281,8 +1847,9 @@ describe("MultiSelectController", () => {
           <div data-stimeo--multi-select-target="fields"></div>
           <template data-stimeo--multi-select-target="tagTemplate">
             <li data-stimeo--multi-select-target="tag">
-              <span data-multi-select-slot="label"></span>
-              <button type="button" tabindex="-1">×</button>
+              <span data-stimeo--multi-select-target="label"></span>
+              <button type="button" tabindex="-1" aria-label="Remove {label}"
+                      data-stimeo--multi-select-target="remove">×</button>
             </li>
           </template>
         </div>`;
@@ -1315,7 +1882,8 @@ describe("MultiSelectController", () => {
       // and its `Remove {label}` name are derived from the option.
       await mountFields("", "apple");
       const chipText = () =>
-        (document.querySelector("[data-multi-select-slot='label']") as HTMLElement)?.textContent;
+        (document.querySelector("[data-stimeo--multi-select-target~='label']") as HTMLElement)
+          ?.textContent;
       const chipName = () => buttons()[0]?.getAttribute("aria-label");
       expect(chipText()).toBe("Apple");
 
@@ -1335,7 +1903,15 @@ describe("MultiSelectController", () => {
       await mountFields("", "apple");
       const button = buttons()[0] as HTMLButtonElement;
       button.focus();
+      const repairs: string[][] = [];
+      root().addEventListener("stimeo--multi-select:reconcile", (event) => {
+        repairs.push((event as CustomEvent<{ values: string[] }>).detail.values);
+      });
       expect(document.activeElement).toBe(button);
+      const changes: string[][] = [];
+      root().addEventListener("stimeo--multi-select:change", (event) => {
+        changes.push((event as CustomEvent).detail.values);
+      });
 
       const late = document.createElement("li");
       late.id = "ms2-cherry";
@@ -1349,6 +1925,8 @@ describe("MultiSelectController", () => {
 
       expect(document.activeElement).toBe(button);
       expect(tags().length).toBe(1);
+      expect(changes).toEqual([]);
+      expect(repairs).toEqual([]);
     });
 
     it("keeps chip focus when an unrelated option is added after selecting out of DOM order", async () => {
@@ -1376,6 +1954,37 @@ describe("MultiSelectController", () => {
       expect(tags().map((tag) => tag.dataset.value)).toEqual(["banana", "apple"]);
     });
 
+    it.each(["template target", "remove-button name"])(
+      "leaves the chip untouched when the %s disappears",
+      async (missing) => {
+        await mountFields("", "apple");
+        const template = root().querySelector<HTMLTemplateElement>(
+          '[data-stimeo--multi-select-target="tagTemplate"]',
+        ) as HTMLTemplateElement;
+        if (missing === "template target") {
+          template.removeAttribute("data-stimeo--multi-select-target");
+        } else {
+          template.content
+            .querySelector<HTMLButtonElement>('button[data-stimeo--multi-select-target~="remove"]')
+            ?.removeAttribute("aria-label");
+        }
+
+        (document.getElementById("ms-list2") as HTMLElement).innerHTML = `
+          <li id="ms2-apple" role="option" aria-selected="true" data-value="apple"
+              data-stimeo--multi-select-target="option">Green Apple</li>`;
+        await tick();
+
+        // Relabelling is one transaction: without a name this template can
+        // produce, the visible text stays put too, so the button never names a
+        // value the chip no longer shows.
+        expect(
+          tags()[0]?.querySelector<HTMLElement>('[data-stimeo--multi-select-target~="label"]')
+            ?.textContent,
+        ).toBe("Apple");
+        expect(buttons()[0]?.getAttribute("aria-label")).toBe("Remove Apple");
+      },
+    );
+
     it("relabels the chip that owns the value when the selection is out of DOM order", async () => {
       // Pairing the two lists by position would push the renamed option's label
       // onto whichever chip happens to sit at the same index.
@@ -1384,7 +1993,9 @@ describe("MultiSelectController", () => {
       options()[0]?.click(); // Apple
       const chipTexts = () =>
         tags().map(
-          (tag) => tag.querySelector<HTMLElement>("[data-multi-select-slot='label']")?.textContent,
+          (tag) =>
+            tag.querySelector<HTMLElement>("[data-stimeo--multi-select-target~='label']")
+              ?.textContent,
         );
       expect(chipTexts()).toEqual(["Banana", "Apple"]);
 
@@ -1408,6 +2019,14 @@ describe("MultiSelectController", () => {
       // the chips and the form disagree with what AT reads.
       await mountFields("", "apple");
       expect(tags().length).toBe(1);
+      const changes: string[][] = [];
+      const repairs: string[][] = [];
+      root().addEventListener("stimeo--multi-select:change", (event) => {
+        changes.push((event as CustomEvent).detail.values);
+      });
+      root().addEventListener("stimeo--multi-select:reconcile", (event) => {
+        repairs.push((event as CustomEvent).detail.values);
+      });
 
       const late = document.createElement("li");
       late.id = "ms2-cherry";
@@ -1421,6 +2040,9 @@ describe("MultiSelectController", () => {
 
       expect(tags().length).toBe(2);
       expect(fields().map((f) => f.value)).toEqual(["apple", "cherry"]);
+      // Re-derived from the swapped list, so `change` stays silent.
+      expect(repairs).toEqual([["apple", "cherry"]]);
+      expect(changes).toEqual([]);
     });
   });
 });

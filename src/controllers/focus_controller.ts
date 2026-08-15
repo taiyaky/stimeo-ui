@@ -4,9 +4,8 @@ import { FocusTrap } from "../utils/focus_trap";
 /**
  * Headless **focus scope**: exposes the shared {@link FocusTrap} as a standalone,
  * declarative focus boundary — `Tab` cycling, initial focus, and restore-on-release —
- * for any region, without building a full modal (counterpart to Alpine `focus` /
- * Headless UI's trap). No dedicated APG pattern; it is the primitive the overlay
- * patterns use, surfaced for direct use.
+ * for any region, without building a full modal. No dedicated APG pattern; it is the
+ * primitive the overlay patterns use, surfaced for direct use.
  *
  * Markup contract (identifier: `stimeo--focus`):
  *   <div data-controller="stimeo--focus" data-stimeo--focus-trap-value="true">

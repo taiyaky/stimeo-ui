@@ -44,8 +44,8 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  *   A `focusout` with no destination is ignored because it also occurs for clicks
  *   on non-focusable content and when the browser window loses focus.
  * - Opt-in **dismiss on scroll** (`closeOnScroll`): while open, scrolling a tracked
- *   scroll-parent ancestor (or the window) closes the panel — the Radix / floating-ui
- *   convention. Closes without restoring focus (like the modeless `focusout` path)
+ *   scroll-parent ancestor (or the window) closes the panel, the usual convention for
+ *   anchored popups. Closes without restoring focus (like the modeless `focusout` path)
  *   so the close never fights the user's scroll. Off by default.
  */
 export class PopoverController extends Controller<HTMLElement> {

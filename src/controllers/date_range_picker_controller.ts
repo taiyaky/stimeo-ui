@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { BeforeCacheReset } from "../utils/before_cache_reset";
 import {
   parseISODateString,
   parseISOMonthString,
@@ -8,6 +9,7 @@ import {
 } from "../utils/dates";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { parseStringList } from "../utils/string_list";
 
 /** Number of cells in a six-week month grid (7 × 6). */
 const GRID_SIZE = 42;
@@ -20,7 +22,8 @@ const GRID_SIZE = 42;
  * Markup contract (identifier: `stimeo--date-range-picker`):
  *   <div data-controller="stimeo--date-range-picker"
  *        data-stimeo--date-range-picker-min-value="2026-01-01"
- *        data-stimeo--date-range-picker-max-value="2026-12-31">
+ *        data-stimeo--date-range-picker-max-value="2026-12-31"
+ *        data-stimeo--date-range-picker-disabled-dates-value='["2026-06-15"]'>
  *     <button data-action="stimeo--date-range-picker#prev">Prev</button>
  *     <span data-stimeo--date-range-picker-target="monthLabel" aria-live="polite"></span>
  *     <button data-action="stimeo--date-range-picker#next">Next</button>
@@ -48,17 +51,31 @@ const GRID_SIZE = 42;
  *
  * Selection model: the first click/Enter sets a *pending* start and enters
  * "selecting" mode (preview follows the pointer/focus); the second confirms the
- * end (auto-swapped if earlier than the start) and dispatches `change`. Escape
- * abandons an in-progress selection, restoring the last confirmed range.
+ * end (auto-swapped if earlier than the start) and dispatches `change` with
+ * `{ start, end }` ISO dates. Escape abandons an in-progress selection,
+ * restoring the last confirmed range.
+ *
+ * Availability is declarative on both axes: `min` / `max` bound the selectable
+ * interval and `disabledDates` excludes individual dates inside it. Both are
+ * render inputs, so a cell's `aria-disabled` is derived during the paint that
+ * needs it rather than written back afterwards — selection, preview, and the
+ * grid paint all read one predicate and cannot disagree. A painted-month
+ * navigation dispatches `monthchange` with `{ month }` as a notification (for
+ * fetching a month's availability, say); the fetched result comes back in
+ * through `disabledDates`, which repaints on its own.
  */
 export class DateRangePickerController extends Controller<HTMLElement> {
   static override targets = ["grid", "monthLabel", "cell", "status", "startField", "endField"];
   static override values = {
     min: { type: String, default: "" },
     max: { type: String, default: "" },
+    // A JSON list read through `parseStringList` rather than Stimulus's `Array`
+    // type: that reader throws out of the value observer before any callback
+    // runs, so one malformed attribute would stop the picker from connecting.
+    disabledDates: { type: String, default: "" },
   };
   static actions = ["applyPreset", "next", "onKeydown", "prev", "previewTo", "selectDate"] as const;
-  static events = ["change"] as const;
+  static events = ["change", "monthchange"] as const;
 
   declare readonly gridTarget: HTMLElement;
   declare readonly hasGridTarget: boolean;
@@ -73,6 +90,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   declare readonly hasEndFieldTarget: boolean;
   declare minValue: string;
   declare maxValue: string;
+  declare disabledDatesValue: string;
 
   /** The month currently rendered, as `YYYY-MM`. */
   #viewMonth = "";
@@ -89,7 +107,15 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   /** Deferred focus after an async month transition (cancelled on teardown). */
   readonly #focusTimer = new SafeTimeout();
 
-  /** Seeds the range from any pre-filled hidden fields and renders the grid. */
+  /** The declared unavailable dates, indexed for the per-cell paint lookup. */
+  #disabledDates = new Set<string>();
+
+  /** Rewinds an unfinished selection before Turbo snapshots the page. */
+  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+
+  /** Last painted month, or `null` until the initial paint has settled. */
+  #announcedMonth: string | null = null;
+
   /**
    * Collapses a morph that swaps render inputs into one repaint, and refuses the
    * pass Stimulus delivers before `connect()`.
@@ -98,10 +124,17 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     this.#render();
   });
 
+  /** Seeds and normalizes the range from optional hidden fields, then paints the grid. */
   override connect(): void {
     this.#repaint.activate();
-    this.#startDate = this.hasStartFieldTarget ? normalizeISO(this.startFieldTarget.value) : "";
-    this.#endDate = this.hasEndFieldTarget ? normalizeISO(this.endFieldTarget.value) : "";
+    this.#beforeCache.activate();
+    const authoredStart = this.hasStartFieldTarget ? normalizeISO(this.startFieldTarget.value) : "";
+    const authoredEnd = this.hasEndFieldTarget ? normalizeISO(this.endFieldTarget.value) : "";
+    [this.#startDate, this.#endDate] = orderRange(authoredStart, authoredEnd);
+    this.#pendingStart = "";
+    this.#previewDate = "";
+    this.#announcedMonth = null;
+    this.#commitFields();
 
     const anchor =
       parseISODateString(this.#startDate) ?? this.#clampToBounds(new Date()) ?? new Date();
@@ -117,6 +150,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   /** Cancels any pending deferred focus so it never fires on a detached element. */
   override disconnect(): void {
     this.#repaint.cancel();
+    this.#beforeCache.deactivate();
     this.#focusTimer.clearAll();
   }
 
@@ -127,6 +161,12 @@ export class DateRangePickerController extends Controller<HTMLElement> {
 
   /** Repaints when application code (or a Turbo morph) changes `max` at runtime. */
   maxValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Re-indexes the unavailable dates and repaints when the declared set changes. */
+  disabledDatesValueChanged(): void {
+    this.#disabledDates = new Set(parseStringList(this.disabledDatesValue));
     this.#repaint.schedule();
   }
 
@@ -147,7 +187,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     const cell = this.#cellFrom(event.target);
     if (!cell) return;
     const date = cell.getAttribute("data-date");
-    if (!date || cell.getAttribute("aria-disabled") === "true") return;
+    if (!date || !this.#isSelectable(date)) return;
     this.#choose(date);
   }
 
@@ -157,36 +197,37 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     if (!cell) return;
     const date = cell.getAttribute("data-date");
     if (!date) return;
+    let shouldRender = false;
     // Focus moves the roving tabindex; hover does not.
     if (event.type.startsWith("focus")) {
       const parsed = parseISODateString(date);
       if (parsed) this.#focusedDate = parsed;
-      // Re-roll the roving tab stop only when focus landed on a cell that is not
-      // already the tab stop — e.g. Tab/click/programmatic focus from outside the
-      // grid's own keyboard navigation (which already rendered the new stop). This
-      // guard avoids a redundant double-render on the controller's own arrow moves
-      // (onKeydown → #render focuses the new stop, which then fires this focus).
-      if (!this.#pendingStart && cell.getAttribute("tabindex") !== "0") {
-        this.#render();
-      }
+      shouldRender = cell.getAttribute("tabindex") !== "0";
     }
-    if (this.#pendingStart) {
+    // An unavailable day can hold focus (APG keeps disabled cells reachable) but
+    // never becomes the previewed endpoint, so the preview stays where it was.
+    if (this.#pendingStart && this.#isSelectable(date) && this.#previewDate !== date) {
       this.#previewDate = date;
-      this.#render();
+      shouldRender = true;
     }
+    if (shouldRender) this.#render();
   }
 
   /** Applies a named preset (`today` / `last7` / `last30` / `thisMonth`). */
   applyPreset(event: Event): void {
     const button = (event.target as HTMLElement | null)?.closest("[data-range]");
-    const name = button?.getAttribute("data-range");
-    if (!name) return;
-    const range = computePreset(name);
+    const range = computePreset(button?.getAttribute("data-range") ?? "");
     if (!range) return;
 
-    const start = this.#clampISO(range.start);
-    const end = this.#clampISO(range.end);
-    if (!start || !end) return;
+    const intersection = this.#intersectRange(range);
+    if (!intersection) return;
+    const { start, end } = intersection;
+    // A preset is the consumer's own button, but what it produces is still a
+    // range, and an unavailable day cannot be one of its endpoints — the same
+    // rule a click or Enter obeys. Refusing keeps one answer per date instead of
+    // one per entry point, and stops a cell from being the confirmed edge while
+    // still painted `aria-disabled="true"`.
+    if (!this.#isSelectable(start) || !this.#isSelectable(end)) return;
 
     this.#startDate = start;
     this.#endDate = end;
@@ -208,13 +249,13 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     if (isReservedArrowChord(event)) return;
     const cell = this.#cellFrom(event.target);
     if (!cell) return;
-    const dateStr = cell.getAttribute("data-date");
-    const date = dateStr ? parseISODateString(dateStr) : null;
+    const dateStr = cell.getAttribute("data-date") ?? "";
+    const date = parseISODateString(dateStr);
     if (!date) return;
 
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      if (dateStr && cell.getAttribute("aria-disabled") !== "true") this.#choose(dateStr);
+      if (this.#isSelectable(dateStr)) this.#choose(dateStr);
       return;
     }
     if (event.key === "Escape") {
@@ -254,10 +295,10 @@ export class DateRangePickerController extends Controller<HTMLElement> {
         next = addDays(date, 6 - date.getDay());
         break;
       case "PageUp":
-        next = shiftMonthClamped(date, -1);
+        next = event.shiftKey ? shiftYearClamped(date, -1) : shiftMonthClamped(date, -1);
         break;
       case "PageDown":
-        next = shiftMonthClamped(date, 1);
+        next = event.shiftKey ? shiftYearClamped(date, 1) : shiftMonthClamped(date, 1);
         break;
       default:
         return;
@@ -292,13 +333,17 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   /** Moves roving focus to `date`, transitioning the month when needed. */
   #moveFocusTo(date: Date): void {
     this.#focusedDate = date;
-    if (this.#pendingStart) this.#previewDate = toISODateString(date);
-    this.#transitionTo(toISOMonthString(date), toISODateString(date));
+    const iso = toISODateString(date);
+    // Availability is known from the Values, not from the cells, so a target in
+    // a month that has not been painted yet resolves in this same pass.
+    if (this.#pendingStart && this.#isSelectable(iso)) this.#previewDate = iso;
+    this.#transitionTo(toISOMonthString(date), iso);
   }
 
   /** Renders `month`, then focuses the cell for `dateStr` (deferred if async). */
   #transitionTo(month: string, dateStr: string): void {
     const isTransition = month !== this.#viewMonth;
+    this.#focusTimer.clearAll();
     this.#viewMonth = month;
     this.#render();
     const focusCell = (): void => {
@@ -335,9 +380,14 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     if (!info) return;
     const { year, month } = info;
 
+    // Tightening `min` / `max` / `disabledDates` mid-selection can strand the
+    // preview on a day that is no longer choosable; drop it back to the pending
+    // start rather than advertising a range the user cannot confirm.
+    if (this.#previewDate && !this.#isSelectable(this.#previewDate)) this.#previewDate = "";
+
     if (this.hasMonthLabelTarget) {
       const lang = document.documentElement.lang || "en";
-      const formatter = new Intl.DateTimeFormat(lang, { month: "long", year: "numeric" });
+      const formatter = monthFormatter(lang);
       this.monthLabelTarget.textContent = formatter.format(new Date(year, month - 1, 1));
     }
 
@@ -346,8 +396,9 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     const focusedStr = toISODateString(this.#focusedDate);
     const todayStr = toISODateString(new Date());
 
+    const cells = this.cellTargets;
     for (let i = 0; i < GRID_SIZE; i++) {
-      const el = this.cellTargets[i];
+      const el = cells[i];
       const date = days[i];
       if (!el || !date) continue;
       const iso = toISODateString(date);
@@ -358,8 +409,8 @@ export class DateRangePickerController extends Controller<HTMLElement> {
       el.setAttribute("data-today", String(iso === todayStr));
       el.setAttribute("tabindex", iso === focusedStr ? "0" : "-1");
 
-      if (this.#outOfBounds(iso)) el.setAttribute("aria-disabled", "true");
-      else el.removeAttribute("aria-disabled");
+      if (this.#isSelectable(iso)) el.removeAttribute("aria-disabled");
+      else el.setAttribute("aria-disabled", "true");
 
       const isStart = !!rangeStart && iso === rangeStart;
       const isEnd = !!rangeEnd && iso === rangeEnd && rangeEnd !== rangeStart;
@@ -377,6 +428,27 @@ export class DateRangePickerController extends Controller<HTMLElement> {
             (!!this.#endDate && iso === this.#endDate),
         ),
       );
+    }
+
+    // Every declared cell is part of the roving composite, even when authored
+    // beyond the documented 42-cell grid. Extras must never become a second stop.
+    for (const extra of cells.slice(GRID_SIZE)) extra.setAttribute("tabindex", "-1");
+
+    // Malformed short markup still gets a usable entry point. Prefer a date in
+    // the displayed month so arrow navigation begins from the visible context.
+    if (!cells.some((cell) => cell.getAttribute("tabindex") === "0")) {
+      const fallback =
+        cells.find((cell) => cell.getAttribute("data-outside") === "false") ?? cells[0];
+      fallback?.setAttribute("tabindex", "0");
+    }
+
+    // A month event belongs to the completed paint so a listener that reads the
+    // grid sees the new dates. It reports the paint; it is not a hook the paint
+    // waits on, so nothing here depends on what a listener does with it.
+    const previous = this.#announcedMonth;
+    this.#announcedMonth = this.#viewMonth;
+    if (previous !== null && previous !== this.#viewMonth) {
+      this.dispatch("monthchange", { detail: { month: this.#viewMonth } });
     }
   }
 
@@ -404,6 +476,18 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     }
   }
 
+  /**
+   * True when `iso` may be chosen as a range endpoint.
+   *
+   * The single availability question in the controller: the grid paint, the
+   * preview, and both commit paths ask it, so a cell's `aria-disabled` and what
+   * a click on that cell does are the same decision rather than two that have to
+   * be kept in step.
+   */
+  #isSelectable(iso: string): boolean {
+    return !this.#outOfBounds(iso) && !this.#disabledDates.has(iso);
+  }
+
   /** True when `iso` falls outside the `[min, max]` bounds. */
   #outOfBounds(iso: string): boolean {
     if (this.minValue && iso < this.minValue) return true;
@@ -411,9 +495,8 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     return false;
   }
 
-  /** Clamps an ISO date string into `[min, max]`, or "" when unparseable. */
+  /** Clamps a generated ISO date string into `[min, max]`. */
   #clampISO(iso: string): string {
-    if (!iso) return "";
     if (this.minValue && iso < this.minValue) return this.minValue;
     if (this.maxValue && iso > this.maxValue) return this.maxValue;
     return iso;
@@ -423,6 +506,29 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   #clampToBounds(date: Date): Date | null {
     const clamped = this.#clampISO(toISODateString(date));
     return parseISODateString(clamped);
+  }
+
+  /**
+   * Intersects a preset with `[min, max]`, rejecting a disjoint interval.
+   *
+   * Only the bounds narrow a preset here: `disabledDates` excludes single days,
+   * not sub-intervals, so it cannot shrink one to a still-contiguous range. A
+   * day it excludes is still refused as an endpoint — the caller checks that —
+   * but a preset that merely spans one keeps its span.
+   */
+  #intersectRange(range: { start: string; end: string }): { start: string; end: string } | null {
+    const start = this.minValue && range.start < this.minValue ? this.minValue : range.start;
+    const end = this.maxValue && range.end > this.maxValue ? this.maxValue : range.end;
+    return start <= end ? { start, end } : null;
+  }
+
+  /** Removes provisional range state before Turbo freezes a cached snapshot. */
+  #rewindForCache(): void {
+    this.#focusTimer.clearAll();
+    if (!this.#pendingStart && !this.#previewDate) return;
+    this.#pendingStart = "";
+    this.#previewDate = "";
+    this.#render();
   }
 
   /** Resolves the cell element from an event target, or null. */
@@ -450,6 +556,14 @@ function shiftMonthClamped(date: Date, delta: number): Date {
   return target;
 }
 
+/** Shifts `date` by `delta` years, clamping leap days to the target month. */
+function shiftYearClamped(date: Date, delta: number): Date {
+  const target = new Date(date.getFullYear() + delta, date.getMonth(), 1);
+  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+  target.setDate(Math.min(date.getDate(), lastDay));
+  return target;
+}
+
 /** Builds the 42 local-time dates of a Sunday-started six-week grid for a month. */
 function gridDays(year: number, month: number): Date[] {
   const first = new Date(year, month - 1, 1);
@@ -468,6 +582,22 @@ function gridDays(year: number, month: number): Date[] {
 function normalizeISO(value: string): string {
   const date = parseISODateString(value.trim());
   return date ? toISODateString(date) : "";
+}
+
+/** Orders a complete range while preserving either valid lone endpoint. */
+function orderRange(start: string, end: string): [string, string] {
+  return start && end && end < start ? [end, start] : [start, end];
+}
+
+/** Creates the month formatter, falling back when the document locale is malformed. */
+function monthFormatter(locale: string): Intl.DateTimeFormat {
+  const options: Intl.DateTimeFormatOptions = { month: "long", year: "numeric" };
+  try {
+    return new Intl.DateTimeFormat(locale, options);
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return new Intl.DateTimeFormat("en", options);
+  }
 }
 
 /** Computes a preset range relative to today, or null for an unknown name. */

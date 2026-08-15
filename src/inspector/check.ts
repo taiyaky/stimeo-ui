@@ -76,6 +76,14 @@ import {
  * @param manifest - The bundled controller manifest to check against.
  * @returns Diagnostics sorted by line then column.
  */
+/** Whether `node` sits somewhere under `ancestor` (not counting itself). */
+function isInside(node: ElementNode, ancestor: ElementNode): boolean {
+  for (let current = node.parent; current; current = current.parent) {
+    if (current === ancestor) return true;
+  }
+  return false;
+}
+
 export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const tree = parseHtml(neutralizeErb(source), erbElements(source));
@@ -674,7 +682,8 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   // --- Stage 2: conditional targets per scope ------------------------------
   // A feature that is opt-in but incomplete without its whole set. Judged from the
   // *presence* set rather than the element set: the question is only whether the
-  // author declared the target anywhere in this scope.
+  // author declared the target anywhere in this scope. A `requireInside` rule is
+  // the exception — it asks where the parts sit, so it reads their elements.
   for (const { node, identifier } of scopes) {
     const controller = known[identifier];
     if (!controller) continue;
@@ -682,13 +691,25 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
     const present = presence.get(node)?.get(identifier) ?? new Set<string>();
     for (const rule of controller.conditionalTargets) {
       if (!present.has(rule.whenPresent)) continue;
-      const missing = rule.require.filter((target) => !present.has(target));
+      const nodesOf = (target: string): readonly ElementNode[] =>
+        targetNodes.get(node)?.get(identifier)?.get(target) ?? [];
+      const owners = nodesOf(rule.whenPresent);
+      // `requireInside` asks where the part sits, not merely whether it exists:
+      // a `<template>` is cloned at runtime, so a part outside it never reaches
+      // the clone and the controller refuses to build.
+      const satisfied = (target: string): boolean =>
+        rule.requireInside
+          ? nodesOf(target).some((el) => owners.some((owner) => isInside(el, owner)))
+          : present.has(target);
+      const missing = rule.require.filter((target) => !satisfied(target));
       if (missing.length === 0) continue;
       report(
         node,
         "missing-conditional-target",
         complete ? "error" : "warning",
-        `"${identifier}" has a "${rule.whenPresent}" target, which also requires ${list(missing)}.`,
+        rule.requireInside
+          ? `"${identifier}" requires ${list(missing)} inside its "${rule.whenPresent}".`
+          : `"${identifier}" has a "${rule.whenPresent}" target, which also requires ${list(missing)}.`,
         node,
         complete ? rule.suggestion : UNRESOLVED_TARGET_HINT,
       );
@@ -727,7 +748,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
         // So is the tag: one file can spell the same role both natively and
         // with a div, and only the div needs the author to supply a name.
         if (!elementHolds(el, req.whenElement)) continue;
-        checkA11y(report, el, identifier, req, severity);
+        checkA11y(report, el, identifier, req, severity, isDynamicValue);
       }
     }
   }
@@ -1134,6 +1155,7 @@ function valueSatisfiesConstraint(raw: string, constraint: ValueConstraint): boo
   if (Number.isNaN(value)) return false;
   if (constraint.finite && !Number.isFinite(value)) return false;
   if (constraint.greaterThan !== undefined && !(value > constraint.greaterThan)) return false;
+  if (constraint.integer && !Number.isInteger(value)) return false;
   return true;
 }
 
@@ -1148,6 +1170,7 @@ function describeValueConstraint(constraint: ValueConstraint): string {
   if (constraint.greaterThan !== undefined) {
     parts.push(`greater than ${constraint.greaterThan}`);
   }
+  if (constraint.integer) parts.push("with no fractional part");
   return parts.join(" ");
 }
 
@@ -1194,7 +1217,8 @@ type Reporter = (
 /**
  * Checks one accessibility requirement against a present element. The base
  * `attrs`/`values` pair and each `or` alternative are alternatives (OR): the
- * requirement is met when at least one candidate attribute is present.
+ * requirement is met when at least one candidate attribute is present, and —
+ * where the requirement constrains no value — holds a non-empty one.
  *
  * Value checking is resolved **per attribute name** by unioning the allowed
  * values across every group that lists that name — so a value valid in *any*
@@ -1217,6 +1241,7 @@ function checkA11y(
   identifier: string,
   req: A11yRequirement,
   severity: DiagnosticSeverity,
+  isDynamicValue: (attr: ParsedAttr) => boolean,
 ): void {
   const groups: readonly A11yAlternative[] = [
     { attrs: req.attrs, values: req.values },
@@ -1241,9 +1266,22 @@ function checkA11y(
 
   const invalid: Array<{ attr: ParsedAttr; values: readonly string[] }> = [];
   let anyPresent = false;
+  let blank: ParsedAttr | undefined;
   for (const [name, allowed] of allowedByAttr) {
     const attr = el.attrs.find((a) => a.name === name);
     if (!attr) continue;
+    // An empty value satisfies nothing an unconstrained requirement asks for:
+    // ARIA computes no accessible name from `aria-label=""` and no role from
+    // `role=""`, so treating the attribute as present would report markup that
+    // is complete as written while the platform sees the value as absent. A
+    // constrained rule keeps reporting the value itself, which is the more
+    // precise diagnostic and carries a machine fix. A templating expression
+    // reads as empty here only because neutralization blanks it, and what it
+    // renders is unknowable from source — that case belongs to the runtime.
+    if (allowed.anyValue && attr.value.trim() === "" && !isDynamicValue(attr)) {
+      blank ??= attr;
+      continue;
+    }
     anyPresent = true;
     if (!allowed.anyValue && !allowed.values.has(attr.value.trim())) {
       invalid.push({ attr, values: [...allowed.values] });
@@ -1258,8 +1296,10 @@ function checkA11y(
       el,
       "missing-aria",
       severity,
-      `"${identifier}" ${verb} ${describeAttrs([...allowedByAttr.keys()])} on its ${where}.`,
-      el,
+      blank
+        ? `${blank.name} is empty on the ${where} of "${identifier}", which ${verb} a value there.`
+        : `"${identifier}" ${verb} ${describeAttrs([...allowedByAttr.keys()])} on its ${where}.`,
+      blank ?? el,
       req.suggestion,
     );
     return;

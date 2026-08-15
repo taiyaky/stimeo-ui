@@ -56,6 +56,18 @@ describe("PasswordStrengthController", () => {
     input().dispatchEvent(new Event("input", { bubbles: true }));
   };
 
+  it("still renders when the levels declaration is malformed", async () => {
+    // Stimulus's own Array reader throws out of the value observer before any
+    // callback runs, which would stop the meter connecting at all.
+    await start('data-stimeo--password-strength-levels-value="[not json"');
+    expect(meter().getAttribute("aria-valuenow")).toBe("0");
+
+    type("abc");
+    // Falls back to the four default labels rather than an empty scale.
+    expect(meter().getAttribute("aria-valuemax")).toBe("4");
+    expect(meter().getAttribute("aria-valuenow")).toBe("1");
+  });
+
   it("reflects an empty field as level 0 on connect", async () => {
     await start();
     expect(meter().getAttribute("aria-valuenow")).toBe("0");

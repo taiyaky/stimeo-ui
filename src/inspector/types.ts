@@ -233,9 +233,11 @@ export interface DocumentCondition {
  * A single accessibility requirement on a controller's markup (Inspector
  * stage 3). At least one of {@link attrs} must be present on the
  * {@link target} element; when {@link values} is given, the present
- * attribute's value must be one of them. {@link or} widens the requirement
- * with alternative attribute/value groups — the requirement is satisfied when
- * *any* group is (e.g. `role="status"` **or** `aria-live`).
+ * attribute's value must be one of them, and when it is not, the value must be
+ * non-empty — ARIA derives no name from `aria-label=""`, so an empty value
+ * leaves the requirement unmet. {@link or} widens the requirement with
+ * alternative attribute/value groups — the requirement is satisfied when *any*
+ * group is (e.g. `role="status"` **or** `aria-live`).
  */
 export interface A11yRequirement {
   /**
@@ -614,6 +616,15 @@ export interface ConditionalTargetRule {
   readonly whenPresent: string;
   /** Targets that become required once {@link whenPresent} appears. */
   readonly require: readonly string[];
+  /**
+   * Require each {@link require} entry to sit **inside** the `whenPresent`
+   * element rather than anywhere in the scope.
+   *
+   * A `<template>` is cloned at runtime, so a part declared outside it never
+   * reaches the clone. Without this the presence check passes on markup the
+   * controller then refuses to build from.
+   */
+  readonly requireInside?: boolean;
   /** Human-readable fix suggestion shown by the CLI (stage 4). */
   readonly suggestion: string;
 }
@@ -634,6 +645,8 @@ export interface ValueConstraint {
   readonly finite?: boolean;
   /** Require a decoded number strictly greater than this bound. */
   readonly greaterThan?: number;
+  /** Require a decoded number with no fractional part. */
+  readonly integer?: boolean;
   /** Human-readable fix suggestion shown by the CLI (stage 4). */
   readonly suggestion: string;
 }

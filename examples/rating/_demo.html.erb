@@ -1,21 +1,22 @@
 <%# Markup for the rating (APG Radio Group, ordinal scale) demo.
     Each symbol is role="radio" with an aria-label ("3 stars", etc.). Selection is
     aria-checked; the currently filled range is data-rating-hover (the selected value or
-    a hover preview). Focus alone does not preview, so Space (select the focused star) shows.
-    The star look is the consumer's CSS. %>
+    a hover/focus preview). DOM order defines values 1..N. The star look is the consumer's CSS. %>
 <div class="rating-demo-wrap">
   <p class="rating-demo__hint"><%= t("components.rating.demo.hint") %></p>
   <div class="rating-demo" role="radiogroup" aria-label="<%= t('components.rating.demo.label') %>"
        data-controller="stimeo--rating"
-       data-stimeo--rating-value-value="0" data-stimeo--rating-max-value="5">
+       data-stimeo--rating-value-value="0">
     <% (1..5).each do |n| %>
       <span class="rating-demo__star" role="radio" aria-checked="false"
             aria-label="<%= t('components.rating.demo.star', count: n) %>"
             tabindex="<%= n == 1 ? 0 : -1 %>"
-            data-rating-value="<%= n %>" data-stimeo--rating-target="symbol"
+            data-stimeo--rating-target="symbol"
             data-action="click->stimeo--rating#select
                          mouseenter->stimeo--rating#preview
                          mouseleave->stimeo--rating#endPreview
+                         focus->stimeo--rating#preview
+                         blur->stimeo--rating#endPreview
                          keydown->stimeo--rating#onKeydown">
         <svg class="rating-demo__icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 2l2.9 6.26 6.86.6-5.2 4.52 1.56 6.72L12 17.1 5.88 20.6l1.56-6.72-5.2-4.52
@@ -26,7 +27,7 @@
 
     <input type="hidden" name="rating" value="0" data-stimeo--rating-target="field" />
 
-    <%# Subscribe to the change event to show the current value (updated by demo.js). %>
+    <%# Subscribe to committed and reconciled values to update this instance's status. %>
     <span class="rating-demo__status" aria-live="polite"
           data-empty-text="<%= t('components.rating.demo.empty') %>"
           data-rated-template="<%= t('components.rating.demo.rated') %>"><%= t(

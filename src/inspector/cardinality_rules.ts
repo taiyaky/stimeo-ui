@@ -34,6 +34,18 @@ import type { CardinalityRules } from "./types";
  * what report them.
  */
 export const cardinalityRules: CardinalityRules = {
+  // A parent is optional, but the controller derives and cascades through its
+  // singular parentTarget. A second parent would display an unmanaged state and
+  // its action would still operate on the first one.
+  "stimeo--checkbox": [
+    {
+      within: "",
+      target: "parent",
+      max: 1,
+      suggestion:
+        'Keep at most one "parent" target in a checkbox group — omit it for a child-only aggregate, or use one select-all checkbox for the children.',
+    },
+  ],
   // The picker's selected dot mirrors the visible slide; two of them means the
   // author asked for two slides at once, and connect keeps the first.
   "stimeo--carousel": [
@@ -86,6 +98,20 @@ export const cardinalityRules: CardinalityRules = {
       max: 1,
       suggestion:
         "Wrap exactly one trigger per hoverArea — hovering an area that holds several always opens the first trigger's panel.",
+    },
+  ],
+  // A custom radio group has one committed choice. Runtime normalization keeps
+  // the first authored `true`, but the discarded choice is still an authoring
+  // error that only the static checker can explain before first paint.
+  "stimeo--radio-group": [
+    {
+      within: "",
+      target: "radio",
+      attr: "aria-checked",
+      values: ["true"],
+      max: 1,
+      suggestion:
+        'Leave aria-checked="true" on at most one radio and set the others to "false" — connect keeps the first checked radio in DOM order.',
     },
   ],
   // Tabs are singly selectable by definition; the initial one is server-rendered

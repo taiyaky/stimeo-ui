@@ -25,6 +25,34 @@ export const hostRules: HostRules = {
     },
   ],
 
+  // Radio Group owns checked state, activation, and roving focus on every
+  // custom radio. A non-submitting button is the only native interactive host
+  // whose activation model it deliberately composes with; native radios and
+  // links should keep their own semantics instead of being repurposed.
+  "stimeo--radio-group": [
+    {
+      target: "radio",
+      mode: "non-interactive-or-button",
+      buttonTypes: ["button"],
+      suggestion:
+        'Use <button type="button">, or place the "radio" target on a non-interactive host such as <div role="radio">.',
+    },
+  ],
+
+  // Toggle Group owns pressed state, activation, and roving focus on every
+  // item. A non-submitting button supplies the one native activation model the
+  // controller deliberately composes with; other interactive hosts would add a
+  // conflicting navigation, form, or editing behavior.
+  "stimeo--toggle-group": [
+    {
+      target: "item",
+      mode: "non-interactive-or-button",
+      buttonTypes: ["button"],
+      suggestion:
+        'Use <button type="button">, or place the "item" target on a non-interactive host such as <div role="button">.',
+    },
+  ],
+
   // Tree-view owns selection, expansion, and the roving key map on every item.
   // Nest a link or button inside the item when it needs a secondary action;
   // making that control the treeitem itself combines incompatible interactions.

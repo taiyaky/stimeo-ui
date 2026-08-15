@@ -13,8 +13,7 @@ const portalState = new WeakMap<Element, { node: HTMLElement; placeholder: Comme
  * Headless **portal / teleport**: moves an element to another place in the DOM (e.g.
  * directly under `body`) on connect and cleans up on disconnect — the shared substrate
  * for overlays that must escape an ancestor's `overflow: hidden`, `transform`, or
- * stacking context (no APG pattern; a DOM utility). Counterpart to Radix `Portal` /
- * Alpine `x-teleport`.
+ * stacking context (no APG pattern; a DOM utility).
  *
  * Markup contract (identifier: `stimeo--portal`):
  *   <div data-controller="stimeo--portal" data-stimeo--portal-to-value="body">

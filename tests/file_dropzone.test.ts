@@ -110,6 +110,10 @@ describe("FileDropzoneController", () => {
     document.querySelector<HTMLElement>(
       "[data-stimeo--file-dropzone-target='status']",
     ) as HTMLElement;
+  const list = () =>
+    document.querySelector<HTMLElement>(
+      "[data-stimeo--file-dropzone-target='list']",
+    ) as HTMLElement;
   const drop = (...files: File[]) =>
     zone().dispatchEvent(
       Object.assign(new Event("drop", { bubbles: true }), {
@@ -205,6 +209,27 @@ describe("FileDropzoneController", () => {
       "b.jpg",
     );
     expect(revokedUrls).toHaveLength(1);
+  });
+
+  it("rebinds removal and restores client previews when the list target is replaced", async () => {
+    await mount();
+    drop(file("a.jpg", "image/jpeg"), file("b.jpg", "image/jpeg"));
+    const oldList = list();
+    const replacement = oldList.cloneNode(false) as HTMLElement;
+
+    oldList.replaceWith(replacement);
+    await tick();
+
+    expect(replacement.querySelectorAll("[data-stimeo--file-dropzone-target='item']")).toHaveLength(
+      2,
+    );
+    replacement.querySelector<HTMLButtonElement>("button")?.click();
+    expect(items()).toHaveLength(1);
+    expect(revokedUrls).toHaveLength(1);
+
+    const staleClick = new MouseEvent("click", { bubbles: true });
+    oldList.dispatchEvent(staleClick);
+    expect(items()).toHaveLength(1);
   });
 
   it("revokes all preview URLs on disconnect", async () => {

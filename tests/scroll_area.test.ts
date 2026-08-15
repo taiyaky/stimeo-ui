@@ -177,6 +177,41 @@ describe("ScrollAreaController", () => {
     expect(viewport().getAttribute("tabindex")).toBe("0");
   });
 
+  it("rebinds scroll, resize, and content observation when the viewport is replaced", async () => {
+    await start(markup());
+    const oldViewport = viewport();
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(oldViewport.getAttribute("tabindex")).toBe("0");
+
+    const replacement = document.createElement("div");
+    replacement.setAttribute("data-stimeo--scroll-area-target", "viewport");
+    replacement.setAttribute("aria-label", "Replacement log");
+    for (const [key, value] of Object.entries({
+      scrollHeight: 800,
+      clientHeight: 200,
+      scrollTop: 600,
+    })) {
+      Object.defineProperty(replacement, key, { configurable: true, value });
+    }
+    oldViewport.replaceWith(replacement);
+    await tick();
+
+    expect(oldViewport.hasAttribute("tabindex")).toBe(false);
+    expect(oldViewport.hasAttribute("role")).toBe(false);
+    expect(replacement.getAttribute("tabindex")).toBe("0");
+    expect(replacement.getAttribute("role")).toBe("region");
+    expect(root().getAttribute("data-scroll")).toBe("end");
+
+    Object.defineProperty(oldViewport, "scrollTop", { configurable: true, value: 300 });
+    oldViewport.dispatchEvent(new Event("scroll"));
+    expect(root().getAttribute("data-scroll")).toBe("end");
+
+    replacement.appendChild(document.createElement("button"));
+    await tick();
+    expect(replacement.hasAttribute("tabindex")).toBe(false);
+    expect(replacement.hasAttribute("role")).toBe(false);
+  });
+
   it("stops re-checking the content once disconnected", async () => {
     // The control is visible to begin with, so the viewport holds no tab stop. Hiding it
     // *after* teardown is the mutation a live observer would answer by adding one — which

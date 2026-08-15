@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { isRtl } from "../utils/logical_scroll";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { RovingTabindex, type RovingWrap, rovingMove } from "../utils/roving_tabindex";
 
 /**
@@ -52,20 +53,37 @@ export class RovingController extends Controller<HTMLElement> {
   declare homeEndValue: boolean;
 
   readonly #roving = new RovingTabindex(() => this.itemTargets);
+  readonly #reconcile = new MicrotaskCoalescer(() => this.#ensureTabStop());
+  #connected = false;
 
   override connect(): void {
     // Establish the single tab stop from the DOM (source of truth): keep an
     // existing tabbable item, else default to the first. Silent — no change event
     // for the initial mount.
-    const active = this.#roving.activeIndex;
-    this.#roving.setActive(active === -1 ? 0 : active);
+    this.#ensureTabStop();
     this.element.addEventListener("keydown", this.#onKeydown);
     this.element.addEventListener("focusin", this.#onFocusin);
+    this.#connected = true;
+    this.#reconcile.activate();
   }
 
   override disconnect(): void {
+    this.#connected = false;
+    this.#reconcile.cancel();
     this.element.removeEventListener("keydown", this.#onKeydown);
     this.element.removeEventListener("focusin", this.#onFocusin);
+  }
+
+  /** Drops a runtime-added item from the Tab sequence before batch reconciliation. */
+  itemTargetConnected(item: HTMLElement): void {
+    if (!this.#connected) return;
+    item.tabIndex = -1;
+    this.#reconcile.schedule();
+  }
+
+  /** Re-establishes the single Tab stop after an item leaves the target set. */
+  itemTargetDisconnected(): void {
+    this.#reconcile.schedule();
   }
 
   /** Arrow keys move focus + the tab stop; Home/End jump to the ends. */
@@ -137,5 +155,11 @@ export class RovingController extends Controller<HTMLElement> {
     if (index !== previous) {
       this.dispatch("change", { detail: { index, item: this.itemTargets[index] } });
     }
+  }
+
+  /** Keeps the first existing Tab stop, falling back to the first live item. */
+  #ensureTabStop(): void {
+    const active = this.#roving.activeIndex;
+    this.#roving.setActive(active === -1 ? 0 : active);
   }
 }

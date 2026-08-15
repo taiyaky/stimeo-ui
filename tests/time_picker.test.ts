@@ -4,7 +4,7 @@ import { TimePickerController } from "../src/controllers/time_picker_controller"
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link TimePickerController}: per-segment spinbutton
@@ -17,7 +17,7 @@ describe("TimePickerController", () => {
   let application: Application;
 
   /** A 24-hour hour:minute picker (optionally with seconds). */
-  const mount24 = async ({ hour = 9, minute = 30, step = 1, seconds = false } = {}) => {
+  const mount24 = async ({ hour = 9, minute = 30, second = 0, step = 1, seconds = false } = {}) => {
     document.body.innerHTML = `
       <div data-controller="stimeo--time-picker"
            data-stimeo--time-picker-hour-cycle-value="24"
@@ -27,7 +27,7 @@ describe("TimePickerController", () => {
         ${segment("Hours", "hour", hour, 0, 23)}
         <span aria-hidden="true">:</span>
         ${segment("Minutes", "minute", minute, 0, 59)}
-        ${seconds ? `<span aria-hidden="true">:</span>${segment("Seconds", "second", 0, 0, 59)}` : ""}
+        ${seconds ? `<span aria-hidden="true">:</span>${segment("Seconds", "second", second, 0, 59)}` : ""}
         <input type="hidden" data-stimeo--time-picker-target="field" />
       </div>`;
     application = Application.start();
@@ -36,10 +36,11 @@ describe("TimePickerController", () => {
   };
 
   /** A 12-hour picker with an AM/PM meridiem spinbutton. */
-  const mount12 = async ({ hour = 9, minute = 30, meridiem = 0 } = {}) => {
+  const mount12 = async ({ hour = 9, minute = 30, meridiem = 0, wrap = true } = {}) => {
     document.body.innerHTML = `
       <div data-controller="stimeo--time-picker"
            data-stimeo--time-picker-hour-cycle-value="12"
+           data-stimeo--time-picker-wrap-value="${wrap}"
            role="group" aria-label="Time">
         ${segment("Hours", "hour", hour, 1, 12)}
         <span aria-hidden="true">:</span>
@@ -66,8 +67,14 @@ describe("TimePickerController", () => {
     ) as HTMLInputElement;
   const root = () =>
     document.querySelector<HTMLElement>("[data-controller='stimeo--time-picker']") as HTMLElement;
-  const key = (el: HTMLElement, k: string) =>
-    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+  const controller = () =>
+    application.controllers.find(
+      (instance) => instance.identifier === "stimeo--time-picker",
+    ) as TimePickerController;
+  const key = (el: HTMLElement, k: string, init: KeyboardEventInit = {}) =>
+    el.dispatchEvent(
+      new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...init }),
+    );
 
   it("reverses the horizontal arrows under RTL, leaving the value pair alone", async () => {
     // Logical direction. `dir="rtl"` is the authoring contract, but happy-dom
@@ -116,10 +123,42 @@ describe("TimePickerController", () => {
 
   it("wraps the minute and carries into the hour", async () => {
     await mount24({ hour: 9, minute: 59 });
+    seg("minute").focus();
     key(seg("minute"), "ArrowUp");
     expect(seg("minute").getAttribute("aria-valuenow")).toBe("0");
     expect(seg("hour").getAttribute("aria-valuenow")).toBe("10");
     expect(field().value).toBe("10:00");
+    expect(document.activeElement).toBe(seg("minute"));
+  });
+
+  it("dispatches only the final value once when a minute carry crosses an hour", async () => {
+    await mount24({ hour: 9, minute: 59 });
+    const widgetValues: string[] = [];
+    const nativeValues: string[] = [];
+    root().addEventListener("stimeo--time-picker:change", (event) => {
+      widgetValues.push((event as CustomEvent<{ value: string }>).detail.value);
+    });
+    field().addEventListener("change", () => nativeValues.push(field().value));
+
+    key(seg("minute"), "ArrowUp");
+
+    expect(widgetValues).toEqual(["10:00"]);
+    expect(nativeValues).toEqual(["10:00"]);
+  });
+
+  it("dispatches only the final value once when seconds carry through two units", async () => {
+    await mount24({ hour: 9, minute: 59, second: 59, seconds: true });
+    const widgetValues: string[] = [];
+    const nativeValues: string[] = [];
+    root().addEventListener("stimeo--time-picker:change", (event) => {
+      widgetValues.push((event as CustomEvent<{ value: string }>).detail.value);
+    });
+    field().addEventListener("change", () => nativeValues.push(field().value));
+
+    key(seg("second"), "ArrowUp");
+
+    expect(widgetValues).toEqual(["10:00:00"]);
+    expect(nativeValues).toEqual(["10:00:00"]);
   });
 
   it("wraps the hour at 23→00 without a day rollover", async () => {
@@ -175,6 +214,30 @@ describe("TimePickerController", () => {
     expect(field().value).toBe("09:30");
   });
 
+  it("leaves modified digits and Home/End shortcuts to the browser", async () => {
+    await mount24();
+    for (const event of [
+      new KeyboardEvent("keydown", {
+        key: "7",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+      new KeyboardEvent("keydown", {
+        key: "End",
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    ]) {
+      seg("hour").dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("9");
+    expect(field().value).toBe("09:30");
+  });
+
   it("jumps to the segment bounds on Home/End", async () => {
     await mount24();
     key(seg("hour"), "End");
@@ -192,6 +255,51 @@ describe("TimePickerController", () => {
     expect(document.activeElement).toBe(seg("minute"));
   });
 
+  it("restarts direct entry from a digit that would overflow the segment", async () => {
+    await mount24();
+
+    key(seg("hour"), "2");
+    key(seg("hour"), "9");
+
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("9");
+    expect(field().value).toBe("09:30");
+  });
+
+  it("discards a partial direct-entry buffer when focus leaves and returns", async () => {
+    await mount24();
+    seg("hour").focus();
+    key(seg("hour"), "1");
+    seg("minute").focus();
+    seg("hour").focus();
+
+    key(seg("hour"), "2");
+
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("2");
+    expect(field().value).toBe("02:30");
+  });
+
+  it("keeps direct-entry state when an unrelated focusout bubbles through the root", async () => {
+    await mount24();
+    key(seg("hour"), "1");
+
+    root().dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    key(seg("hour"), "4");
+
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("14");
+    expect(field().value).toBe("14:30");
+  });
+
+  it("discards a partial direct-entry buffer after a non-digit action", async () => {
+    await mount24();
+    key(seg("hour"), "1");
+    key(seg("hour"), "ArrowUp");
+
+    key(seg("hour"), "3");
+
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("3");
+    expect(field().value).toBe("03:30");
+  });
+
   it("composes a 24-hour field from a 12-hour picker via the meridiem", async () => {
     await mount12({ hour: 9, minute: 30, meridiem: 0 });
     expect(field().value).toBe("09:30");
@@ -201,6 +309,161 @@ describe("TimePickerController", () => {
     expect(field().value).toBe("21:30");
     key(seg("meridiem"), "ArrowUp"); // PM → AM
     expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("AM");
+    expect(field().value).toBe("09:30");
+  });
+
+  it("carries across noon and midnight in both directions on a 12-hour clock", async () => {
+    await mount12({ hour: 11, minute: 59, meridiem: 0 });
+
+    key(seg("minute"), "ArrowUp");
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("12");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("PM");
+    expect(field().value).toBe("12:00");
+
+    key(seg("minute"), "ArrowDown");
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("11");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("AM");
+    expect(field().value).toBe("11:59");
+
+    key(seg("meridiem"), "ArrowUp");
+    key(seg("minute"), "ArrowUp");
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("12");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("AM");
+    expect(field().value).toBe("00:00");
+  });
+
+  it("toggles meridiem when direct hour stepping crosses 11 and 12", async () => {
+    await mount12({ hour: 11, minute: 30, meridiem: 0 });
+
+    key(seg("hour"), "ArrowUp");
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("12");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("PM");
+    expect(field().value).toBe("12:30");
+
+    key(seg("hour"), "ArrowDown");
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("11");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("AM");
+  });
+
+  it("reports a value the reconciliation moved as reconcile, not change", async () => {
+    // Dropping the second segment recomposes without it, so the committed value
+    // changes without anyone editing it.
+    await mount24({ hour: 9, minute: 30, second: 45, seconds: true });
+    expect(field().value).toBe("09:30:45");
+
+    const changes: unknown[] = [];
+    const repairs: unknown[] = [];
+    const natives: string[] = [];
+    root().addEventListener("stimeo--time-picker:change", (event) => {
+      changes.push((event as CustomEvent).detail);
+    });
+    root().addEventListener("stimeo--time-picker:reconcile", (event) => {
+      repairs.push((event as CustomEvent).detail);
+    });
+    field().addEventListener("change", () => natives.push(field().value));
+
+    seg("second").remove();
+    await tick();
+
+    expect(field().value).toBe("09:30:00");
+    expect(repairs).toEqual([{ value: "09:30:00" }]);
+    expect(changes).toEqual([]);
+    expect(natives).toEqual([]);
+  });
+
+  it("stays quiet when a reconciliation leaves the value where it was", async () => {
+    await mount24({ hour: 9, minute: 30 });
+    const events: string[] = [];
+    root().addEventListener("stimeo--time-picker:change", () => events.push("change"));
+    root().addEventListener("stimeo--time-picker:reconcile", () => events.push("reconcile"));
+
+    // A morph that rewrites the same values is still a reconciliation pass.
+    seg("hour").setAttribute("aria-valuenow", "9");
+    await tick();
+
+    expect(field().value).toBe("09:30");
+    expect(events).toEqual([]);
+  });
+
+  it("reports nothing on the initial connection", async () => {
+    const events: string[] = [];
+    document.addEventListener("stimeo--time-picker:change", () => events.push("change"));
+    document.addEventListener("stimeo--time-picker:reconcile", () => events.push("reconcile"));
+
+    await mount24({ hour: 9, minute: 30 });
+
+    expect(events).toEqual([]);
+  });
+
+  it("crosses 11 and 12 even with wrapping disabled", async () => {
+    // Disabling wrap keeps a step inside the segment's own bounds; 11 → 12 is
+    // inside them. The displayed hour is a projection of the instant, so the
+    // step still moves from morning to afternoon.
+    await mount12({ hour: 11, minute: 30, meridiem: 0, wrap: false });
+
+    key(seg("hour"), "ArrowUp");
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("12");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("PM");
+    expect(field().value).toBe("12:30");
+
+    key(seg("hour"), "ArrowDown");
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("11");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("AM");
+    expect(field().value).toBe("11:30");
+  });
+
+  it("clamps at the last hour of the day when wrapping is disabled", async () => {
+    await mount12({ hour: 11, minute: 30, meridiem: 1, wrap: false });
+    expect(field().value).toBe("23:30");
+
+    key(seg("hour"), "ArrowUp");
+    expect(field().value).toBe("23:30");
+  });
+
+  it("clamps at the first hour of the day when wrapping is disabled", async () => {
+    await mount12({ hour: 12, minute: 30, meridiem: 0, wrap: false });
+    expect(field().value).toBe("00:30");
+
+    key(seg("hour"), "ArrowDown");
+    expect(field().value).toBe("00:30");
+  });
+
+  it("preserves PM while Home and End change the displayed 12-hour value", async () => {
+    await mount12({ hour: 9, minute: 30, meridiem: 1 });
+
+    key(seg("hour"), "Home");
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("1");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("PM");
+    expect(field().value).toBe("13:30");
+
+    key(seg("hour"), "End");
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("12");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("PM");
+    expect(field().value).toBe("12:30");
+  });
+
+  it("uses Home and End to select AM and PM on the meridiem segment", async () => {
+    await mount12({ hour: 9, minute: 30, meridiem: 1 });
+
+    key(seg("meridiem"), "Home");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("AM");
+    expect(field().value).toBe("09:30");
+
+    key(seg("meridiem"), "End");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("PM");
+    expect(field().value).toBe("21:30");
+  });
+
+  it("clamps the meridiem segment when wrapping is disabled", async () => {
+    await mount12({ hour: 9, minute: 30, meridiem: 0, wrap: false });
+
+    key(seg("meridiem"), "ArrowDown");
+    expect(field().value).toBe("09:30");
+    key(seg("meridiem"), "ArrowUp");
+    expect(field().value).toBe("21:30");
+    key(seg("meridiem"), "ArrowUp");
+    expect(field().value).toBe("21:30");
+    key(seg("meridiem"), "ArrowDown");
     expect(field().value).toBe("09:30");
   });
 
@@ -241,6 +504,17 @@ describe("TimePickerController", () => {
     expect(field().value).toBe("09:30:01");
   });
 
+  it("normalizes a non-positive or fractional minute step to a positive integer", async () => {
+    await mount24({ step: 0 });
+    key(seg("minute"), "ArrowUp");
+    expect(seg("minute").getAttribute("aria-valuenow")).toBe("31");
+
+    disconnectAndStopApplication(application);
+    await mount24({ step: 1.9 });
+    key(seg("minute"), "ArrowUp");
+    expect(seg("minute").getAttribute("aria-valuenow")).toBe("31");
+  });
+
   it("dispatches change on every committed step", async () => {
     await mount24();
     const values: string[] = [];
@@ -273,6 +547,37 @@ describe("TimePickerController", () => {
     key(seg("minute"), "ArrowUp");
 
     expect(values).toEqual(["09:31"]);
+  });
+
+  it("keeps multiple picker instances isolated", async () => {
+    const picker = (label: string, hour: number, minute: number) => `
+      <div data-controller="stimeo--time-picker" role="group" aria-label="${label}">
+        ${segment("Hours", "hour", hour, 0, 23)}
+        ${segment("Minutes", "minute", minute, 0, 59)}
+        <input type="hidden" data-stimeo--time-picker-target="field" />
+      </div>`;
+    document.body.innerHTML = `${picker("Start", 9, 30)}${picker("End", 17, 45)}`;
+    application = Application.start();
+    application.register("stimeo--time-picker", TimePickerController);
+    await tick();
+    const pickers = [...document.querySelectorAll<HTMLElement>("[data-controller]")];
+    const firstMinute = pickers[0]?.querySelector<HTMLElement>("[data-segment='minute']");
+    const fields = pickers.map(
+      (picker) =>
+        picker.querySelector<HTMLInputElement>("[data-stimeo--time-picker-target='field']")?.value,
+    );
+
+    if (!firstMinute) throw new Error("Expected the first picker to have a minute segment");
+    key(firstMinute, "ArrowUp");
+
+    expect(fields).toEqual(["09:30", "17:45"]);
+    expect(
+      pickers.map(
+        (picker) =>
+          picker.querySelector<HTMLInputElement>("[data-stimeo--time-picker-target='field']")
+            ?.value,
+      ),
+    ).toEqual(["09:31", "17:45"]);
   });
 
   it("does not dispatch native change while composing the initial field", async () => {
@@ -315,6 +620,161 @@ describe("TimePickerController", () => {
     expect(field().value).toBe("23:30");
   });
 
+  it("overwrites incorrect authored ARIA bounds with controller-owned bounds", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--time-picker" role="group" aria-label="Time">
+        ${segment("Hours", "hour", 9, -10, 99)}
+        ${segment("Minutes", "minute", 30, 10, 30)}
+        <input type="hidden" data-stimeo--time-picker-target="field" />
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--time-picker", TimePickerController);
+    await tick();
+
+    expect(seg("hour").getAttribute("aria-valuemin")).toBe("0");
+    expect(seg("hour").getAttribute("aria-valuemax")).toBe("23");
+    expect(seg("minute").getAttribute("aria-valuemin")).toBe("0");
+    expect(seg("minute").getAttribute("aria-valuemax")).toBe("59");
+  });
+
+  it("uses the 24-hour and one-minute public defaults when Values are omitted", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--time-picker" role="group" aria-label="Time">
+        ${segment("Hours", "hour", 9, 1, 12)}
+        ${segment("Minutes", "minute", 30, 0, 59)}
+        <input type="hidden" data-stimeo--time-picker-target="field" />
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--time-picker", TimePickerController);
+    await tick();
+
+    expect(seg("hour").getAttribute("aria-valuemax")).toBe("23");
+    key(seg("minute"), "ArrowUp");
+    expect(seg("minute").getAttribute("aria-valuenow")).toBe("31");
+  });
+
+  it("adopts a runtime-added segment and resets a removed unit silently", async () => {
+    await mount24();
+    root().setAttribute("data-stimeo--time-picker-seconds-value", "true");
+    controller().secondsValueChanged();
+    await flushMicrotasks();
+    const second = document.createElement("span");
+    second.setAttribute("role", "spinbutton");
+    second.setAttribute("aria-label", "Seconds");
+    second.setAttribute("aria-valuenow", "45");
+    second.setAttribute("data-segment", "second");
+    second.setAttribute("data-stimeo--time-picker-target", "segment");
+    second.setAttribute("data-action", "keydown->stimeo--time-picker#onKeydown");
+    root().insertBefore(second, field());
+    controller().segmentTargetConnected();
+    await tick();
+
+    expect(second.getAttribute("aria-valuemin")).toBe("0");
+    expect(second.getAttribute("aria-valuemax")).toBe("59");
+    expect(field().value).toBe("09:30:45");
+    key(second, "ArrowUp");
+    expect(field().value).toBe("09:30:46");
+
+    second.remove();
+    controller().segmentTargetDisconnected();
+    await flushMicrotasks();
+    expect(field().value).toBe("09:30:00");
+  });
+
+  it("adopts a replacement segment as the DOM source of truth", async () => {
+    await mount24();
+    const previous = seg("minute");
+    const replacement = previous.cloneNode(true) as HTMLElement;
+    replacement.setAttribute("aria-valuenow", "44");
+    replacement.textContent = "44";
+    previous.replaceWith(replacement);
+    controller().segmentTargetDisconnected();
+    controller().segmentTargetConnected();
+    await flushMicrotasks();
+
+    expect(replacement.getAttribute("aria-valuenow")).toBe("44");
+    expect(field().value).toBe("09:44");
+  });
+
+  it("hydrates a runtime replacement field without reporting a user change", async () => {
+    await mount24();
+    const changes = vi.fn();
+    root().addEventListener("stimeo--time-picker:change", changes);
+    const previous = field();
+    const replacement = document.createElement("input");
+    replacement.type = "hidden";
+    replacement.value = "stale";
+    replacement.setAttribute("data-stimeo--time-picker-target", "field");
+    previous.replaceWith(replacement);
+    controller().fieldTargetDisconnected();
+    controller().fieldTargetConnected();
+    await flushMicrotasks();
+
+    expect(replacement.value).toBe("09:30");
+    expect(changes).not.toHaveBeenCalled();
+  });
+
+  it("adopts retained aria-valuenow morphs before the next user action", async () => {
+    await mount24();
+    const changes = vi.fn();
+    root().addEventListener("stimeo--time-picker:change", changes);
+    seg("hour").setAttribute("aria-valuenow", "15");
+    await tick();
+
+    expect(seg("hour").textContent).toBe("15");
+    expect(field().value).toBe("15:30");
+    expect(changes).not.toHaveBeenCalled();
+
+    key(seg("hour"), "ArrowUp");
+    expect(field().value).toBe("16:30");
+  });
+
+  it("ignores retained attributes outside segment targets without clearing direct entry", async () => {
+    await mount24();
+    key(seg("hour"), "1");
+    root().querySelector<HTMLElement>("[aria-hidden='true']")?.setAttribute("aria-valuenow", "45");
+    await tick();
+
+    key(seg("hour"), "4");
+
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("14");
+    expect(field().value).toBe("14:30");
+  });
+
+  it("silently reconciles retained data-segment and render Value morphs", async () => {
+    await mount12({ hour: 9, minute: 30, meridiem: 1 });
+    const changes = vi.fn();
+    root().addEventListener("stimeo--time-picker:change", changes);
+    root().setAttribute("data-stimeo--time-picker-hour-cycle-value", "24");
+    root().setAttribute("data-stimeo--time-picker-seconds-value", "true");
+    controller().hourCycleValueChanged();
+    controller().secondsValueChanged();
+    await flushMicrotasks();
+
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("21");
+    expect(seg("hour").getAttribute("aria-valuemin")).toBe("0");
+    expect(seg("hour").getAttribute("aria-valuemax")).toBe("23");
+    expect(field().value).toBe("21:30:00");
+    expect(changes).not.toHaveBeenCalled();
+
+    seg("minute").setAttribute("data-segment", "second");
+    seg("second").setAttribute("aria-valuenow", "12");
+    await tick();
+    expect(field().value).toBe("21:00:12");
+    expect(changes).not.toHaveBeenCalled();
+  });
+
+  it("stops retained-attribute observation after disconnect", async () => {
+    await mount24();
+    controller().disconnect();
+
+    seg("hour").setAttribute("aria-valuenow", "15");
+    await tick();
+
+    expect(seg("hour").getAttribute("aria-valuenow")).toBe("15");
+    expect(field().value).toBe("09:30");
+  });
+
   it("falls back to the segment minimum for a non-numeric seeded value", async () => {
     await mount24({ hour: Number.NaN, minute: 30 });
 
@@ -333,17 +793,38 @@ describe("TimePickerController", () => {
     application = Application.start();
     application.register("stimeo--time-picker", TimePickerController);
     await tick();
-    const event = new KeyboardEvent("keydown", {
+    const outsideEvent = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      bubbles: true,
+      cancelable: true,
+    });
+    const malformedEvent = new KeyboardEvent("keydown", {
       key: "ArrowUp",
       bubbles: true,
       cancelable: true,
     });
 
-    root().dispatchEvent(event);
+    root().dispatchEvent(outsideEvent);
+    seg("zone").dispatchEvent(malformedEvent);
 
-    expect(event.defaultPrevented).toBe(false);
+    expect(outsideEvent.defaultPrevented).toBe(false);
+    expect(malformedEvent.defaultPrevented).toBe(false);
     expect(field().value).toBe("00:00");
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("skips malformed targets during auxiliary focus movement", async () => {
+    await mount24();
+    const malformed = document.createElement("span");
+    malformed.setAttribute("data-segment", "zone");
+    malformed.setAttribute("data-stimeo--time-picker-target", "segment");
+    seg("hour").after(malformed);
+    await tick();
+    seg("hour").focus();
+
+    key(seg("hour"), "ArrowRight");
+
+    expect(document.activeElement).toBe(seg("minute"));
   });
 
   it("has no machine-detectable a11y violations", async () => {

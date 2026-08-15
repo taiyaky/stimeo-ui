@@ -199,9 +199,42 @@ describe("ColorPickerController", () => {
         ).detail,
       );
     });
-    press(slider("hue"), "End"); // hue 0 -> 360 wraps back to red
-    expect(detail.at(-1)?.value).toBe("#ff0000");
-    expect(detail.at(-1)?.rgba).toEqual({ r: 255, g: 0, b: 0, a: 1 });
+    press(slider("lightness"), "Home"); // lightness 50 -> 0 turns the color black
+    expect(detail.at(-1)?.value).toBe("#000000");
+    expect(detail.at(-1)?.rgba).toEqual({ r: 0, g: 0, b: 0, a: 1 });
+  });
+
+  it("stays quiet when a key leaves the committed color where it is", async () => {
+    await start('data-stimeo--color-picker-value-value="#ff0000"');
+    const details: Array<{ value: string }> = [];
+    root().addEventListener("stimeo--color-picker:change", (event) => {
+      details.push((event as CustomEvent<{ value: string }>).detail);
+    });
+
+    // Hue 360 renders the same red as hue 0, and Home at hue 0 does not move at
+    // all. Neither is a color the user changed.
+    press(slider("hue"), "End");
+    press(slider("hue"), "Home");
+    expect(details).toEqual([]);
+
+    press(slider("lightness"), "End"); // lightness 50 -> 100 is white: a real move
+    expect(details.map((detail) => detail.value)).toEqual(["#ffffff"]);
+  });
+
+  it("stays quiet when the same hex is confirmed again", async () => {
+    await start('data-stimeo--color-picker-value-value="#ff0000"');
+    const details: Array<{ value: string }> = [];
+    root().addEventListener("stimeo--color-picker:change", (event) => {
+      details.push((event as CustomEvent<{ value: string }>).detail);
+    });
+
+    hex().value = "#ff0000";
+    hex().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(details).toEqual([]);
+
+    hex().value = "#00ff00";
+    hex().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(details.map((detail) => detail.value)).toEqual(["#00ff00"]);
   });
 
   it("includes the alpha byte in the hex when alpha is enabled", async () => {
@@ -226,7 +259,7 @@ describe("ColorPickerController", () => {
     root().addEventListener("stimeo--color-picker:change", (event) => {
       detail.push((event as CustomEvent<{ rgba: { a: number } }>).detail);
     });
-    press(slider("hue"), "End"); // any change; rgba.a must be 1 (opaque)
+    press(slider("lightness"), "Home"); // any move of the color; rgba.a must be 1 (opaque)
     expect(detail.at(-1)?.rgba.a).toBe(1);
   });
 
@@ -332,5 +365,36 @@ describe("ColorPickerController", () => {
     root().setAttribute("data-stimeo--color-picker-alpha-value", "false");
     await tick();
     expect(hex().value.length).toBe(7);
+  });
+
+  it("reports a color dropped by a runtime alpha switch as reconcile, not change", async () => {
+    await start(
+      'data-stimeo--color-picker-value-value="#3366ccff" data-stimeo--color-picker-alpha-value="true"',
+    );
+    const changes: unknown[] = [];
+    const repairs: Array<{ value: string }> = [];
+    root().addEventListener("stimeo--color-picker:change", (event) => {
+      changes.push((event as CustomEvent).detail);
+    });
+    root().addEventListener("stimeo--color-picker:reconcile", (event) => {
+      repairs.push((event as CustomEvent).detail);
+    });
+
+    root().setAttribute("data-stimeo--color-picker-alpha-value", "false");
+    await tick();
+
+    // The alpha channel left the model by configuration, not by a drag or a type.
+    expect(repairs.map((detail) => detail.value)).toEqual(["#3366cc"]);
+    expect(changes).toEqual([]);
+  });
+
+  it("emits nothing at connect, so a mount is never read as an edit", async () => {
+    const events: string[] = [];
+    document.addEventListener("stimeo--color-picker:change", () => events.push("change"));
+    document.addEventListener("stimeo--color-picker:reconcile", () => events.push("reconcile"));
+
+    await start('data-stimeo--color-picker-value-value="#3366cc"');
+
+    expect(events).toEqual([]);
   });
 });

@@ -70,7 +70,7 @@ describe("NumberInputController", () => {
     expect(incrementBtn().disabled).toBe(false);
   });
 
-  it("stays inert without an input target, including after a Value change", async () => {
+  it("stays inert without an input target across lifecycle and public actions", async () => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <div data-controller="stimeo--number-input"
@@ -84,10 +84,25 @@ describe("NumberInputController", () => {
       "[data-controller='stimeo--number-input']",
     ) as HTMLElement;
     const orphanButton = orphanRoot.querySelector("button") as HTMLButtonElement;
+    const orphanController = application.getControllerForElementAndIdentifier(
+      orphanRoot,
+      "stimeo--number-input",
+    ) as NumberInputController;
     const down = new Event("pointerdown", { bubbles: true, cancelable: true });
+    const keydown = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      cancelable: true,
+    });
 
     expect(() => orphanButton.dispatchEvent(down)).not.toThrow();
     expect(down.defaultPrevented).toBe(false);
+    expect(() => {
+      orphanController.increment();
+      orphanController.decrement();
+      orphanController.onInput();
+      orphanController.onKeydown(keydown);
+    }).not.toThrow();
+    expect(keydown.defaultPrevented).toBe(false);
     orphanRoot.setAttribute("data-stimeo--number-input-min-value", "10");
     await flushMicrotasks();
   });
@@ -115,6 +130,9 @@ describe("NumberInputController", () => {
     decrementBtn().click();
     expect(input().value).toBe("90");
     expect(incrementBtn().disabled).toBe(true);
+
+    controller().disconnect();
+    expect(incrementBtn().disabled).toBe(true);
   });
 
   it("steps with the increment and decrement buttons", () => {
@@ -134,10 +152,15 @@ describe("NumberInputController", () => {
       bubbles: true,
       cancelable: true,
     });
+    const changes = vi.fn();
+    root().addEventListener("stimeo--number-input:change", changes);
     input().dispatchEvent(chord);
 
     expect(chord.defaultPrevented).toBe(false);
-    expect(input().value).toBe("0");
+    // A real number input may now run its native step behavior; happy-dom does
+    // not model that browser action. The controller contract is the two facts
+    // above: it neither consumes the key nor publishes a controller commit.
+    expect(changes).not.toHaveBeenCalled();
   });
 
   it("steps with ArrowUp and ArrowDown", () => {
@@ -170,6 +193,29 @@ describe("NumberInputController", () => {
     expect(incrementBtn().disabled).toBe(true);
     press("Home");
     expect(input().value).toBe("0");
+  });
+
+  it("reports a value pulled down by a runtime max as reconcile, not change", async () => {
+    press("End");
+    expect(input().value).toBe("100");
+    const changes: unknown[] = [];
+    const repairs: unknown[] = [];
+    root().addEventListener("stimeo--number-input:change", (event) => {
+      changes.push((event as CustomEvent).detail);
+    });
+    root().addEventListener("stimeo--number-input:reconcile", (event) => {
+      repairs.push((event as CustomEvent).detail);
+    });
+
+    // The page narrows the range; the committed number follows by this
+    // controller's clamp, not by anything the user typed.
+    root().setAttribute("data-stimeo--number-input-max-value", "40");
+    controller().maxValueChanged();
+    await flushMicrotasks();
+
+    expect(input().value).toBe("40");
+    expect(repairs).toEqual([{ value: 40 }]);
+    expect(changes).toEqual([]);
   });
 
   it("leaves Home and End unhandled when their bounds are infinite", async () => {
@@ -214,6 +260,16 @@ describe("NumberInputController", () => {
     expect(input().value).toBe("4");
   });
 
+  it("uses step one when no step Value is authored", async () => {
+    root().removeAttribute("data-stimeo--number-input-step-value");
+    input().value = "2";
+    await flushMicrotasks();
+
+    incrementBtn().click();
+
+    expect(input().value).toBe("3");
+  });
+
   it("uses a runtime step change without rewiring button listeners", async () => {
     root().setAttribute("data-stimeo--number-input-step-value", "5");
     controller().stepValueChanged();
@@ -236,6 +292,9 @@ describe("NumberInputController", () => {
     expect(input().value).toBe("54");
     expect(incrementBtn().disabled).toBe(true);
     expect(changes).not.toHaveBeenCalled();
+
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(changes).not.toHaveBeenCalled();
   });
 
   it("clamps at the maximum and disables increment there", () => {
@@ -249,6 +308,37 @@ describe("NumberInputController", () => {
     input().value = "23";
     input().dispatchEvent(new Event("change", { bubbles: true }));
     expect(input().value).toBe("20");
+  });
+
+  it("dispatches once when an on-grid typed value changes semantically", () => {
+    const values: number[] = [];
+    root().addEventListener("stimeo--number-input:change", (event) => {
+      values.push((event as CustomEvent<{ value: number }>).detail.value);
+    });
+
+    input().value = "50";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    input().value = "53"; // snaps back to the already committed 50
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(input().value).toBe("50");
+    expect(values).toEqual([50]);
+  });
+
+  it("treats blank as a new baseline without inventing a numeric change event", () => {
+    const values: number[] = [];
+    root().addEventListener("stimeo--number-input:change", (event) => {
+      values.push((event as CustomEvent<{ value: number }>).detail.value);
+    });
+    input().value = "50";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    input().value = "";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    input().value = "50";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(values).toEqual([50, 50]);
   });
 
   it("preserves a blank input on change", () => {
@@ -299,6 +389,68 @@ describe("NumberInputController", () => {
     expect(incrementBtn().disabled).toBe(true);
     expect(document.activeElement).toBe(input());
     expect(disabledStatesAtFocus).toEqual([false]);
+  });
+
+  it("silently reconciles a replaced input and seeds its event baseline", async () => {
+    const changes = vi.fn();
+    root().addEventListener("stimeo--number-input:change", changes);
+    const replacement = input().cloneNode(true) as HTMLInputElement;
+    replacement.value = "23";
+
+    input().replaceWith(replacement);
+    await tick();
+
+    expect(input()).toBe(replacement);
+    expect(input().value).toBe("20");
+    expect(decrementBtn().disabled).toBe(false);
+    expect(changes).not.toHaveBeenCalled();
+
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(changes).not.toHaveBeenCalled();
+    press("ArrowUp");
+    expect(input().value).toBe("30");
+    expect(changes).toHaveBeenCalledOnce();
+
+    const atMaximum = input().cloneNode(true) as HTMLInputElement;
+    atMaximum.value = "100";
+    input().replaceWith(atMaximum);
+    await tick();
+    expect(incrementBtn().disabled).toBe(true);
+    expect(changes).toHaveBeenCalledOnce();
+  });
+
+  it("rebinds pointer focus guards when a step button is replaced", async () => {
+    const oldButton = incrementBtn();
+    const replacement = oldButton.cloneNode(true) as HTMLButtonElement;
+    oldButton.replaceWith(replacement);
+    await tick();
+
+    const currentDown = new Event("pointerdown", { bubbles: true, cancelable: true });
+    replacement.dispatchEvent(currentDown);
+    expect(currentDown.defaultPrevented).toBe(true);
+    window.dispatchEvent(new Event("pointerup"));
+
+    const staleDown = new Event("pointerdown", { bubbles: true, cancelable: true });
+    oldButton.dispatchEvent(staleDown);
+    expect(staleDown.defaultPrevented).toBe(false);
+  });
+
+  it("returns controller-owned button disabled state on target removal and disconnect", async () => {
+    expect(decrementBtn().disabled).toBe(true);
+    expect(decrementBtn().hasAttribute("data-number-input-disabled")).toBe(true);
+    const removed = decrementBtn();
+
+    removed.remove();
+    await tick();
+
+    expect(removed.disabled).toBe(false);
+    expect(removed.hasAttribute("data-number-input-disabled")).toBe(false);
+
+    press("End");
+    expect(incrementBtn().disabled).toBe(true);
+    controller().disconnect();
+    expect(incrementBtn().disabled).toBe(false);
+    expect(incrementBtn().hasAttribute("data-number-input-disabled")).toBe(false);
   });
 
   it("dispatches change with the committed value", () => {
@@ -352,8 +504,10 @@ describe("NumberInputController on a custom spinbutton host", () => {
            data-stimeo--number-input-max-value="5"
            data-stimeo--number-input-step-value="1">
         <input type="text" role="spinbutton" inputmode="numeric" value="3" aria-label="Level"
+               aria-valuenow="99" aria-valuemin="-99" aria-valuemax="99"
                data-stimeo--number-input-target="input"
-               data-action="keydown->stimeo--number-input#onKeydown" />
+               data-action="change->stimeo--number-input#onInput
+                            keydown->stimeo--number-input#onKeydown" />
       </div>`;
     application = Application.start();
     application.register("stimeo--number-input", NumberInputController);
@@ -365,27 +519,90 @@ describe("NumberInputController on a custom spinbutton host", () => {
     document.body.innerHTML = "";
   });
 
-  it("announces the spinbutton role, name, range, and value in order", async () => {
-    const input = document.querySelector<HTMLInputElement>(
+  const root = () =>
+    document.querySelector<HTMLElement>("[data-controller='stimeo--number-input']") as HTMLElement;
+  const input = () =>
+    document.querySelector<HTMLInputElement>(
       "[data-stimeo--number-input-target='input']",
     ) as HTMLInputElement;
-    const before = await captureSpeech({ container: input, steps: 0 });
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--number-input",
+    ) as NumberInputController;
+
+  it("announces the spinbutton role, name, range, and value in order", async () => {
+    const before = await captureSpeech({ container: input(), steps: 0 });
     expect(before).toEqual(["spinbutton, Level, max value 5, min value 1, 3"]);
 
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
-    const after = await captureSpeech({ container: input, steps: 0 });
+    input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    const after = await captureSpeech({ container: input(), steps: 0 });
     expect(after).toEqual(["spinbutton, Level, max value 5, min value 1, 4"]);
   });
 
   it("syncs aria-valuenow/min/max on the spinbutton", () => {
-    const input = document.querySelector<HTMLInputElement>(
-      "[data-stimeo--number-input-target='input']",
-    ) as HTMLInputElement;
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
-    expect(input.value).toBe("4");
-    expect(input.getAttribute("aria-valuenow")).toBe("4");
-    expect(input.getAttribute("aria-valuemin")).toBe("1");
-    expect(input.getAttribute("aria-valuemax")).toBe("5");
+    input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    expect(input().value).toBe("4");
+    expect(input().getAttribute("aria-valuenow")).toBe("4");
+    expect(input().getAttribute("aria-valuemin")).toBe("1");
+    expect(input().getAttribute("aria-valuemax")).toBe("5");
+  });
+
+  it("removes stale finite ARIA boundaries when Values become unbounded", async () => {
+    root().removeAttribute("data-stimeo--number-input-min-value");
+    root().removeAttribute("data-stimeo--number-input-max-value");
+    await tick();
+
+    expect(input().hasAttribute("aria-valuemin")).toBe(false);
+    expect(input().hasAttribute("aria-valuemax")).toBe(false);
+    expect(input().getAttribute("aria-valuenow")).toBe("3");
+  });
+
+  it("removes aria-valuenow while blank and restores it on the next numeric commit", () => {
+    input().value = "";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(input().hasAttribute("aria-valuenow")).toBe(false);
+    expect(input().getAttribute("aria-valuemin")).toBe("1");
+    expect(input().getAttribute("aria-valuemax")).toBe("5");
+
+    input().value = "4";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(input().getAttribute("aria-valuenow")).toBe("4");
+  });
+
+  it("restores authored ARIA when the controller disconnects", () => {
+    expect(input().getAttribute("aria-valuenow")).toBe("3");
+    controller().disconnect();
+
+    expect(input().getAttribute("aria-valuenow")).toBe("99");
+    expect(input().getAttribute("aria-valuemin")).toBe("-99");
+    expect(input().getAttribute("aria-valuemax")).toBe("99");
+  });
+
+  it("yields arrow keys throughout IME composition", () => {
+    const perEvent = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(perEvent, "isComposing", { value: true });
+    input().dispatchEvent(perEvent);
+    expect(perEvent.defaultPrevented).toBe(false);
+    expect(input().value).toBe("3");
+
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    const duringLifecycle = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      bubbles: true,
+      cancelable: true,
+    });
+    input().dispatchEvent(duringLifecycle);
+    expect(duringLifecycle.defaultPrevented).toBe(false);
+    expect(input().value).toBe("3");
+
+    input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    expect(input().value).toBe("4");
   });
 });
 
@@ -449,6 +666,11 @@ describe("NumberInputController press-and-hold", () => {
     ) as NumberInputController;
   const pointerdown = (button: HTMLButtonElement) =>
     button.dispatchEvent(new Event("pointerdown", { bubbles: true, cancelable: true }));
+  const ownedPointerEvent = (type: string, pointerId: number) => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "pointerId", { value: pointerId });
+    return event;
+  };
   const secondaryPointerdown = (button: HTMLButtonElement) => {
     const event = new Event("pointerdown", { bubbles: true, cancelable: true });
     Object.defineProperty(event, "button", { value: 2 }); // right button
@@ -509,8 +731,79 @@ describe("NumberInputController press-and-hold", () => {
     vi.advanceTimersByTime(400 + 80 * 5); // 90, 100, then bound stops the repeat
     expect(input().value).toBe("100");
     expect(incrementBtn().disabled).toBe(true);
-    // 90 and 100 are the only changes; the no-op repeats at the bound do not fire.
-    expect(values).toEqual([90, 100]);
+    // The typed 80 is a real commit, followed by 90 and 100; no-op repeats at
+    // the bound add nothing.
+    expect(values).toEqual([80, 90, 100]);
+  });
+
+  it("keeps each simultaneous hold owned by its initiating pointer", async () => {
+    const secondRoot = root().cloneNode(true) as HTMLElement;
+    document.body.appendChild(secondRoot);
+    await vi.advanceTimersByTimeAsync(0);
+    const inputs = Array.from(
+      document.querySelectorAll<HTMLInputElement>("[data-stimeo--number-input-target='input']"),
+    );
+    const buttons = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        "[data-stimeo--number-input-target='increment']",
+      ),
+    );
+
+    buttons[0]?.dispatchEvent(ownedPointerEvent("pointerdown", 1));
+    buttons[1]?.dispatchEvent(ownedPointerEvent("pointerdown", 2));
+    vi.advanceTimersByTime(200);
+    window.dispatchEvent(ownedPointerEvent("pointerup", 2));
+    vi.advanceTimersByTime(200);
+
+    expect(inputs.map((candidate) => candidate.value)).toEqual(["10", "0"]);
+    window.dispatchEvent(ownedPointerEvent("pointerup", 1));
+  });
+
+  it("rebinds long-press behavior to a replacement button", async () => {
+    const oldButton = incrementBtn();
+    const replacement = oldButton.cloneNode(true) as HTMLButtonElement;
+    oldButton.replaceWith(replacement);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const down = new Event("pointerdown", { bubbles: true, cancelable: true });
+    replacement.dispatchEvent(down);
+    vi.advanceTimersByTime(400);
+
+    expect(down.defaultPrevented).toBe(true);
+    expect(input().value).toBe("10");
+    window.dispatchEvent(new Event("pointerup"));
+  });
+
+  it("stops a hold immediately when its button target disconnects", async () => {
+    const button = incrementBtn();
+    pointerdown(button);
+    vi.advanceTimersByTime(200);
+
+    button.remove();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(1000);
+
+    expect(input().value).toBe("0");
+  });
+
+  it("stops a hold when its pointer leaves the owning button", () => {
+    const button = incrementBtn();
+    button.dispatchEvent(ownedPointerEvent("pointerdown", 7));
+    vi.advanceTimersByTime(400); // first repeat -> 10
+
+    button.dispatchEvent(ownedPointerEvent("pointerleave", 7));
+    vi.advanceTimersByTime(1000);
+
+    expect(input().value).toBe("10");
+  });
+
+  it("stays safe when the input disappears before an armed hold fires", () => {
+    const removedInput = input();
+    pointerdown(incrementBtn());
+    removedInput.remove();
+
+    expect(() => vi.advanceTimersByTime(400)).not.toThrow();
+    expect(removedInput.value).toBe("0");
   });
 
   it("ignores secondary (non-primary) pointer buttons", () => {
@@ -539,6 +832,18 @@ describe("NumberInputController press-and-hold", () => {
 
     releaseOutside(); // no hold is active, so this must be a no-op
     incrementBtn().click();
+    expect(input().value).toBe("20");
+  });
+
+  it("does not re-arm trailing-click suppression when an inactive window blurs", () => {
+    pointerdown(incrementBtn());
+    vi.advanceTimersByTime(400); // -> 10
+    releaseOutside();
+    incrementBtn().click(); // consume the trailing-click suppression
+
+    window.dispatchEvent(new Event("blur"));
+    incrementBtn().click();
+
     expect(input().value).toBe("20");
   });
 

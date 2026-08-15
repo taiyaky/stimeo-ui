@@ -1,5 +1,16 @@
 import { Controller } from "@hotwired/stimulus";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { parseStringList } from "../utils/string_list";
+
+/** Activity signals watched unless the consumer declares its own list. */
+const DEFAULT_ACTIVITY_EVENTS = [
+  "mousemove",
+  "mousedown",
+  "keydown",
+  "wheel",
+  "touchstart",
+  "scroll",
+];
 
 /**
  * Headless inactivity / session-timeout detector: fires `idle` after `timeout` ms
@@ -30,16 +41,16 @@ export class IdleController extends Controller<HTMLElement> {
   static override values = {
     timeout: { type: Number, default: 900_000 },
     promptBefore: { type: Number, default: 0 },
-    events: {
-      type: Array,
-      default: ["mousemove", "mousedown", "keydown", "wheel", "touchstart", "scroll"],
-    },
+    // A JSON list read through `parseStringList` rather than Stimulus's `Array`
+    // type: that reader throws out of the value observer before any callback
+    // runs, so one malformed attribute would stop the detector connecting.
+    events: { type: String, default: "" },
   };
   static events = ["prompt", "idle", "active"] as const;
 
   declare timeoutValue: number;
   declare promptBeforeValue: number;
-  declare eventsValue: string[];
+  declare eventsValue: string;
 
   readonly #timeouts = new SafeTimeout();
   #idle = false;
@@ -82,7 +93,7 @@ export class IdleController extends Controller<HTMLElement> {
     this.#idle = false;
     this.#prompted = false;
     this.element.removeAttribute("data-idle");
-    this.#boundEvents = [...this.eventsValue];
+    this.#boundEvents = parseStringList(this.eventsValue, DEFAULT_ACTIVITY_EVENTS);
     for (const type of this.#boundEvents) {
       document.addEventListener(type, this.#onActivity, { passive: true, capture: true });
     }

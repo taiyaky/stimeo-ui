@@ -46,6 +46,33 @@ describe("PersistController", () => {
     field(name).dispatchEvent(new Event("input", { bubbles: true }));
   };
 
+  it("excludes a field by name, not only by type", async () => {
+    await mount(
+      `data-stimeo--persist-key-value="draft" data-stimeo--persist-exclude-value='["nickname"]'`,
+      '<input name="title"><input name="nickname">',
+    );
+    edit("title", "hello");
+    edit("nickname", "skip me");
+    vi.advanceTimersByTime(DEBOUNCE);
+
+    expect(JSON.parse(stored("draft") ?? "{}")).toEqual({ title: "hello" });
+  });
+
+  it("still saves when the exclude declaration is malformed", async () => {
+    // Stimulus's own Array reader throws out of the value observer before any
+    // callback runs, which would stop the controller connecting at all.
+    await mount(
+      'data-stimeo--persist-key-value="draft" data-stimeo--persist-exclude-value="[not json"',
+      '<input name="title"><input type="password" name="secret">',
+    );
+    edit("title", "hello");
+    edit("secret", "s3cret");
+    vi.advanceTimersByTime(DEBOUNCE);
+
+    // The default exclusion still applies, so the password stays out.
+    expect(JSON.parse(stored("draft") ?? "{}")).toEqual({ title: "hello" });
+  });
+
   it("debounce-saves field values to localStorage", async () => {
     await mount('data-stimeo--persist-key-value="draft"', '<input name="title">');
     edit("title", "hello");

@@ -2,9 +2,16 @@
     Filter candidates as you type, select several, and show the selected ones as chips.
     Focus stays on the input; the active candidate is shown via aria-activedescendant
     and selection via aria-selected. The library handles filtering, multi-select
-    toggling, chip create/remove, roving, live announcements, and dismiss. Placement
+    toggling, chip create/remove, roving, shared announcements, and dismiss. Placement
     lives in demo.css. %>
-<div class="multi-select" data-controller="stimeo--multi-select">
+<% announce_selected = t("components.multi_select.demo.announce_selected") %>
+<% announce_removed = t("components.multi_select.demo.announce_removed") %>
+<% remove_label = t("components.multi_select.demo.remove_label") %>
+<div
+  class="multi-select"
+  data-controller="stimeo--multi-select"
+  data-stimeo--multi-select-announce-text-value="<%= announce_selected %>"
+  data-stimeo--multi-select-announce-removed-text-value="<%= announce_removed %>">
   <span id="multi-select-label" class="multi-select__label">
     <%= t("components.multi_select.demo.label") %>
   </span>
@@ -50,22 +57,24 @@
     <% end %>
   </ul>
 
-  <span
-    role="status"
-    aria-live="polite"
-    class="multi-select__status visually-hidden"
-    data-stimeo--multi-select-target="status"></span>
-
   <template data-stimeo--multi-select-target="tagTemplate">
     <li class="multi-select__tag" data-stimeo--multi-select-target="tag">
-      <span data-multi-select-slot="label"></span>
+      <span data-stimeo--multi-select-target="label"></span>
       <%# Removal is handled by a delegated listener on the tags container, so it
           works instantly without waiting on Stimulus wiring a data-action onto the
           dynamically-added button. %>
       <button
         type="button"
         class="multi-select__remove"
-        tabindex="-1">×</button>
+        tabindex="-1"
+        aria-label="<%= remove_label %>"
+        data-stimeo--multi-select-target="remove">×</button>
     </li>
   </template>
+
+  <%# Selection announcements go to the shared announcer that lives in the page. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden" data-stimeo--announcer-target="polite"
+         aria-live="polite" aria-atomic="true"></div>
+  </div>
 </div>

@@ -1,17 +1,20 @@
 import { Controller } from "@hotwired/stimulus";
+import { announce, fillTemplate } from "../utils/announce";
 import { ensureId } from "../utils/aria_ids";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { ChipRow } from "../utils/chip_row";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { scrollOptionIntoView } from "../utils/option_scroll";
-import { RovingTabindex } from "../utils/roving_tabindex";
 import { TabindexLoan } from "../utils/tabindex_loan";
 
 /**
  * Headless, accessible multi-select combobox with chips.
  *
  * Markup contract (identifier: `stimeo--multi-select`):
- *   <div data-controller="stimeo--multi-select">
+ *   <div data-controller="stimeo--multi-select"
+ *        data-stimeo--multi-select-announce-text-value="{label} selected; {count} total"
+ *        data-stimeo--multi-select-announce-removed-text-value="{label} removed; {count} total">
  *     <ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>
  *     <input type="text" role="combobox" aria-expanded="false"
  *            aria-autocomplete="list" aria-controls="ms-list"
@@ -25,11 +28,15 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  *           data-stimeo--multi-select-target="option"
  *           data-action="click->stimeo--multi-select#toggleOption">Apple</li>
  *     </ul>
- *     <span role="status" aria-live="polite" class="visually-hidden"
- *           data-stimeo--multi-select-target="status"></span>
  *     <!-- Optional: submit the selection as name="fruits[]" hidden inputs. -->
  *     <div data-stimeo--multi-select-target="fields"></div>
- *     <template data-stimeo--multi-select-target="tagTemplate">…</template>
+ *     <template data-stimeo--multi-select-target="tagTemplate">
+ *       <li data-stimeo--multi-select-target="tag">
+ *         <span data-stimeo--multi-select-target="label"></span>
+ *         <button type="button" tabindex="-1" aria-label="Remove {label}"
+ *                 data-stimeo--multi-select-target="remove">×</button>
+ *       </li>
+ *     </template>
  *   </div>
  *
  * Implements the WAI-ARIA APG **Combobox** pattern in its list-autocomplete,
@@ -42,13 +49,19 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * - Typing filters options by substring and opens the list; `ArrowDown`/`ArrowUp`
  *   (wrapping), `Home`/`End` move the active option; `Enter` toggles it (the list
  *   stays open); `Escape`/`Tab`/outside click close.
- * - Toggling syncs `aria-selected`, adds/removes a `Remove {label}` chip, mirrors
- *   the live region, and dispatches `stimeo--multi-select:change` with `values`;
- *   filtering dispatches `stimeo--multi-select:filter` for async candidates.
+ * - Toggling syncs `aria-selected`, expands the author-localized remove-button
+ *   name from the chip template, adds/removes the chip, sends localized text to
+ *   the shared announcer, and dispatches
+ *   `stimeo--multi-select:change` with `values`; filtering dispatches
+ *   `stimeo--multi-select:filter` for async candidates. Option churn or a lowered
+ *   `max` that moves the selection without a user edit is reported as
+ *   `stimeo--multi-select:reconcile`, carrying the same `values` detail.
  * - The chips are one roving Tab stop: `ArrowLeft`/`ArrowRight` move between them,
  *   `Delete`/`Backspace` remove the focused chip, and `Backspace` on an empty
- *   input removes the last; removal re-homes focus to a neighbor or the input.
- * - `max` caps the selection (`0` = unlimited).
+ *   input removes the last and keeps input focus; removal from a chip re-homes
+ *   focus to a neighbor or the input.
+ * - `max` is a permanent selection invariant across initial markup, interaction,
+ *   runtime options, and runtime cap changes (`0` = unlimited).
  * - With a `fields` target the selected values are mirrored into named hidden
  *   inputs (default name `options[]`), so the selection submits with a normal
  *   form and no consumer JS — parity with {@link TagsInputController}. An optional
@@ -64,16 +77,19 @@ export class MultiSelectController extends Controller<HTMLElement> {
     "tags",
     "tag",
     "tagTemplate",
-    "status",
+    "label",
+    "remove",
     "fields",
   ];
   static override values = {
     max: { type: Number, default: 0 },
     name: { type: String, default: "options[]" },
     form: { type: String, default: "" },
+    announceText: { type: String, default: "" },
+    announceRemovedText: { type: String, default: "" },
   };
   static actions = ["close", "filter", "onKeydown", "open", "toggleOption"] as const;
-  static events = ["change", "filter"] as const;
+  static events = ["change", "filter", "reconcile"] as const;
 
   declare readonly inputTarget: HTMLInputElement;
   declare readonly listTarget: HTMLElement;
@@ -81,25 +97,29 @@ export class MultiSelectController extends Controller<HTMLElement> {
   declare readonly tagsTarget: HTMLElement;
   declare readonly tagTargets: HTMLElement[];
   declare readonly tagTemplateTarget: HTMLTemplateElement;
-  declare readonly statusTarget: HTMLElement;
+  declare readonly labelTargets: HTMLElement[];
+  declare readonly removeTargets: HTMLButtonElement[];
   declare readonly fieldsTarget: HTMLElement;
   declare readonly hasListTarget: boolean;
   declare readonly hasInputTarget: boolean;
   declare readonly hasTagsTarget: boolean;
   declare readonly hasTagTemplateTarget: boolean;
-  declare readonly hasStatusTarget: boolean;
   declare readonly hasFieldsTarget: boolean;
 
   declare maxValue: number;
   declare nameValue: string;
   declare formValue: string;
   declare readonly hasFormValue: boolean;
+  declare announceTextValue: string;
+  declare announceRemovedTextValue: string;
 
   /** Stable id of the active option; the current target is resolved from the DOM. */
   #activeOptionId: string | null = null;
   /** Whether the root borrowed a tab stop to catch focus, so teardown can undo it. */
   readonly #tabindex = new TabindexLoan();
-  /** Prevents initial/teardown target callbacks from mutating authored DOM. */
+  /** Last reconciled selection, used to distinguish state changes from derived-DOM repair. */
+  #selectionValues: string[] = [];
+  /** Whether initial normalization finished, so a fields callback cannot mirror stale state. */
   #connected = false;
   /** Collapses one batch of target callbacks into a single final-DOM reconciliation. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileOptions());
@@ -121,18 +141,30 @@ export class MultiSelectController extends Controller<HTMLElement> {
       this.filter();
     },
   });
-  readonly #roving = new RovingTabindex(() => this.#removeButtons);
+  /** Whether this connection already reported its unusable chip template. */
+  #warnedTemplate = false;
+  /** Shared delegated interaction for the replaceable row of removable chips. */
+  readonly #chipRow = new ChipRow({
+    directionElement: this.element,
+    getItems: () => this.tagTargets,
+    getButton: (tag) =>
+      tag.querySelector<HTMLButtonElement>('button[data-stimeo--multi-select-target~="remove"]'),
+    onRemove: (index) => this.#removeTagAt(index),
+    focusAfterEnd: () => this.#focusInput(),
+  });
 
   /** Starts closed, syncs chips for any pre-selected options, and listens out. */
   override connect(): void {
-    if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
-    this.#normalizeSelection();
+    this.#warnedTemplate = false;
+    // A fresh connection has no prior selection to preserve: deterministic DOM
+    // order decides which authored selections survive a finite max.
+    this.#normalizeSelection([]);
     this.close();
     if (this.hasTagsTarget) {
-      this.tagsTarget.addEventListener("keydown", this.#onTagKeydown);
-      this.tagsTarget.addEventListener("click", this.#onTagClick);
+      this.#chipRow.connect(this.tagsTarget);
       this.#rebuildTags();
     }
+    this.#selectionValues = this.#values;
     // Seed the hidden fields from any pre-selected options so the form submits
     // the initial selection without an interaction.
     this.#syncFields();
@@ -147,10 +179,16 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * cleared before deriving afresh to avoid duplicates.
    */
   #rebuildTags(): void {
-    if (!this.hasTagsTarget) return;
+    if (!this.hasTagsTarget || !this.hasTagTemplateTarget) return;
+    const fragments: DocumentFragment[] = [];
+    for (const option of this.#selectedOptions) {
+      const fragment = this.#buildTag(option);
+      if (!fragment) return;
+      fragments.push(fragment);
+    }
     for (const tag of this.tagTargets) tag.remove();
-    for (const option of this.#selectedOptions) this.#appendTag(option);
-    if (this.#removeButtons.length > 0) this.#roving.setActive(0);
+    this.tagsTarget.append(...fragments);
+    this.#chipRow.ensureTabStop();
   }
 
   /** Tears down document and chip listeners on disconnect (Turbo included). */
@@ -159,10 +197,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     this.#reconcile.cancel();
     this.#composition.disconnect();
     this.#ignorePostCompositionInput = false;
-    if (this.hasTagsTarget) {
-      this.tagsTarget.removeEventListener("keydown", this.#onTagKeydown);
-      this.tagsTarget.removeEventListener("click", this.#onTagClick);
-    }
+    this.#chipRow.disconnect();
     document.removeEventListener("click", this.#onOutsideClick, true);
     this.#releaseTabindex();
   }
@@ -174,10 +209,41 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Cleans a removed target and reconciles active state against the surviving DOM. */
   optionTargetDisconnected(option: HTMLElement): void {
-    if (!this.#connected) return;
     // `#setActive` can only scan current targets; clean the old node explicitly in
     // case a Turbo morph reuses it elsewhere.
     option.removeAttribute("data-active");
+    this.#scheduleOptionReconcile();
+  }
+
+  /** Rebinds delegated chip interaction when Turbo replaces the tags container. */
+  tagsTargetConnected(tags: HTMLElement): void {
+    this.#chipRow.connect(tags);
+    this.#scheduleOptionReconcile();
+  }
+
+  /** Releases only the row that actually disconnected, never a newer replacement. */
+  tagsTargetDisconnected(tags: HTMLElement): void {
+    this.#chipRow.disconnect(tags);
+    this.#scheduleOptionReconcile();
+  }
+
+  /** Seeds a fields target inserted after connect from the current selection. */
+  fieldsTargetConnected(): void {
+    if (this.#connected) this.#syncFields();
+  }
+
+  /** Reconciles a runtime max change, including dropping any newly invalid overflow. */
+  maxValueChanged(): void {
+    this.#scheduleOptionReconcile();
+  }
+
+  /** Rebuilds submitted fields when their public name changes at runtime. */
+  nameValueChanged(): void {
+    this.#scheduleOptionReconcile();
+  }
+
+  /** Rebuilds submitted fields when their associated form changes at runtime. */
+  formValueChanged(): void {
     this.#scheduleOptionReconcile();
   }
 
@@ -205,7 +271,23 @@ export class MultiSelectController extends Controller<HTMLElement> {
     this.#setActive(next);
     this.#reflectEmpty();
 
-    this.#normalizeSelection();
+    const previous = this.#selectionValues;
+    const previousLabels = new Map(
+      this.tagTargets.map((tag) => [
+        tag.dataset.value ?? "",
+        (
+          tag.querySelector<HTMLElement>('[data-stimeo--multi-select-target~="label"]')
+            ?.textContent ?? ""
+        ).trim(),
+      ]),
+    );
+    // Prefer the interaction order represented by live chips. A tags target can
+    // be replaced with an empty container, so the last reconciled option set is
+    // the fallback that prevents a derived-DOM repair from evicting user choices.
+    const priority = [
+      ...new Set([...this.tagTargets.map((tag) => tag.dataset.value ?? ""), ...previous]),
+    ];
+    this.#normalizeSelection(priority);
     const selected = this.#selectedOptions;
     // Compared as a set, not a sequence: the chips are in selection order while
     // the options are in DOM order, so an index-wise comparison reports a change
@@ -218,19 +300,60 @@ export class MultiSelectController extends Controller<HTMLElement> {
     if (unchanged) this.#refreshTagLabels(selected);
     else this.#rebuildTags();
     this.#syncFields();
+
+    const values = this.#values;
+    const changed = !this.#sameSelection(previous, values);
+    this.#selectionValues = values;
+    if (!changed) return;
+
+    const options = new Map(selected.map((option) => [this.#optionValue(option), option]));
+    for (const value of previous) {
+      if (!values.includes(value)) {
+        this.#announceTransition(false, previousLabels.get(value) || value, value, values.length);
+      }
+    }
+    for (const value of values) {
+      if (previous.includes(value)) continue;
+      // `values` is derived from `selected`, so this lookup is total.
+      const option = options.get(value) as HTMLElement;
+      this.#announceTransition(true, this.#optionLabel(option), value, values.length);
+    }
+    // Runtime option churn and the `max` cap move the selection by this
+    // controller's rules, so the repair is reported apart from `change`, which
+    // stays reserved for the user's own add and remove.
+    this.dispatch("reconcile", { detail: { values } });
   }
 
   /**
-   * Gives every option an explicit `aria-selected`, without changing which ones
-   * the author chose. An absent value means "not selectable" in ARIA, so a
-   * forgotten attribute hides a selectable option. Several `true` is the normal
-   * case here — the list is `aria-multiselectable` — so nothing is dropped.
+   * Gives every option an explicit `aria-selected` and enforces the current cap.
+   * Priority preserves existing chip order at runtime; a fresh connection passes
+   * no priority, so deterministic option DOM order chooses the initial survivors.
    */
-  #normalizeSelection(): void {
-    for (const option of this.optionTargets) {
-      if (option.getAttribute("aria-selected") !== "true") {
-        option.setAttribute("aria-selected", "false");
+  #normalizeSelection(priority: readonly string[]): void {
+    const selected = this.optionTargets.filter(
+      (option) => option.getAttribute("aria-selected") === "true",
+    );
+    const limit = this.#selectionLimit;
+    const kept = new Set<HTMLElement>();
+
+    if (limit === 0) {
+      for (const option of selected) kept.add(option);
+    } else {
+      for (const value of priority) {
+        if (kept.size >= limit) break;
+        const option = selected.find(
+          (candidate) => !kept.has(candidate) && this.#optionValue(candidate) === value,
+        );
+        if (option) kept.add(option);
       }
+      for (const option of selected) {
+        if (kept.size >= limit) break;
+        kept.add(option);
+      }
+    }
+
+    for (const option of this.optionTargets) {
+      option.setAttribute("aria-selected", String(kept.has(option)));
     }
   }
 
@@ -257,6 +380,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Filters confirmed input text, opens, and re-seeds the active option. */
   filter(event?: InputEvent): void {
+    if (!this.hasInputTarget) return;
     if (event && this.#ignorePostCompositionInput) {
       this.#ignorePostCompositionInput = false;
       return;
@@ -282,10 +406,14 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * opening is skipped entirely, where {@link close} still closes.
    */
   open(): void {
-    if (!this.hasListTarget || !this.hasInputTarget) return;
+    if (!this.hasListTarget || !this.hasInputTarget) {
+      this.#reflectEmpty();
+      return;
+    }
     this.listTarget.hidden = false;
     this.inputTarget.setAttribute("aria-expanded", "true");
     if (!this.#activeOption) this.#setActive(this.#visibleOptions[0] ?? null);
+    this.#reflectEmpty();
   }
 
   /**
@@ -300,11 +428,10 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * active option, so only the `aria-expanded` write is guarded.
    */
   close(): void {
-    if (!this.hasListTarget) return;
-    this.listTarget.hidden = true;
+    if (this.hasListTarget) this.listTarget.hidden = true;
     this.#setActive(null);
-    if (!this.hasInputTarget) return;
-    this.inputTarget.setAttribute("aria-expanded", "false");
+    if (this.hasInputTarget) this.inputTarget.setAttribute("aria-expanded", "false");
+    this.#reflectEmpty();
   }
 
   /** Routes input keyboard interaction per the multi-select combobox model. */
@@ -313,6 +440,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // list or move the active option — composition depends on this yield.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if (!this.hasInputTarget) return;
     // Ignore keys fired during IME composition: the `Enter` that confirms a
     // candidate (and arrows that move within it) must not select an option or
     // navigate the chip list. Controller-owned lifecycle state covers confirming
@@ -372,17 +500,17 @@ export class MultiSelectController extends Controller<HTMLElement> {
         break;
       case "Backspace":
         if (this.inputTarget.value === "") {
-          const buttons = this.#removeButtons;
-          if (buttons.length > 0) {
+          const last = this.#chipRow.lastIndex;
+          if (last >= 0) {
             event.preventDefault();
-            this.#removeTagAt(buttons.length - 1);
+            this.#removeTagAt(last, "input");
           }
         }
         break;
       case "ArrowLeft":
-        if (this.inputTarget.value === "" && this.#removeButtons.length > 0) {
+        if (this.inputTarget.value === "" && this.#chipRow.length > 0) {
           event.preventDefault();
-          this.#roving.setActive(this.#removeButtons.length - 1, { focus: true });
+          this.#chipRow.focusLast();
         }
         break;
       case "Tab":
@@ -425,8 +553,8 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * Unlike the other {@link #focusInput} callers, the element that held focus has
    * just left the DOM, so "leave it alone" is not an option — the browser already
    * dropped it to `<body>`. The root borrows a `tabindex="-1"` just-in-time (not a
-   * Tab stop, handed back on teardown). Focus that landed on a real element is
-   * left alone, so a chip removed out of band never steals it.
+   * Tab stop, handed back before Turbo caches or on teardown). Focus that landed
+   * on a real element is left alone, so a chip removed out of band never steals it.
    */
   #focusAfterLastTag(): void {
     if (this.hasInputTarget) {
@@ -453,45 +581,48 @@ export class MultiSelectController extends Controller<HTMLElement> {
     this.#tabindex.returnAll();
   }
 
-  /**
-   * Removes the chip whose remove button was clicked, deselecting its option.
-   * Delegated on the tags container (like `#onTagKeydown`) rather than bound
-   * per chip via `data-action`, so it works the instant a chip is appended without
-   * waiting on Stimulus to wire a freshly created element.
-   */
-  readonly #onTagClick = (event: MouseEvent): void => {
-    const button = (event.target as HTMLElement).closest("button");
-    if (!button || !this.tagsTarget.contains(button)) return;
-    const index = this.#removeButtons.indexOf(button as HTMLButtonElement);
-    if (index !== -1) this.#removeTagAt(index);
-  };
-
   /** Moves the active option by `delta` among visible options, wrapping. */
   #moveActive(delta: number): void {
     const visible = this.#visibleOptions;
-    if (visible.length === 0) return;
-    const current = this.#activeOption ? visible.indexOf(this.#activeOption) : -1;
+    const active = this.#activeOption;
+    // `null` is the deliberate "not found" sentinel; Array#indexOf accepts it
+    // at runtime and returns -1, although this array's static item type excludes it.
+    const current = visible.indexOf(active as HTMLElement);
     const candidate = current === -1 ? (delta > 0 ? 0 : visible.length - 1) : current + delta;
     const next = (candidate + visible.length) % visible.length;
     this.#setActive(visible[next] ?? null);
   }
 
-  /** Selects/deselects `option`, honoring `max`, and syncs chip + live region. */
+  /** Selects/deselects `option`, honoring `max`, and syncs chip + announcement. */
   #toggleSelection(option: HTMLElement): void {
     const selected = option.getAttribute("aria-selected") === "true";
-    if (!selected && this.maxValue > 0 && this.#selectedOptions.length >= this.maxValue) {
+    const limit = this.#selectionLimit;
+    if (!selected && limit > 0 && this.#selectedOptions.length >= limit) {
       return;
     }
-    option.setAttribute("aria-selected", String(!selected));
     if (selected) {
+      option.setAttribute("aria-selected", "false");
       this.#removeTagFor(option);
     } else {
-      this.#appendTag(option);
+      // Chips are a display affordance here, not the value model: the selection
+      // lives on `aria-selected` and the hidden fields, so a field authored
+      // without a chip template still selects. An authored template that cannot
+      // be completed is the opposite case — leaving a selection whose chip is
+      // missing would be the half-applied state, so that one aborts instead.
+      if (this.hasTagTemplateTarget && !this.#appendTag(option)) return;
+      option.setAttribute("aria-selected", "true");
     }
-    this.#announce(this.#optionLabel(option));
     this.#refreshRoving();
     this.#syncFields();
-    this.dispatch("change", { detail: { values: this.#values } });
+    const values = this.#values;
+    this.#selectionValues = values;
+    this.#announceTransition(
+      !selected,
+      this.#optionLabel(option),
+      this.#optionValue(option),
+      values.length,
+    );
+    this.dispatch("change", { detail: { values } });
   }
 
   /**
@@ -509,33 +640,94 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // different places and an index-wise pairing would relabel the wrong chip.
     const options = new Map(selected.map((option) => [this.#optionValue(option), option]));
     for (const tag of this.tagTargets) {
-      const option = options.get(tag.dataset.value ?? "");
-      if (!option) continue;
+      // The caller established equal selected/tag value sets before refreshing.
+      const option = options.get(tag.dataset.value ?? "") as HTMLElement;
       const text = this.#optionLabel(option);
-      const label = tag.querySelector<HTMLElement>('[data-multi-select-slot="label"]');
-      if (label && label.textContent !== text) label.textContent = text;
-      const button = tag.querySelector("button");
-      const name = `Remove ${text}`;
-      if (button && button.getAttribute("aria-label") !== name) {
-        button.setAttribute("aria-label", name);
-      }
+      const label = tag.querySelector<HTMLElement>('[data-stimeo--multi-select-target~="label"]');
+      const button = tag.querySelector<HTMLButtonElement>(
+        'button[data-stimeo--multi-select-target~="remove"]',
+      );
+      const name = this.#removeName(text, this.#optionValue(option));
+      // Relabelling is one transaction, like building the chip is. Writing the
+      // visible text without its accessible name would leave the button naming
+      // a value the chip no longer shows, so a name this template cannot produce
+      // holds the old text in place too.
+      if (!label || !button || !name) continue;
+      if (label.textContent !== text) label.textContent = text;
+      if (button.getAttribute("aria-label") !== name) button.setAttribute("aria-label", name);
     }
   }
 
   /** Builds one chip from the template for `option`. */
-  #appendTag(option: HTMLElement): void {
-    if (!this.hasTagTemplateTarget || !this.hasTagsTarget) return;
-    const fragment = this.tagTemplateTarget.content.cloneNode(true) as DocumentFragment;
-    const tag = fragment.querySelector<HTMLElement>('[data-stimeo--multi-select-target="tag"]');
-    const label = fragment.querySelector<HTMLElement>('[data-multi-select-slot="label"]');
-    const button = fragment.querySelector<HTMLButtonElement>("button");
-    if (!tag || !button) return;
-    const text = this.#optionLabel(option);
-    tag.dataset.value = this.#optionValue(option);
-    if (label) label.textContent = text;
-    button.setAttribute("aria-label", `Remove ${text}`);
-    button.tabIndex = -1;
+  #appendTag(option: HTMLElement): boolean {
+    if (!this.hasTagsTarget) {
+      this.#warnTemplate('a "tags" target to append the chip to');
+      return false;
+    }
+    const fragment = this.#buildTag(option);
+    if (!fragment) return false;
     this.tagsTarget.appendChild(fragment);
+    return true;
+  }
+
+  /**
+   * Builds one fully named chip without mutating the live tag row, or `null`
+   * when the authored template cannot produce one. Both callers establish the
+   * template first: a field authored without `tagTemplate` renders no chips at
+   * all — a supported configuration — and never reaches here.
+   */
+  #buildTag(option: HTMLElement): DocumentFragment | null {
+    const fragment = this.tagTemplateTarget.content.cloneNode(true) as DocumentFragment;
+    const tag = fragment.querySelector<HTMLElement>('[data-stimeo--multi-select-target~="tag"]');
+    const label = fragment.querySelector<HTMLElement>(
+      '[data-stimeo--multi-select-target~="label"]',
+    );
+    const button = fragment.querySelector<HTMLButtonElement>(
+      'button[data-stimeo--multi-select-target~="remove"]',
+    );
+    const text = this.#optionLabel(option);
+    const value = this.#optionValue(option);
+    const removeName = button?.getAttribute("aria-label")?.trim() ?? "";
+    if (!tag) return this.#warnTemplate('a "tag" target');
+    if (!label) return this.#warnTemplate('a "label" target');
+    if (!button) return this.#warnTemplate('a "remove" target <button>');
+    if (removeName === "") {
+      return this.#warnTemplate('a non-empty aria-label on its "remove" target');
+    }
+    tag.dataset.value = value;
+    label.textContent = text;
+    button.setAttribute("aria-label", fillTemplate(removeName, { label: text, value }));
+    button.tabIndex = -1;
+    return fragment;
+  }
+
+  /**
+   * Reports an unusable chip template to the author, once per connection.
+   *
+   * The selection itself stays untouched — no `aria-selected`, chip, hidden
+   * field, announcement, or event moves. Without this line the only symptom is
+   * a listbox whose options refuse to select, and the two causes the Inspector
+   * cannot see statically (a name that renders empty from a missing
+   * translation, a server-rendered template) would have no diagnostic anywhere.
+   */
+  #warnTemplate(missing: string): null {
+    if (!this.#warnedTemplate) {
+      this.#warnedTemplate = true;
+      console.warn(
+        `Stimeo UI: "${this.identifier}" changed no selection because its chip template lacks ${missing}.`,
+      );
+    }
+    return null;
+  }
+
+  /** Expands the current template's localized remove-button name. */
+  #removeName(label: string, value: string): string | null {
+    if (!this.hasTagTemplateTarget) return null;
+    const template = this.tagTemplateTarget.content
+      .querySelector<HTMLButtonElement>('button[data-stimeo--multi-select-target~="remove"]')
+      ?.getAttribute("aria-label")
+      ?.trim();
+    return template ? fillTemplate(template, { label, value }) : null;
   }
 
   /** Removes the chip mirroring `option`, if present. */
@@ -546,7 +738,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
   }
 
   /** Removes chip `index` and deselects its option, re-homing focus. */
-  #removeTagAt(index: number): void {
+  #removeTagAt(index: number, focus: "neighbor" | "input" = "neighbor"): void {
     const tag = this.tagTargets[index];
     if (!tag) return;
     const value = tag.dataset.value ?? "";
@@ -557,58 +749,24 @@ export class MultiSelectController extends Controller<HTMLElement> {
     tag.remove();
     // Prefer the option's display label for the announcement (e.g. "Apple"),
     // which can differ from its data-value (e.g. "apple").
-    this.#announce(option ? this.#optionLabel(option) : value);
     this.#refreshRoving();
     this.#syncFields();
-    this.dispatch("change", { detail: { values: this.#values } });
+    const values = this.#values;
+    this.#selectionValues = values;
+    this.#announceTransition(
+      false,
+      option ? this.#optionLabel(option) : value,
+      value,
+      values.length,
+    );
+    this.dispatch("change", { detail: { values } });
 
-    const remaining = this.#removeButtons;
-    if (remaining.length === 0) {
-      this.#focusAfterLastTag();
-    } else {
-      this.#roving.setActive(Math.min(index, remaining.length - 1), { focus: true });
+    if (focus === "input") {
+      this.#focusInput();
+      return;
     }
+    if (!this.#chipRow.focusAfterRemoval(index)) this.#focusAfterLastTag();
   }
-
-  /** Arrow navigation and deletion within the chip list (delegated). */
-  readonly #onTagKeydown = (event: KeyboardEvent): void => {
-    // A descendant widget that already claimed the key must not ALSO move the
-    // chip focus — composition depends on this yield. Chips render from the
-    // consumer's template, so an arbitrary widget can live inside one.
-    if (event.defaultPrevented) return;
-    if (isReservedArrowChord(event)) return;
-    const button = (event.target as HTMLElement).closest("button");
-    if (!button) return;
-    const buttons = this.#removeButtons;
-    const index = buttons.indexOf(button);
-    if (index === -1) return;
-    // Logical, not physical. The key is normalised rather than a new case added:
-    // the two horizontal branches are not mirror images — only one guards its
-    // edge, and the other hands focus back to the input — so swapping the key
-    // keeps each branch, guards and all, with its own direction. Both handlers
-    // read the same element on purpose; probing the focused child would let the
-    // input and the chips disagree at the boundary between them.
-    switch (logicalArrowKey(event.key, this.element)) {
-      case "ArrowLeft":
-        if (index > 0) {
-          event.preventDefault();
-          this.#roving.setActive(index - 1, { focus: true });
-        }
-        break;
-      case "ArrowRight":
-        event.preventDefault();
-        if (index < buttons.length - 1) this.#roving.setActive(index + 1, { focus: true });
-        else this.#focusInput();
-        break;
-      case "Delete":
-      case "Backspace":
-        event.preventDefault();
-        this.#removeTagAt(index);
-        break;
-      default:
-        break;
-    }
-  };
 
   /**
    * Marks `option` active via `data-active` and the input's
@@ -643,9 +801,8 @@ export class MultiSelectController extends Controller<HTMLElement> {
     const resolved = this.#activeOption;
     const active = resolved && !resolved.hidden ? resolved : null;
     const marked = this.optionTargets.filter((candidate) => candidate.hasAttribute("data-active"));
-    const idref = this.hasInputTarget
-      ? this.inputTarget.getAttribute("aria-activedescendant")
-      : null;
+    // The only caller returns before reaching here when the input is absent.
+    const idref = this.inputTarget.getAttribute("aria-activedescendant");
     if (!active || marked.length !== 1 || marked[0] !== active || idref !== activeId) {
       this.#setActive(active);
     }
@@ -682,13 +839,21 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Keeps exactly one chip remove button tabbable after the set changes. */
   #refreshRoving(): void {
-    if (this.#removeButtons.length > 0 && this.#roving.activeIndex === -1)
-      this.#roving.setActive(0);
+    this.#chipRow.ensureTabStop();
   }
 
-  /** Mirrors the changed option label into the live region. */
-  #announce(text: string): void {
-    if (this.hasStatusTarget) this.statusTarget.textContent = text;
+  /** Sends one localized selection transition through the page's shared announcer. */
+  #announceTransition(selected: boolean, label: string, value: string, count: number): void {
+    const template = selected ? this.announceTextValue : this.announceRemovedTextValue;
+    announce(fillTemplate(template, { label, value, count }));
+  }
+
+  /** Whether two arrays represent the same selection set, independent of DOM order. */
+  #sameSelection(left: readonly string[], right: readonly string[]): boolean {
+    if (left.length !== right.length) return false;
+    const a = [...left].sort();
+    const b = [...right].sort();
+    return a.every((value, index) => value === b[index]);
   }
 
   /** Closes the list on a click outside the controller element. */
@@ -713,9 +878,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Current active target resolved by stable id, never a detached node reference. */
   get #activeOption(): HTMLElement | null {
-    const activeId = this.#activeOptionId;
-    if (activeId === null) return null;
-    return this.optionTargets.find((option) => option.id === activeId) ?? null;
+    return this.optionTargets.find((option) => option.id === this.#activeOptionId) ?? null;
   }
 
   /** Options currently selected. */
@@ -728,11 +891,10 @@ export class MultiSelectController extends Controller<HTMLElement> {
     return this.#selectedOptions.map((option) => this.#optionValue(option));
   }
 
-  /** The chip remove buttons in order (the roving navigation set). */
-  get #removeButtons(): HTMLButtonElement[] {
-    return this.hasTagsTarget
-      ? Array.from(this.tagsTarget.querySelectorAll<HTMLButtonElement>("button"))
-      : [];
+  /** Normalized cardinality cap: zero is unlimited and positive fractions round down. */
+  get #selectionLimit(): number {
+    if (!Number.isFinite(this.maxValue) || this.maxValue <= 0) return 0;
+    return Math.max(1, Math.floor(this.maxValue));
   }
 
   /** Whether the list is currently hidden. */

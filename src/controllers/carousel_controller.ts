@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
 import { SafeInterval } from "../utils/safe_timeout";
 
@@ -44,7 +45,10 @@ import { SafeInterval } from "../utils/safe_timeout";
  * focus out — the user must press play), so motion never surprises a keyboard
  * user. The interval is cleared on `disconnect()` (Turbo navigation included).
  * Picker arrow keys move focus only (manual activation); slide changes never steal
- * focus from the control the user operated.
+ * focus from the control the user operated. A slide change the user drove is
+ * reported as `stimeo--carousel:change` with `{ index, total }`; the same detail
+ * arrives as `stimeo--carousel:reconcile` when removing a slide or picker clamps
+ * the active index instead.
  */
 export class CarouselController extends Controller<HTMLElement> {
   static override targets = ["slide", "viewport", "prev", "next", "picker", "playToggle"];
@@ -62,7 +66,7 @@ export class CarouselController extends Controller<HTMLElement> {
     "resume",
     "togglePlay",
   ] as const;
-  static events = ["change", "pause", "play"] as const;
+  static events = ["change", "pause", "play", "reconcile"] as const;
 
   declare readonly slideTargets: HTMLElement[];
   declare readonly pickerTargets: HTMLElement[];
@@ -73,7 +77,12 @@ export class CarouselController extends Controller<HTMLElement> {
   declare loopValue: boolean;
 
   readonly #roving = new RovingTabindex(() => this.pickerTargets);
-  /** Gates the target callback so it does not repaint once per authored picker on mount. */
+  readonly #reconcileTargets = new MicrotaskCoalescer(() => this.#reconcileTargetSet());
+  /**
+   * Whether `connect()` has run. Scheduling is already inert outside that window
+   * ({@link MicrotaskCoalescer}), so this only gates the Tab stop a picker
+   * present at mount authored for itself.
+   */
   #connected = false;
   readonly #intervals = new SafeInterval();
   /** Index of the visible slide. */
@@ -100,6 +109,7 @@ export class CarouselController extends Controller<HTMLElement> {
     this.#render({ focus: false });
     this.#syncTimer();
     this.#connected = true;
+    this.#reconcileTargets.activate();
   }
 
   /**
@@ -111,9 +121,25 @@ export class CarouselController extends Controller<HTMLElement> {
    * repaint re-derives every picker from `#index`, so a late arrival never steals
    * the selection.
    */
-  pickerTargetConnected(): void {
+  pickerTargetConnected(picker: HTMLElement): void {
     if (!this.#connected) return;
-    this.#render({ focus: false });
+    picker.tabIndex = -1;
+    this.#reconcileTargets.schedule();
+  }
+
+  /** Repairs selection and roving after a picker leaves a retained carousel. */
+  pickerTargetDisconnected(): void {
+    this.#reconcileTargets.schedule();
+  }
+
+  /** Reconciles a slide added in the same DOM batch as its picker. */
+  slideTargetConnected(): void {
+    this.#reconcileTargets.schedule();
+  }
+
+  /** Re-clamps the active index after a slide is removed. */
+  slideTargetDisconnected(): void {
+    this.#reconcileTargets.schedule();
   }
 
   /**
@@ -133,6 +159,7 @@ export class CarouselController extends Controller<HTMLElement> {
   /** Clears the autoplay interval so it never fires after teardown. */
   override disconnect(): void {
     this.#connected = false;
+    this.#reconcileTargets.cancel();
     this.#intervals.clearAll();
     this.#timerId = null;
   }
@@ -255,10 +282,40 @@ export class CarouselController extends Controller<HTMLElement> {
       slide.setAttribute("data-state", active ? "active" : "inactive");
       slide.hidden = !active;
     });
+    // The picker set can be shorter than the slide set (a picker removed on its
+    // own, or a carousel that only pickers part of its slides). Resolving the
+    // selection inside the picker range keeps exactly one selected tab and one Tab
+    // stop; an out-of-range index would leave every picker at `tabindex="-1"` and
+    // strand the tablist outside the Tab sequence.
+    const pickerIndex = Math.min(this.#index, this.pickerTargets.length - 1);
     this.pickerTargets.forEach((picker, i) => {
-      picker.setAttribute("aria-selected", i === this.#index ? "true" : "false");
+      picker.setAttribute("aria-selected", i === pickerIndex ? "true" : "false");
     });
-    this.#roving.setActive(this.#index, { focus });
+    this.#roving.setActive(pickerIndex, { focus });
+  }
+
+  /** Keeps the live active slide when possible and otherwise selects the nearest survivor. */
+  #reconcileTargetSet(): void {
+    const activeSlide = this.slideTargets.findIndex(
+      (slide) => slide.getAttribute("data-state") === "active",
+    );
+    const selectedPicker = this.pickerTargets.findIndex(
+      (picker) => picker.getAttribute("aria-selected") === "true",
+    );
+    const lastSlide = this.slideTargets.length - 1;
+    const candidate =
+      activeSlide !== -1 ? activeSlide : selectedPicker !== -1 ? selectedPicker : this.#index;
+    const previous = this.#index;
+    this.#index = lastSlide < 0 ? 0 : Math.min(lastSlide, Math.max(0, candidate));
+    this.#render({ focus: false });
+    this.#syncTimer();
+    // `change` stays reserved for user navigation; a clamp onto the nearest
+    // surviving slide is this controller's decision, not the reader's.
+    if (this.#index !== previous) {
+      this.dispatch("reconcile", {
+        detail: { index: this.#index, total: this.slideTargets.length },
+      });
+    }
   }
 
   /**

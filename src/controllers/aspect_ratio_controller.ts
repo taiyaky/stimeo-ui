@@ -1,5 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
 
+const DEFAULT_RATIO = "1 / 1";
+const RATIO_PROPERTY = "--stimeo--aspect-ratio";
+const CSS_NUMBER_PATTERN = /^[+-]?(?:\d+|\d*\.\d+)(?:[eE][+-]?\d+)?$/;
+
 /**
  * Headless **Aspect Ratio** helper. No APG pattern — a pure layout utility with
  * no role or state.
@@ -7,8 +11,7 @@ import { Controller } from "@hotwired/stimulus";
  * Markup contract (identifier: `stimeo--aspect-ratio`):
  *   <div data-controller="stimeo--aspect-ratio"
  *        data-stimeo--aspect-ratio-ratio-value="16/9">
- *     <img src="/cover.jpg" alt="Cover"
- *          data-stimeo--aspect-ratio-target="content" />
+ *     <img src="/cover.jpg" alt="Cover" />
  *   </div>
  *
  * Supplies the requested ratio as the `--stimeo--aspect-ratio` custom property on
@@ -23,7 +26,6 @@ import { Controller } from "@hotwired/stimulus";
  * into the custom property. The reflection re-runs when the value changes.
  */
 export class AspectRatioController extends Controller<HTMLElement> {
-  static override targets = ["content"];
   static override values = {
     ratio: { type: String, default: "1/1" },
   };
@@ -32,27 +34,36 @@ export class AspectRatioController extends Controller<HTMLElement> {
 
   /** Applies the ratio on connect and whenever the value changes. */
   ratioValueChanged(): void {
-    this.element.style.setProperty("--stimeo--aspect-ratio", this.#normalizeRatio(this.ratioValue));
+    this.element.style.setProperty(RATIO_PROPERTY, this.#normalizeRatio(this.ratioValue));
   }
 
   /**
    * Normalizes a ratio string to a valid CSS `<ratio>`:
-   * - `"16/9"` / `"16 / 9"` → `"16 / 9"` (both parts must be positive numbers)
-   * - `"1.5"` → `"1.5"` (a bare positive number)
+   * - `"16/9"` / `"16 / 9"` → `"16 / 9"` (both parts must be positive CSS numbers)
+   * - `"1.5"` → `"1.5"` (a bare positive CSS number)
    * - anything else → `"1 / 1"` (the default), so the custom property is always valid.
    */
   #normalizeRatio(raw: string): string {
     const value = raw.trim();
     if (value.includes("/")) {
-      const [w, h] = value.split("/").map((part) => Number.parseFloat(part.trim()));
-      if (this.#isPositive(w) && this.#isPositive(h)) return `${w} / ${h}`;
-      return "1 / 1";
+      const parts = value.split("/");
+      if (parts.length !== 2) return DEFAULT_RATIO;
+
+      const width = this.#parsePositiveNumber(parts[0] ?? "");
+      const height = this.#parsePositiveNumber(parts[1] ?? "");
+      return width !== undefined && height !== undefined ? `${width} / ${height}` : DEFAULT_RATIO;
     }
-    const single = Number.parseFloat(value);
-    return this.#isPositive(single) ? String(single) : "1 / 1";
+
+    const single = this.#parsePositiveNumber(value);
+    return single === undefined ? DEFAULT_RATIO : String(single);
   }
 
-  #isPositive(value: number | undefined): value is number {
-    return value !== undefined && Number.isFinite(value) && value > 0;
+  /** Parses one complete CSS `<number>` token and rejects units or trailing syntax. */
+  #parsePositiveNumber(raw: string): number | undefined {
+    const token = raw.trim();
+    if (!CSS_NUMBER_PATTERN.test(token)) return undefined;
+
+    const value = Number(token);
+    return Number.isFinite(value) && value > 0 ? value : undefined;
   }
 }

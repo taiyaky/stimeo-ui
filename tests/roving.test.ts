@@ -175,14 +175,26 @@ describe("RovingController", () => {
     const d = document.createElement("button");
     d.id = "d";
     d.setAttribute("data-stimeo--roving-target", "item");
-    d.tabIndex = -1;
+    d.tabIndex = 0;
     d.textContent = "D";
     group().appendChild(d);
     await tick(); // let Stimulus pick up the new target
 
+    expect([query("#a").tabIndex, query("#b").tabIndex, query("#c").tabIndex, d.tabIndex]).toEqual([
+      0, -1, -1, -1,
+    ]);
+
     arrow("#a", "End"); // last is now D
     expect(document.activeElement).toBe(query("#d"));
     expect(query("#d").tabIndex).toBe(0);
+  });
+
+  it("re-establishes a Tab stop when the active item is removed", async () => {
+    await mount("", ["-1", "0", "-1"]);
+    query("#b").remove();
+    await tick();
+
+    expect([query("#a").tabIndex, query("#c").tabIndex]).toEqual([0, -1]);
   });
 
   it("yields arrows a descendant widget already claimed (defaultPrevented)", async () => {

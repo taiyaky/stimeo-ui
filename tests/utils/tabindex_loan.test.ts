@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TabindexLoan } from "../../src/utils/tabindex_loan";
 
 /**
@@ -19,6 +19,13 @@ describe("TabindexLoan", () => {
     document.body.innerHTML = "<div id='host'></div>";
     element = document.querySelector<HTMLElement>("#host") as HTMLElement;
     loan = new TabindexLoan();
+  });
+
+  afterEach(() => {
+    // Flush configured-value loans created inside individual cases too.
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    loan.returnAll();
+    document.body.innerHTML = "";
   });
 
   describe("lending", () => {
@@ -107,6 +114,41 @@ describe("TabindexLoan", () => {
       loan.lend(element);
       loan.returnAll();
       expect(() => loan.returnAll()).not.toThrow();
+      expect(element.hasAttribute("tabindex")).toBe(false);
+    });
+
+    it("returns every live loan before Turbo caches the page", () => {
+      const tabStop = new TabindexLoan("0");
+      const second = document.createElement("div");
+      document.body.append(second);
+      loan.lend(element);
+      tabStop.lend(second);
+
+      document.dispatchEvent(new Event("turbo:before-cache"));
+
+      expect(element.hasAttribute("tabindex")).toBe(false);
+      expect(second.hasAttribute("tabindex")).toBe(false);
+    });
+
+    it("keeps consumer ownership and drops its cache subscription", () => {
+      loan.lend(element);
+      element.setAttribute("tabindex", "0");
+
+      document.dispatchEvent(new Event("turbo:before-cache"));
+      element.setAttribute("tabindex", "-1");
+      document.dispatchEvent(new Event("turbo:before-cache"));
+
+      expect(element.getAttribute("tabindex")).toBe("-1");
+    });
+
+    it("can lend again after a cache rewind", () => {
+      loan.lend(element);
+      document.dispatchEvent(new Event("turbo:before-cache"));
+
+      loan.lend(element);
+
+      expect(element.getAttribute("tabindex")).toBe("-1");
+      loan.returnAll();
       expect(element.hasAttribute("tabindex")).toBe(false);
     });
   });

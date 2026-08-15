@@ -398,6 +398,17 @@ export const a11yRules: A11yRules = {
       suggestion: 'Add role="option" to each option target.',
     },
   ],
+  // Free-input tags have no single APG composite role, but every generated
+  // remove button still needs an author-localized accessible name. The
+  // controller expands placeholders; it deliberately never invents prose.
+  "stimeo--tags-input": [
+    {
+      target: "remove",
+      attrs: ["aria-label"],
+      suggestion:
+        'Add a localized aria-label to the remove target (for example, aria-label="Remove {label}").',
+    },
+  ],
   // Editable combobox (APG): the input's combobox role and its list-filter
   // announcement are authored. ARIA requires a name on both `combobox` and
   // `listbox`, but the input's is disarmed on the native tags — an
@@ -484,6 +495,12 @@ export const a11yRules: A11yRules = {
       attrs: ["role"],
       values: ["option"],
       suggestion: 'Add role="option" to each option target.',
+    },
+    {
+      target: "remove",
+      attrs: ["aria-label"],
+      suggestion:
+        'Add a localized aria-label to the remove target (for example, aria-label="Remove {label}").',
     },
   ],
   // Tabs (APG): the controller manages aria-selected and roving tabindex, but
@@ -594,6 +611,33 @@ export const a11yRules: A11yRules = {
       suggestion: "Name the radio group via aria-labelledby or aria-label.",
     },
   ],
+  // Toggle buttons expose their state through controller-managed aria-pressed.
+  // The group role and generic-host button roles remain authored: a native
+  // button supplies its own implicit role, while a generic host does not.
+  "stimeo--toggle-group": [
+    {
+      target: "",
+      attrs: ["role"],
+      values: ["group"],
+      suggestion: 'Add role="group" to the controller element.',
+    },
+    {
+      target: "item",
+      attrs: ["role"],
+      values: ["button"],
+      whenElement: { exceptTags: ["button"] },
+      suggestion: 'Add role="button" to each non-button item target.',
+    },
+    // The role itself remains usable unnamed, so this contextual label is a
+    // warning. A fieldset can obtain the same name from its native legend.
+    {
+      target: "",
+      attrs: ["aria-labelledby", "aria-label"],
+      whenElement: { exceptTags: ["fieldset"] },
+      severity: "warning",
+      suggestion: "Name the toggle group via aria-labelledby or aria-label.",
+    },
+  ],
   // Toolbar (APG): the controller provides the roving tabindex; the toolbar
   // role that makes the grouping perceivable is authored, and so is the
   // orientation — the controller reads its own Value to decide which arrow keys
@@ -690,7 +734,9 @@ export const a11yRules: A11yRules = {
   // contract is div/button-based, so the grid and gridcell roles are explicit
   // and authored on the targets themselves — and with no `<table>` in sight
   // there is no `<caption>` to name the grid either, so ARIA's required name
-  // has to be authored. aria-selected / aria-disabled are controller-managed.
+  // has to be authored. aria-selected and aria-disabled are both
+  // controller-managed: unavailable dates arrive as the `disabled-dates` Value,
+  // not as markup, because the 42 cells are recycled across months.
   "stimeo--date-range-picker": [
     {
       target: "grid",

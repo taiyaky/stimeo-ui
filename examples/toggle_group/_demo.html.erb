@@ -1,42 +1,108 @@
-<%# Markup for the toggle-group (APG Button toggle + Toolbar roving) demo.
-    Pressed state is aria-pressed; the single tab stop is roving tabindex. Arrows only
-    move focus; toggling is Space/Enter and click. Multiple selection (multiple). The look
-    switches on [aria-pressed="true"]. %>
-<div class="toggle-group-demo" role="group"
-     aria-label="<%= t('components.toggle_group.demo.label') %>"
-     data-controller="stimeo--toggle-group">
-  <button type="button" class="toggle-group-demo__item" aria-pressed="false" tabindex="0"
-          aria-label="<%= t('components.toggle_group.demo.bold') %>" data-value="bold"
-          data-stimeo--toggle-group-target="item"
-          data-action="click->stimeo--toggle-group#toggle
-                       keydown->stimeo--toggle-group#onKeydown">
-    <svg class="demo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M6 4h8a4 4 0 0 1 0 8H6z"></path>
-      <path d="M6 12h9a4 4 0 0 1 0 8H6z"></path>
-    </svg>
-  </button>
-  <button type="button" class="toggle-group-demo__item" aria-pressed="false" tabindex="-1"
-          aria-label="<%= t('components.toggle_group.demo.italic') %>" data-value="italic"
-          data-stimeo--toggle-group-target="item"
-          data-action="click->stimeo--toggle-group#toggle
-                       keydown->stimeo--toggle-group#onKeydown">
-    <svg class="demo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <line x1="19" y1="4" x2="10" y2="4"></line>
-      <line x1="14" y1="20" x2="5" y2="20"></line>
-      <line x1="15" y1="4" x2="9" y2="20"></line>
-    </svg>
-  </button>
-  <button type="button" class="toggle-group-demo__item" aria-pressed="false" tabindex="-1"
-          aria-label="<%= t('components.toggle_group.demo.underline') %>" data-value="underline"
-          data-stimeo--toggle-group-target="item"
-          data-action="click->stimeo--toggle-group#toggle
-                       keydown->stimeo--toggle-group#onKeydown">
-    <svg class="demo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M6 3v7a6 6 0 0 0 12 0V3"></path>
-      <line x1="4" y1="21" x2="20" y2="21"></line>
-    </svg>
-  </button>
+<%# Markup for the toggle-group demo: multiple selection, single selection, and
+    unavailable items. The group delegates click and keydown, so the items carry
+    no data-action of their own. %>
+<div class="toggle-group-demo-suite">
+  <section class="toggle-group-demo__example">
+    <h3 class="toggle-group-demo__heading" id="toggle-group-multiple-heading">
+      <%= t("components.toggle_group.demo.multiple_heading") %>
+    </h3>
+    <div class="toggle-group-demo" role="group"
+         aria-labelledby="toggle-group-multiple-heading"
+         data-controller="stimeo--toggle-group">
+      <button type="button" class="toggle-group-demo__item" aria-pressed="false" tabindex="0"
+              aria-label="<%= t('components.toggle_group.demo.bold') %>" data-value="bold"
+              data-stimeo--toggle-group-target="item">
+        <svg class="demo-icon" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 4h8a4 4 0 0 1 0 8H6z"></path>
+          <path d="M6 12h9a4 4 0 0 1 0 8H6z"></path>
+        </svg>
+      </button>
+      <button type="button" class="toggle-group-demo__item" aria-pressed="false" tabindex="-1"
+              aria-label="<%= t('components.toggle_group.demo.italic') %>" data-value="italic"
+              data-stimeo--toggle-group-target="item">
+        <svg class="demo-icon" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="19" y1="4" x2="10" y2="4"></line>
+          <line x1="14" y1="20" x2="5" y2="20"></line>
+          <line x1="15" y1="4" x2="9" y2="20"></line>
+        </svg>
+      </button>
+      <button type="button" class="toggle-group-demo__item" aria-pressed="false" tabindex="-1"
+              aria-label="<%= t('components.toggle_group.demo.underline') %>" data-value="underline"
+              data-stimeo--toggle-group-target="item">
+        <svg class="demo-icon" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 3v7a6 6 0 0 0 12 0V3"></path>
+          <line x1="4" y1="21" x2="20" y2="21"></line>
+        </svg>
+      </button>
+    </div>
+  </section>
+
+  <section class="toggle-group-demo__example">
+    <h3 class="toggle-group-demo__heading" id="toggle-group-single-heading">
+      <%= t("components.toggle_group.demo.single_heading") %>
+    </h3>
+    <div class="toggle-group-demo" role="group"
+         aria-labelledby="toggle-group-single-heading"
+         data-controller="stimeo--toggle-group"
+         data-stimeo--toggle-group-mode-value="single">
+      <button type="button" class="toggle-group-demo__item" aria-pressed="true" tabindex="0"
+              aria-label="<%= t('components.toggle_group.demo.align_left') %>" data-value="left"
+              data-stimeo--toggle-group-target="item">
+        <svg class="demo-icon" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" aria-hidden="true">
+          <path d="M4 6h16M4 10h11M4 14h16M4 18h9"></path>
+        </svg>
+      </button>
+      <button type="button" class="toggle-group-demo__item" aria-pressed="false" tabindex="-1"
+              aria-label="<%= t('components.toggle_group.demo.align_center') %>" data-value="center"
+              data-stimeo--toggle-group-target="item">
+        <svg class="demo-icon" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" aria-hidden="true">
+          <path d="M4 6h16M6 10h12M4 14h16M7 18h10"></path>
+        </svg>
+      </button>
+      <button type="button" class="toggle-group-demo__item" aria-pressed="false" tabindex="-1"
+              aria-label="<%= t('components.toggle_group.demo.align_right') %>" data-value="right"
+              data-stimeo--toggle-group-target="item">
+        <svg class="demo-icon" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" aria-hidden="true">
+          <path d="M4 6h16M9 10h11M4 14h16M11 18h9"></path>
+        </svg>
+      </button>
+    </div>
+  </section>
+
+  <section class="toggle-group-demo__example">
+    <h3 class="toggle-group-demo__heading" id="toggle-group-disabled-heading">
+      <%= t("components.toggle_group.demo.disabled_heading") %>
+    </h3>
+    <div class="toggle-group-demo" role="group"
+         aria-labelledby="toggle-group-disabled-heading"
+         data-controller="stimeo--toggle-group">
+      <button type="button" class="toggle-group-demo__item toggle-group-demo__item--wide"
+              aria-pressed="false" tabindex="0" data-value="available"
+              data-stimeo--toggle-group-target="item">
+        <%= t("components.toggle_group.demo.available") %>
+      </button>
+      <button type="button" class="toggle-group-demo__item toggle-group-demo__item--wide"
+              aria-pressed="false" tabindex="-1" data-value="native-disabled" disabled
+              data-stimeo--toggle-group-target="item">
+        <%= t("components.toggle_group.demo.native_disabled") %>
+      </button>
+      <button type="button" class="toggle-group-demo__item toggle-group-demo__item--wide"
+              aria-pressed="false" tabindex="-1" data-value="aria-disabled" aria-disabled="true"
+              data-stimeo--toggle-group-target="item">
+        <%= t("components.toggle_group.demo.aria_disabled") %>
+      </button>
+    </div>
+  </section>
 </div>

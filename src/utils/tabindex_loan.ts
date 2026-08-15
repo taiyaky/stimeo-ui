@@ -1,3 +1,5 @@
+import { BeforeCacheReset } from "./before_cache_reset";
+
 /**
  * Shared bookkeeping for a `tabindex` a controller lends an element temporarily.
  *
@@ -16,6 +18,11 @@
  * **Never borrow over an existing value.** An element that already carries a
  * `tabindex` is the author's to control, so there is nothing to lend and nothing
  * to return.
+ *
+ * Every live loan also owns a shared `turbo:before-cache` subscription. The loan
+ * is returned before Turbo can copy it into a snapshot, so consumers get cache
+ * safety without duplicating a lifecycle hook; `returnAll()` removes the
+ * subscription again as soon as no loan remains.
  *
  * The registry is keyed by element, so a controller borrowing on a single
  * element (`this.element`) and one borrowing across a changing set of targets
@@ -46,6 +53,8 @@
 export class TabindexLoan<T extends HTMLElement = HTMLElement> {
   readonly #value: string;
   readonly #lent = new Set<T>();
+  /** Returns live loans before Turbo can copy them into its page snapshot. */
+  readonly #beforeCache = new BeforeCacheReset(() => this.returnAll());
 
   /**
    * @param value - the `tabindex` to lend. `"-1"` (the default) is
@@ -61,6 +70,9 @@ export class TabindexLoan<T extends HTMLElement = HTMLElement> {
     if (element.hasAttribute("tabindex")) return;
     element.setAttribute("tabindex", this.#value);
     this.#lent.add(element);
+    // Subscribe only while a real loan exists. Keeping this guarantee here means
+    // every consumer is Turbo-safe without another lifecycle hook to remember.
+    this.#beforeCache.activate();
   }
 
   /** Takes back every loan whose value is still the one that was lent. */
@@ -69,5 +81,6 @@ export class TabindexLoan<T extends HTMLElement = HTMLElement> {
       if (element.getAttribute("tabindex") === this.#value) element.removeAttribute("tabindex");
     }
     this.#lent.clear();
+    this.#beforeCache.deactivate();
   }
 }

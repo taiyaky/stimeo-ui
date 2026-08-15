@@ -1,6 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { LayoutObserver } from "../utils/layout_observer";
 import { logicalScrollMetrics } from "../utils/logical_scroll";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { TabindexLoan } from "../utils/tabindex_loan";
 
 /** A CSS selector for natively focusable / author-focusable descendants. */
@@ -44,6 +46,8 @@ interface VisibilityCheckable {
  * @remarks
  * Behavior only. The `scroll` listener and {@link LayoutObserver} (element +
  * viewport resize) are torn down on `disconnect()` (Turbo navigation included).
+ * Runtime replacement of the viewport rebinds those resources and the content
+ * observer as one lifecycle unit.
  * `role="region"` is added only when the viewport is already named, so a scrollable
  * region never becomes an unlabeled landmark.
  */
@@ -60,24 +64,56 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   declare orientationValue: string;
 
   readonly #layout = new LayoutObserver(() => this.#update());
+  /** Current element receiving scroll, resize, mutation, and keyboard-reach behavior. */
+  #viewport: HTMLElement | null = null;
+  /** Guards target callbacks before connect and after disconnect. */
+  #connected = false;
+  /** Collapses target replacement callbacks into one final-DOM rebind. */
+  readonly #rebind = new MicrotaskCoalescer(() => this.#syncViewport());
   /** Re-checks the tab stop when the viewport's focusable content comes or goes. */
   #content: MutationObserver | null = null;
   /** Last edge reported via `reach`, so the event fires once per arrival. */
   #lastEdge: "start" | "end" | null = null;
   /** Whether this controller added `tabindex`, so teardown only removes its own. */
   readonly #tabindex = new TabindexLoan("0");
-  /** Whether this controller added `role="region"`, for symmetric teardown. */
-  #addedRole = false;
+  /** Temporarily owns a derived `role="region"` without losing an authored replacement. */
+  readonly #role = new AttributeLease<HTMLElement>("role");
 
   readonly #onScroll = (): void => {
     this.#update();
   };
 
   override connect(): void {
-    if (!this.hasViewportTarget) return;
-    this.viewportTarget.addEventListener("scroll", this.#onScroll, { passive: true });
-    this.#layout.observe(this.viewportTarget);
+    this.#connected = true;
+    this.#rebind.activate();
     this.#layout.observeViewport();
+    this.#syncViewport();
+  }
+
+  /** Schedules a complete observer/listener rebind for a runtime viewport target. */
+  viewportTargetConnected(): void {
+    this.#rebind.schedule();
+  }
+
+  /** Schedules cleanup or replacement binding after a viewport leaves. */
+  viewportTargetDisconnected(): void {
+    this.#rebind.schedule();
+  }
+
+  /** Rebinds every viewport-owned resource against the final target in this mutation batch. */
+  #syncViewport(): void {
+    if (!this.#connected) return;
+    const next = this.hasViewportTarget ? this.viewportTarget : null;
+    if (next === this.#viewport) {
+      this.#update();
+      return;
+    }
+    if (this.#viewport) this.#unbindViewport(this.#viewport);
+    this.#viewport = next;
+    if (!next) return;
+
+    next.addEventListener("scroll", this.#onScroll, { passive: true });
+    this.#layout.observe(next);
     // Overflow follows the box, but focusability follows the content, and the two
     // change independently: revealing a button inside a fixed-height viewport fires
     // no resize and no scroll. Without this the tab stop would be stale until the
@@ -95,11 +131,10 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     // change is not an arrival.
     if (typeof MutationObserver !== "undefined") {
       this.#content = new MutationObserver(() => {
-        if (!this.hasViewportTarget) return;
-        const vp = this.viewportTarget;
-        this.#syncKeyboardReach(vp, this.#syncOverflow(vp));
+        if (this.#viewport !== next) return;
+        this.#syncKeyboardReach(next, this.#syncOverflow(next));
       });
-      this.#content.observe(this.viewportTarget, {
+      this.#content.observe(next, {
         subtree: true,
         childList: true,
         attributes: true,
@@ -109,23 +144,31 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
-    if (this.hasViewportTarget) {
-      this.viewportTarget.removeEventListener("scroll", this.#onScroll);
-      // Remove only the keyboard-reach attributes this controller added, so a
-      // Turbo cache snapshot never preserves a controller-owned tab stop /
-      // landmark (controller-added state must not outlive the controller).
-      this.#clearAddedAttributes(this.viewportTarget);
-    }
+    this.#connected = false;
+    this.#rebind.cancel();
+    if (this.#viewport) this.#unbindViewport(this.#viewport);
     this.#layout.disconnect();
+    this.#lastEdge = null;
+  }
+
+  /** Releases every resource and derived attribute owned by one former viewport. */
+  #unbindViewport(viewport: HTMLElement): void {
+    viewport.removeEventListener("scroll", this.#onScroll);
+    this.#layout.unobserve(viewport);
     this.#content?.disconnect();
     this.#content = null;
+    // Remove only the keyboard-reach attributes this controller added, so a
+    // Turbo cache snapshot never preserves a controller-owned tab stop /
+    // landmark (controller-added state must not outlive the controller).
+    this.#clearAddedAttributes(viewport);
+    if (this.#viewport === viewport) this.#viewport = null;
     this.#lastEdge = null;
   }
 
   /** Re-measures overflow and scroll position and reflects the state hooks. */
   #update(): void {
-    if (!this.hasViewportTarget) return;
-    const vp = this.viewportTarget;
+    const vp = this.#viewport;
+    if (!vp) return;
     const overflowing = this.#syncOverflow(vp);
     this.#syncKeyboardReach(vp, overflowing);
 
@@ -142,7 +185,6 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     }
   }
 
-  /** Whether the viewport can scroll on the configured axis. */
   /**
    * Measures overflow and reflects the `data-overflow` hook.
    *
@@ -199,8 +241,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     if (wantsTabindex) {
       this.#tabindex.lend(vp);
       if (!vp.hasAttribute("role") && this.#hasAccessibleName(vp)) {
-        vp.setAttribute("role", "region");
-        this.#addedRole = true;
+        this.#role.write(vp, "region");
       }
     } else {
       this.#clearAddedAttributes(vp);
@@ -210,10 +251,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   /** Removes (and resets the flags for) only the attributes this controller added. */
   #clearAddedAttributes(vp: HTMLElement): void {
     this.#tabindex.returnAll();
-    if (this.#addedRole) {
-      vp.removeAttribute("role");
-      this.#addedRole = false;
-    }
+    this.#role.return(vp);
   }
 
   /**

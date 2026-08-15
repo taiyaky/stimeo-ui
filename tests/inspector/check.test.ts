@@ -34,6 +34,20 @@ describe("checkSource", () => {
       <div role="tabpanel" aria-labelledby="tabs-tab-a" data-stimeo--tabs-target="panel">A</div>
     </div>`;
 
+  const validTagsInput = `
+    <div data-controller="stimeo--tags-input">
+      <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
+      <input aria-label="Add tag" data-stimeo--tags-input-target="input"
+             data-action="keydown->stimeo--tags-input#onKeydown">
+      <template data-stimeo--tags-input-target="tagTemplate">
+        <li role="listitem" data-stimeo--tags-input-target="tag">
+          <span data-stimeo--tags-input-target="label"></span>
+          <button type="button" aria-label="Remove {label}"
+                  data-stimeo--tags-input-target="remove">×</button>
+        </li>
+      </template>
+    </div>`;
+
   it("reports no problems for well-formed markup", () => {
     expect(checkSource(validMenu, manifest)).toEqual([]);
   });
@@ -86,6 +100,33 @@ describe("checkSource", () => {
           expect(diagnostic?.message).toContain(`"${identifier}.step"`);
         },
       );
+
+      it.each(["0", "-1", "1.5", "Infinity", "NaN"])(
+        "rejects the invalid Time Picker step %s",
+        (step) => {
+          const diagnostic = checkSource(
+            `<div data-stimeo--time-picker-step-value="${step}"></div>`,
+            manifest,
+          ).find((candidate) => candidate.code === "invalid-value");
+
+          expect(diagnostic).toMatchObject({
+            severity: "error",
+            suggestion: "Set step to a positive integer.",
+          });
+        },
+      );
+
+      it("names the integral requirement in the Time Picker step message", () => {
+        // The suggestion tells the author what to write; the message tells them
+        // what was expected. Only the message carries the integral part.
+        const diagnostic = checkSource(
+          `<div data-stimeo--time-picker-step-value="1.5"></div>`,
+          manifest,
+        ).find((candidate) => candidate.code === "invalid-value");
+
+        expect(diagnostic?.message).toContain("a finite number greater than 0");
+        expect(diagnostic?.message).toContain("with no fractional part");
+      });
 
       it.each(["-1", "Infinity", "NaN", "not-a-number"])(
         "rejects the invalid Slider step %s",
@@ -208,6 +249,99 @@ describe("checkSource", () => {
       expect(codeList).toContain("missing-required-target");
     });
 
+    it("accepts an Avatar with only its optional fallback target", () => {
+      const codeList = codes(`
+        <span data-controller="stimeo--avatar" role="img" aria-label="Jane Doe">
+          <span aria-hidden="true" data-stimeo--avatar-target="fallback">JD</span>
+        </span>`);
+
+      expect(codeList).not.toContain("missing-required-target");
+    });
+
+    it("accepts the complete tags-input template contract", () => {
+      expect(codes(validTagsInput)).toEqual([]);
+    });
+
+    it("flags every missing transactional tags-input template target", () => {
+      const incomplete = validTagsInput
+        .replace(' data-stimeo--tags-input-target="label"', "")
+        .replace(' data-stimeo--tags-input-target="remove"', "");
+      const missing = checkSource(incomplete, manifest).filter(
+        (diagnostic) => diagnostic.code === "missing-conditional-target",
+      );
+
+      expect(missing).toHaveLength(1);
+      expect(missing[0]?.message).toContain('"label"');
+      expect(missing[0]?.message).toContain('"remove"');
+    });
+
+    it("flags tags-input template parts declared outside the template", () => {
+      // Every part exists, so a presence check passes — but a clone carries only
+      // what the template contains, so this markup builds no chip at runtime.
+      const outside = `
+        <div data-controller="stimeo--tags-input">
+          <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
+          <input aria-label="Add tag" data-stimeo--tags-input-target="input"
+                 data-action="keydown->stimeo--tags-input#onKeydown">
+          <template data-stimeo--tags-input-target="tagTemplate"></template>
+          <div hidden data-stimeo--tags-input-target="tag">
+            <span data-stimeo--tags-input-target="label"></span>
+            <button type="button" aria-label="Remove {label}"
+                    data-stimeo--tags-input-target="remove">×</button>
+          </div>
+        </div>`;
+      const missing = checkSource(outside, manifest).filter(
+        (diagnostic) => diagnostic.code === "missing-conditional-target",
+      );
+
+      expect(missing).toHaveLength(1);
+      expect(missing[0]?.message).toContain('inside its "tagTemplate"');
+      expect(missing[0]?.message).toContain('"tag"');
+    });
+
+    it("flags multi-select template parts declared outside the template", () => {
+      const outside = `
+        <div data-controller="stimeo--multi-select">
+          <ul role="list" aria-label="Selected" data-stimeo--multi-select-target="tags"></ul>
+          <input type="text" role="combobox" aria-expanded="false" aria-label="Fruit"
+                 data-stimeo--multi-select-target="input">
+          <ul role="listbox" aria-multiselectable="true" aria-label="Fruit" hidden
+              data-stimeo--multi-select-target="list"></ul>
+          <template data-stimeo--multi-select-target="tagTemplate"></template>
+          <div hidden data-stimeo--multi-select-target="tag">
+            <span data-stimeo--multi-select-target="label"></span>
+            <button type="button" aria-label="Remove {label}"
+                    data-stimeo--multi-select-target="remove">×</button>
+          </div>
+        </div>`;
+      const missing = checkSource(outside, manifest).filter(
+        (diagnostic) => diagnostic.code === "missing-conditional-target",
+      );
+
+      expect(missing).toHaveLength(1);
+      expect(missing[0]?.message).toContain('inside its "tagTemplate"');
+    });
+
+    it("accepts a Time Picker without its optional field target", () => {
+      const codeList = codes(`
+        <div data-controller="stimeo--time-picker" role="group" aria-label="Time">
+          <span role="spinbutton" aria-label="Hours" tabindex="0"
+                data-segment="hour" data-stimeo--time-picker-target="segment"
+                data-action="keydown->stimeo--time-picker#onKeydown"></span>
+        </div>`);
+
+      expect(codeList).not.toContain("missing-required-target");
+    });
+
+    it("still requires a Time Picker segment when its optional field is present", () => {
+      const codeList = codes(`
+        <div data-controller="stimeo--time-picker" role="group" aria-label="Time">
+          <input type="hidden" data-stimeo--time-picker-target="field">
+        </div>`);
+
+      expect(codeList).toContain("missing-required-target");
+    });
+
     // A feature that is opt-in but incomplete without its whole set (schema v8).
     // Every other check passes and the page loads — the feature just silently does
     // nothing — so a static rule is the only layer that can say anything.
@@ -221,6 +355,37 @@ describe("checkSource", () => {
             <li><a href="/a/b" aria-current="page">B</a></li>
           </ol>
         </nav>`;
+
+      // multi-select keeps the selection on the options, so a field that renders
+      // no chips is a configuration rather than a mistake. Declaring the
+      // template is the signal that the parts are now mandatory.
+      const multiSelect = (template: string) => `
+        <div data-controller="stimeo--multi-select">
+          <input role="combobox" aria-autocomplete="list"
+                 data-stimeo--multi-select-target="input">
+          <ul role="listbox" aria-label="Options" aria-multiselectable="true"
+              data-stimeo--multi-select-target="list"></ul>
+          <ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>
+          ${template}
+        </div>`;
+
+      it("accepts a multi-select that renders no chips at all", () => {
+        expect(codes(multiSelect(""))).toEqual([]);
+      });
+
+      it("requires the chip parts once a tagTemplate is declared", () => {
+        const found = checkSource(
+          multiSelect(`<template data-stimeo--multi-select-target="tagTemplate">
+            <li data-stimeo--multi-select-target="tag"></li>
+          </template>`),
+          manifest,
+        ).filter((d) => d.code === "missing-conditional-target");
+
+        expect(found).toHaveLength(1);
+        expect(found[0]?.message).toContain('"label"');
+        expect(found[0]?.message).toContain('"remove"');
+        expect(found[0]?.message).not.toContain('"tag"');
+      });
 
       it("requires the disclosure once an item is marked collapsible", () => {
         const found = checkSource(trail(""), manifest).filter(
@@ -365,6 +530,49 @@ describe("checkSource", () => {
       expect(codes(validDialog)).toEqual([]);
     });
 
+    it("requires an author-localized name on tags-input and multi-select remove targets", () => {
+      const unnamedTags = validTagsInput.replace(' aria-label="Remove {label}"', "");
+      expect(codes(unnamedTags)).toContain("missing-aria");
+
+      const multiSelect = `
+        <div data-controller="stimeo--multi-select">
+          <input role="combobox" aria-autocomplete="list"
+                 data-stimeo--multi-select-target="input">
+          <ul role="listbox" aria-label="Options" aria-multiselectable="true"
+              data-stimeo--multi-select-target="list"></ul>
+          <ul data-stimeo--multi-select-target="tags"></ul>
+          <template data-stimeo--multi-select-target="tagTemplate">
+            <li data-stimeo--multi-select-target="tag">
+              <span data-stimeo--multi-select-target="label"></span>
+              <button type="button" data-stimeo--multi-select-target="remove">×</button>
+            </li>
+          </template>
+        </div>`;
+      const diagnostics = checkSource(multiSelect, manifest).filter(
+        (diagnostic) => diagnostic.code === "missing-aria",
+      );
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]?.message).toContain("aria-label");
+    });
+
+    it("rejects an empty accessible name the same way as an absent one", () => {
+      const blankTags = validTagsInput.replace('aria-label="Remove {label}"', 'aria-label=""');
+      const diagnostics = checkSource(blankTags, manifest).filter(
+        (diagnostic) => diagnostic.code === "missing-aria",
+      );
+
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]?.message).toContain("aria-label is empty");
+      expect(diagnostics[0]?.severity).toBe("error");
+      // Whitespace is no more a name than the empty string is.
+      expect(codes(validTagsInput.replace("Remove {label}", "   "))).toContain("missing-aria");
+    });
+
+    it("leaves a templating expression to the runtime rather than calling it empty", () => {
+      const dynamic = validTagsInput.replace("Remove {label}", "<%= t('remove') %>");
+      expect(codes(dynamic)).not.toContain("missing-aria");
+    });
+
     it("accepts aria-label as an alternative accessible name", () => {
       const source = validDialog.replace('aria-labelledby="t"', 'aria-label="Confirm"');
       expect(codes(source)).not.toContain("missing-aria");
@@ -424,6 +632,29 @@ describe("checkSource", () => {
 
       const labelled = validTabs.replace('aria-labelledby="tabs-title"', 'aria-label="Sections"');
       expect(codes(labelled)).not.toContain("missing-aria");
+    });
+
+    it("checks the authored Toggle Group roles and contextual name", () => {
+      const complete = `
+        <div data-controller="stimeo--toggle-group" role="group" aria-label="View">
+          <button type="button" data-stimeo--toggle-group-target="item">Grid</button>
+          <div role="button" data-stimeo--toggle-group-target="item">List</div>
+        </div>`;
+      expect(codes(complete)).toEqual([]);
+
+      const diagnostics = checkSource(
+        `<div data-controller="stimeo--toggle-group">
+          <div data-stimeo--toggle-group-target="item">Grid</div>
+        </div>`,
+        manifest,
+      ).filter((diagnostic) => diagnostic.code === "missing-aria");
+      expect(diagnostics).toHaveLength(3);
+      expect(diagnostics.map(({ severity }) => severity)).toEqual(["error", "warning", "error"]);
+      expect(diagnostics.map(({ suggestion }) => suggestion)).toEqual([
+        'Add role="group" to the controller element.',
+        "Name the toggle group via aria-labelledby or aria-label.",
+        'Add role="button" to each non-button item target.',
+      ]);
     });
 
     it("does not require ARIA the controller sets itself (no aria-selected)", () => {
@@ -784,6 +1015,80 @@ describe("checkSource", () => {
               '<div data-controller="stimeo--switch"></div></div>',
           ),
         ).not.toContain("invalid-host");
+      });
+
+      it.each([
+        '<button type="button" data-stimeo--toggle-group-target="item"></button>',
+        '<div role="button" data-stimeo--toggle-group-target="item"></div>',
+        '<a role="button" data-stimeo--toggle-group-target="item"></a>',
+        '<div contenteditable="false" role="button" data-stimeo--toggle-group-target="item"></div>',
+      ])("accepts a supported Toggle Group item host: %s", (candidate) => {
+        const source = `<div role="group" aria-label="View" data-controller="stimeo--toggle-group">
+          ${candidate}
+        </div>`;
+        expect(codes(source)).not.toContain("invalid-host");
+      });
+
+      it.each([
+        '<button data-stimeo--toggle-group-target="item"></button>',
+        '<button type="submit" data-stimeo--toggle-group-target="item"></button>',
+        '<button type="reset" data-stimeo--toggle-group-target="item"></button>',
+        '<a href="/view" data-stimeo--toggle-group-target="item"></a>',
+        '<input type="checkbox" data-stimeo--toggle-group-target="item">',
+        '<div contenteditable role="button" data-stimeo--toggle-group-target="item"></div>',
+      ])("rejects a conflicting Toggle Group item host: %s", (candidate) => {
+        const source = `<div role="group" aria-label="View" data-controller="stimeo--toggle-group">
+          ${candidate}
+        </div>`;
+        const diagnostic = checkSource(source, manifest).find(
+          (entry) => entry.code === "invalid-host",
+        );
+        expect(diagnostic?.severity).toBe("error");
+        expect(diagnostic?.suggestion).toContain('<button type="button">');
+      });
+
+      it("skips an undecidable Toggle Group item host", () => {
+        const source = `<div role="group" aria-label="View" data-controller="stimeo--toggle-group">
+          <button type="<%= button_type %>" data-stimeo--toggle-group-target="item"></button>
+        </div>`;
+        expect(codes(source)).not.toContain("invalid-host");
+      });
+
+      it.each([
+        '<button type="button" role="radio" data-stimeo--radio-group-target="radio"></button>',
+        '<div role="radio" data-stimeo--radio-group-target="radio"></div>',
+        '<a role="radio" data-stimeo--radio-group-target="radio"></a>',
+        '<div contenteditable="false" role="radio" data-stimeo--radio-group-target="radio"></div>',
+      ])("accepts a supported Radio Group item host: %s", (candidate) => {
+        const source = `<div role="radiogroup" aria-label="Plan" data-controller="stimeo--radio-group">
+          ${candidate}
+        </div>`;
+        expect(codes(source)).not.toContain("invalid-host");
+      });
+
+      it.each([
+        '<button role="radio" data-stimeo--radio-group-target="radio"></button>',
+        '<button type="submit" role="radio" data-stimeo--radio-group-target="radio"></button>',
+        '<button type="reset" role="radio" data-stimeo--radio-group-target="radio"></button>',
+        '<a href="/plan" role="radio" data-stimeo--radio-group-target="radio"></a>',
+        '<input type="radio" data-stimeo--radio-group-target="radio">',
+        '<div contenteditable role="radio" data-stimeo--radio-group-target="radio"></div>',
+      ])("rejects a conflicting Radio Group item host: %s", (candidate) => {
+        const source = `<div role="radiogroup" aria-label="Plan" data-controller="stimeo--radio-group">
+          ${candidate}
+        </div>`;
+        const diagnostic = checkSource(source, manifest).find(
+          (entry) => entry.code === "invalid-host",
+        );
+        expect(diagnostic?.severity).toBe("error");
+        expect(diagnostic?.suggestion).toContain('<button type="button">');
+      });
+
+      it("skips an undecidable Radio Group item host", () => {
+        const source = `<div role="radiogroup" aria-label="Plan" data-controller="stimeo--radio-group">
+          <button type="<%= button_type %>" role="radio" data-stimeo--radio-group-target="radio"></button>
+        </div>`;
+        expect(codes(source)).not.toContain("invalid-host");
       });
 
       it("requires treeitem targets to use non-interactive hosts", () => {
@@ -1446,6 +1751,48 @@ describe("checkSource", () => {
     });
 
     describe("set-level cardinality", () => {
+      it("flags the second authored checked radio that connect discards", () => {
+        const source = `
+          <div data-controller="stimeo--radio-group" role="radiogroup" aria-label="Plan">
+            <div role="radio" aria-checked="true"
+                 data-stimeo--radio-group-target="radio">Basic</div>
+            <div role="radio" aria-checked="true"
+                 data-stimeo--radio-group-target="radio">Pro</div>
+          </div>`;
+        const violations = checkSource(source, manifest).filter(
+          (entry) => entry.code === "cardinality-violation",
+        );
+
+        expect(violations).toHaveLength(1);
+        expect(violations[0]?.message).toContain("at most 1");
+        expect(violations[0]?.message).toContain("but found 2");
+        expect(violations[0]?.suggestion).toContain("first checked radio in DOM order");
+      });
+
+      describe("optional checkbox parent", () => {
+        const checkbox = (parents: string) => `
+          <div data-controller="stimeo--checkbox">
+            ${parents}
+            <input type="checkbox" data-stimeo--checkbox-target="child">
+          </div>`;
+        const parent = (label: string) => `
+          <label><input type="checkbox" data-stimeo--checkbox-target="parent">${label}</label>`;
+
+        it("accepts child-only and one-parent groups", () => {
+          expect(codes(checkbox(""))).toEqual([]);
+          expect(codes(checkbox(parent("All")))).toEqual([]);
+        });
+
+        it("flags a second parent target", () => {
+          const all = checkSource(checkbox(`${parent("All")}${parent("Secondary")}`), manifest);
+          const violations = all.filter((x) => x.code === "cardinality-violation");
+          expect(violations).toHaveLength(1);
+          expect(violations[0]?.message).toContain("at most 1");
+          expect(violations[0]?.message).toContain("but found 2");
+          expect(violations[0]?.suggestion).toContain("at most one");
+        });
+      });
+
       // A second authored selection is normalized away on connect (first in DOM
       // order wins), so the source is the last place the mistake is visible.
       const tabs = (second: string, third = "") => `

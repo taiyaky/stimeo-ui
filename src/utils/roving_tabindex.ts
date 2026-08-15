@@ -17,7 +17,10 @@
  *
  * @remarks
  * Items are read lazily through a getter so a controller can add or remove
- * targets (Stimulus re-scans the DOM) without re-wiring this helper.
+ * targets (Stimulus re-scans the DOM) without re-wiring this helper. A caller
+ * that already captured one event-scoped snapshot may pass it to
+ * {@link RovingTabindex.setActive}, avoiding a second live-target scan while
+ * preserving one coherent collection for the whole operation.
  */
 export class RovingTabindex {
   /** Returns the current ordered item elements; called on every operation. */
@@ -43,10 +46,15 @@ export class RovingTabindex {
    * "nothing is currently tabbable".
    *
    * @param index - Position of the item to make tabbable.
-   * @param options - Pass `{ focus: true }` to also move DOM focus to that item.
+   * @param options - Pass `{ focus: true }` to also move DOM focus to that item,
+   *   and `items` to reuse an event-scoped collection snapshot.
    */
-  setActive(index: number, { focus = false }: { focus?: boolean } = {}): void {
-    const items = this.#getItems();
+  setActive(
+    index: number,
+    options: { focus?: boolean; items?: readonly HTMLElement[] } = {},
+  ): void {
+    const { focus = false } = options;
+    const items = options.items ?? this.#getItems();
     items.forEach((item, i) => {
       item.tabIndex = i === index ? 0 : -1;
     });

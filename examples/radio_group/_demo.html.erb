@@ -1,6 +1,7 @@
 <%# Markup for the radio-group (APG Radio Group) demo.
     A custom card-style radio. Single selection is shown via aria-checked and the single
-    tab stop via roving tabindex. Arrows move the selection (focus = selection). The
+    tab stop via roving tabindex. Arrows move the selection (focus = selection). The group
+    delegates click and keydown, so the radios carry no data-action of their own. The
     selected value is reflected into a hidden field; the look is the consumer's CSS. %>
 <div class="radio-group-demo" role="radiogroup" aria-labelledby="rg-label"
      data-controller="stimeo--radio-group">
@@ -11,23 +12,17 @@
 
   <div class="radio-group-demo__options">
     <div class="radio-group-demo__option" role="radio" aria-checked="false" tabindex="0"
-         data-value="basic" data-stimeo--radio-group-target="radio"
-         data-action="click->stimeo--radio-group#select
-                      keydown->stimeo--radio-group#onKeydown">
+         data-value="basic" data-stimeo--radio-group-target="radio">
       <span class="radio-group-demo__name"><%= t("components.radio_group.demo.basic") %></span>
       <span class="radio-group-demo__desc"><%= t("components.radio_group.demo.basic_desc") %></span>
     </div>
     <div class="radio-group-demo__option" role="radio" aria-checked="false" tabindex="-1"
-         data-value="pro" data-stimeo--radio-group-target="radio"
-         data-action="click->stimeo--radio-group#select
-                      keydown->stimeo--radio-group#onKeydown">
+         data-value="pro" data-stimeo--radio-group-target="radio">
       <span class="radio-group-demo__name"><%= t("components.radio_group.demo.pro") %></span>
       <span class="radio-group-demo__desc"><%= t("components.radio_group.demo.pro_desc") %></span>
     </div>
     <div class="radio-group-demo__option" role="radio" aria-checked="false" tabindex="-1"
-         data-value="max" data-stimeo--radio-group-target="radio"
-         data-action="click->stimeo--radio-group#select
-                      keydown->stimeo--radio-group#onKeydown">
+         data-value="max" data-stimeo--radio-group-target="radio">
       <span class="radio-group-demo__name"><%= t("components.radio_group.demo.max") %></span>
       <span class="radio-group-demo__desc"><%= t("components.radio_group.demo.max_desc") %></span>
     </div>

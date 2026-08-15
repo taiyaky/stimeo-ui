@@ -43,8 +43,8 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  * - Visibility flips `hidden` and `data-state` (`open`/`closed`); the
  *   `aria-describedby` reference is always preserved.
  * - Opt-in **dismiss on scroll** (`closeOnScroll`): while shown, scrolling a tracked
- *   scroll-parent ancestor (or the window) hides the tooltip — the Radix / floating-ui
- *   convention, useful for focus-triggered tooltips that a pointer-leave cannot
+ *   scroll-parent ancestor (or the window) hides the tooltip, the usual convention for
+ *   anchored popups and useful for focus-triggered tooltips that a pointer-leave cannot
  *   dismiss. Off by default.
  */
 export class TooltipController extends Controller<HTMLElement> {

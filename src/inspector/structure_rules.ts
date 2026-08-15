@@ -27,7 +27,9 @@ export const structureRules: StructureRules = {
   "stimeo--aspect-ratio": {},
   // No required targets: the controller element is the form unless `form` is given.
   "stimeo--auto-submit": {},
-  "stimeo--avatar": { requiredTargets: ["image"] },
+  // No required targets: fallback-only and empty avatars are valid, while image
+  // and fallback can each be supplied independently.
+  "stimeo--avatar": {},
   "stimeo--breadcrumb": {
     requiredTargets: ["list"],
     // Collapsing is opt-in, but incomplete without its whole set: the items go
@@ -50,7 +52,9 @@ export const structureRules: StructureRules = {
   // No required targets: works on a bare <textarea>/<input> (no `input` target), and
   // the count display (`output`) is optional.
   "stimeo--character-counter": {},
-  "stimeo--checkbox": { requiredTargets: ["parent"] },
+  // No required targets: parent-only and child-only groups are both supported,
+  // and an empty root degrades to the explicit `none` aggregate.
+  "stimeo--checkbox": {},
   "stimeo--clipboard": { requiredTargets: ["button", "feedback"] },
   "stimeo--collapsible": { requiredTargets: ["trigger", "content"] },
   "stimeo--color-picker": { requiredTargets: ["slider"] },
@@ -144,7 +148,22 @@ export const structureRules: StructureRules = {
   "stimeo--menubar": { requiredTargets: ["top", "menu"] },
   // No required targets: value/ARIA/state live on the controller element.
   "stimeo--meter": {},
-  "stimeo--multi-select": { requiredTargets: ["input", "list", "tags"] },
+  // Chips display the selection here rather than holding it, so a field without
+  // `tagTemplate` renders none and still selects. Declaring the template is what
+  // makes its parts mandatory: the label and the localized remove name are
+  // author-owned, and a selection whose chip cannot be built commits nothing.
+  "stimeo--multi-select": {
+    requiredTargets: ["input", "list", "tags"],
+    conditionalTargets: [
+      {
+        whenPresent: "tagTemplate",
+        require: ["tag", "label", "remove"],
+        requireInside: true,
+        suggestion:
+          'Complete the chip template: inside it, it needs a "tag" root, a "label" element for the option text, and a "remove" button. Parts declared outside the template never reach the clone, so no selection can commit.',
+      },
+    ],
+  },
   "stimeo--navigation-menu": { requiredTargets: ["trigger", "panel"] },
   "stimeo--nested-form": { requiredTargets: ["list", "template"] },
   // No required targets: offline and online announcement channels are optional.
@@ -218,12 +237,25 @@ export const structureRules: StructureRules = {
   "stimeo--submit-once": {},
   "stimeo--switch": {},
   "stimeo--tabs": { requiredTargets: ["tab", "panel", "list"] },
-  "stimeo--tags-input": { requiredTargets: ["input", "tags"] },
+  // Free-input commit has the same all-or-nothing template contract as multi-select.
+  "stimeo--tags-input": {
+    requiredTargets: ["input", "tags", "tagTemplate"],
+    conditionalTargets: [
+      {
+        whenPresent: "tagTemplate",
+        require: ["tag", "label", "remove"],
+        requireInside: true,
+        suggestion:
+          'Complete the chip template: inside it, it needs a "tag" root, a "label" element for the entered text, and a "remove" button. Parts declared outside the template never reach the clone, so no tag can commit.',
+      },
+    ],
+  },
   // No required targets: the controller element is the <textarea>; it declares no targets.
   "stimeo--textarea-autosize": {},
   // No required targets: the 2-value single-button contract has no `option` targets.
   "stimeo--theme": {},
-  "stimeo--time-picker": { requiredTargets: ["segment", "field"] },
+  // The form field is optional; segment spinbuttons are the widget itself.
+  "stimeo--time-picker": { requiredTargets: ["segment"] },
   "stimeo--toast": { requiredTargets: ["list"] },
   "stimeo--toggle-group": { requiredTargets: ["item"] },
   "stimeo--toolbar": { requiredTargets: ["control"] },

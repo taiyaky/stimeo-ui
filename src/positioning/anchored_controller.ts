@@ -5,8 +5,8 @@ import { attachPositioning, type Placement, type PositioningOptions, type Positi
  * Headless **anchored positioning**: keeps a `floating` element placed against an
  * `anchor`, flipping/shifting it away from viewport edges as the page scrolls or
  * resizes. It is the declarative surface of the opt-in {@link attachPositioning}
- * engine (`@floating-ui/dom`-based) — Radix's anchored popper / floating-ui's
- * `autoUpdate`, exposed as a controller. No dedicated APG pattern; it is the
+ * engine (`@floating-ui/dom`-based), exposing its `autoUpdate` behavior as a
+ * controller. No dedicated APG pattern; it is the
  * placement primitive the popup patterns (Tooltip / Menu / Popover …) build on.
  *
  * Markup contract (identifier: `stimeo--anchored`):

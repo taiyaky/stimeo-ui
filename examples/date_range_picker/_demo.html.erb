@@ -3,8 +3,16 @@
     selection, a provisional range preview mid-selection, marking in-range cells,
     auto-swapping when start > end, applying presets, and grid keyboard movement
     (roving). Range ends are shown with aria-selected and the inside with data-in-range;
-    placement and styling live in demo.css. %>
-<div class="drp demo-card" data-controller="stimeo--date-range-picker">
+    placement and styling live in demo.css.
+
+    Two unavailable days are declared as data rather than written onto cells. The
+    42 cells are reused for a different date every month, so availability has to
+    be keyed by the date; the controller derives each cell's aria-disabled from
+    this array on every paint. A range may still span such a day — it just cannot
+    end on one. %>
+<% blackout = [3.days.from_now, 4.days.from_now].map { |day| day.strftime("%Y-%m-%d") } %>
+<div class="drp demo-card" data-controller="stimeo--date-range-picker"
+     data-stimeo--date-range-picker-disabled-dates-value="<%= blackout.to_json %>">
   <div class="drp__header">
     <button class="drp__nav" type="button"
             data-action="click->stimeo--date-range-picker#prev"
@@ -56,6 +64,10 @@
 
   <span class="drp__status" role="status" aria-live="polite"
         data-stimeo--date-range-picker-target="status"></span>
+
+  <%# Says on screen why two days are struck out. The dates move with today, so
+      without this the exclusion reads as a glitch rather than a demonstration. %>
+  <p class="drp__note"><%= t("components.date_range_picker.demo.blackout_note") %></p>
 
   <input type="hidden" name="start_date" data-stimeo--date-range-picker-target="startField" />
   <input type="hidden" name="end_date" data-stimeo--date-range-picker-target="endField" />

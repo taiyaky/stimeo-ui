@@ -8,9 +8,8 @@ const tokensOf = (value: string): string[] => value.split(/\s+/).filter(Boolean)
 /**
  * Headless **enter/leave transition base**: stages CSS classes for showing and hiding
  * an element (the shared substrate other widgets can lean on instead of hand-rolling
- * it). Counterpart to Headless UI `Transition` / Alpine `x-transition` (no APG pattern;
- * honors WCAG 2.2 **2.3.3** via `prefers-reduced-motion` and keeps the visual state in
- * sync with `hidden`).
+ * it). No APG pattern; honors WCAG 2.2 **2.3.3** via `prefers-reduced-motion` and keeps
+ * the visual state in sync with `hidden`.
  *
  * Markup contract (identifier: `stimeo--transition`):
  *   <div data-controller="stimeo--transition"

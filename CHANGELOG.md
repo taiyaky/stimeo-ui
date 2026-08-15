@@ -7,6 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.6.0] - 2026-08-15
+
+Minor release that separates reconciled state from user edits: `change` now
+means the user committed a value, and a controller that re-derives its own state
+reports `reconcile` instead. Several markup contracts tightened, and authored
+prose — remove-button names, announcements — moved out of the library. The
+Inspector manifest stays on schema v11, but **`stimeo check` can report errors on
+views that passed under 0.5.0**, so run it before deploying.
+
+### Upgrade notes
+
+- Listening to `change` to observe controller-driven repair? Subscribe to
+  `reconcile` too: carousel, checkbox, color-picker, multi-select, number-input,
+  radio-group, rating, tags-input, time-picker. Neither fires on connect.
+- rating: delete `max` and every `data-rating-value`. The DOM order of the
+  `symbol` targets is the scale.
+- aspect-ratio: delete the `content` target.
+- toggle-group, radio-group: items must be `<button type="button">` or a
+  non-interactive host with `role="button"` / `role="radio"`. Others are left
+  untouched at runtime.
+- tags-input, multi-select: delete the `status` target, put a
+  `stimeo--announcer` on the page, and set `announceText` /
+  `announceRemovedText`. In the chip template add `label` and `remove` targets
+  and author the remove button's `aria-label` (`{label}` / `{value}` expand).
+  Drop `data-*-slot="label"` and tags-input's `removeTag` action.
+- date-range-picker: declare unavailable days with `disabled-dates`; an
+  `aria-disabled` you write on a cell is overwritten on the next paint.
+- time-picker: AM/PM is a `role="spinbutton"` segment, not an `aria-pressed`
+  toggle. `seconds` only decides whether the composed value carries seconds.
+- List values are read as JSON strings — idle's `events`, password-strength's
+  `levels`, persist's `exclude`, date-range-picker's `disabled-dates`. The
+  markup is unchanged; the manifest reports `String` where it reported `Array`.
+
+### Removed
+
+- **Breaking** — rating: `max` and `data-rating-value`. aspect-ratio: the
+  `content` target. tags-input, multi-select: the `status` target, tags-input's
+  `removeTag` action, and the English `Remove {value}` label the library wrote
+  onto generated remove buttons.
+
+### Added
+
+- A `reconcile` event, carrying the same `detail` as that component's `change`,
+  on carousel, checkbox, color-picker, multi-select, number-input, radio-group,
+  rating, tags-input, and time-picker.
+- checkbox: a group works without a `parent`; the root still reports
+  `all` / `partial` / `none`.
+- rating: `Delete` and `Backspace` clear the rating when `clearable`.
+- date-range-picker: `disabled-dates`, a `monthchange` event,
+  `Shift+PageUp` / `Shift+PageDown` for stepping a year, and month labels
+  formatted from `documentElement.lang`.
+- multi-select: a `fields` target holding one hidden input per selected value,
+  with `name` and `form`, plus `announceText` / `announceRemovedText`.
+  tags-input: `label` and `remove` targets and the same two announce values.
+- avatar: an `empty` state beside `loading`, `loaded`, and `error`.
+- Inspector: `invalid-host` for radio-group and toggle-group items;
+  chip-template parts required *inside* the template; `aria-label` on remove
+  buttons and the group role on toggle groups; at most one checkbox `parent`
+  and one checked radio; a positive integer time-picker `step`. An empty
+  attribute value no longer satisfies a requirement that asks only for the
+  attribute's presence.
+
+### Changed
+
+- **Breaking** — `change` is reserved for user-committed values. DOM
+  normalization, target churn, morphs, and runtime value changes report
+  `reconcile`, and a repair that leaves the committed state unchanged reports
+  nothing.
+- **Breaking** — radio-group, time-picker: the hidden `field` fires a native
+  `change` only for user edits, so a server-rendered repaint cannot drive an
+  `auto-submit` companion into a resubmit loop.
+- **Breaking** — multi-select: `max` is enforced at all times, not only on the
+  click path; surplus options normalize to `aria-selected="false"`.
+- **Breaking** — avatar: a present `src` value wins over an authored `src`, and
+  an empty one means "no image". Remove the attribute to hand the element's own
+  `src` back.
+- **Breaking** — checkbox: a parent toggle sets each child's `checked` without
+  synthesizing a native `change` per child; the root reports one event.
+- toggle-group, radio-group, tags-input, multi-select: interaction is delegated
+  from the container, so items added at runtime work without per-item
+  `data-action`. Existing per-item actions stay compatible.
+- toggle-group, radio-group: `aria-disabled` items stay reachable by arrow keys
+  with activation suppressed; natively disabled and `hidden` items are skipped.
+- number-input, rating, scroll-area, time-picker: ARIA and `tabindex` the
+  controller writes are treated as loans and handed back to their authored
+  values, without overwriting a change you made in the meantime.
+- date-range-picker: a preset that only partly overlaps `min` / `max` is
+  narrowed to the selectable span instead of committing an unavailable endpoint.
+- multi-select, tags-input: `Backspace` in an empty input removes the last chip
+  and keeps focus in the input.
+- time-picker: a unit that wraps past noon or midnight carries AM/PM with it,
+  and one operation reports one `change` with the final value.
+
+### Fixed
+
+- avatar, carousel, checkbox, radio-group, rating, roving, toggle-group: targets
+  added, removed, or morphed at runtime settle on one state — a single tab stop,
+  a single checked or pressed item, and focus on a surviving item.
+- date-range-picker: an unavailable day cannot become a committed endpoint
+  through a preset, a preview, or Enter/Space; a reversed stored range is
+  normalized on connect; a pending selection is rewound before Turbo caches the
+  page.
+- number-input: commits compare numbers rather than the displayed text, and IME
+  composition never commits a value.
+- time-picker: with `wrap` disabled, 11 and 12 no longer step into each other,
+  and an unfinished direct-entry buffer is discarded when focus leaves.
+- multi-select, tags-input: a chip is built only when the template can produce a
+  complete one, only the `remove` target inside a chip acts on it, and a
+  replaced `tags` container is re-wired.
+- file-dropzone, scroll-area: a replaced `list` / `viewport` keeps its state and
+  takes over the listeners; the old element stops responding.
+- idle, password-strength, persist, date-range-picker: a malformed list value
+  falls back to its default instead of stopping the controller from connecting
+  and leaving the whole element inert.
+
 ## [0.5.0] - 2026-08-13
 
 ### Changed
@@ -458,6 +573,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.6.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.6.0
 [0.5.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.5.0
 [0.4.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.4.0
 [0.3.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.3.0

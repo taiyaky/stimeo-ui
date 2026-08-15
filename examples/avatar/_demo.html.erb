@@ -1,8 +1,8 @@
 <%# Markup for the avatar demo.
     The accessible name is owned solely by the container (role="img" + aria-label);
     the inner <img> and fallback use aria-hidden="true" to avoid double announcement.
-    The library only detects load/error and toggles display (data-state); shape,
-    color, and size are drawn by demo.css. %>
+    The library only tracks the source and its load state, exposing empty / loading /
+    loaded / error on data-state; shape, color, and size are drawn by demo.css. %>
 <div class="avatar-demo">
   <%# 1. An avatar that loads successfully. The src is a self-contained data-URI SVG that
       draws a person silhouette (a picture, not letters) so the "loaded image" state reads
@@ -54,5 +54,22 @@
       >JD</span>
     </span>
     <figcaption><%= t("components.avatar.demo.caption_fallback") %></figcaption>
+  </figure>
+
+  <%# 3. An avatar with no image target at all. Both targets are optional, so a
+      fallback-only avatar is valid and settles in the empty state. %>
+  <figure class="avatar-demo__item">
+    <span
+      class="avatar"
+      data-controller="stimeo--avatar"
+      role="img"
+      aria-label="<%= t("components.avatar.demo.name_empty") %>">
+      <span
+        class="avatar__fallback"
+        aria-hidden="true"
+        data-stimeo--avatar-target="fallback"
+      >GU</span>
+    </span>
+    <figcaption><%= t("components.avatar.demo.caption_empty") %></figcaption>
   </figure>
 </div>
