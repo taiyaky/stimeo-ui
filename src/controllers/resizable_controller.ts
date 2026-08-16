@@ -29,6 +29,8 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  *   presentation styles.
  * - `F6` cycles focus through the panes, which the pattern lists as optional.
  *
+ * `change` dispatches `{ value: number, fraction: number }`.
+ *
  * @remarks
  * Behavior only. The controller adjusts the CSS custom property on the root element,
  * updates ARIA values on the separator, and emits `stimeo--resizable:change` events.

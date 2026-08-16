@@ -1,23 +1,19 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { readLocalStorage, writeLocalStorage } from "../../src/utils/safe_storage";
+import {
+  readLocalStorage,
+  removeLocalStorage,
+  writeLocalStorage,
+} from "../../src/utils/safe_storage";
 
 /**
- * Unit tests for the guarded `localStorage` helpers {@link readLocalStorage} /
- * {@link writeLocalStorage}: reads fall back to `null` and writes are dropped
- * when storage throws (storage disabled / private mode / quota).
- *
- * happy-dom ships a working `localStorage`, but its `Storage` instance is a
- * Proxy whose `defineProperty` trap makes `vi.spyOn(localStorage, …)`
- * unrestorable (the spy lingers as an own property). The failure paths instead
- * swap the `window.localStorage` property itself for a throwing stub — the
- * same shape as a browser with storage blocked — and restore the original
- * descriptor afterwards.
+ * Unit tests for guarded localStorage reads, writes, and removals. An unavailable
+ * store is distinguishable from an unset key, and no browser exception escapes.
  */
 
-/** Restores `window.localStorage` after a blocked-storage test (null = nothing to restore). */
+/** Restores `window.localStorage` after a blocked-storage test. */
 let restoreStorage: (() => void) | null = null;
 
-/** Replaces `window.localStorage` with a stub whose reads/writes throw. */
+/** Replaces `window.localStorage` with a stub whose operations throw. */
 const installBlockedStorage = (): void => {
   const descriptor = Object.getOwnPropertyDescriptor(window, "localStorage");
   const blocked = {
@@ -25,6 +21,9 @@ const installBlockedStorage = (): void => {
       throw new Error("storage blocked");
     },
     setItem(): void {
+      throw new Error("storage blocked");
+    },
+    removeItem(): void {
       throw new Error("storage blocked");
     },
   };
@@ -47,31 +46,49 @@ afterEach(() => {
 describe("readLocalStorage", () => {
   it("returns the stored string", () => {
     window.localStorage.setItem("stimeo-test", "value");
-    expect(readLocalStorage("stimeo-test")).toBe("value");
+    expect(readLocalStorage("stimeo-test")).toEqual({ ok: true, value: "value" });
   });
 
-  it("returns null for an unset key", () => {
-    expect(readLocalStorage("stimeo-missing")).toBeNull();
+  it("distinguishes an unset key from unavailable storage", () => {
+    expect(readLocalStorage("stimeo-missing")).toEqual({ ok: true, value: null });
   });
 
-  it("returns null when the read throws (storage blocked)", () => {
-    window.localStorage.setItem("stimeo-test", "value");
+  it("returns a failure when the read throws", () => {
     installBlockedStorage();
-    expect(readLocalStorage("stimeo-test")).toBeNull();
+    const result = readLocalStorage("stimeo-test");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBeInstanceOf(Error);
   });
 });
 
 describe("writeLocalStorage", () => {
-  it("stores the value", () => {
-    writeLocalStorage("stimeo-test", "value");
+  it("stores the value and reports success", () => {
+    expect(writeLocalStorage("stimeo-test", "value")).toEqual({
+      ok: true,
+      value: undefined,
+    });
     expect(window.localStorage.getItem("stimeo-test")).toBe("value");
   });
 
-  it("swallows a throwing write (quota / private mode) without persisting", () => {
+  it("returns a failure when the write throws", () => {
     installBlockedStorage();
-    expect(() => writeLocalStorage("stimeo-test", "value")).not.toThrow();
-    restoreStorage?.();
-    restoreStorage = null;
+    const result = writeLocalStorage("stimeo-test", "value");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBeInstanceOf(Error);
+  });
+});
+
+describe("removeLocalStorage", () => {
+  it("removes the key and reports success", () => {
+    window.localStorage.setItem("stimeo-test", "value");
+    expect(removeLocalStorage("stimeo-test")).toEqual({ ok: true, value: undefined });
     expect(window.localStorage.getItem("stimeo-test")).toBeNull();
+  });
+
+  it("returns a failure when the removal throws", () => {
+    installBlockedStorage();
+    const result = removeLocalStorage("stimeo-test");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBeInstanceOf(Error);
   });
 });

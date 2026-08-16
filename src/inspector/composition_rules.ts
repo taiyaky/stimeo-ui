@@ -29,7 +29,7 @@ export const compositionRules: CompositionRules = {
       target: "list",
       fallbackToScope: true,
       coController: "stimeo--roving",
-      when: { value: "orientation", equals: ["vertical"], default: "vertical" },
+      when: { value: "orientation", type: "string", equals: ["vertical"], default: "vertical" },
       require: { value: "orientation", oneOf: ["vertical", "both"], default: "horizontal" },
       suggestion:
         'Set data-stimeo--roving-orientation-value="vertical" on the list so Up/Down move focus between handles (roving defaults to "horizontal").',
@@ -38,7 +38,12 @@ export const compositionRules: CompositionRules = {
       target: "list",
       fallbackToScope: true,
       coController: "stimeo--roving",
-      when: { value: "orientation", equals: ["horizontal"], default: "vertical" },
+      when: {
+        value: "orientation",
+        type: "string",
+        equals: ["horizontal"],
+        default: "vertical",
+      },
       require: { value: "orientation", oneOf: ["horizontal", "both"], default: "horizontal" },
       suggestion:
         'Set data-stimeo--roving-orientation-value="horizontal" on the list so Left/Right move focus between handles.',
@@ -49,7 +54,7 @@ export const compositionRules: CompositionRules = {
     {
       target: "item",
       coController: "stimeo--pointer-drag",
-      when: { value: "orientation", equals: ["vertical"], default: "vertical" },
+      when: { value: "orientation", type: "string", equals: ["vertical"], default: "vertical" },
       require: { value: "axis", oneOf: ["y", "both"], default: "both" },
       suggestion:
         'Set data-stimeo--pointer-drag-axis-value="y" on the item so grabbed Up/Down (and vertical drags) move it along the list.',
@@ -57,7 +62,12 @@ export const compositionRules: CompositionRules = {
     {
       target: "item",
       coController: "stimeo--pointer-drag",
-      when: { value: "orientation", equals: ["horizontal"], default: "vertical" },
+      when: {
+        value: "orientation",
+        type: "string",
+        equals: ["horizontal"],
+        default: "vertical",
+      },
       require: { value: "axis", oneOf: ["x", "both"], default: "both" },
       suggestion:
         'Set data-stimeo--pointer-drag-axis-value="x" on the item so grabbed Left/Right (and horizontal drags) move it along the list.',

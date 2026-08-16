@@ -33,6 +33,8 @@ const hookOwners = new WeakMap<Element, HighlightController>();
  * `data-highlight="true"`, dispatches `start`, and after `duration` removes it and
  * dispatches `end` — both carry `detail.element`.
  *
+ * `start` and `end` dispatch `{ element }`.
+ *
  * @remarks
  * Behavior only — it ships no color or animation, just the hook (pair with CSS, and
  * with Announcer / Flash for non-visual notice). Under `prefers-reduced-motion: reduce`

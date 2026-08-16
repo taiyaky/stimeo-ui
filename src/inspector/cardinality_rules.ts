@@ -46,6 +46,19 @@ export const cardinalityRules: CardinalityRules = {
         'Keep at most one "parent" target in a checkbox group — omit it for a child-only aggregate, or use one select-all checkbox for the children.',
     },
   ],
+  // Runtime ARIA is written through Stimulus' singular controlTarget. Requiring
+  // one control structurally covers the lower bound; this upper bound prevents
+  // a second target from looking managed while every association resolves to
+  // the first control in DOM order.
+  "stimeo--form-field": [
+    {
+      within: "",
+      target: "control",
+      max: 1,
+      suggestion:
+        'Keep exactly one "control" target in each form field — split multiple inputs into separate stimeo--form-field scopes.',
+    },
+  ],
   // The picker's selected dot mirrors the visible slide; two of them means the
   // author asked for two slides at once, and connect keeps the first.
   "stimeo--carousel": [
@@ -68,7 +81,7 @@ export const cardinalityRules: CardinalityRules = {
       attr: "aria-selected",
       values: ["true"],
       max: 1,
-      when: { value: "selection", equals: ["single"], default: "none" },
+      when: { value: "selection", type: "string", equals: ["single"], default: "none" },
       suggestion:
         'Leave aria-selected="true" on exactly one row, or switch the grid to data-stimeo--data-grid-selection-value="multiple" if several were meant.',
     },

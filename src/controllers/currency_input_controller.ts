@@ -21,6 +21,8 @@ import { Controller } from "@hotwired/stimulus";
  *     <input type="hidden" data-stimeo--currency-input-target="field" />
  *   </div>
  *
+ * `change` dispatches `{ value: number, formatted: string }`.
+ *
  * @remarks
  * Behavior only — no styling, no validation (range/required belong to the
  * consumer or Form Field). The display field is the sole Tab stop and keeps its

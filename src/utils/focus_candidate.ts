@@ -38,9 +38,10 @@ export function inheritsFieldsetDisabled(control: HTMLElement): boolean {
  * **`aria-disabled` is not disqualifying.** It is the attribute an author uses
  * for a control that must stay *discoverable*, and the roving contract keeps
  * such items reachable. Only the three conditions that make the platform refuse
- * focus are checked: `hidden` (an ancestor's counts), the native `disabled`
- * property, and `disabled` inherited from an ancestor `fieldset`. CSS-only
- * invisibility is not detectable here and stays the consumer's problem.
+ * focus are checked: `hidden` / `inert` (an ancestor's counts),
+ * `input[type="hidden"]`, the native `disabled` property, and `disabled`
+ * inherited from an ancestor `fieldset`. CSS-only invisibility is handled by
+ * {@link isRenderedForFocus} when a consumer needs sequential-focus semantics.
  *
  * Reading `:disabled` instead of walking the fieldset chain would be shorter, but
  * that pseudo-class is not evaluated consistently outside real browsers and this
@@ -65,8 +66,112 @@ export function inheritsFieldsetDisabled(control: HTMLElement): boolean {
  * @param element - the candidate destination
  */
 export function canTakeFocus(element: HTMLElement): boolean {
-  if (element.closest("[hidden]")) return false;
+  if (element.closest("[hidden], [inert]")) return false;
+  if (element instanceof HTMLInputElement && element.type === "hidden") return false;
   if (!("disabled" in element)) return true;
   if ((element as HTMLElement & { disabled: boolean }).disabled) return false;
   return !inheritsFieldsetDisabled(element);
+}
+
+/** Elements whose semantics or authored attributes can place them in sequential focus order. */
+export const TAB_STOP_CANDIDATE_SELECTOR = [
+  "a[href]",
+  "area[href]",
+  "button",
+  "input",
+  "select",
+  "textarea",
+  "summary",
+  "iframe",
+  "audio[controls]",
+  "video[controls]",
+  "[tabindex]",
+  "[contenteditable]",
+].join(",");
+
+/** Optional browser visibility API used to exclude CSS-hidden candidates. */
+interface VisibilityCheckable {
+  checkVisibility?: (options?: { visibilityProperty?: boolean }) => boolean;
+}
+
+/** Whether CSS visibility allows an otherwise eligible element to participate in focus order. */
+export function isRenderedForFocus(element: HTMLElement): boolean {
+  const check = (element as HTMLElement & VisibilityCheckable).checkVisibility;
+  return typeof check === "function" ? check.call(element, { visibilityProperty: true }) : true;
+}
+
+/** Parses an authored `tabindex`; invalid syntax has no explicit focus-order meaning. */
+function authoredTabindex(element: HTMLElement): number | null {
+  const value = element.getAttribute("tabindex");
+  if (value === null || !/^[+-]?\d+$/.test(value.trim())) return null;
+  return Number(value);
+}
+
+/** Whether the element's native semantics place it in sequential focus order. */
+function hasNativeTabStop(element: HTMLElement): boolean {
+  if (element instanceof HTMLAnchorElement || element instanceof HTMLAreaElement) {
+    return element.hasAttribute("href");
+  }
+  if (
+    element instanceof HTMLButtonElement ||
+    element instanceof HTMLSelectElement ||
+    element instanceof HTMLTextAreaElement
+  ) {
+    return true;
+  }
+  if (element instanceof HTMLInputElement) return element.type !== "hidden";
+  if (element instanceof HTMLIFrameElement) return true;
+  if (element.tagName === "AUDIO" || element.tagName === "VIDEO") {
+    return element.hasAttribute("controls");
+  }
+  if (element instanceof HTMLElement && element.tagName === "SUMMARY") {
+    const details = element.parentElement;
+    return (
+      details instanceof HTMLDetailsElement &&
+      Array.from(details.children).find((child) => child.tagName === "SUMMARY") === element
+    );
+  }
+  return false;
+}
+
+/** Whether an explicit `contenteditable` value creates an editable tab stop. */
+function hasEditableTabStop(element: HTMLElement): boolean {
+  const value = element.getAttribute("contenteditable")?.toLowerCase();
+  return value === "" || value === "true" || value === "plaintext-only";
+}
+
+/**
+ * Whether an element is a usable sequential Tab stop right now.
+ *
+ * Native semantics, authored `tabindex`, editable hosts, inherited disabled state,
+ * HTML `hidden`/`inert`, and CSS visibility are evaluated together. `aria-disabled`
+ * remains focusable because it communicates unavailability without removing the
+ * control from discovery order.
+ */
+export function isTabStop(element: HTMLElement): boolean {
+  if (!canTakeFocus(element) || !isRenderedForFocus(element)) return false;
+
+  const tabindex = authoredTabindex(element);
+  if (tabindex !== null) return tabindex >= 0;
+  return hasNativeTabStop(element) || hasEditableTabStop(element);
+}
+
+/** Returns every usable sequential Tab stop below `root` in document order. */
+export function tabStopsWithin(root: ParentNode): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(TAB_STOP_CANDIDATE_SELECTOR)).filter(
+    isTabStop,
+  );
+}
+
+/** Returns the first usable sequential Tab stop below `root`, if one exists. */
+export function firstTabStop(root: ParentNode): HTMLElement | null {
+  for (const candidate of root.querySelectorAll<HTMLElement>(TAB_STOP_CANDIDATE_SELECTOR)) {
+    if (isTabStop(candidate)) return candidate;
+  }
+  return null;
+}
+
+/** Whether `root` contains at least one usable sequential Tab stop. */
+export function hasTabStop(root: ParentNode): boolean {
+  return firstTabStop(root) !== null;
 }

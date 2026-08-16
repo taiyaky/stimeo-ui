@@ -1,8 +1,8 @@
 <%# Markup for the form-field demo.
     Associates label / description / error with the control via aria-describedby /
     aria-invalid / aria-errormessage. Showing/clearing the error uses the action
-    parameter (message) and #clearError. The look (e.g. the invalid border) switches
-    on data-stimeo--form-field-invalid and aria-invalid. %>
+    parameter (message) and #clearError. The look switches on
+    data-stimeo--form-field-invalid and aria-invalid. %>
 <div class="form-field-demo" data-controller="stimeo--form-field"
      data-stimeo--form-field-focus-on-error-value="true">
   <label class="form-field-demo__label" for="ff-email">
@@ -13,8 +13,8 @@
          placeholder="<%= t('components.form_field.demo.placeholder') %>"
          data-stimeo--form-field-target="control" />
 
-  <%# Helper description. On connect it's assigned an id and linked into the
-      control's aria-describedby. %>
+  <%# Helper description. It is assigned an id and linked into the control's
+      aria-describedby. %>
   <p class="form-field-demo__description" data-stimeo--form-field-target="description">
     <%= t("components.form_field.demo.hint") %>
   </p>
@@ -23,8 +23,9 @@
       it doesn't validate or clear the value). %>
   <p class="form-field-demo__note"><%= t("components.form_field.demo.note") %></p>
 
-  <%# Error region. role="alert" so it's announced without moving focus. Starts hidden. %>
-  <p class="form-field-demo__error" role="alert" hidden
+  <%# Visual error region. Starts hidden; speech is delegated to the shared
+      announcer seated below. %>
+  <p class="form-field-demo__error" hidden
      data-stimeo--form-field-target="error"></p>
 
   <div class="form-field-demo__actions">
@@ -40,7 +41,15 @@
     </button>
   </div>
 
-  <%# Helper region that subscribes to the validate event to show status (updated by demo.js). %>
+  <%# Helper region that subscribes to the validate event and shows the valid
+      state only (updated by demo.js). %>
   <p class="form-field-demo__status" id="ff-status" aria-live="polite"
      data-valid-text="<%= t('components.form_field.demo.valid') %>"></p>
+
+  <%# Assertive announcement target. It is seated in the accessibility tree ahead
+      of the first error, which is what makes the message observable. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden" data-stimeo--announcer-target="assertive"
+         aria-live="assertive" aria-atomic="true"></div>
+  </div>
 </div>

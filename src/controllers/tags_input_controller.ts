@@ -48,6 +48,8 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  *   delete the focused tag, and `Backspace` on an empty input deletes the last.
  * - Removing from a chip moves focus to its neighbor (else the input); removing
  *   via empty-input `Backspace` keeps focus in the input for continued editing.
+ * `change` and `reconcile` dispatch `{ tags: string[] }`; `reject` dispatches
+ * `{ value: string, reason: "duplicate" | "empty" | "max" }`.
  */
 export class TagsInputController extends Controller<HTMLElement> {
   static override targets = ["input", "tags", "tag", "tagTemplate", "label", "remove", "fields"];

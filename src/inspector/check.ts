@@ -20,6 +20,7 @@ import {
   type DocumentCondition,
   type ElementCondition,
   type HostRequirement,
+  type HostSelector,
   type Manifest,
   type ValueCondition,
   type ValueConstraint,
@@ -84,6 +85,31 @@ function isInside(node: ElementNode, ancestor: ElementNode): boolean {
   return false;
 }
 
+/** Whether one element has the tag — and, when named, the attribute — a selector asks for. */
+function matchesHost(node: ElementNode, selector: HostSelector): boolean {
+  if (node.tag !== selector.tag) return false;
+  if (!selector.attr) return true;
+  const attr = node.attrs.find((candidate) => candidate.name === selector.attr);
+  return attr !== undefined && (selector.values ?? []).includes(attr.value.trim().toLowerCase());
+}
+
+/**
+ * The nearest ancestor of `node` matching any selector, or a falsy result when
+ * none can be named: `null` where the chain holds no match, `undefined` where a
+ * generated ancestor sits in the way and has no tag to compare. Both leave the
+ * host unknown, which callers treat the same way.
+ */
+function nearestHost(
+  node: ElementNode,
+  selectors: readonly HostSelector[],
+): ElementNode | null | undefined {
+  for (let current = node.parent; current; current = current.parent) {
+    if (current.origin !== "markup" || current.opaque) return undefined;
+    if (selectors.some((selector) => matchesHost(current, selector))) return current;
+  }
+  return null;
+}
+
 export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const tree = parseHtml(neutralizeErb(source), erbElements(source));
@@ -125,7 +151,10 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       (a) => a.name === `data-${identifier}-${dasherize(when.value)}-value`,
     );
     if (hostAttr && isDynamicValue(hostAttr)) return null;
-    return when.equals.includes(hostAttr ? hostAttr.value.trim() : when.default);
+    const raw = hostAttr ? hostAttr.value : when.default;
+    const effective =
+      when.type === "boolean" ? String(!(raw === "0" || raw.toLowerCase() === "false")) : raw;
+    return when.equals.includes(effective);
   };
 
   /**
@@ -264,6 +293,28 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   const presence = new Map<ElementNode, Map<string, Set<string>>>();
   /** Target *elements* per scope/identifier/target name, for stage-3 ARIA checks. */
   const targetNodes = new Map<ElementNode, Map<string, Map<string, ElementNode[]>>>();
+  /** Action methods wired within each scope, with the event that triggers them. */
+  const wiredActions = new Map<
+    ElementNode,
+    Map<string, Array<{ element: ElementNode; method: string; eventType: string }>>
+  >();
+
+  const recordAction = (
+    owner: ElementNode,
+    identifier: string,
+    element: ElementNode,
+    method: string,
+    eventType: string,
+  ): void => {
+    let byId = wiredActions.get(owner);
+    if (!byId) {
+      byId = new Map();
+      wiredActions.set(owner, byId);
+    }
+    const found = byId.get(identifier);
+    if (found) found.push({ element, method, eventType });
+    else byId.set(identifier, [{ element, method, eventType }]);
+  };
 
   const recordPresence = (owner: ElementNode, identifier: string, target: string): void => {
     let byId = presence.get(owner);
@@ -555,11 +606,16 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
                 (candidate) => dasherize(candidate.value) === parsed.valueToken,
               );
               if (constraint && !valueSatisfiesConstraint(attr.value, constraint)) {
+                // Numeric decoding ignores surrounding whitespace, so the trimmed
+                // literal is what the runtime reads. A String contract compares the
+                // attribute verbatim, which makes the padding the reason it failed —
+                // trimming it away would print the accepted spelling as the rejected one.
+                const literal = constraint.type === "string" ? attr.value : attr.value.trim();
                 report(
                   node,
                   "invalid-value",
                   "error",
-                  `Invalid value "${attr.value.trim()}" for "${parsed.identifier}.${parsed.valueToken}". Expected ${describeValueConstraint(constraint)}.`,
+                  `Invalid value "${literal}" for "${parsed.identifier}.${parsed.valueToken}". Expected ${describeValueConstraint(constraint)}.`,
                   attr,
                   constraint.suggestion,
                 );
@@ -572,8 +628,12 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
 
       // --- data-action descriptors: controller + method --------------------
       if (attr.name === "data-action") {
-        for (const { identifier, method } of actionDescriptors(attr.value)) {
+        for (const { identifier, method, eventType } of actionDescriptors(attr.value)) {
           const controller = known[identifier];
+          if (controller && method.length > 0) {
+            const owner = findOwner(node, identifier);
+            if (owner) recordAction(owner, identifier, node, method, eventType);
+          }
           if (!controller) {
             const best = nearestName(identifier, knownIdentifiers);
             report(
@@ -697,21 +757,111 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       // `requireInside` asks where the part sits, not merely whether it exists:
       // a `<template>` is cloned at runtime, so a part outside it never reaches
       // the clone and the controller refuses to build.
-      const satisfied = (target: string): boolean =>
-        rule.requireInside
-          ? nodesOf(target).some((el) => owners.some((owner) => isInside(el, owner)))
-          : present.has(target);
+      const hosts = rule.requireSameHost;
+      // A host is only judged when both sides resolve to one. A template helper
+      // that emits the host leaves nothing in the parsed tree, so "no host
+      // above this element" and "the host is generated" look identical here —
+      // reporting either would be a guess.
+      const sharesHost = (target: string, selectors: readonly HostSelector[]): boolean => {
+        const ownerHosts = owners.map((owner) => nearestHost(owner, selectors));
+        if (ownerHosts.some((host) => !host)) return true;
+        const candidates = nodesOf(target);
+        if (candidates.length === 0) return false;
+        return candidates.some((el) => {
+          const host = nearestHost(el, selectors);
+          return host ? ownerHosts.includes(host) : true;
+        });
+      };
+      const satisfied = (target: string): boolean => {
+        if (hosts) return sharesHost(target, hosts);
+        if (rule.requireInside)
+          return nodesOf(target).some((el) => owners.some((owner) => isInside(el, owner)));
+        return present.has(target);
+      };
       const missing = rule.require.filter((target) => !satisfied(target));
       if (missing.length === 0) continue;
       report(
         node,
         "missing-conditional-target",
         complete ? "error" : "warning",
-        rule.requireInside
-          ? `"${identifier}" requires ${list(missing)} inside its "${rule.whenPresent}".`
-          : `"${identifier}" has a "${rule.whenPresent}" target, which also requires ${list(missing)}.`,
+        hosts
+          ? `"${identifier}" requires ${list(missing)} in the same ${rule.hostLabel ?? "element"} as its "${rule.whenPresent}".`
+          : rule.requireInside
+            ? `"${identifier}" requires ${list(missing)} inside its "${rule.whenPresent}".`
+            : `"${identifier}" has a "${rule.whenPresent}" target, which also requires ${list(missing)}.`,
         node,
         complete ? rule.suggestion : UNRESOLVED_TARGET_HINT,
+      );
+    }
+  }
+
+  // --- Stage 2b: required actions per configured element ------------------
+  // Optional interactive variants can be structurally complete and expose a
+  // Tab stop while remaining inert because the consumer omitted the one action
+  // binding that activates them. The rule checks the exact host and event, not
+  // merely the method appearing somewhere else in the controller scope.
+  for (const { node, identifier } of scopes) {
+    const controller = known[identifier];
+    if (!controller) continue;
+    const wired = wiredActions.get(node)?.get(identifier) ?? [];
+    for (const rule of controller.requiredActions) {
+      if (conditionHolds(node, identifier, rule.when) !== true) continue;
+      const elements =
+        rule.target === ""
+          ? [node]
+          : (targetNodes.get(node)?.get(identifier)?.get(rule.target) ?? []);
+      for (const element of elements) {
+        const actionAttr = element.attrs.find((attr) => attr.name === "data-action");
+        if (element.opaque || (actionAttr && isDynamicValue(actionAttr))) continue;
+        const satisfied = wired.some(
+          (action) =>
+            action.element === element &&
+            action.method === rule.action &&
+            rule.eventTypes.includes(action.eventType),
+        );
+        if (satisfied) continue;
+        const where = rule.target === "" ? "scope element" : `"${rule.target}" target`;
+        report(
+          element,
+          "missing-required-action",
+          "error",
+          `The ${where} of "${identifier}" requires action "${rule.action}" on ${list(rule.eventTypes)} in this configuration.`,
+          element,
+          rule.suggestion,
+        );
+      }
+    }
+  }
+
+  // --- Stage 2c: action completion per scope -------------------------------
+  // An action that opens a state the controller cannot close on its own. The
+  // markup is well-formed either way and nothing throws, so the only symptom of
+  // a missing exit is a control that never comes back.
+  for (const { node, identifier } of scopes) {
+    const controller = known[identifier];
+    if (!controller) continue;
+    const wired = wiredActions.get(node)?.get(identifier) ?? [];
+    if (wired.length === 0) continue;
+    for (const rule of controller.actionCompletion) {
+      const opens = wired.some(
+        (action) => action.method === rule.opens && rule.whenTriggeredBy.includes(action.eventType),
+      );
+      if (!opens) continue;
+      if (wired.some((action) => rule.closedBy.includes(action.method))) continue;
+      if (rule.escapeValue) {
+        const attrName = `data-${identifier}-${dasherize(rule.escapeValue)}-value`;
+        const authored = node.attrs.find((attr) => attr.name === attrName);
+        // A generated bound is undecidable, and an author who wrote the escape
+        // at all is answering this rule — only a literal zero leaves it open.
+        if (authored && (isDynamicValue(authored) || Number(authored.value.trim()) !== 0)) continue;
+      }
+      report(
+        node,
+        "missing-action-completion",
+        "warning",
+        `"${identifier}" opens a state with "${rule.opens}" here, and nothing in this scope closes it.`,
+        node,
+        rule.suggestion,
       );
     }
   }
@@ -1149,8 +1299,9 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   return diagnostics;
 }
 
-/** Decodes a Number Value exactly as Stimulus does, then applies its contract. */
+/** Decodes a literal Value according to its family, then applies its contract. */
 function valueSatisfiesConstraint(raw: string, constraint: ValueConstraint): boolean {
+  if (constraint.type === "string") return constraint.allowedValues.includes(raw);
   const value = decodeNumericValue(raw);
   if (Number.isNaN(value)) return false;
   if (constraint.finite && !Number.isFinite(value)) return false;
@@ -1164,8 +1315,9 @@ function decodeNumericValue(raw: string): number {
   return Number(raw.replace(/_/g, ""));
 }
 
-/** Human-readable numeric expectation used in the diagnostic message. */
+/** Human-readable expectation used in the diagnostic message. */
 function describeValueConstraint(constraint: ValueConstraint): string {
+  if (constraint.type === "string") return `one of ${list(constraint.allowedValues)}`;
   const parts = [constraint.finite ? "a finite number" : "a number"];
   if (constraint.greaterThan !== undefined) {
     parts.push(`greater than ${constraint.greaterThan}`);

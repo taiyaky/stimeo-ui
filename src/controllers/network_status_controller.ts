@@ -24,6 +24,8 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * (assertive, because losing connectivity is urgent) and `announceOnlineText`
  * (polite), which go to the page's announcer.
  *
+ * `change` dispatches `{ online: boolean }`.
+ *
  * @remarks
  * Behavior only. `navigator.onLine` is the browser's *guess* — it does not
  * guarantee server reachability, which stays the consumer's job. A banner that is

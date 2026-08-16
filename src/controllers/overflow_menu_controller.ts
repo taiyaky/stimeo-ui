@@ -74,6 +74,8 @@ interface MovableParent {
  * `data-overflowing` / `data-overflow-count`, and a `change` event fires on connect and
  * on every later transition.
  *
+ * `change` dispatches `{ visible, hidden }`.
+ *
  * @remarks
  * **Measuring.** The container's width must not be derived from its content (give the bar
  * an explicit width, `flex: 1`, or plain block layout): the More button is revealed before

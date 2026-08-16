@@ -1,13 +1,43 @@
-<%# Dirty-form demo: edit the field and the form gets data-dirty (shown as a badge).
-    While dirty, leaving is guarded (beforeunload + Turbo turbo:before-visit → a native
-    confirm). "Save" calls the markClean action to clear the dirty state (this catalog
-    has no server, so it stands in for a successful save). The library owns the
-    data-dirty hook and the guards; this demo only styles the badge. %>
+<%# Dirty-form demo: edit either field and its form gets data-dirty (shown as a badge).
+    When both forms are dirty, one Turbo visit dispatches both guard events and opens
+    one native confirm using the first eligible form in live DOM order. "Save" calls
+    markClean for that form; this catalog has no server, so it stands in for a successful
+    save. The library owns data-dirty and navigation coordination; the demo only styles
+    the visible state. %>
 <div class="dirty-form-demo">
-  <form class="dirty-form" data-controller="stimeo--dirty-form">
+  <form
+    class="dirty-form"
+    data-controller="stimeo--dirty-form"
+    data-stimeo--dirty-form-message-value="<%= t('components.dirty_form.demo.first_message') %>"
+    aria-labelledby="dirty-form-first-title"
+  >
+    <h3 id="dirty-form-first-title" class="dirty-form__title">
+      <%= t("components.dirty_form.demo.first_title") %>
+    </h3>
     <label class="dirty-form__field">
-      <span><%= t("components.dirty_form.demo.label") %></span>
-      <input type="text" name="title" value="<%= t('components.dirty_form.demo.value') %>">
+      <span><%= t("components.dirty_form.demo.first_label") %></span>
+      <input type="text" name="title" value="<%= t('components.dirty_form.demo.first_value') %>">
+    </label>
+    <div class="dirty-form__bar">
+      <span class="dirty-form__badge"><%= t("components.dirty_form.demo.unsaved") %></span>
+      <button type="button" class="demo-trigger" data-action="stimeo--dirty-form#markClean">
+        <%= t("components.dirty_form.demo.save") %>
+      </button>
+    </div>
+  </form>
+
+  <form
+    class="dirty-form"
+    data-controller="stimeo--dirty-form"
+    data-stimeo--dirty-form-message-value="<%= t('components.dirty_form.demo.second_message') %>"
+    aria-labelledby="dirty-form-second-title"
+  >
+    <h3 id="dirty-form-second-title" class="dirty-form__title">
+      <%= t("components.dirty_form.demo.second_title") %>
+    </h3>
+    <label class="dirty-form__field">
+      <span><%= t("components.dirty_form.demo.second_label") %></span>
+      <input type="text" name="summary" value="<%= t('components.dirty_form.demo.second_value') %>">
     </label>
     <div class="dirty-form__bar">
       <span class="dirty-form__badge"><%= t("components.dirty_form.demo.unsaved") %></span>

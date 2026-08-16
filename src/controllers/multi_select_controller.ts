@@ -68,6 +68,8 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  *   `form` value sets the hidden inputs' `form` attribute, associating them with a
  *   `<form>` by id even when the picker lives outside it. Without a `fields`
  *   target the hidden inputs are simply not written.
+ * `change` and `reconcile` dispatch `{ values: string[] }`.
+ * `filter` dispatches `{ query: string }`.
  */
 export class MultiSelectController extends Controller<HTMLElement> {
   static override targets = [

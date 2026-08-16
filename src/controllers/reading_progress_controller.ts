@@ -27,6 +27,8 @@ const PROGRESS_PROPERTY = "--stimeo--reading-progress";
  * already 1 (e.g. a Turbo restore at the bottom) only establishes the
  * baseline and does not fire it.
  *
+ * `change` dispatches `{ progress }`.
+ *
  * @remarks
  * Behavior only — the bar itself (and hiding it, e.g. before any scroll) is
  * the consumer's CSS; the progress value carries no ARIA (a decorative

@@ -28,6 +28,8 @@ function toStyle(value: string): DateTimeStyle | undefined {
  * locale/zone on connect. This is the *absolute* localization axis, distinct from
  * {@link RelativeTimeController}'s "3 minutes ago".
  *
+ * `format` dispatches `{ formatted }`.
+ *
  * @remarks
  * Behavior only. The machine-readable `datetime` (UTC) is left untouched so
  * assistive tech and crawlers keep the canonical value while only the display

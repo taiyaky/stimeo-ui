@@ -43,6 +43,8 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  *     <input type="hidden" data-stimeo--time-picker-target="field" />
  *   </div>
  *
+ * `reconcile` dispatches `{ value: string }`.
+ *
  * @remarks
  * `segment` targets declare the spinbuttons; the optional `field` target receives
  * the composed form value. `hourCycle` selects 12- or 24-hour presentation

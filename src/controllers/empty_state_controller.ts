@@ -20,6 +20,8 @@ import { announce, fillTemplate } from "../utils/announce";
  * dispatches `change` after the display is updated, so a listener reads the
  * state the crossing produced.
  *
+ * `change` dispatches `{ count, empty }`.
+ *
  * @remarks
  * Behavior only — the placeholder's look/copy is the consumer's. State is derived
  * from the DOM (no module-scope state), so `connect()` re-syncs after a Turbo

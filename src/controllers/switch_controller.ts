@@ -28,6 +28,8 @@ const OBSERVED_ANCESTOR_ATTRIBUTES = ["contenteditable"];
  * Implements the WAI-ARIA APG **Switch** pattern. The controller element is the
  * switch itself; its on/off state is reflected solely through `aria-checked`.
  *
+ * `changed` dispatches `{ checked: boolean }`.
+ *
  * @remarks
  * Behavior only — the consumer owns all styling (typically keyed off the
  * `[aria-checked="true"]` attribute). On a native `<button>` host, the browser

@@ -22,6 +22,8 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * skeleton. `minDuration` keeps the placeholder up long enough to avoid a flash
  * when content arrives almost immediately.
  *
+ * `ready` dispatches `{}`.
+ *
  * @remarks
  * Behavior only — skeleton shapes/animation are the consumer's. The
  * min-duration wait is held by {@link MinDurationFloor} on a {@link SafeTimeout},

@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.7.0] - 2026-08-16
+
+Minor release reworking the form stack, separator, and scroll-area, with
+announcements moving onto the shared `stimeo--announcer`. The Inspector manifest
+moves to schema v12, so `stimeo check` can report on views that passed under
+0.6.0.
+
+### Removed
+
+- **Breaking** — direct-upload: the `status` target and the `announce` /
+  `doneLabel` / `errorLabel` Values. Use `announceDoneText` /
+  `announceErrorText` with `{name}` instead of `%{name}`.
+- **Breaking** — persist: the unversioned draft format. Drafts written by earlier
+  releases are discarded, not migrated.
+
+### Added
+
+- separator `min` / `max` / `value`; submit-once `finish` / `cancel` and
+  `idle` / `busy` targets; dirty-form `acceptRestore`; character-counter
+  `announceText`; form-field `setError(message, { focus })`; persist `error`;
+  `reconcile` on character-counter and conditional-fields.
+- form-validation: localized constraint wording through
+  `data-stimeo--form-validation-message[-<constraint>]`, a declarative
+  `disallow="whitespace"`, and controls attached with `form="id"`.
+- Inspector: schema v12 (`requiredActions`, `actionCompletion`) with the
+  `missing-required-action`, `missing-action-completion`, and
+  `missing-announcer` diagnostics.
+
+### Changed
+
+- **Breaking** — announcing components need a `stimeo--announcer` on the page
+  plus the wording: character-counter `announceText`, direct-upload
+  `announceDoneText` / `announceErrorText`, submit-once `announceText` /
+  `announceReadyText`. Drop `role="alert"` from form-field's `error` target and
+  `aria-live` from character-counter's `output`.
+- **Breaking** — separator: the Values are the only runtime input, so move
+  `role`, `tabindex`, and the orientation / range ARIA into `orientation`,
+  `focusable`, `min`, `max`, `step`, and `value`. A `focusable` separator also
+  needs `keydown->stimeo--separator#onKeydown` on itself and an accessible name.
+- **Breaking** — submit-once: sessions are per form, and `preventDefault()` no
+  longer ends one — wire `finish` or `cancel`, or set a `timeout`. `start` /
+  `end` carry `{ form, submitter, … }`.
+- **Breaking** — direct-upload: `done` fires only on success, and a row that
+  reached `error` stays there.
+- **Breaking** — dirty-form: a successful submit re-baselines to what Turbo
+  submitted, so later edits stay dirty, and one native confirmation covers every
+  dirty form per navigation. With persist, add
+  `data-action="stimeo--persist:restore->stimeo--dirty-form#acceptRestore"`.
+- **Breaking** — character-counter: `change` fires only when a committed edit
+  changes the length. form-field: `validate` fires only for `setError` /
+  `clearError`.
+- persist: `exclude` defaults to Rails' `authenticity_token` / `_method` /
+  `utf8`; `password` is always excluded regardless of the list.
+
+### Fixed
+
+- Attribute and style leases are released by the subscriber that owns the
+  lifecycle, so a cached page no longer retains detached elements.
+- localStorage access goes through one guarded helper, so persist, sidebar, and
+  theme keep working when the browser denies storage.
+
 ## [0.6.0] - 2026-08-15
 
 Minor release that separates reconciled state from user edits: `change` now
@@ -573,6 +634,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.7.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.7.0
 [0.6.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.6.0
 [0.5.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.5.0
 [0.4.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.4.0

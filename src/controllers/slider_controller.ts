@@ -32,6 +32,8 @@ const FRACTION_PROPERTY = "--stimeo--slider-fraction";
  * property (a number in `[0, 1]`) set on the controller element — the library
  * positions nothing itself.
  *
+ * `change` dispatches `{ value: number }`.
+ *
  * @remarks
  * Behavior only. The consumer owns all layout (e.g. positioning the thumb from
  * the fraction). Only the horizontal orientation is handled.

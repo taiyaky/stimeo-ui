@@ -20,7 +20,7 @@ import { valueRelationRules } from "./value_relation_rules";
  * `schemaVersion`. Bump on breaking schema changes; a reader compares it with
  * the shape its own engine knows how to consume.
  */
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 /**
  * Minimal structural view of a Stimulus controller class, exposing only the
@@ -87,6 +87,8 @@ export function buildManifest(packageVersion: string): Manifest {
       events: [...(reflect.events ?? [])],
       requiredTargets: [...(rule?.requiredTargets ?? [])],
       conditionalTargets: [...(rule?.conditionalTargets ?? [])],
+      requiredActions: [...(rule?.requiredActions ?? [])],
+      actionCompletion: [...(rule?.actionCompletion ?? [])],
       a11y: [...(allA11yRules[identifier] ?? [])],
       keyboard: [...(keyboardRules[identifier] ?? [])],
       hosts: [...(hostRules[identifier] ?? [])],

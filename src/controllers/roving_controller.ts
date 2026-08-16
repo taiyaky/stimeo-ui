@@ -29,6 +29,8 @@ import { RovingTabindex, type RovingWrap, rovingMove } from "../utils/roving_tab
  * dynamically added/removed items need no per-item `data-action`. It emits
  * `change` whenever the tabbable item changes.
  *
+ * `change` dispatches `{ index, item }`.
+ *
  * @remarks
  * Behavior only: it owns `tabindex` and focus movement, nothing else. It does
  * **not** assign roles (`role="toolbar"`/`"radiogroup"` is the author's), manage

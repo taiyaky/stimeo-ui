@@ -17,6 +17,8 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * accessible name stays state-independent ("Show password") while the pressed
  * state is conveyed by `aria-pressed`.
  *
+ * `toggle` dispatches `{ visible: boolean }`.
+ *
  * @remarks
  * Behavior only — icon rendering is the consumer's, keyed off `aria-pressed` /
  * `data-state` (`hidden` / `visible`). Flipping `input.type` can drop focus and

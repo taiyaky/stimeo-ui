@@ -21,6 +21,8 @@ import { Controller } from "@hotwired/stimulus";
  * user must be able to see where focus went AND keep seeing the element that
  * owns it (WCAG 2.4.7 / 2.4.11).
  *
+ * `change` dispatches `{ hidden }`.
+ *
  * @remarks
  * Behavior only — `position: sticky`, the translate animation, and
  * reduced-motion handling are the consumer's CSS (`prefers-reduced-motion`

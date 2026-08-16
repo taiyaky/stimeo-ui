@@ -1,4 +1,14 @@
-import type { StructureRules } from "./types";
+import type { HostSelector, StructureRules } from "./types";
+
+/**
+ * The elements that can submit a form, and therefore own one structured label
+ * pair. `input[type=image]` submits too, so it hosts a pair as legitimately as
+ * a `<button>` does.
+ */
+const SUBMIT_CONTROL_HOSTS: readonly HostSelector[] = [
+  { tag: "button" },
+  { tag: "input", attr: "type", values: ["submit", "image"] },
+];
 
 /**
  * Hand-written **structure rules** (Inspector stage 2).
@@ -215,7 +225,18 @@ export const structureRules: StructureRules = {
   "stimeo--scroll-restore": {},
   "stimeo--scroll-visibility": { requiredTargets: ["element"] },
   "stimeo--scrollspy": { requiredTargets: ["link"] },
-  "stimeo--separator": {},
+  "stimeo--separator": {
+    requiredActions: [
+      {
+        target: "",
+        action: "onKeydown",
+        eventTypes: ["keydown"],
+        when: { value: "focusable", type: "boolean", equals: ["true"], default: "false" },
+        suggestion:
+          'Add data-action="keydown->stimeo--separator#onKeydown" to the separator element.',
+      },
+    ],
+  },
   // Only `panel` is required; trigger and backdrop are optional guarded channels.
   "stimeo--sidebar": { requiredTargets: ["panel"] },
   // No required targets: placeholder and content are independently optional.
@@ -233,8 +254,43 @@ export const structureRules: StructureRules = {
   // No required targets: `content` is optional (defaults to the scroll container).
   "stimeo--stick-to-bottom": {},
   "stimeo--sticky-observer": { requiredTargets: ["sentinel", "element"] },
-  // No required targets: `submit` falls back to the form's native button[type=submit].
-  "stimeo--submit-once": {},
+  // Native submit controls are discovered through the form. Structured labels
+  // are optional, but declaring either state requires its counterpart *in the
+  // same submit control*: the swap is resolved per button, so halves split
+  // across two buttons leave both with an incomplete pair and neither swaps.
+  "stimeo--submit-once": {
+    conditionalTargets: [
+      {
+        whenPresent: "idle",
+        require: ["busy"],
+        requireSameHost: SUBMIT_CONTROL_HOSTS,
+        hostLabel: "submit control",
+        suggestion:
+          'Add a "busy" target inside the same submit button, or remove the "idle" target and use busyLabel for a plain-text button.',
+      },
+      {
+        whenPresent: "busy",
+        require: ["idle"],
+        requireSameHost: SUBMIT_CONTROL_HOSTS,
+        hostLabel: "submit control",
+        suggestion:
+          'Add an "idle" target inside the same submit button, or remove the "busy" target and use busyLabel for a plain-text button.',
+      },
+    ],
+    // Turbo completes its own submissions, so this only fires for the wiring
+    // that declares a non-Turbo async flow. Nothing else in the page can end
+    // that session, and a control that never re-enables reads as a dead form.
+    actionCompletion: [
+      {
+        opens: "start",
+        whenTriggeredBy: ["submit"],
+        closedBy: ["finish", "cancel"],
+        escapeValue: "timeout",
+        suggestion:
+          'Wire "finish" when the request settles and "cancel" when it never ran, or set a non-zero timeout Value. On a Turbo form drop the "start" action entirely — Turbo\'s own events already drive it.',
+      },
+    ],
+  },
   "stimeo--switch": {},
   "stimeo--tabs": { requiredTargets: ["tab", "panel", "list"] },
   // Free-input commit has the same all-or-nothing template contract as multi-select.

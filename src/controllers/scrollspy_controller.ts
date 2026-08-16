@@ -42,6 +42,8 @@ const ANCHOR_ATTRIBUTES = ["href", "data-href"];
  * `data-action` on the links is optional and opts into {@link scrollTo}, which
  * scrolls the nested container instead of bouncing the whole window.
  *
+ * `change` dispatches `{ id: string, link: HTMLElement }`.
+ *
  * @remarks
  * Behavior only — how a current link looks is the consumer's CSS
  * (`[aria-current="location"] { … }`). `connect()` reads the current location

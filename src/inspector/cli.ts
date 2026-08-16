@@ -2,6 +2,8 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import type { ScannedSource } from "./announcer_rules";
+import { announcerSeatingDiagnostic } from "./announcer_rules";
 import { checkSource } from "./check";
 import type { ExamplesIndex } from "./examples";
 import { EXAMPLES_SCHEMA_VERSION } from "./examples";
@@ -65,10 +67,29 @@ function collectFiles(target: string, out: string[]): void {
   if (isCheckableFile(target)) out.push(target);
 }
 
-/** Builds a report for a single file. */
-function checkFile(file: string, manifest: Manifest): FileReport {
-  const source = readFileSync(file, "utf8");
+/** Builds a report for one already-read source. */
+function checkFile(file: string, source: string, manifest: Manifest): FileReport {
   return { file, diagnostics: checkSource(source, manifest) };
+}
+
+/**
+ * Appends the run-scoped announcer-seating warning to the file that raised it.
+ *
+ * Every other rule judges one source, so it can be attached to that source's
+ * report as it is built. This one needs the whole run before it can be decided,
+ * which is why it is merged afterwards rather than reported from `checkSource`.
+ */
+function withAnnouncerSeating(
+  reports: readonly FileReport[],
+  sources: readonly ScannedSource[],
+): FileReport[] {
+  const seating = announcerSeatingDiagnostic(sources);
+  if (!seating) return [...reports];
+  return reports.map((report) =>
+    report.file === seating.file
+      ? { file: report.file, diagnostics: [...report.diagnostics, seating.diagnostic] }
+      : report,
+  );
 }
 
 /**
@@ -263,13 +284,14 @@ export function runCli(
   const manifest = load();
   const cwd = process.cwd();
   const reports: FileReport[] = [];
+  const sources: ScannedSource[] = [];
   for (const file of files.sort()) {
-    reports.push({
-      file: relative(cwd, file) || file,
-      diagnostics: checkFile(file, manifest).diagnostics,
-    });
+    const path = relative(cwd, file) || file;
+    const source = readFileSync(file, "utf8");
+    sources.push({ file: path, source });
+    reports.push(checkFile(path, source, manifest));
   }
-  const summary = buildCheckReport(reports, files.length);
+  const summary = buildCheckReport(withAnnouncerSeating(reports, sources), files.length);
 
   if (json) {
     write(JSON.stringify(summary, null, 2));

@@ -52,6 +52,9 @@ interface KeyboardSession {
  * `keyboardStep` px each, Space/Enter drops (`end`) and Escape cancels — so every
  * consumer gets a keyboard path for free.
  *
+ * `start` dispatches `{ x, y, pointerType }`; `move` dispatches `{ dx, dy, x, y, pointerType }`;
+ * `end` dispatches `{ dx, dy, pointerType }`; `cancel` dispatches `{ pointerType }`.
+ *
  * @remarks
  * Behavior only: consumers own all visuals (ghost, placeholder, transforms) by
  * reacting to the events and the `data-dragging` / `data-grabbed` hooks. The one

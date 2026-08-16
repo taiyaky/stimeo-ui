@@ -27,6 +27,8 @@ type FilterControl = HTMLElement;
  * is shown. Items are toggled via `hidden`; groups with zero visible items and the
  * `empty` element are kept in sync, and `stimeo--filter:change` is dispatched.
  *
+ * `change` dispatches `{ active, visible, total }`.
+ *
  * @remarks
  * Behavior only — the consumer owns all styling and the controls' own accessible
  * state (e.g. `aria-pressed`). Visibility is re-derived from the live DOM on

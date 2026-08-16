@@ -1,8 +1,9 @@
-<%# Character counter demo: a textarea whose remaining count is shown beneath it.
-    The controller writes the count into the output (an aria-live="polite" region),
-    toggles data-near-limit / data-over-limit on the root, and sets aria-invalid on the
-    field past the max. This demo styles those state hooks; the library only updates the
-    count text and the hooks — no consumer JS is needed (it reacts to input on its own). %>
+<%# Markup for the character-counter demo. The visible output updates on every
+    keystroke, while the settled remaining count is debounced into the shared
+    stimeo--announcer seated below. This demo's CSS styles the root's near/over
+    hooks and the over-limit aria-invalid; watching the field needs no consumer
+    JavaScript. %>
+<% announcement = t("components.character_counter.demo.announcement") %>
 <div class="character-counter-demo">
   <label class="character-counter-demo__label" for="cc-message">
     <%= t("components.character_counter.demo.label") %>
@@ -11,7 +12,8 @@
     class="character-counter"
     data-controller="stimeo--character-counter"
     data-stimeo--character-counter-max-value="140"
-    data-stimeo--character-counter-warn-at-value="20">
+    data-stimeo--character-counter-warn-at-value="20"
+    data-stimeo--character-counter-announce-text-value="<%= announcement %>">
     <textarea
       id="cc-message"
       class="character-counter__input"
@@ -22,7 +24,12 @@
     <span
       id="cc-message-count"
       class="character-counter__output"
-      data-stimeo--character-counter-target="output"
-      aria-live="polite"></span>
+      data-stimeo--character-counter-target="output"></span>
+    <div data-controller="stimeo--announcer">
+      <div class="visually-hidden"
+           data-stimeo--announcer-target="polite"
+           aria-live="polite"
+           aria-atomic="true"></div>
+    </div>
   </div>
 </div>

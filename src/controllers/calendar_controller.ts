@@ -49,6 +49,8 @@ const OWNED_DISABLED = "data-stimeo--calendar-owns-disabled";
  * - Full grid keyboard controls (arrows, PageUp/Down, Home/End, Shift+PageUp/Down).
  * - Automatic month wrapping and date clamping for missing dates (e.g. leap years, 31st to 30th).
  *
+ * `monthchange` dispatches `{ month: string }`; `select` dispatches `{ date: string }`.
+ *
  * @remarks
  * Behavior only. The controller updates classes, attributes (aria-selected, data-outside, etc.),
  * and text contents dynamically on 42 pre-allocated `day` targets.

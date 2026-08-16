@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { AttributeLease } from "../utils/attribute_lease";
+import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
 /** Public rendering phases exposed through the root's `data-state`. */
@@ -50,6 +51,7 @@ export class AvatarController extends Controller<HTMLElement> {
   /** Collapses one morph's Value, target, and direct-attribute signals into one pass. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#render());
   /** Preserves directly-authored source and visibility while targets are controlled. */
+  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   readonly #src = new AttributeLease<HTMLImageElement>("src");
   readonly #imageHidden = new AttributeLease<HTMLImageElement>("hidden");
   readonly #fallbackHidden = new AttributeLease<HTMLElement>("hidden");
@@ -66,6 +68,7 @@ export class AvatarController extends Controller<HTMLElement> {
   override connect(): void {
     this.#connected = true;
     this.#reconcile.activate();
+    this.#beforeCache.activate();
     this.#srcObserver.observe(this.element, {
       attributes: true,
       attributeFilter: ["src"],
@@ -78,6 +81,7 @@ export class AvatarController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#connected = false;
     this.#reconcile.cancel();
+    this.#beforeCache.deactivate();
     this.#srcObserver.disconnect();
   }
 
@@ -197,5 +201,11 @@ export class AvatarController extends Controller<HTMLElement> {
       this.#fallbackHidden.write(this.fallbackTarget, showImage ? "" : null);
     }
     this.element.setAttribute("data-state", state);
+  }
+  /** Returns borrowed image and fallback semantics before Turbo snapshots the page. */
+  #rewindForCache(): void {
+    this.#src.returnAll();
+    this.#imageHidden.returnAll();
+    this.#fallbackHidden.returnAll();
   }
 }

@@ -21,6 +21,8 @@ function px(value: string): number {
  * `maxRows` (in line-height units), toggling internal scrolling and the
  * `data-at-max-rows` hook at the cap. Height-only changes preserve focus and caret.
  *
+ * `resize` dispatches `{ height, rows }`.
+ *
  * @remarks
  * Behavior only — the height is written to the element's own inline style, never a
  * CSS class. State lives on the element (no module-scope state), so `connect()`

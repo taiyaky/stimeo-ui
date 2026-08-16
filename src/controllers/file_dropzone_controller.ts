@@ -40,6 +40,8 @@ import { Controller } from "@hotwired/stimulus";
  *   previous) remove button, falling back to the trigger; `disconnect()` revokes
  *   every outstanding `objectURL`. Replacing the `list` target rebinds delegated
  *   removal and moves the client-only previews into the replacement.
+ * `reject` dispatches `{ file: File, reason: "type" | "size" | "count" }`.
+ * `change` dispatches `{ files: File[] }`.
  */
 export class FileDropzoneController extends Controller<HTMLElement> {
   static override targets = ["zone", "trigger", "input", "list", "item", "itemTemplate", "status"];

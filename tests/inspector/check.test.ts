@@ -85,6 +85,31 @@ describe("checkSource", () => {
     });
 
     describe("literal Value constraints", () => {
+      it.each([
+        ["max", "max"],
+        ["warn-at", "warnAt"],
+      ])("rejects invalid Character Counter %s counts", (token, value) => {
+        for (const authored of ["-1", "1.5", "Infinity", "NaN"]) {
+          const diagnostic = checkSource(
+            `<div data-stimeo--character-counter-${token}-value="${authored}"></div>`,
+            manifest,
+          ).find((candidate) => candidate.code === "invalid-value");
+
+          expect(diagnostic).toMatchObject({
+            severity: "error",
+            suggestion: `Set ${value} to a non-negative integer.`,
+          });
+        }
+      });
+
+      it("accepts zero and positive Character Counter counts", () => {
+        expect(
+          codes(
+            '<div data-stimeo--character-counter-max-value="0" data-stimeo--character-counter-warn-at-value="20"></div>',
+          ),
+        ).not.toContain("invalid-value");
+      });
+
       it.each(["stimeo--slider", "stimeo--range-slider", "stimeo--number-input"])(
         "rejects a non-positive step for %s",
         (identifier) => {
@@ -183,6 +208,102 @@ describe("checkSource", () => {
           codes(
             `<div data-stimeo--range-slider-min-value="80" data-stimeo--range-slider-max-value="<%= max %>"></div>`,
           ),
+        ).not.toContain("invalid-value");
+      });
+
+      it.each(["min", "max", "value"])("rejects a non-finite Separator %s", (value) => {
+        const diagnostic = checkSource(
+          `<div data-stimeo--separator-${value}-value="NaN"></div>`,
+          manifest,
+        ).find((candidate) => candidate.code === "invalid-value");
+
+        expect(diagnostic).toMatchObject({
+          severity: "error",
+          suggestion: `Set ${value} to a finite number.`,
+        });
+      });
+
+      it("rejects invalid Separator orientation, step, and bound order", () => {
+        expect(codes(`<div data-stimeo--separator-orientation-value="sideways"></div>`)).toContain(
+          "invalid-value",
+        );
+        expect(
+          codes(`<div data-stimeo--separator-orientation-value=" vertical "></div>`),
+        ).toContain("invalid-value");
+        // A String contract compares the attribute verbatim, so the padding is the
+        // whole reason it failed and has to survive into the message — together
+        // with the accepted spellings, which are a set rather than a numeric range.
+        expect(
+          checkSource(
+            `<div data-stimeo--separator-orientation-value=" vertical "></div>`,
+            manifest,
+          ).find((d) => d.code === "invalid-value")?.message,
+        ).toBe(
+          'Invalid value " vertical " for "stimeo--separator.orientation". Expected one of "horizontal", "vertical".',
+        );
+        // A numeric contract decodes through Number(), which ignores the padding,
+        // so the message shows the literal the runtime actually reads.
+        expect(
+          checkSource(`<div data-stimeo--separator-step-value=" 0 "></div>`, manifest).find(
+            (d) => d.code === "invalid-value",
+          )?.message,
+        ).toContain('Invalid value "0"');
+      });
+
+      // Every shipped rule names the scope element, so the target-scoped branch of
+      // the same rule needs a manifest of its own to be reachable at all.
+      it("reports a required action missing from a named target", () => {
+        const separator = manifest.controllers["stimeo--separator"];
+        if (!separator) throw new Error("expected the separator manifest entry");
+        const scoped: Manifest = {
+          ...manifest,
+          controllers: {
+            ...manifest.controllers,
+            "stimeo--separator": {
+              ...separator,
+              targets: [...separator.targets, "handle"],
+              requiredActions: [
+                {
+                  target: "handle",
+                  action: "onKeydown",
+                  eventTypes: ["keydown"],
+                  suggestion: 'Add data-action="keydown->stimeo--separator#onKeydown".',
+                },
+              ],
+            },
+          },
+        };
+        const diagnostic = checkSource(
+          `<div data-controller="stimeo--separator">
+             <span data-stimeo--separator-target="handle"></span>
+           </div>`,
+          scoped,
+        ).find((d) => d.code === "missing-required-action");
+
+        expect(diagnostic?.message).toContain('The "handle" target of "stimeo--separator"');
+        // The diagnostic has to land on the target, not the scope that declares it.
+        expect(diagnostic?.line).toBe(2);
+        expect(codes(`<div data-stimeo--separator-step-value="0"></div>`)).toContain(
+          "invalid-value",
+        );
+        expect(
+          codes(`
+            <div data-stimeo--separator-min-value="80"
+                 data-stimeo--separator-max-value="20"></div>`),
+        ).toContain("invalid-value");
+      });
+
+      it("accepts valid Separator Values and skips dynamic ones", () => {
+        expect(
+          codes(`
+            <div data-stimeo--separator-orientation-value="vertical"
+                 data-stimeo--separator-min-value="20"
+                 data-stimeo--separator-max-value="80"
+                 data-stimeo--separator-step-value="5"
+                 data-stimeo--separator-value-value="50"></div>`),
+        ).not.toContain("invalid-value");
+        expect(
+          codes(`<div data-stimeo--separator-orientation-value="<%= axis %>"></div>`),
         ).not.toContain("invalid-value");
       });
 
@@ -394,6 +515,28 @@ describe("checkSource", () => {
         expect(found).toHaveLength(1);
         expect(found[0]?.message).toContain('"ellipsis"');
         expect(found[0]?.message).toContain('"trigger"');
+        // Literal markup can be acted on, so the rule's own fix is the suggestion.
+        expect(found[0]?.severity).toBe("error");
+        expect(found[0]?.suggestion).toContain('an "ellipsis" item and a "trigger" button');
+      });
+
+      it("hands an unresolved scope the runtime hint instead of the rule's fix", () => {
+        // A non-literal data: hash can carry the missing halves, so naming the
+        // exact markup to add would be a guess. The severity drops with it.
+        const source = `
+          <nav data-controller="stimeo--breadcrumb">
+            <ol data-stimeo--breadcrumb-target="list">
+              <li id="bc-a" data-stimeo--breadcrumb-target="collapsible"><a href="/a">A</a></li>
+              <%= tag.li data: crumb_attrs %>
+            </ol>
+          </nav>`;
+        const found = checkSource(source, manifest).find(
+          (d) => d.code === "missing-conditional-target",
+        );
+
+        expect(found?.severity).toBe("warning");
+        expect(found?.suggestion).toContain("may exist at runtime");
+        expect(found?.suggestion).not.toContain('an "ellipsis" item');
       });
 
       it("names only the half that is missing", () => {
@@ -444,6 +587,221 @@ describe("checkSource", () => {
         );
         expect(withTemplate[0]?.message).toContain('"list"');
         expect(withList[0]?.message).toContain('"itemTemplate"');
+      });
+
+      it("requires both halves of a submit-once structured label", () => {
+        const submitOnce = (part: string) => `
+          <form data-controller="stimeo--submit-once">
+            <button type="submit">
+              <span data-stimeo--submit-once-target="${part}">Label</span>
+            </button>
+          </form>`;
+        const withIdle = checkSource(submitOnce("idle"), manifest).filter(
+          (d) => d.code === "missing-conditional-target",
+        );
+        const withBusy = checkSource(submitOnce("busy"), manifest).filter(
+          (d) => d.code === "missing-conditional-target",
+        );
+
+        expect(withIdle[0]?.message).toContain('"busy"');
+        expect(withBusy[0]?.message).toContain('"idle"');
+        expect(
+          codes(`
+            <form data-controller="stimeo--submit-once">
+              <button type="submit">
+                <span data-stimeo--submit-once-target="idle">Send</span>
+                <span data-stimeo--submit-once-target="busy" hidden>Sending</span>
+              </button>
+            </form>`),
+        ).not.toContain("missing-conditional-target");
+      });
+
+      it("rejects a submit-once label pair split across two submit buttons", () => {
+        const diagnostics = checkSource(
+          `
+            <form data-controller="stimeo--submit-once">
+              <button type="submit">
+                <span data-stimeo--submit-once-target="idle">Send</span>
+              </button>
+              <button type="submit">
+                <span data-stimeo--submit-once-target="busy" hidden>Sending</span>
+              </button>
+            </form>`,
+          manifest,
+        ).filter((d) => d.code === "missing-conditional-target");
+
+        expect(diagnostics).toHaveLength(2);
+        expect(diagnostics[0]?.message).toContain("in the same submit control");
+      });
+
+      it("accepts one pair per submit button when a form has several", () => {
+        expect(
+          codes(`
+            <form data-controller="stimeo--submit-once">
+              <button type="submit">
+                <span data-stimeo--submit-once-target="idle">Send</span>
+                <span data-stimeo--submit-once-target="busy" hidden>Sending</span>
+              </button>
+              <button type="submit">
+                <span data-stimeo--submit-once-target="idle">Draft</span>
+                <span data-stimeo--submit-once-target="busy" hidden>Saving</span>
+              </button>
+            </form>`),
+        ).not.toContain("missing-conditional-target");
+      });
+
+      it("leaves a pair alone when a helper generates the host it would sit in", () => {
+        expect(
+          codes(`
+            <form data-controller="stimeo--submit-once">
+              <%= button_tag do %>
+                <span data-stimeo--submit-once-target="idle">Send</span>
+                <span data-stimeo--submit-once-target="busy" hidden>Sending</span>
+              <% end %>
+            </form>`),
+        ).not.toContain("missing-conditional-target");
+      });
+
+      it("leaves a half alone when only its counterpart resolves to a host", () => {
+        expect(
+          codes(`
+            <form data-controller="stimeo--submit-once">
+              <button type="submit">
+                <span data-stimeo--submit-once-target="idle">Send</span>
+              </button>
+              <%= tag.span "Sending", data: { "stimeo--submit-once-target": "busy" } %>
+              <span data-stimeo--submit-once-target="busy" hidden>Sending</span>
+            </form>`),
+        ).not.toContain("missing-conditional-target");
+      });
+    });
+
+    describe("action completion", () => {
+      it("warns when a submit-driven start has nothing that closes it", () => {
+        const diagnostics = checkSource(
+          `
+            <form data-controller="stimeo--submit-once"
+                  data-action="submit->stimeo--submit-once#start">
+              <button type="submit">Send</button>
+            </form>`,
+          manifest,
+        ).filter((d) => d.code === "missing-action-completion");
+
+        expect(diagnostics).toHaveLength(1);
+        expect(diagnostics[0]?.severity).toBe("warning");
+      });
+
+      it("accepts finish, cancel, or a non-zero timeout as the exit", () => {
+        const wired = (extra: string) => `
+          <form data-controller="stimeo--submit-once" ${extra}>
+            <button type="submit">Send</button>
+          </form>`;
+        const withFinish = wired(
+          'data-action="submit->stimeo--submit-once#start done->stimeo--submit-once#finish"',
+        );
+        const withCancel = wired(
+          'data-action="submit->stimeo--submit-once#start stop->stimeo--submit-once#cancel"',
+        );
+        const withTimeout = wired(
+          'data-action="submit->stimeo--submit-once#start" data-stimeo--submit-once-timeout-value="5000"',
+        );
+
+        for (const source of [withFinish, withCancel, withTimeout]) {
+          expect(codes(source)).not.toContain("missing-action-completion");
+        }
+      });
+
+      it("still warns when the timeout escape is explicitly zero", () => {
+        expect(
+          codes(`
+            <form data-controller="stimeo--submit-once"
+                  data-action="submit->stimeo--submit-once#start"
+                  data-stimeo--submit-once-timeout-value="0">
+              <button type="submit">Send</button>
+            </form>`),
+        ).toContain("missing-action-completion");
+      });
+
+      it("stays silent for a Turbo form that wires no start action", () => {
+        expect(
+          codes(`
+            <form data-controller="stimeo--submit-once">
+              <button type="submit">Send</button>
+            </form>`),
+        ).not.toContain("missing-action-completion");
+      });
+    });
+
+    describe("required actions", () => {
+      const separator = (attributes: string, content = "") => `
+        <div data-controller="stimeo--separator" ${attributes}>${content}</div>`;
+
+      it("requires the root keydown action for a literal focusable Separator", () => {
+        const diagnostic = checkSource(
+          separator('data-stimeo--separator-focusable-value="true" aria-controls="pane"'),
+          manifest,
+        ).find((candidate) => candidate.code === "missing-required-action");
+
+        expect(diagnostic).toMatchObject({
+          severity: "error",
+          suggestion:
+            'Add data-action="keydown->stimeo--separator#onKeydown" to the separator element.',
+        });
+        // A rule that names no target speaks about the scope element itself.
+        expect(diagnostic?.message).toContain('The scope element of "stimeo--separator"');
+      });
+
+      it("accepts the required action only on the configured element and event", () => {
+        const valid = separator(
+          'data-stimeo--separator-focusable-value="true" aria-controls="pane" ' +
+            'data-action="keydown->stimeo--separator#onKeydown"',
+        );
+        const wrongEvent = separator(
+          'data-stimeo--separator-focusable-value="true" aria-controls="pane" ' +
+            'data-action="click->stimeo--separator#onKeydown"',
+        );
+        const wrongElement = separator(
+          'data-stimeo--separator-focusable-value="true" aria-controls="pane"',
+          '<span data-action="keydown->stimeo--separator#onKeydown"></span>',
+        );
+
+        expect(codes(valid)).not.toContain("missing-required-action");
+        expect(codes(wrongEvent)).toContain("missing-required-action");
+        expect(codes(wrongElement)).toContain("missing-required-action");
+      });
+
+      it("does not guess when focusability or action wiring is generated", () => {
+        expect(
+          codes(
+            separator(
+              'data-stimeo--separator-focusable-value="<%= focusable %>" aria-controls="pane"',
+            ),
+          ),
+        ).not.toContain("missing-required-action");
+        expect(
+          codes(
+            separator(
+              'data-stimeo--separator-focusable-value="true" aria-controls="pane" ' +
+                'data-action="<%= action %>"',
+            ),
+          ),
+        ).not.toContain("missing-required-action");
+      });
+
+      it("decodes the focusable condition exactly as Stimulus does", () => {
+        expect(codes(separator('data-stimeo--separator-focusable-value="FALSE"'))).not.toContain(
+          "missing-required-action",
+        );
+        expect(codes(separator('data-stimeo--separator-focusable-value=" false "'))).toContain(
+          "missing-required-action",
+        );
+      });
+
+      it("does not require key wiring from decorative Separators", () => {
+        expect(codes(separator(""))).not.toContain("missing-required-action");
+        expect(codes(separator('data-stimeo--separator-focusable-value="false"'))).not.toContain(
+          "missing-required-action",
+        );
       });
     });
 
@@ -528,6 +886,16 @@ describe("checkSource", () => {
 
     it("accepts a dialog that authors its required ARIA", () => {
       expect(codes(validDialog)).toEqual([]);
+    });
+
+    it("keeps a form-field error visual and delegates speech to the shared announcer", () => {
+      const source = `
+        <div data-controller="stimeo--form-field">
+          <input aria-label="Email" data-stimeo--form-field-target="control">
+          <p hidden data-stimeo--form-field-target="error"></p>
+        </div>`;
+
+      expect(codes(source)).toEqual([]);
     });
 
     it("requires an author-localized name on tags-input and multi-select remove targets", () => {
@@ -702,6 +1070,51 @@ describe("checkSource", () => {
       ).toEqual([]);
     });
 
+    it("requires aria-controls only for a focusable Separator", () => {
+      const bare = `
+        <div data-controller="stimeo--separator"
+             data-stimeo--separator-focusable-value="true"
+             data-action="keydown->stimeo--separator#onKeydown"></div>`;
+      const diagnostic = checkSource(bare, manifest).find(
+        (candidate) => candidate.code === "missing-aria",
+      );
+      expect(diagnostic?.suggestion).toBe(
+        "Point the separator at its primary pane via aria-controls.",
+      );
+
+      expect(
+        codes(`
+          <div data-controller="stimeo--separator"
+               data-stimeo--separator-focusable-value="false"></div>`),
+      ).not.toContain("missing-aria");
+      expect(
+        codes(`
+          <div id="pane"></div>
+          <div data-controller="stimeo--separator" aria-controls="pane" aria-labelledby="pane"
+               data-stimeo--separator-focusable-value="true"
+               data-action="keydown->stimeo--separator#onKeydown"></div>`),
+      ).not.toContain("missing-aria");
+    });
+
+    it("requires the focusable Separator's APG name and accepts either spelling", () => {
+      const base = `
+        <div id="pane">Sidebar</div>
+        <div data-controller="stimeo--separator" aria-controls="pane"
+             data-stimeo--separator-focusable-value="true"
+             data-action="keydown->stimeo--separator#onKeydown"></div>`;
+      const diagnostic = checkSource(base, manifest).find(
+        (candidate) => candidate.code === "missing-aria",
+      );
+      expect(diagnostic?.suggestion).toContain("Name the focusable separator");
+
+      expect(
+        codes(base.replace('aria-controls="pane"', 'aria-controls="pane" aria-label="Sidebar"')),
+      ).not.toContain("missing-aria");
+      expect(
+        codes(base.replace('aria-controls="pane"', 'aria-controls="pane" aria-labelledby="pane"')),
+      ).not.toContain("missing-aria");
+    });
+
     it("checks presence-only requirements (tooltip trigger's aria-describedby)", () => {
       const bare = `
         <span data-controller="stimeo--tooltip">
@@ -829,6 +1242,8 @@ describe("checkSource", () => {
               events: [],
               requiredTargets: [],
               conditionalTargets: [],
+              requiredActions: [],
+              actionCompletion: [],
               a11y: [
                 {
                   target: "box",
@@ -1793,6 +2208,21 @@ describe("checkSource", () => {
         });
       });
 
+      it("flags a second form-field control target", () => {
+        const source = `
+          <div data-controller="stimeo--form-field">
+            <input aria-label="Email" data-stimeo--form-field-target="control">
+            <input aria-label="Confirmation" data-stimeo--form-field-target="control">
+          </div>`;
+        const violations = checkSource(source, manifest).filter(
+          (entry) => entry.code === "cardinality-violation",
+        );
+
+        expect(violations).toHaveLength(1);
+        expect(violations[0]?.message).toContain("at most 1");
+        expect(violations[0]?.suggestion).toContain("exactly one");
+      });
+
       // A second authored selection is normalized away on connect (first in DOM
       // order wins), so the source is the last place the mistake is visible.
       const tabs = (second: string, third = "") => `
@@ -2340,7 +2770,7 @@ describe("checkSource", () => {
                 data: { "stimeo--form-field-target": "control",
                         action: "input->stimeo--form-field#clearError" } %>
           <p id="body-help" data-stimeo--form-field-target="description">Markdown supported.</p>
-          <p role="alert" data-stimeo--form-field-target="error"></p>
+          <p data-stimeo--form-field-target="error"></p>
         <% end %>`;
         expect(checkSource(source, manifest)).toEqual([]);
       });

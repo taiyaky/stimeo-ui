@@ -42,6 +42,8 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * - `stimeo--spinner:timeout` — `timeout` elapsed with the load still running;
  *   the controller then ends it exactly as `stop` would, so a `hide` follows.
  *
+ * `hide`, `show` and `timeout` dispatch `{}`.
+ *
  * @remarks
  * Behavior only — the visual spinner is the consumer's, alongside the text and
  * `aria-hidden="true"`. Both timers are owned by {@link SafeTimeout}, kept across

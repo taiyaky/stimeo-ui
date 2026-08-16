@@ -87,6 +87,8 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  * - The tree consumes none of the control's events, by two mechanisms:
  *   {@link NESTED_INTERACTIVE} names controls by *element shape*, the
  *   `defaultPrevented` yield covers widgets no selector can name.
+ * `select` dispatches `{ item: HTMLElement }`.
+ * `toggle` dispatches `{ item: HTMLElement, expanded: boolean }`.
  */
 export class TreeViewController extends Controller<HTMLElement> {
   static override targets = ["item", "group"];

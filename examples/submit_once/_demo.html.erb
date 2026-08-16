@@ -1,18 +1,30 @@
-<%# Submit-once demo: the submit button disables and swaps its label on submit, then
-    restores. This catalog has no server, so demo.js intercepts the submit and simulates
-    a round trip by firing turbo:submit-end after a short delay. The library owns the
-    disable / aria-busy / data-submitting / label state; this demo only styles it. %>
+<%# Submit-once demo. A structured idle / busy target pair keeps the DOM the
+    consumer authored while the button is disabled. This catalog has no server,
+    so demo.js fires Turbo's start / end lifecycle around a short fake round
+    trip. %>
+<% announce_start = t("components.submit_once.demo.announce_start") %>
+<% announce_ready = t("components.submit_once.demo.announce_ready") %>
+<% submit_label = t("components.submit_once.demo.submit") %>
+<% busy_label = t("components.submit_once.demo.busy") %>
 <div class="submit-once-demo">
   <form
     data-controller="stimeo--submit-once"
-    data-stimeo--submit-once-busy-label-value="<%= t('components.submit_once.demo.busy') %>"
-    data-action="submit->stimeo--submit-once#start">
+    data-stimeo--submit-once-announce-text-value="<%= announce_start %>"
+    data-stimeo--submit-once-announce-ready-text-value="<%= announce_ready %>">
     <label class="submit-once-demo__field">
       <span><%= t("components.submit_once.demo.label") %></span>
       <input type="text" name="title" class="submit-once-demo__input">
     </label>
     <button type="submit" class="demo-trigger" data-stimeo--submit-once-target="submit">
-      <%= t("components.submit_once.demo.submit") %>
+      <span data-stimeo--submit-once-target="idle"><%= submit_label %></span>
+      <span data-stimeo--submit-once-target="busy" hidden><%= busy_label %></span>
     </button>
   </form>
+
+  <%# aria-busy exposes state that can be queried; this always-present region is
+      what announces the transition itself, without moving focus. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden" data-stimeo--announcer-target="polite"
+         aria-live="polite" aria-atomic="true"></div>
+  </div>
 </div>

@@ -39,6 +39,9 @@ const OWNED_VALUE_TEXT = "data-stimeo--progress-owns-valuetext";
  * the bar's width/animation is the consumer's, driven off the
  * `--stimeo--progress-ratio` (0–1) custom property and `data-state`.
  *
+ * `change` dispatches `{ value: number, ratio: number }`; `complete` dispatches
+ * `{ value: number }`.
+ *
  * @remarks
  * Behavior only — no styling is emitted. An indeterminate bar drops
  * `aria-valuenow` (per ARIA) so assistive tech announces "busy" rather than a

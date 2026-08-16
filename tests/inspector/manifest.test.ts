@@ -54,6 +54,15 @@ describe("buildManifest", () => {
     expect(isCompatibleManifest(legacy)).toBe(false);
   });
 
+  it("requires the schema-v12 required-action field when loading a manifest", () => {
+    const legacy = structuredClone(manifest) as unknown as {
+      controllers: Record<string, Record<string, unknown>>;
+    };
+    const separator = legacy.controllers["stimeo--separator"];
+    if (separator) delete separator.requiredActions;
+    expect(isCompatibleManifest(legacy)).toBe(false);
+  });
+
   it("requires the schema-v10 host-contract field when loading a manifest", () => {
     const legacy = structuredClone(manifest) as unknown as {
       controllers: Record<string, Record<string, unknown>>;
@@ -93,6 +102,70 @@ describe("buildManifest", () => {
   it("reflects static value names (camelCase keys)", () => {
     expect(manifest.controllers["stimeo--calendar"]?.values).toContain("weekStart");
     expect(manifest.controllers["stimeo--switch"]?.values).toEqual([]);
+    expect(manifest.controllers["stimeo--separator"]?.values).toEqual([
+      "orientation",
+      "focusable",
+      "min",
+      "max",
+      "step",
+      "value",
+    ]);
+  });
+
+  it("reflects Separator's conditional key binding", () => {
+    expect(manifest.controllers["stimeo--separator"]?.requiredActions).toEqual([
+      {
+        target: "",
+        action: "onKeydown",
+        eventTypes: ["keydown"],
+        when: { value: "focusable", type: "boolean", equals: ["true"], default: "false" },
+        suggestion:
+          'Add data-action="keydown->stimeo--separator#onKeydown" to the separator element.',
+      },
+    ]);
+  });
+
+  it("reflects the submit-once structured-label and completion contract", () => {
+    const submitOnce = manifest.controllers["stimeo--submit-once"];
+    expect(submitOnce?.targets).toEqual(["submit", "idle", "busy"]);
+    expect(submitOnce?.values).toEqual([
+      "announceText",
+      "announceReadyText",
+      "busyLabel",
+      "timeout",
+      "restoreFocus",
+    ]);
+    expect(submitOnce?.actions).toEqual(["cancel", "finish", "start"]);
+    expect(submitOnce?.events).toEqual(["start", "end"]);
+    const hosts = [{ tag: "button" }, { tag: "input", attr: "type", values: ["submit", "image"] }];
+    expect(submitOnce?.conditionalTargets).toEqual([
+      {
+        whenPresent: "idle",
+        require: ["busy"],
+        requireSameHost: hosts,
+        hostLabel: "submit control",
+        suggestion:
+          'Add a "busy" target inside the same submit button, or remove the "idle" target and use busyLabel for a plain-text button.',
+      },
+      {
+        whenPresent: "busy",
+        require: ["idle"],
+        requireSameHost: hosts,
+        hostLabel: "submit control",
+        suggestion:
+          'Add an "idle" target inside the same submit button, or remove the "busy" target and use busyLabel for a plain-text button.',
+      },
+    ]);
+    expect(submitOnce?.actionCompletion).toEqual([
+      {
+        opens: "start",
+        whenTriggeredBy: ["submit"],
+        closedBy: ["finish", "cancel"],
+        escapeValue: "timeout",
+        suggestion:
+          'Wire "finish" when the request settles and "cancel" when it never ran, or set a non-zero timeout Value. On a Turbo form drop the "start" action entirely — Turbo\'s own events already drive it.',
+      },
+    ]);
   });
 
   it("reflects the multi-select hidden-field and shared-announcement contract", () => {
@@ -166,6 +239,28 @@ describe("buildManifest", () => {
   });
 
   it("merges semantic Value constraints and keeps them on declared Values", () => {
+    expect(manifest.controllers["stimeo--character-counter"]?.events).toEqual([
+      "change",
+      "reconcile",
+    ]);
+    expect(manifest.controllers["stimeo--character-counter"]?.valueConstraints).toEqual([
+      {
+        value: "max",
+        type: "number",
+        finite: true,
+        greaterThan: -1,
+        integer: true,
+        suggestion: "Set max to a non-negative integer.",
+      },
+      {
+        value: "warnAt",
+        type: "number",
+        finite: true,
+        greaterThan: -1,
+        integer: true,
+        suggestion: "Set warnAt to a non-negative integer.",
+      },
+    ]);
     expect(manifest.controllers["stimeo--slider"]?.valueConstraints).toEqual([
       {
         value: "step",
@@ -221,6 +316,39 @@ describe("buildManifest", () => {
         suggestion: "Set step to a positive integer.",
       },
     ]);
+    expect(manifest.controllers["stimeo--separator"]?.valueConstraints).toEqual([
+      {
+        value: "orientation",
+        type: "string",
+        allowedValues: ["horizontal", "vertical"],
+        suggestion: 'Set orientation to "horizontal" or "vertical".',
+      },
+      {
+        value: "min",
+        type: "number",
+        finite: true,
+        suggestion: "Set min to a finite number.",
+      },
+      {
+        value: "max",
+        type: "number",
+        finite: true,
+        suggestion: "Set max to a finite number.",
+      },
+      {
+        value: "step",
+        type: "number",
+        finite: true,
+        greaterThan: 0,
+        suggestion: "Set step to a finite number greater than 0.",
+      },
+      {
+        value: "value",
+        type: "number",
+        finite: true,
+        suggestion: "Set value to a finite number.",
+      },
+    ]);
     expect(manifest.controllers["stimeo--switch"]?.valueConstraints).toEqual([]);
 
     for (const [identifier, rules] of Object.entries(valueConstraintRules)) {
@@ -232,6 +360,16 @@ describe("buildManifest", () => {
 
   it("merges cross-Value relationships and keeps both sides on declared Values", () => {
     expect(manifest.controllers["stimeo--range-slider"]?.valueRelations).toEqual([
+      {
+        left: "min",
+        operator: "less-than-or-equal",
+        right: "max",
+        leftDefault: 0,
+        rightDefault: 100,
+        suggestion: "Set min to a finite number less than or equal to max.",
+      },
+    ]);
+    expect(manifest.controllers["stimeo--separator"]?.valueRelations).toEqual([
       {
         left: "min",
         operator: "less-than-or-equal",
@@ -494,6 +632,10 @@ describe("buildManifest", () => {
     expect(checkbox.map((rule) => `${rule.target}:${rule.min}-${rule.max}`)).toEqual([
       "parent:undefined-1",
     ]);
+    const formField = manifest.controllers["stimeo--form-field"]?.cardinality ?? [];
+    expect(formField.map((rule) => `${rule.target}:${rule.min}-${rule.max}`)).toEqual([
+      "control:undefined-1",
+    ]);
     const nav = manifest.controllers["stimeo--navigation-menu"]?.cardinality ?? [];
     expect(nav.map((rule) => `${rule.within}:${rule.target}:${rule.min}-${rule.max}`)).toEqual([
       "hoverArea:trigger:1-1",
@@ -512,6 +654,13 @@ describe("buildManifest", () => {
   it("keeps the checkbox parent optional while bounding it to one", () => {
     expect(manifest.controllers["stimeo--checkbox"]?.requiredTargets).toEqual([]);
     expect(manifest.controllers["stimeo--checkbox"]?.targets).toEqual(["parent", "child"]);
+  });
+
+  it("requires exactly one form-field control across structure and cardinality", () => {
+    expect(manifest.controllers["stimeo--form-field"]?.requiredTargets).toEqual(["control"]);
+    expect(manifest.controllers["stimeo--form-field"]?.cardinality).toEqual([
+      expect.objectContaining({ target: "control", max: 1 }),
+    ]);
   });
 
   it("only writes companion / target-declaration / cardinality rules for known controllers", () => {
@@ -560,13 +709,30 @@ describe("buildManifest", () => {
     for (const [id, rules] of Object.entries(cardinalityRules)) {
       for (const rule of rules) if (rule.when) conditions.push([id, rule.when]);
     }
+    for (const [id, rules] of Object.entries(structureRules)) {
+      for (const rule of rules.requiredActions ?? []) {
+        if (rule.when) conditions.push([id, rule.when]);
+      }
+    }
     expect(conditions.length).toBeGreaterThan(0);
     for (const [id, when] of conditions) {
       const host = allControllers[id as keyof typeof allControllers];
       expect(host, `unknown host ${id}`).toBeDefined();
       expect(manifest.controllers[id]?.values).toContain(when.value);
       expect(when.equals.length).toBeGreaterThan(0);
-      expect(valueDefault(host, when.value)).toBe(when.default);
+      expect(String(valueDefault(host, when.value))).toBe(when.default);
+    }
+  });
+
+  it("declares required actions on known methods, events, targets, and Values", () => {
+    for (const entry of Object.values(manifest.controllers)) {
+      for (const rule of entry.requiredActions) {
+        if (rule.target !== "") expect(entry.targets).toContain(rule.target);
+        expect(entry.actions).toContain(rule.action);
+        expect(rule.eventTypes.length).toBeGreaterThan(0);
+        if (rule.when) expect(entry.values).toContain(rule.when.value);
+        expect(rule.suggestion.length).toBeGreaterThan(0);
+      }
     }
   });
 

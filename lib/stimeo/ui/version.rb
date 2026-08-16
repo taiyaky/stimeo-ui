@@ -5,6 +5,6 @@ module Stimeo
     # Kept in lockstep with package.json (stable versions share the same
     # notation; a prerelease maps npm `-beta.N` ⇔ gem `.pre.beta.N` because
     # RubyGems forbids dashes). Bump both together.
-    VERSION = "0.6.0"
+    VERSION = "0.7.0"
   end
 end

@@ -26,6 +26,8 @@ const portalState = new WeakMap<Element, { node: HTMLElement; placeholder: Comme
  * (when `restore`) — or remove it — leaving no orphan behind. The moved node carries
  * `data-portaled`.
  *
+ * `mount` dispatches `{ target }`; `unmount` dispatches `{}`.
+ *
  * @remarks
  * Behavior only — no positioning (pair with `stimeo-ui/positioning`) and no focus
  * trapping (pair with a Focus Scope / the overlay). Moving a Stimulus element within

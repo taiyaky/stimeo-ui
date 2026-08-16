@@ -18,6 +18,8 @@ import { Controller } from "@hotwired/stimulus";
  * `placeholder`. The element carries `data-preview-hidden` and emits `hide`; when the
  * preview clears it is restored and `show` fires.
  *
+ * `hide` and `show` dispatch `{}`.
+ *
  * @remarks
  * Behavior only — restoring the *fresh* value is the normal render's job, not this
  * controller's (it just un-hides what was there). State is derived from the DOM (no

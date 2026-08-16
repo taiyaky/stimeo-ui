@@ -579,6 +579,14 @@ describe("NumberInputController on a custom spinbutton host", () => {
     expect(input().getAttribute("aria-valuemax")).toBe("99");
   });
 
+  it("restores authored ARIA before Turbo caches the page", () => {
+    document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(input().getAttribute("aria-valuenow")).toBe("99");
+    expect(input().getAttribute("aria-valuemin")).toBe("-99");
+    expect(input().getAttribute("aria-valuemax")).toBe("99");
+  });
+
   it("yields arrow keys throughout IME composition", () => {
     const perEvent = new KeyboardEvent("keydown", {
       key: "ArrowUp",

@@ -20,6 +20,8 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *     <form data-stimeo--auto-submit-target="form"> … </form>
  *   </div>
  *
+ * `submit` dispatches `{ trigger }`; `done` dispatches `{ message? }`.
+ *
  * @remarks
  * Behavior only — it owns *triggering* the submit (debounce + `requestSubmit`),
  * never the submit itself (Turbo / native form submission) or validation. It

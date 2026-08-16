@@ -19,6 +19,8 @@ import { prefersReducedMotion } from "../utils/reduced_motion";
  * With `once` (default) later starts are ignored (`data-count-up-done` records
  * a finished run across Turbo cache restores).
  *
+ * `end` dispatches `{ value }`.
+ *
  * @remarks
  * Behavior only — no formatting is imposed: the authored text is parsed for
  * its integer value (separators are ignored) and restored verbatim at the end;

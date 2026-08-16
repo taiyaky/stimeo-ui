@@ -23,6 +23,8 @@ import { IntersectionWatcher, isBeforeRootStart } from "../utils/intersection_wa
  * once with the current state, including after a Turbo reconnect; subsequent
  * notifications dispatch only when that state changes.
  *
+ * `change` dispatches `{ stuck: boolean }`.
+ *
  * @remarks
  * Behavior only — `position: sticky`, shadows, and shrink effects are the
  * consumer's CSS (`[data-stuck="true"] { … }`). `data-stuck` is a visual hook

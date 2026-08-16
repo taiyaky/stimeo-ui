@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
+import { firstTabStop } from "../utils/focus_candidate";
 import { observeScrollDismiss } from "../utils/scroll_dismiss";
 
 /**
@@ -66,10 +67,6 @@ export class PopoverController extends Controller<HTMLElement> {
   /** Escape-stack membership while open; the shared resolver dismisses via it. */
   readonly #escapeLayer = new EscapeLayer();
 
-  /** Selector for natively focusable elements used to find the first one. */
-  static readonly #FOCUSABLE =
-    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
   /** Starts closed and registers the standing dismissal listeners. */
   override connect(): void {
     this.close();
@@ -129,7 +126,7 @@ export class PopoverController extends Controller<HTMLElement> {
 
   /** Moves focus to the first focusable element in the panel, or the panel itself. */
   #focusFirst(): void {
-    const first = this.panelTarget.querySelector<HTMLElement>(PopoverController.#FOCUSABLE);
+    const first = firstTabStop(this.panelTarget);
     if (first) {
       first.focus();
       return;

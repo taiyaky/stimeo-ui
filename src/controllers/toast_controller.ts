@@ -31,6 +31,10 @@ const DELEGATED_EVENTS = ["click", "focusin", "focusout", "keydown", "mouseover"
  * Implements WAI-ARIA live region status/alert announcements, limits simultaneous
  * elements, and pauses dismiss timeouts on hover or focus to comply with WCAG 2.2.1.
  *
+ * `dismiss` dispatches `{ item: HTMLElement, reason: "timeout" | "user" }`.
+ *
+ * `show` dispatches `{ item: HTMLElement }`.
+ *
  * @remarks
  * Behavior only. The controller handles state updates via `data-state` and lifecycle events
  * while leaving visual styling completely to the client's CSS transitions.

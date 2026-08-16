@@ -34,6 +34,8 @@ import { findTypeaheadMatch, isTypeaheadKey, Typeahead } from "../utils/typeahea
  * text-filtered popup use {@link ComboboxController | Combobox}; for multiple
  * selection use Multi-Select.
  *
+ * `change` dispatches `{ value: string, option: HTMLElement }`.
+ *
  * @remarks
  * Behavior only. Static placement is the consumer's CSS; dynamic placement is
  * delegated to the opt-in `stimeo-ui/positioning` module. The look is keyed off

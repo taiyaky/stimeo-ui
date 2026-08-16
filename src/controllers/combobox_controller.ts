@@ -29,6 +29,8 @@ import { scrollOptionIntoView } from "../utils/option_scroll";
  * list-autocomplete. Focus stays in the input; the active option is tracked with
  * `aria-activedescendant` rather than by moving DOM focus.
  *
+ * `selected` dispatches `{ value: string }`.
+ *
  * @remarks
  * Behavior only. Options are authored in the DOM; the controller filters them by
  * toggling each option's `hidden` attribute (case-insensitive substring match on

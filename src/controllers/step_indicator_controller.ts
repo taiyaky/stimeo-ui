@@ -18,6 +18,8 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  * and the steps are not operable. For an interactive wizard whose steps are
  * `<button>`s, use {@link StepperController | Stepper}.
  *
+ * `change` dispatches `{ current: number, total: number }`.
+ *
  * @remarks
  * Behavior only. Each step `<li>` gets a `data-state` (`complete`/`current`/
  * `upcoming`) derived from the current index; the consumer draws the circles,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AttributeLease } from "../../src/utils/attribute_lease";
 
 /** Contract tests for temporary, authored-value-preserving attribute control. */
@@ -73,5 +73,51 @@ describe("AttributeLease", () => {
 
     expect(first.hasAttribute("role")).toBe(false);
     expect(second.getAttribute("role")).toBe("group");
+  });
+
+  it("skips DOM writes when the leased value is already reflected", () => {
+    const element = document.createElement("div");
+    const setAttribute = vi.spyOn(element, "setAttribute");
+    const lease = new AttributeLease("data-state");
+
+    lease.write(element, "active");
+    lease.write(element, "active");
+
+    expect(setAttribute).toHaveBeenCalledTimes(1);
+    lease.returnAll();
+  });
+
+  it("returns every outstanding lease on demand", () => {
+    const first = document.createElement("div");
+    const second = document.createElement("div");
+    second.setAttribute("role", "group");
+    const lease = new AttributeLease<HTMLElement>("role");
+
+    lease.write(first, "region");
+    lease.write(second, "region");
+    lease.returnAll();
+
+    expect(first.hasAttribute("role")).toBe(false);
+    expect(second.getAttribute("role")).toBe("group");
+  });
+
+  it("subscribes to no document event, so a dropped lease cannot outlive its consumer", () => {
+    // A consumer that keeps its materialized output writes and then simply drops
+    // the lease. Nothing may hold it afterwards: a document subscription would
+    // root the lease — and through it the detached subtree — until it next fired.
+    const add = vi.spyOn(document, "addEventListener");
+    const host = document.createElement("div");
+    const image = document.createElement("img");
+    image.setAttribute("hidden", "");
+    host.append(image);
+    document.body.append(host);
+    const lease = new AttributeLease<HTMLElement>("hidden");
+
+    lease.write(image, null);
+    host.remove();
+    document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(add).not.toHaveBeenCalled();
+    expect(image.hasAttribute("hidden")).toBe(false);
   });
 });

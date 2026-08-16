@@ -71,6 +71,18 @@ describe("PopoverController", () => {
     expect(document.activeElement).toBe(query("#pop input"));
   });
 
+  it("uses the shared Tab-stop rules when choosing panel focus", async () => {
+    disconnectAndStopApplication(application);
+    await start(`
+      <fieldset disabled><button id="blocked">Blocked</button></fieldset>
+      <div id="editor" contenteditable>Edit</div>
+      <details><summary id="summary">More</summary></details>`);
+
+    trigger().click();
+
+    expect(document.activeElement).toBe(query("#editor"));
+  });
+
   it("toggles closed on a second trigger click", () => {
     trigger().click();
     trigger().click();

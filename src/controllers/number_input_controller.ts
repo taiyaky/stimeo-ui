@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
+import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { SafeInterval, SafeTimeout } from "../utils/safe_timeout";
@@ -33,6 +34,8 @@ const OWNED_DISABLED = "data-number-input-disabled";
  * fully owned by the controller (not delegated to the browser's native number
  * stepping) so the behavior is identical for a native `<input type="number">` and
  * a custom `role="spinbutton"` host.
+ *
+ * `reconcile` dispatches `{ value: number }`.
  *
  * @remarks
  * Behavior only — the consumer styles the field and buttons. The input is the
@@ -101,6 +104,7 @@ export class NumberInputController extends Controller<HTMLElement> {
   /** Tracks IME lifecycle on the current input, including confirming keys without a signal. */
   readonly #composition = new CompositionTracker();
   /** Restores authored custom-spinbutton ARIA when a target leaves or the controller stops. */
+  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   readonly #ariaValueNow = new AttributeLease<HTMLInputElement>("aria-valuenow");
   readonly #ariaValueMin = new AttributeLease<HTMLInputElement>("aria-valuemin");
   readonly #ariaValueMax = new AttributeLease<HTMLInputElement>("aria-valuemax");
@@ -125,6 +129,7 @@ export class NumberInputController extends Controller<HTMLElement> {
   /** Normalizes any initial value and wires the focus/hold pointer guards. */
   override connect(): void {
     this.#repaint.activate();
+    this.#beforeCache.activate();
     this.#globalGuards = new AbortController();
     const { signal } = this.#globalGuards;
     for (const button of this.incrementTargets) this.#wireButton(button, 1);
@@ -142,6 +147,7 @@ export class NumberInputController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#repaint.cancel();
     this.#composition.disconnect();
+    this.#beforeCache.deactivate();
     this.#globalGuards?.abort();
     this.#globalGuards = null;
     const buttons = new Set([
@@ -523,5 +529,11 @@ export class NumberInputController extends Controller<HTMLElement> {
   /** Shared range configuration; finite endpoints remain allowed off the grid. */
   get #steppedRange() {
     return { min: this.minValue, max: this.maxValue, step: this.stepValue };
+  }
+  /** Returns borrowed range ARIA before Turbo snapshots the page. */
+  #rewindForCache(): void {
+    this.#ariaValueNow.returnAll();
+    this.#ariaValueMin.returnAll();
+    this.#ariaValueMax.returnAll();
   }
 }

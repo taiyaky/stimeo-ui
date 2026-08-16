@@ -27,6 +27,8 @@ const tokensOf = (value: string): string[] => value.split(/\s+/).filter(Boolean)
  * (`entering` / `entered` / `leaving` / `left`) and `entered` / `left` events fire on
  * completion.
  *
+ * `entered` and `left` dispatch `{}`.
+ *
  * @remarks
  * Behavior only — the animation itself is the consumer's CSS; this controls *when* the
  * stage classes are applied. Completion is owned by the shared

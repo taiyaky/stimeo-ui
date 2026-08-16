@@ -46,6 +46,8 @@ const OWNED_VALUE_TEXT = "data-stimeo--meter-owns-valuetext";
  * thresholds are present, classifies the value into a `low`/`medium`/`high`
  * segment on `data-state` so the consumer can color the bar.
  *
+ * `change` dispatches `{ value: number, ratio: number, state: string }`.
+ *
  * @remarks
  * Behavior only. Because state must not be conveyed by color alone (WCAG 1.4.1),
  * a consumer-provided `valueText` template feeds `aria-valuetext` so the segment

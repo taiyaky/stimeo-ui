@@ -37,6 +37,8 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  * exclusive selection with radio semantics, use
  * {@link RadioGroupController | Radio Group} instead.
  *
+ * `change` dispatches `{ value: string, pressed: boolean, values: string[] }`.
+ *
  * @remarks
  * Behavior only — the consumer styles off `[aria-pressed="true"]`. A supported
  * item is either `<button type="button">` or a non-interactive host such as

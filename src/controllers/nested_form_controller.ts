@@ -22,6 +22,8 @@ import { Controller } from "@hotwired/stimulus";
  *             data-action="click->stimeo--nested-form#add">Add</button>
  *   </div>
  *
+ * `add` dispatches `{ index, element }`; `remove` dispatches `{ element, persisted }`.
+ *
  * @remarks
  * Behavior only — server-side `accepts_nested_attributes_for`, per-field
  * validation, and reordering are out of scope. Row state lives **only** in the DOM

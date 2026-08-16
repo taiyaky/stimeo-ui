@@ -34,6 +34,8 @@ interface TurboLike {
  *   <a href="/items/1" data-action="click->stimeo--confirm#request"
  *      data-stimeo--confirm-message-param="Delete this item?">Delete</a>
  *
+ * `open` dispatches `{ message }`; `resolve` dispatches `{ confirmed }`.
+ *
  * @remarks
  * Behavior only — the dialog's a11y (focus trap, restore, roles) is delegated to
  * the shared {@link FocusTrap}; this controller adds the Turbo bridge and the

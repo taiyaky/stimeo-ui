@@ -22,6 +22,8 @@ import { Controller } from "@hotwired/stimulus";
  *     </div>
  *   </div>
  *
+ * `change` dispatches `{ count, allPages }`.
+ *
  * @remarks
  * Behavior only — it never runs the batch action (that is the consumer's
  * form/Turbo) nor fetches/pages rows. Selection lives **only** in each checkbox's

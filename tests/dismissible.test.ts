@@ -162,6 +162,22 @@ describe("DismissibleController", () => {
     expect(document.activeElement).toBe(byId("available"));
   });
 
+  it("uses the shared Tab-stop rules when choosing the following destination", async () => {
+    await start(`
+      <div data-controller="stimeo--dismissible">
+        <div data-stimeo--dismissible-target="root">
+          <button id="close" data-action="stimeo--dismissible#dismiss">Close</button>
+        </div>
+        <fieldset disabled><button id="blocked">Blocked</button></fieldset>
+        <details><summary id="summary">More</summary></details>
+      </div>`);
+    byId("close").focus();
+
+    byId("close").click();
+
+    expect(document.activeElement).toBe(byId("summary"));
+  });
+
   it("ignores a fallback target inside the root", async () => {
     await start(`
       <div data-controller="stimeo--dismissible">

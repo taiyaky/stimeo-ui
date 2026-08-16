@@ -34,6 +34,8 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  * within the dialog, virtual focus roves via `aria-activedescendant`, and filtering
  * is performed in memory.
  *
+ * `select` dispatches `{ value: string, option: HTMLElement }`.
+ *
  * @remarks
  * Behavior only. The combobox concerns (filtering, virtual focus, selection) live
  * here; the modal lifecycle — focus trap, scroll lock, background `inert`, focus

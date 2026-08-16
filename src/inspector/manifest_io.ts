@@ -24,6 +24,8 @@ const CONTROLLER_ARRAY_FIELDS = [
   "events",
   "requiredTargets",
   "conditionalTargets",
+  "requiredActions",
+  "actionCompletion",
   "a11y",
   "keyboard",
   "hosts",

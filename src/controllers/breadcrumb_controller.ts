@@ -37,6 +37,8 @@ const OVERFLOW_EPSILON = 1;
  * author-marked middle items behind a disclosure (`…`) button, which expands
  * them back on demand.
  *
+ * `toggle` dispatches `{ expanded: boolean }`.
+ *
  * @remarks
  * Behavior only — the consumer owns separators (CSS) and the look. The items to
  * collapse are the author-marked `collapsible` targets (the source of truth),

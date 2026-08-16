@@ -24,6 +24,8 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * net so the state never sticks). `minDuration` keeps the skeleton up long enough to
  * avoid a flicker.
  *
+ * `start` and `end` dispatch `{}`.
+ *
  * @remarks
  * Behavior only — it ships no skeleton markup or styling (pair with Skeleton/CSS);
  * loading is held purely in `aria-busy` / `data-frame-loading` and the optional

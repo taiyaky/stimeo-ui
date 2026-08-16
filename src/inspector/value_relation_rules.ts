@@ -12,4 +12,14 @@ export const valueRelationRules: ValueRelationRules = {
       suggestion: "Set min to a finite number less than or equal to max.",
     },
   ],
+  "stimeo--separator": [
+    {
+      left: "min",
+      operator: "less-than-or-equal",
+      right: "max",
+      leftDefault: 0,
+      rightDefault: 100,
+      suggestion: "Set min to a finite number less than or equal to max.",
+    },
+  ],
 };

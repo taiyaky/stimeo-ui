@@ -101,6 +101,16 @@ describe("AvatarController", () => {
     expect(fallback().hidden).toBe(true);
   });
 
+  it("returns borrowed image attributes before Turbo caches the page", async () => {
+    await start(markup());
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(image().hasAttribute("src")).toBe(false);
+    expect(image().hidden).toBe(true);
+    expect(fallback().hidden).toBe(false);
+  });
+
   it("uses a directly authored image src when the Value is absent", async () => {
     await start(markup({ value: null, directSrc: "/authored.jpg" }));
 

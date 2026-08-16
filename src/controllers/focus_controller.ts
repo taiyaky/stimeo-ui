@@ -20,6 +20,8 @@ import { FocusTrap } from "../utils/focus_trap";
  * `Tab` still cycles but the background stays reachable. The element carries
  * `data-focus-trapped` while active and emits `activate` / `deactivate`.
  *
+ * `activate` and `deactivate` dispatch `{}`.
+ *
  * @remarks
  * Behavior only — it does not open/close or render an overlay (pair with Dialog) and
  * does not move DOM (pair with Portal). It reuses the shared {@link FocusTrap}, so it never

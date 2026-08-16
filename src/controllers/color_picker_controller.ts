@@ -53,6 +53,9 @@ interface Hsla {
  * preview and root as the `--stimeo--color` custom property and mirrored into a
  * hidden form field.
  *
+ * `change` and `reconcile` dispatch
+ * `{ value: string, rgba: { r: number, g: number, b: number, a: number } }`.
+ *
  * @remarks
  * Behavior only — the swatch/gradient visuals are the consumer's CSS/canvas, fed
  * by `--stimeo--color`. Only the consumer knows whether a channel track mirrors

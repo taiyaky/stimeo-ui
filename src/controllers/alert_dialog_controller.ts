@@ -27,6 +27,8 @@ type CancelReason = "user" | "escape";
  * actions that emit events so the consumer only writes the message and "what to
  * do on confirm".
  *
+ * `cancel` dispatches `{ reason: "user" | "escape" }`; `confirm` carries no detail.
+ *
  * @remarks
  * Behavior only. The modal lifecycle (focus trap, scroll lock, background
  * `inert`, focus restore, teardown reversal) is delegated to the shared

@@ -30,6 +30,10 @@ const SECOND_MS = 1000;
  * slot free of live-region semantics: with `announceText` set it would say the
  * same thing twice.
  *
+ * `complete` dispatches `{}`; `tick` dispatches
+ * `{ remaining: number, direction: "down" | "up" }`, where `remaining` is in
+ * milliseconds.
+ *
  * @remarks
  * Behavior only — slot text is updated, not styled. Pause/resume shifts an
  * internal time anchor so the displayed amount is preserved across a pause, down

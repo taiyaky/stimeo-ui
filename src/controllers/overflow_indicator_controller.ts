@@ -33,6 +33,8 @@ const DIRECTION_BUTTON_SELECTOR = "[data-stimeo--overflow-indicator-direction-pa
  * scroll one logical viewport page at a time (including RTL) and have their
  * disabled state synced to the matching direction's remaining room.
  *
+ * `change` dispatches `{ start: boolean, end: boolean }`.
+ *
  * @remarks
  * Behavior only — shadows, arrows, and gradients are the consumer's CSS;
  * `data-overflow-*` carry no ARIA semantics. All observers/listeners are released

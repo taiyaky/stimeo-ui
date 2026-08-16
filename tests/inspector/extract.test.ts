@@ -74,19 +74,23 @@ describe("extract helpers", () => {
     ]);
   });
 
-  it("decodes stimeo data-action descriptors into identifier + method", () => {
+  it("decodes stimeo data-action descriptors into identifier + method + event", () => {
     expect(
       actionDescriptors("click->stimeo--menu#toggle keydown->stimeo--menu#onItemKeydown"),
     ).toEqual([
-      { identifier: "stimeo--menu", method: "toggle" },
-      { identifier: "stimeo--menu", method: "onItemKeydown" },
+      { identifier: "stimeo--menu", method: "toggle", eventType: "click" },
+      { identifier: "stimeo--menu", method: "onItemKeydown", eventType: "keydown" },
     ]);
     // Default-event form, non-stimeo controllers skipped, options stripped.
     expect(actionDescriptors("stimeo--otp#onInput resize@window->other#x")).toEqual([
-      { identifier: "stimeo--otp", method: "onInput" },
+      { identifier: "stimeo--otp", method: "onInput", eventType: "" },
     ]);
     expect(actionDescriptors("click->stimeo--dialog#close:prevent")).toEqual([
-      { identifier: "stimeo--dialog", method: "close" },
+      { identifier: "stimeo--dialog", method: "close", eventType: "click" },
+    ]);
+    // A global scope names the same event type as its element-bound spelling.
+    expect(actionDescriptors("keydown@window->stimeo--dialog#close")).toEqual([
+      { identifier: "stimeo--dialog", method: "close", eventType: "keydown" },
     ]);
   });
 

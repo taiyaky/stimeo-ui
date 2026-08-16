@@ -18,6 +18,8 @@ import { Controller } from "@hotwired/stimulus";
  * For a read-only progress display use
  * {@link StepIndicatorController | Step Indicator}; for panel switching use Tabs.
  *
+ * `change` dispatches `{ index: number, previous: number, step: HTMLElement }`.
+ *
  * @remarks
  * Behavior only. The controller never traps or restores focus — each step button
  * is in the natural Tab order. `data-state` is purely derived from `index`

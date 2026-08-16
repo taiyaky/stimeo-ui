@@ -24,6 +24,8 @@ import { attachPositioning, type Placement, type PositioningOptions, type Positi
  * written — never decoration — and the resolved (post-flip) side is mirrored onto
  * `data-anchored-placement` on the floating element for CSS hooks (e.g. an arrow).
  *
+ * `position` dispatches `{ placement, x, y }`.
+ *
  * @remarks
  * Behavior only. It does **not** open/close, manage focus, or render an overlay
  * (pair with Dialog / Popover and {@link "../controllers/focus_controller"}), and

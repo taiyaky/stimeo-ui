@@ -38,13 +38,13 @@ describe("FormValidationController", () => {
           <label for="email">Email</label>
           <input id="email" name="email" type="email" required
                  data-stimeo--form-field-target="control" />
-          <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+          <p hidden data-stimeo--form-field-target="error"></p>
         </div>
         <div data-controller="stimeo--form-field">
           <label for="name">Name</label>
           <input id="name" name="name" type="text" required
                  data-stimeo--form-field-target="control" />
-          <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+          <p hidden data-stimeo--form-field-target="error"></p>
         </div>
         <button type="submit">Save</button>
       </form>`;
@@ -109,6 +109,20 @@ describe("FormValidationController", () => {
     expect(event.defaultPrevented).toBe(false);
   });
 
+  it("removes the document-level field event listeners on disconnect", async () => {
+    const node = form();
+    const email = emailInput();
+    node.remove();
+    await tick();
+    node.removeAttribute("data-controller");
+    document.body.appendChild(node);
+    await tick();
+
+    email.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(email.getAttribute("aria-invalid")).toBe("false");
+  });
+
   it("leaves an author-set novalidate untouched on disconnect", async () => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = `
@@ -165,11 +179,11 @@ describe("FormValidationController", () => {
     expect(emailInput().getAttribute("aria-errormessage")).toBe(errorFor("email").id);
   });
 
-  // Speech-order regression. form-validation does not own the announced text
-  // (form-field carries the ARIA), so this freezes the *integration*: after an
-  // invalid submit the control reads as invalid and its error region announces the
-  // routed validationMessage, in order.
-  it("announces the invalid control and its routed error message in order", async () => {
+  // Speech-order regression. form-validation does not own the accessible
+  // description (form-field carries the ARIA), so this freezes the integration:
+  // the invalid control reads its error and the visual paragraph follows in order.
+  // The separately seated Announcer path is covered by form_field.test.ts.
+  it("exposes the invalid control and its routed error message in order", async () => {
     emailInput().value = "person@example.com";
     nameInput().value = "Ada";
     emailInput().setCustomValidity("Already taken");
@@ -179,9 +193,9 @@ describe("FormValidationController", () => {
     expect(await captureSpeech({ container: fieldEl, steps: 4 })).toEqual([
       "Email",
       "textbox, Email, person@example.com, Already taken, 1 error message, invalid, required",
-      "alert",
+      "paragraph",
       "Already taken",
-      "end of alert",
+      "end of paragraph",
     ]);
   });
 
@@ -195,6 +209,7 @@ describe("FormValidationController", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(valid).toHaveLength(1);
+    expect(valid[0]?.detail).toEqual({});
     expect(emailInput().getAttribute("aria-invalid")).toBe("false");
   });
 
@@ -253,6 +268,51 @@ describe("FormValidationController", () => {
     expect(emailInput().getAttribute("aria-invalid")).toBe("false");
   });
 
+  it("ignores events from every form element barred from constraint validation", () => {
+    const button = form().querySelector("button[type='submit']") as HTMLButtonElement;
+    const hidden = document.createElement("input");
+    hidden.type = "hidden";
+    const disabled = document.createElement("input");
+    disabled.disabled = true;
+    const readonly = document.createElement("input");
+    readonly.readOnly = true;
+    form().append(hidden, disabled, readonly);
+
+    for (const element of [button, hidden, disabled, readonly]) {
+      element.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    expect(emailInput().getAttribute("aria-invalid")).toBe("false");
+    expect(nameInput().getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("keeps focus still during field validation even when form-field focusOnError is true", () => {
+    const field = emailInput().closest(OUTLET) as HTMLElement;
+    const button = form().querySelector("button[type='submit']") as HTMLButtonElement;
+    field.setAttribute("data-stimeo--form-field-focus-on-error-value", "true");
+    button.focus();
+
+    emailInput().dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(document.activeElement).toBe(button);
+    expect(emailInput().getAttribute("aria-invalid")).toBe("true");
+  });
+
+  it("does not report an unchanged invalid message again on every input", () => {
+    const field = emailInput().closest(OUTLET) as HTMLElement;
+    const reports: CustomEvent[] = [];
+    field.addEventListener("stimeo--form-field:validate", (event) =>
+      reports.push(event as CustomEvent),
+    );
+
+    blur(emailInput());
+    input(emailInput());
+
+    expect(reports).toHaveLength(1);
+  });
+
   it("does not re-validate on input when revalidateOnInput is false", () => {
     form().setAttribute("data-stimeo--form-validation-revalidate-on-input-value", "false");
     blur(emailInput()); // touched + invalid (empty, required)
@@ -287,6 +347,225 @@ describe("FormValidationController", () => {
 });
 
 /**
+ * Every validatable control inside one form-field is one atomic validation unit.
+ * A valid sibling must not clear an invalid sibling's result, and interaction
+ * state belongs to the field rather than whichever child emitted the event.
+ */
+describe("FormValidationController with multiple controls in one field", () => {
+  let application: Application;
+
+  beforeEach(async () => {
+    document.body.innerHTML = `
+      <form data-controller="stimeo--form-validation"
+            data-stimeo--form-validation-stimeo--form-field-outlet="${OUTLET}">
+        <div id="compound-field" data-controller="stimeo--form-field">
+          <div role="group" aria-label="Compound value"
+               data-stimeo--form-field-target="control">
+            <input id="compound-first" required
+                   data-stimeo--form-validation-message-value-missing="First is required" />
+            <input id="compound-second" value="ready" />
+          </div>
+          <p hidden data-stimeo--form-field-target="error"></p>
+        </div>
+        <button type="submit">Save</button>
+      </form>`;
+    application = Application.start();
+    application.register("stimeo--form-field", FormFieldController);
+    application.register("stimeo--form-validation", FormValidationController);
+    await tick();
+    await tick();
+  });
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const form = () => document.querySelector<HTMLFormElement>("form") as HTMLFormElement;
+  const field = () => document.querySelector<HTMLElement>("#compound-field") as HTMLElement;
+  const first = () =>
+    document.querySelector<HTMLInputElement>("#compound-first") as HTMLInputElement;
+  const second = () =>
+    document.querySelector<HTMLInputElement>("#compound-second") as HTMLInputElement;
+  const error = () =>
+    field().querySelector<HTMLElement>("[data-stimeo--form-field-target='error']") as HTMLElement;
+
+  it("keeps the field invalid when an earlier sibling is invalid and a later one is valid", () => {
+    const invalidEvents: CustomEvent[] = [];
+    form().addEventListener("stimeo--form-validation:invalid", (event) =>
+      invalidEvents.push(event as CustomEvent),
+    );
+    const event = new Event("submit", { bubbles: true, cancelable: true });
+
+    form().dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(field().hasAttribute("data-stimeo--form-field-invalid")).toBe(true);
+    expect(error().textContent).toBe("First is required");
+    expect(invalidEvents[0]?.detail.invalid as HTMLElement[]).toEqual([first()]);
+  });
+
+  it("revalidates the whole touched field when a sibling emits input", () => {
+    first().dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    expect(field().hasAttribute("data-stimeo--form-field-invalid")).toBe(true);
+
+    first().value = "now valid";
+    second().dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(field().hasAttribute("data-stimeo--form-field-invalid")).toBe(false);
+    expect(error().hidden).toBe(true);
+  });
+});
+
+/**
+ * Field lookup is intentionally linear in controls plus DOM depth. Counting
+ * `contains()` calls pins that property: the former field-by-control nested scan
+ * performs one call per field/control pair and fails this bound decisively.
+ */
+describe("FormValidationController field lookup complexity", () => {
+  let application: Application;
+  const fieldCount = 40;
+
+  beforeEach(async () => {
+    const fields = Array.from(
+      { length: fieldCount },
+      (_, index) => `
+        <div data-controller="stimeo--form-field">
+          <input id="perf-${index}" required data-stimeo--form-field-target="control" />
+          <p hidden data-stimeo--form-field-target="error"></p>
+        </div>`,
+    ).join("");
+    document.body.innerHTML = `
+      <form data-controller="stimeo--form-validation"
+            data-stimeo--form-validation-stimeo--form-field-outlet="${OUTLET}">
+        ${fields}
+      </form>`;
+    application = Application.start();
+    application.register("stimeo--form-field", FormFieldController);
+    application.register("stimeo--form-validation", FormValidationController);
+    await tick();
+    await tick();
+  });
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it("does not scan every field for every control", () => {
+    const form = document.querySelector<HTMLFormElement>("form") as HTMLFormElement;
+    const controller = application.getControllerForElementAndIdentifier(
+      form,
+      "stimeo--form-validation",
+    ) as FormValidationController;
+    const originalContains = Element.prototype.contains;
+    let containsCalls = 0;
+    Element.prototype.contains = function contains(node: Node | null): boolean {
+      containsCalls += 1;
+      return originalContains.call(this, node);
+    };
+
+    try {
+      expect(controller.validate()).toBe(false);
+    } finally {
+      Element.prototype.contains = originalContains;
+    }
+
+    expect(containsCalls).toBeLessThan(fieldCount * 4);
+  });
+});
+
+/**
+ * Native form ownership is not the same as DOM containment: `form="id"`
+ * controls can live elsewhere, multiple orchestrators can share one document,
+ * and Turbo can insert controls after connection. Delegation filters on the
+ * live `control.form` relation and rebuilds grouping for every operation.
+ */
+describe("FormValidationController form ownership and live controls", () => {
+  let application: Application;
+
+  beforeEach(async () => {
+    document.body.innerHTML = `
+      <form id="account-form" data-controller="stimeo--form-validation"
+            data-stimeo--form-validation-stimeo--form-field-outlet="${OUTLET}">
+        <div id="account-field" data-controller="stimeo--form-field">
+          <input id="account-name" required data-stimeo--form-field-target="control" />
+          <p hidden data-stimeo--form-field-target="error"></p>
+        </div>
+        <button type="submit">Save account</button>
+      </form>
+      <form id="profile-form" data-controller="stimeo--form-validation"
+            data-stimeo--form-validation-stimeo--form-field-outlet="${OUTLET}">
+        <div id="profile-field" data-controller="stimeo--form-field">
+          <input id="profile-name" required data-stimeo--form-field-target="control" />
+          <p hidden data-stimeo--form-field-target="error"></p>
+        </div>
+        <button type="submit">Save profile</button>
+      </form>
+      <div id="external-field" data-controller="stimeo--form-field">
+        <label for="external-code">External account code</label>
+        <input id="external-code" form="account-form" required
+               data-stimeo--form-field-target="control" />
+        <p hidden data-stimeo--form-field-target="error"></p>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--form-field", FormFieldController);
+    application.register("stimeo--form-validation", FormValidationController);
+    await tick();
+    await tick();
+  });
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const accountForm = () =>
+    document.querySelector<HTMLFormElement>("#account-form") as HTMLFormElement;
+  const profileForm = () =>
+    document.querySelector<HTMLFormElement>("#profile-form") as HTMLFormElement;
+  const field = (id: string) => document.querySelector<HTMLElement>(id) as HTMLElement;
+
+  it("validates an external associated control and ignores it in the other form", () => {
+    const external = document.querySelector<HTMLInputElement>("#external-code") as HTMLInputElement;
+
+    external.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(field("#external-field").hasAttribute("data-stimeo--form-field-invalid")).toBe(true);
+    expect(field("#account-field").hasAttribute("data-stimeo--form-field-invalid")).toBe(false);
+    expect(field("#profile-field").hasAttribute("data-stimeo--form-field-invalid")).toBe(false);
+  });
+
+  it("keeps submit validation isolated between two forms", () => {
+    const event = new Event("submit", { bubbles: true, cancelable: true });
+
+    profileForm().dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(field("#profile-field").hasAttribute("data-stimeo--form-field-invalid")).toBe(true);
+    expect(field("#account-field").hasAttribute("data-stimeo--form-field-invalid")).toBe(false);
+    expect(field("#external-field").hasAttribute("data-stimeo--form-field-invalid")).toBe(false);
+  });
+
+  it("discovers a control and field added after the controller connected", async () => {
+    const dynamicField = document.createElement("div");
+    dynamicField.id = "dynamic-field";
+    dynamicField.setAttribute("data-controller", "stimeo--form-field");
+    dynamicField.innerHTML = `
+      <input id="dynamic-code" required data-stimeo--form-field-target="control" />
+      <p hidden data-stimeo--form-field-target="error"></p>`;
+    accountForm().appendChild(dynamicField);
+    await tick();
+    await tick();
+
+    const dynamic = document.querySelector<HTMLInputElement>("#dynamic-code") as HTMLInputElement;
+    dynamic.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(dynamicField.hasAttribute("data-stimeo--form-field-invalid")).toBe(true);
+  });
+});
+
+/**
  * A radio group validates through native group semantics: a required group is
  * invalid until a choice is made. The group's accessible container
  * (`role="radiogroup"`) is the form-field `control`, so the invalid state lands
@@ -306,7 +585,7 @@ describe("FormValidationController with a radio group", () => {
             <label><input id="plan-free" type="radio" name="plan" required /> Free</label>
             <label><input id="plan-pro" type="radio" name="plan" /> Pro</label>
           </div>
-          <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+          <p hidden data-stimeo--form-field-target="error"></p>
         </div>
         <button type="submit">Save</button>
       </form>`;
@@ -353,6 +632,16 @@ describe("FormValidationController with a radio group", () => {
     // Moving between radios of the same group is not leaving the field, so the
     // relatedTarget guard must defer validation (no premature invalid state).
     free().dispatchEvent(new FocusEvent("focusout", { relatedTarget: pro(), bubbles: true }));
+    expect(group().getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("skips blur validation when focus moves to a non-control inside the field", () => {
+    const help = document.createElement("button");
+    help.type = "button";
+    group().appendChild(help);
+
+    free().dispatchEvent(new FocusEvent("focusout", { relatedTarget: help, bubbles: true }));
+
     expect(group().getAttribute("aria-invalid")).toBe("false");
   });
 
@@ -414,7 +703,7 @@ describe("FormValidationController with a listbox via a validatable mirror", () 
           </ul>
           <input type="text" hidden required name="plan"
                  data-stimeo--listbox-target="field" />
-          <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+          <p hidden data-stimeo--form-field-target="error"></p>
         </div>
         <button type="submit">Save</button>
       </form>`;
@@ -484,10 +773,11 @@ describe("FormValidationController mirror focus fallback", () => {
             data-stimeo--form-validation-stimeo--form-field-outlet="${OUTLET}">
         <div data-controller="stimeo--form-field">
           <div role="radiogroup" aria-label="Size" data-stimeo--form-field-target="control">
+            <input id="size-mirror" type="text" hidden required name="size-value" />
+            <fieldset disabled><button id="blocked" type="button">Blocked</button></fieldset>
             <div id="first-member" role="radio" aria-checked="false" tabindex="0">S</div>
             <div role="radio" aria-checked="false" tabindex="-1">M</div>
           </div>
-          <input type="text" hidden required name="size" />
         </div>
       </form>`;
     application = Application.start();
@@ -509,6 +799,7 @@ describe("FormValidationController mirror focus fallback", () => {
     form.dispatchEvent(event);
 
     expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).not.toBe(document.querySelector("#size-mirror"));
     expect(document.activeElement).toBe(document.querySelector("#first-member"));
   });
 });
@@ -557,6 +848,38 @@ describe("FormValidationController with an unwired native radio group", () => {
     expect(invalid).toHaveLength(1);
     expect(invalid[0]).toBe(first);
     expect(document.activeElement).toBe(first);
+  });
+
+  it("does not validate while focus moves within the field-less radio group", () => {
+    const first = document.querySelector<HTMLInputElement>("#size-s") as HTMLInputElement;
+    const second = document.querySelector<HTMLInputElement>("#size-m") as HTMLInputElement;
+    let invalidEvents = 0;
+    first.addEventListener("invalid", () => {
+      invalidEvents += 1;
+    });
+    second.addEventListener("invalid", () => {
+      invalidEvents += 1;
+    });
+
+    first.dispatchEvent(new FocusEvent("focusout", { relatedTarget: second, bubbles: true }));
+
+    expect(invalidEvents).toBe(0);
+  });
+
+  it("revalidates a touched field-less radio group on input", () => {
+    const form = document.querySelector<HTMLFormElement>("form") as HTMLFormElement;
+    const first = document.querySelector<HTMLInputElement>("#size-s") as HTMLInputElement;
+    const outside = form.querySelector<HTMLButtonElement>("button") as HTMLButtonElement;
+    let invalidEvents = 0;
+    first.addEventListener("invalid", () => {
+      invalidEvents += 1;
+    });
+    first.dispatchEvent(new FocusEvent("focusout", { relatedTarget: outside, bubbles: true }));
+    invalidEvents = 0;
+
+    first.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(invalidEvents).toBeGreaterThan(0);
   });
 });
 
@@ -683,9 +1006,9 @@ describe("FormValidationController declarative messages and custom rules", () =>
     await mountForm(`
       <div data-controller="stimeo--form-field">
         <input id="body" name="body" required
-               data-stimeo--form-field-message-value-missing="本文を入力してください"
+               data-stimeo--form-validation-message-value-missing="本文を入力してください"
                data-stimeo--form-field-target="control" />
-        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+        <p hidden data-stimeo--form-field-target="error"></p>
       </div>`);
 
     const event = submit(); // empty required field -> valueMissing
@@ -699,9 +1022,9 @@ describe("FormValidationController declarative messages and custom rules", () =>
     await mountForm(`
       <div data-controller="stimeo--form-field">
         <input id="body" name="body" required
-               data-stimeo--form-field-message="必須項目です"
+               data-stimeo--form-validation-message="必須項目です"
                data-stimeo--form-field-target="control" />
-        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+        <p hidden data-stimeo--form-field-target="error"></p>
       </div>`);
 
     submit();
@@ -713,10 +1036,10 @@ describe("FormValidationController declarative messages and custom rules", () =>
     await mountForm(`
       <div data-controller="stimeo--form-field">
         <input id="body" name="body" required
-               data-stimeo--form-field-message="generic"
-               data-stimeo--form-field-message-value-missing="specific"
+               data-stimeo--form-validation-message="generic"
+               data-stimeo--form-validation-message-value-missing="specific"
                data-stimeo--form-field-target="control" />
-        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+        <p hidden data-stimeo--form-field-target="error"></p>
       </div>`);
 
     submit();
@@ -728,7 +1051,7 @@ describe("FormValidationController declarative messages and custom rules", () =>
     await mountForm(`
       <div data-controller="stimeo--form-field">
         <input id="body" name="body" required data-stimeo--form-field-target="control" />
-        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+        <p hidden data-stimeo--form-field-target="error"></p>
       </div>`);
     // setCustomValidity makes the native message engine-independent in happy-dom.
     const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
@@ -740,14 +1063,30 @@ describe("FormValidationController declarative messages and custom rules", () =>
     expect(errorText()).toBe("native text");
   });
 
+  it("prefers a consumer custom error over a simultaneous native-constraint override", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body" required
+               data-stimeo--form-validation-message-value-missing="Native constraint text"
+               data-stimeo--form-field-target="control" />
+        <p hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    body.setCustomValidity("Consumer custom text");
+
+    submit();
+
+    expect(errorText()).toBe("Consumer custom text");
+  });
+
   it("blocks a whitespace-only value via disallow='whitespace'", async () => {
     await mountForm(`
       <div data-controller="stimeo--form-field">
         <input id="body" name="body"
-               data-stimeo--form-field-disallow="whitespace"
-               data-stimeo--form-field-message-value-missing="空白だけは不可です"
+               data-stimeo--form-validation-disallow="whitespace"
+               data-stimeo--form-validation-message-whitespace="空白だけは不可です"
                data-stimeo--form-field-target="control" />
-        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+        <p hidden data-stimeo--form-field-target="error"></p>
       </div>`);
     const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
     body.value = "　　"; // full-width spaces: passes required/minlength, blank after trim
@@ -763,9 +1102,9 @@ describe("FormValidationController declarative messages and custom rules", () =>
     await mountForm(`
       <div data-controller="stimeo--form-field">
         <input id="body" name="body"
-               data-stimeo--form-field-disallow="whitespace"
+               data-stimeo--form-validation-disallow="whitespace"
                data-stimeo--form-field-target="control" />
-        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+        <p hidden data-stimeo--form-field-target="error"></p>
       </div>`);
     const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
 
@@ -782,11 +1121,11 @@ describe("FormValidationController declarative messages and custom rules", () =>
     await mountForm(`
       <div data-controller="stimeo--form-field">
         <input id="body" name="body"
-               data-stimeo--form-field-disallow="whitespace"
-               data-stimeo--form-field-message="generic"
-               data-stimeo--form-field-message-value-missing="空白だけは不可です"
+               data-stimeo--form-validation-disallow="whitespace"
+               data-stimeo--form-validation-message="generic"
+               data-stimeo--form-validation-message-whitespace="空白だけは不可です"
                data-stimeo--form-field-target="control" />
-        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+        <p hidden data-stimeo--form-field-target="error"></p>
       </div>`);
     const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
     body.value = "　　";
@@ -800,9 +1139,9 @@ describe("FormValidationController declarative messages and custom rules", () =>
     await mountForm(`
       <div data-controller="stimeo--form-field">
         <input id="body" name="body"
-               data-stimeo--form-field-disallow="whitespace"
+               data-stimeo--form-validation-disallow="whitespace"
                data-stimeo--form-field-target="control" />
-        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+        <p hidden data-stimeo--form-field-target="error"></p>
       </div>`);
     const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
     // A real (non-whitespace) value: our rule passes, but the consumer marks it
@@ -816,13 +1155,111 @@ describe("FormValidationController declarative messages and custom rules", () =>
     expect(errorText()).toBe("Already taken");
   });
 
+  it("does not reclaim the custom-validity slot after a consumer replaces its owned error", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-validation-disallow="whitespace"
+               data-stimeo--form-field-target="control" />
+        <p hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    body.value = "   ";
+    submit(); // The controller writes and records its whitespace error.
+
+    body.setCustomValidity("Consumer still rejects this value");
+    const event = submit();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(body.validationMessage).toBe("Consumer still rejects this value");
+    expect(errorText()).toBe("Consumer still rejects this value");
+  });
+
+  it("does not clear a consumer replacement when the declarative rule later passes", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-validation-disallow="whitespace"
+               data-stimeo--form-field-target="control" />
+        <p hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    body.value = "   ";
+    submit();
+
+    body.value = "real content";
+    body.setCustomValidity("Consumer rejects the real value");
+    const event = submit();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(body.validationMessage).toBe("Consumer rejects the real value");
+    expect(errorText()).toBe("Consumer rejects the real value");
+  });
+
+  it("releases a surviving controller-owned custom error on disconnect", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-validation-disallow="whitespace"
+               data-stimeo--form-field-target="control" />
+        <p hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    body.value = "   ";
+    submit();
+    expect(body.validity.customError).toBe(true);
+
+    form().remove();
+    await tick();
+
+    expect(body.validity.customError).toBe(false);
+  });
+
+  it("preserves a consumer replacement when disconnecting", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-validation-disallow="whitespace"
+               data-stimeo--form-field-target="control" />
+        <p hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    body.value = "   ";
+    submit();
+    body.setCustomValidity("Consumer owns this now");
+
+    form().remove();
+    await tick();
+
+    expect(body.validationMessage).toBe("Consumer owns this now");
+    expect(body.validity.customError).toBe(true);
+  });
+
+  it("treats blank authored messages as absent and falls through", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-validation-disallow="whitespace"
+               data-stimeo--form-validation-message-whitespace="   "
+               data-stimeo--form-validation-message="Generic fallback"
+               data-stimeo--form-field-target="control" />
+        <p hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    body.value = "   ";
+
+    submit();
+
+    expect(errorText()).toBe("Generic fallback");
+  });
+
   it("ignores an unknown disallow value (no custom validity written)", async () => {
     await mountForm(`
       <div data-controller="stimeo--form-field">
         <input id="body" name="body"
-               data-stimeo--form-field-disallow="bogus"
+               data-stimeo--form-validation-disallow="bogus"
                data-stimeo--form-field-target="control" />
-        <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+        <p hidden data-stimeo--form-field-target="error"></p>
       </div>`);
     const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
     body.value = "   "; // whitespace-only, but the rule is unknown -> not enforced

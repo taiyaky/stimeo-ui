@@ -42,6 +42,8 @@ const STRENGTH_BANDS = ["weak", "fair", "good", "strong"] as const;
  * `--stimeo--password-strength`, and (when `minScore` is set) `data-below-min`,
  * and writes the level label into the label target.
  *
+ * `change` dispatches `{ score, level, max, meetsMin }`.
+ *
  * @remarks
  * Behavior only — the meter/bar look is the consumer's, keyed off the data hooks.
  * `data-strength` is one of the fixed {@link STRENGTH_BANDS} (not the localizable

@@ -28,6 +28,8 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * controller observes the element's scroll instead of the (never-scrolling)
  * window. `toTop` then scrolls that same container.
  *
+ * `change` dispatches `{ visible: boolean }`.
+ *
  * @remarks
  * Behavior only — the look and any transition are the consumer's CSS. The scroll
  * listener is `passive`, coalesced through `requestAnimationFrame`, and removed on

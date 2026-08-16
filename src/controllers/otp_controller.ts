@@ -24,6 +24,9 @@ import { CompositionTracker } from "../utils/composition_tracker";
  * - Clipboard intercepting paste division across fields with trailing focus positioning.
  * - Hidden form sync and complete/change event dispatching.
  *
+ * `change` and `complete` dispatch `{ value: string }`; `invalid` dispatches
+ * `{ pattern: string }`.
+ *
  * @remarks
  * Behavior only. The controller binds events dynamically to pre-rendered inputs,
  * updates `data-filled` and hidden value bindings, and emits Stimulus custom events.

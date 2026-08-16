@@ -31,6 +31,8 @@ const fakeManifest: Manifest = {
       events: ["changed"],
       requiredTargets: ["panel"],
       conditionalTargets: [],
+      requiredActions: [],
+      actionCompletion: [],
       a11y: [],
       keyboard: [],
       hosts: [],

@@ -42,6 +42,9 @@ function nextSortDirection(current: string): SortDirection {
  * `-1`); arrow keys move both DOM focus and that tabbable position. Sort state is
  * exposed via `aria-sort` on headers, selection via `aria-selected` on rows.
  *
+ * `selectionchange` dispatches `{ rows: HTMLElement[] }`; `sort` dispatches
+ * `{ column: HTMLElement, direction: "ascending" | "descending" | "none" }`.
+ *
  * @remarks
  * Behavior only — the consumer performs the actual data sort/render in response to
  * the `sort` event and owns all styling. No timers or observers are held, so there

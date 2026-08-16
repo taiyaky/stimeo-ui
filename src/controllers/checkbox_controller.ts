@@ -25,6 +25,9 @@ type CheckboxState = "all" | "partial" | "none";
  * `indeterminate` property (announced as `mixed`) derived from its children, and
  * the cascade from a parent toggle to its children.
  *
+ * `change` and `reconcile` dispatch
+ * `{ checked: boolean, indeterminate: boolean, state: "all" | "partial" | "none" }`.
+ *
  * @remarks
  * Behavior only — the check mark and any "mixed" affordance are the consumer's
  * CSS (keyed off `:checked` / `:indeterminate` / `data-state`). The `parent`

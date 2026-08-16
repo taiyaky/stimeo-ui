@@ -366,9 +366,8 @@ export class SidebarController extends Controller<HTMLElement> {
   #restoreCollapsed(): boolean {
     const key = this.#storageKey;
     if (key) {
-      // An unreadable storage reads as null and falls through to the DOM / declared default.
-      const stored = readLocalStorage(key);
-      if (stored !== null) return stored === "1";
+      const result = readLocalStorage(key);
+      if (result.ok && result.value !== null) return result.value === "1";
     }
     const domState = this.hasPanelTarget ? this.panelTarget.getAttribute("data-state") : null;
     if (domState === "collapsed") return true;

@@ -156,6 +156,19 @@ const EXAMPLE_RESULT_SCHEMA: ToolOutputSchema = {
   required: ["id", "file", "source", "guidance"],
 };
 
+/** JSON Schema fragment for a controller Value condition. */
+const VALUE_CONDITION_SCHEMA = {
+  type: "object",
+  description: "Own-value condition arming a rule; absent means unconditional.",
+  properties: {
+    value: { type: "string" },
+    type: { type: "string", enum: ["boolean", "string"] },
+    equals: STRING_ARRAY,
+    default: { type: "string" },
+  },
+  required: ["value", "type", "equals", "default"],
+} as const;
+
 /** JSON Schema fragment for a content condition (how many targets an element holds). */
 const CONTENT_CONDITION_SCHEMA = {
   type: "object",
@@ -222,9 +235,14 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
         type: "object",
         properties: {
           value: { type: "string", description: "Camel-case declared Value name." },
-          type: { type: "string", enum: ["number"] },
+          type: { type: "string", enum: ["number", "string"] },
           finite: { type: "boolean" },
           greaterThan: { type: "number" },
+          integer: { type: "boolean" },
+          allowedValues: {
+            ...STRING_ARRAY,
+            description: "Accepted literals for a String Value constraint.",
+          },
           suggestion: { type: "string" },
         },
         required: ["value", "type", "suggestion"],
@@ -268,6 +286,49 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
         required: ["whenPresent", "require", "suggestion"],
       },
     },
+    requiredActions: {
+      type: "array",
+      description:
+        "Action bindings required on a particular element in one configured Value state.",
+      items: {
+        type: "object",
+        properties: {
+          target: { type: "string", description: 'Target name; "" means the scope element.' },
+          action: { type: "string", description: "Public action method that must be wired." },
+          eventTypes: {
+            ...STRING_ARRAY,
+            description: "Event types that make the binding usable for this contract.",
+          },
+          when: VALUE_CONDITION_SCHEMA,
+          suggestion: { type: "string" },
+        },
+        required: ["target", "action", "eventTypes", "suggestion"],
+      },
+    },
+    actionCompletion: {
+      type: "array",
+      description:
+        "States an action opens that the consumer's own wiring has to close. Wiring the " +
+        "opening action without any closing one leaves the controller busy for good, and " +
+        "nothing else in the markup reveals it.",
+      items: {
+        type: "object",
+        properties: {
+          opens: { type: "string", description: "Action that opens the state." },
+          whenTriggeredBy: {
+            ...STRING_ARRAY,
+            description: "Event types for that action the controller cannot complete itself.",
+          },
+          closedBy: { ...STRING_ARRAY, description: "Any one of these closes it again." },
+          escapeValue: {
+            type: "string",
+            description: "Value whose non-zero number supplies an automatic exit instead.",
+          },
+          suggestion: { type: "string" },
+        },
+        required: ["opens", "whenTriggeredBy", "closedBy", "suggestion"],
+      },
+    },
     a11y: {
       type: "array",
       description: "Author-supplied ARIA the controller relies on but never sets itself.",
@@ -289,18 +350,7 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
               required: ["attrs"],
             },
           },
-          when: {
-            type: "object",
-            description:
-              "Own-value condition arming the requirement; absent means unconditional. " +
-              "Outside the named configuration the ARIA is not optional but wrong.",
-            properties: {
-              value: { type: "string" },
-              equals: STRING_ARRAY,
-              default: { type: "string" },
-            },
-            required: ["value", "equals", "default"],
-          },
+          when: VALUE_CONDITION_SCHEMA,
           whenContains: CONTENT_CONDITION_SCHEMA,
           whenElement: ELEMENT_CONDITION_SCHEMA,
           whenDocument: DOCUMENT_CONDITION_SCHEMA,
@@ -390,16 +440,7 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
             description: "Check the scope element when the target is absent.",
           },
           coController: { type: "string", description: "Companion controller identifier." },
-          when: {
-            type: "object",
-            description: "Host-value condition arming the rule; absent means unconditional.",
-            properties: {
-              value: { type: "string" },
-              equals: STRING_ARRAY,
-              default: { type: "string" },
-            },
-            required: ["value", "equals", "default"],
-          },
+          when: VALUE_CONDITION_SCHEMA,
           require: {
             type: "object",
             description: "Companion-value requirement (first allowed value is canonical).",
@@ -469,16 +510,7 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
           values: { ...STRING_ARRAY, description: "Restrict the attribute to these values." },
           min: { type: "integer", description: "Smallest permitted count (inclusive)." },
           max: { type: "integer", description: "Largest permitted count (inclusive)." },
-          when: {
-            type: "object",
-            description: "Own-value condition arming the bound; absent means unconditional.",
-            properties: {
-              value: { type: "string" },
-              equals: STRING_ARRAY,
-              default: { type: "string" },
-            },
-            required: ["value", "equals", "default"],
-          },
+          when: VALUE_CONDITION_SCHEMA,
           suggestion: { type: "string" },
         },
         required: ["within", "target", "suggestion"],
@@ -513,6 +545,8 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
     "events",
     "requiredTargets",
     "conditionalTargets",
+    "requiredActions",
+    "actionCompletion",
     "a11y",
     "keyboard",
     "hosts",

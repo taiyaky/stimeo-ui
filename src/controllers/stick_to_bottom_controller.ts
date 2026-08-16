@@ -36,6 +36,8 @@ const countElements = (nodes: NodeList): number => {
  * do. It is off by default, so a restored reading position (a Turbo cache restore, a user
  * who had scrolled up) is never yanked to the bottom unless the consumer asks for it.
  *
+ * `pin` dispatches `{ pinned }`; `new` dispatches `{ count }`.
+ *
  * @remarks
  * The `MutationObserver` watches `childList` only (not `subtree`), so it follows
  * direct appends to `content` (or the element). Appends made deeper inside a nested

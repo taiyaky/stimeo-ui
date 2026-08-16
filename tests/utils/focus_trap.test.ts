@@ -50,6 +50,17 @@ describe("FocusTrap", () => {
     expect(document.activeElement).toBe(byId("first"));
   });
 
+  it("uses the shared Tab-stop rules when choosing initial focus", () => {
+    container.innerHTML = `
+      <fieldset disabled><button id="blocked">Blocked</button></fieldset>
+      <div id="editor" contenteditable>Edit</div>
+      <details><summary id="summary">More</summary></details>`;
+
+    trap().activate();
+
+    expect(document.activeElement).toBe(byId("editor"));
+  });
+
   it("prefers the initialFocus element when provided", () => {
     trap({ initialFocus: () => byId("last") }).activate();
     expect(document.activeElement).toBe(byId("last"));

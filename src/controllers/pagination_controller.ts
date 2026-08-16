@@ -27,6 +27,8 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * `prev`/`next` must be real `<button>` elements: the boundary state is applied
  * through the native `disabled` property, which no other element honors.
  *
+ * `change` dispatches `{ page: number, total: number, previous: number }`.
+ *
  * @remarks
  * Behavior only — each control is in the natural Tab order (no roving). When a
  * boundary disables the button that currently has focus, focus is moved first so

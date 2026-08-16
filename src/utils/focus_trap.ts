@@ -1,5 +1,6 @@
 import { BeforeCacheReset } from "./before_cache_reset";
 import { EscapeLayer } from "./escape_layer";
+import { tabStopsWithin } from "./focus_candidate";
 
 /**
  * Modal focus-trap primitive shared by the modal-overlay controllers
@@ -27,13 +28,6 @@ import { EscapeLayer } from "./escape_layer";
  * target without worrying about when the trap instance is constructed relative to
  * `connect()`.
  */
-
-/**
- * Selector matching the elements considered focusable. Shared by the trap's Tab
- * cycling and by form-validation's invalid-focus delegation.
- */
-export const FOCUSABLE =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /** Behavior hooks a controller supplies when constructing a {@link FocusTrap}. */
 export interface FocusTrapOptions {
@@ -262,8 +256,6 @@ export class FocusTrap {
 
   /** Collects the container's currently focusable descendants in DOM order. */
   #focusableElements(): HTMLElement[] {
-    return Array.from(this.#getContainer().querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-      (el) => !el.hidden,
-    );
+    return tabStopsWithin(this.#getContainer());
   }
 }

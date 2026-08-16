@@ -1,6 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { setDefaultAttribute } from "../utils/default_attribute";
-import { FOCUSABLE } from "../utils/focus_trap";
+import { canTakeFocus, firstTabStop, isTabStop } from "../utils/focus_candidate";
 import type { FormFieldController } from "./form_field_controller";
 
 /** Native form controls that participate in constraint validation. */
@@ -24,18 +24,34 @@ const CONSTRAINT_MESSAGE_KEYS: ReadonlyArray<readonly [keyof ValidityState, stri
 ];
 
 /** Attribute prefix for a per-constraint message override, authored on the control. */
-const MESSAGE_ATTR_PREFIX = "data-stimeo--form-field-message-";
+const MESSAGE_ATTR_PREFIX = "data-stimeo--form-validation-message-";
 /** Attribute for a generic message override applied to any failing constraint. */
-const MESSAGE_ATTR_GENERIC = "data-stimeo--form-field-message";
+const MESSAGE_ATTR_GENERIC = "data-stimeo--form-validation-message";
 /** Attribute opting a control into a declarative custom rule (`"whitespace"`). */
-const DISALLOW_ATTR = "data-stimeo--form-field-disallow";
+const DISALLOW_ATTR = "data-stimeo--form-validation-disallow";
+/** Message override dedicated to the declarative whitespace rule. */
+const DISALLOW_WHITESPACE_MESSAGE = `${MESSAGE_ATTR_PREFIX}whitespace`;
 /** Default message when `disallow="whitespace"` fails and no override is given. */
 const DISALLOW_WHITESPACE_DEFAULT = "Please enter a value that is not only whitespace.";
 
+/** Public invalid-state hook owned by `stimeo--form-field`. */
+const FORM_FIELD_INVALID_ATTR = "data-stimeo--form-field-invalid";
+
+/** Identity used to collect controls into one validation field. */
+type FieldGroupKey = FormFieldController | ValidatableControl | string;
+
 /** A field's validatable controls, grouped so the whole field validates together. */
 interface FieldGroup {
+  readonly key: FieldGroupKey;
   readonly field: FormFieldController | undefined;
   readonly controls: ValidatableControl[];
+}
+
+/** Live form grouping resolved once for a validation operation. */
+interface ValidationSnapshot {
+  readonly groups: Map<FieldGroupKey, FieldGroup>;
+  /** `null` is a deliberate miss key so delegated non-control events need one guard. */
+  readonly groupByControl: Map<ValidatableControl | null, FieldGroup>;
 }
 
 /**
@@ -48,7 +64,7 @@ interface FieldGroup {
  *       <label for="email">Email</label>
  *       <input id="email" type="email" required
  *              data-stimeo--form-field-target="control" />
- *       <p role="alert" hidden data-stimeo--form-field-target="error"></p>
+ *       <p hidden data-stimeo--form-field-target="error"></p>
  *     </div>
  *     <button type="submit">Save</button>
  *   </form>
@@ -61,23 +77,25 @@ interface FieldGroup {
  * `aria-describedby`) therefore lives in exactly one place — `stimeo--form-field`,
  * reached through a Stimulus **outlet** — and is never re-implemented here.
  *
+ * `valid` dispatches `{}`; `invalid` dispatches `{ invalid: HTMLElement[] }`.
+ *
  * @remarks
  * Behavior only — validation **rules** stay in the markup (native HTML
  * constraints: `required`, `type`, `pattern`, `min`/`max`, …) or in the consumer's
  * own `setCustomValidity()` calls, which `checkValidity()` surfaces transparently.
  * It sets the form's `novalidate` so it can replace the browser's default error
- * bubbles with the accessible, in-page `role="alert"` regions, and restores the
- * attribute on disconnect.
+ * bubbles with accessible in-page visual errors plus the shared Announcer, and
+ * restores the attribute on disconnect.
  *
  * Two declarative escape hatches let a field **exceed** native validation with no
  * consumer JS (author them on the control):
- * - **Per-constraint messages** — `data-stimeo--form-field-message-<constraint>`
+ * - **Per-constraint messages** — `data-stimeo--form-validation-message-<constraint>`
  *   (`value-missing`, `too-short`, `too-long`, `pattern-mismatch`, `type-mismatch`,
  *   `range-overflow`, `range-underflow`, `step-mismatch`, `bad-input`), or a generic
- *   `data-stimeo--form-field-message` fallback, override the shown text per failing
+ *   `data-stimeo--form-validation-message` fallback, override the shown text per failing
  *   `ValidityState` flag — controlled, localizable wording that also fixes headless
  *   browsers returning an empty native `validationMessage`. Falls back to native.
- * - **`data-stimeo--form-field-disallow="whitespace"`** — a built-in custom rule
+ * - **`data-stimeo--form-validation-disallow="whitespace"`** — a built-in custom rule
  *   rejecting a value that is blank after trimming (which slips past `required` /
  *   `minlength`), wired through `setCustomValidity` so it blocks submit like any
  *   native constraint.
@@ -140,15 +158,25 @@ export class FormValidationController extends Controller<HTMLFormElement> {
   /** Marker recording that we added `novalidate`, so we only remove our own. */
   static readonly #NOVALIDATE_MARKER = "data-stimeo--form-validation-novalidate";
 
-  /** Controls already interacted with — the gate for blur / input (re)validation. */
-  readonly #touched = new WeakSet<ValidatableControl>();
+  /** Object-backed groups already interacted with — the input revalidation gate. */
+  readonly #touchedGroups = new WeakSet<FormFieldController | ValidatableControl>();
+
+  /** String-backed fallback radio groups already interacted with. */
+  readonly #touchedRadioGroups = new Set<string>();
 
   /**
-   * Controls whose `customError` *we* set via the `disallow` rule. Tracked so we
-   * only ever clear our own custom validity — a consumer's `setCustomValidity` on
-   * the same control survives once our rule passes (don't-clobber-authored-state).
+   * Last message this controller wrote through `setCustomValidity`, kept as a
+   * two-layer ownership ledger: a value is cleared only while the live message
+   * still equals the recorded write. Iterable so disconnect can release every
+   * surviving loan without touching a consumer's later custom error.
    */
-  readonly #ownedCustomError = new WeakSet<ValidatableControl>();
+  readonly #ownedCustomErrors = new Map<ValidatableControl, string>();
+
+  /** Last invalid message routed to each field, suppressing duplicate reports. */
+  readonly #reportedErrors = new WeakMap<FormFieldController, string>();
+
+  /** Exact document that owns the delegated listeners for this connection. */
+  #listenerDocument: Document | null = null;
 
   readonly #onSubmit = (event: SubmitEvent): void => {
     if (event.target !== this.element) return;
@@ -169,34 +197,35 @@ export class FormValidationController extends Controller<HTMLFormElement> {
 
   readonly #onFocusOut = (event: FocusEvent): void => {
     if (!this.validateOnBlurValue) return;
-    const control = this.#controlFrom(event.target);
-    if (!control) return;
+    const snapshot = this.#snapshot();
+    const group = snapshot.groupByControl.get(this.#controlFrom(event.target));
+    if (!group) return;
     // Focus moving *within* the same field (e.g. between members of a radio
     // group) is not leaving it — defer validation until focus actually exits.
-    const field = this.#fieldFor(control);
     const related = event.relatedTarget;
-    if (field && related instanceof Node && field.element.contains(related)) return;
-    this.#touched.add(control);
-    this.#validateControl(control);
+    if (group.field && related instanceof Node && group.field.element.contains(related)) return;
+    if (snapshot.groupByControl.get(this.#controlFrom(related))?.key === group.key) return;
+    this.#markTouched(group.key);
+    this.#applyGroup(group);
   };
 
   readonly #onInput = (event: Event): void => {
     if (!this.revalidateOnInputValue) return;
-    const control = this.#controlFrom(event.target);
+    const group = this.#snapshot().groupByControl.get(this.#controlFrom(event.target));
     // Only re-validate a field the user has already left once, so the first
     // keystroke never eagerly flags a control they are still filling in.
-    if (!control || !this.#touched.has(control)) return;
-    this.#validateControl(control);
+    if (!group || !this.#isTouched(group.key)) return;
+    this.#applyGroup(group);
   };
 
   readonly #onChange = (event: Event): void => {
     if (!this.validateOnChangeValue) return;
-    const control = this.#controlFrom(event.target);
-    if (!control) return;
+    const group = this.#snapshot().groupByControl.get(this.#controlFrom(event.target));
+    if (!group) return;
     // change marks a *committed* interaction (a picked option, a toggled box, a
     // widget writing its mirror), so unlike input it both touches and validates.
-    this.#touched.add(control);
-    this.#validateControl(control);
+    this.#markTouched(group.key);
+    this.#applyGroup(group);
   };
 
   /** Suppresses native bubbles and binds the submit / blur / input listeners. */
@@ -204,21 +233,28 @@ export class FormValidationController extends Controller<HTMLFormElement> {
     if (setDefaultAttribute(this.element, "novalidate", "")) {
       this.element.setAttribute(FormValidationController.#NOVALIDATE_MARKER, "");
     }
-    // Capture phase on the document so we run before any submit listener bound to
-    // the form itself (Stimulus actions, submit-once), whose relative order in the
-    // target phase would otherwise be unpredictable.
-    document.addEventListener("submit", this.#onSubmit, true);
-    this.element.addEventListener("focusout", this.#onFocusOut);
-    this.element.addEventListener("input", this.#onInput);
-    this.element.addEventListener("change", this.#onChange);
+    // Capture submit before form-bound actions. The other bubbling events live on
+    // the same document so controls associated through `form="id"` participate too;
+    // #controlFrom rejects every control owned by a different form.
+    this.#listenerDocument = this.element.ownerDocument;
+    this.#listenerDocument.addEventListener("submit", this.#onSubmit, true);
+    this.#listenerDocument.addEventListener("focusout", this.#onFocusOut);
+    this.#listenerDocument.addEventListener("input", this.#onInput);
+    this.#listenerDocument.addEventListener("change", this.#onChange);
   }
 
   /** Tears down listeners and restores `novalidate` if we added it. */
   override disconnect(): void {
-    document.removeEventListener("submit", this.#onSubmit, true);
-    this.element.removeEventListener("focusout", this.#onFocusOut);
-    this.element.removeEventListener("input", this.#onInput);
-    this.element.removeEventListener("change", this.#onChange);
+    this.#listenerDocument?.removeEventListener("submit", this.#onSubmit, true);
+    this.#listenerDocument?.removeEventListener("focusout", this.#onFocusOut);
+    this.#listenerDocument?.removeEventListener("input", this.#onInput);
+    this.#listenerDocument?.removeEventListener("change", this.#onChange);
+    this.#listenerDocument = null;
+    for (const [control, message] of this.#ownedCustomErrors) {
+      if (control.validationMessage === message) control.setCustomValidity("");
+    }
+    this.#ownedCustomErrors.clear();
+    this.#touchedRadioGroups.clear();
     if (this.element.hasAttribute(FormValidationController.#NOVALIDATE_MARKER)) {
       this.element.removeAttribute("novalidate");
       this.element.removeAttribute(FormValidationController.#NOVALIDATE_MARKER);
@@ -227,8 +263,8 @@ export class FormValidationController extends Controller<HTMLFormElement> {
 
   /**
    * Validates every control now, rendering or clearing each field's message, and
-   * returns whether the whole form is valid. Marks every control touched so a
-   * later input re-validates it. Bound via `data-action`
+   * returns whether the whole form is valid. Marks every field/group touched so
+   * a later input from any sibling re-validates it. Bound via `data-action`
    * (`#validate`) or callable directly (e.g. before a programmatic submit).
    */
   validate(): boolean {
@@ -243,35 +279,49 @@ export class FormValidationController extends Controller<HTMLFormElement> {
    * Each group's first invalid control supplies the message and the focus target.
    */
   #validateAll(): ValidatableControl[] {
-    const groups = new Map<unknown, FieldGroup>();
-    for (const control of this.#controls) {
-      this.#touched.add(control);
-      const field = this.#fieldFor(control);
-      const key = this.#keyFor(control, field);
-      const group = groups.get(key);
-      if (group) {
-        group.controls.push(control);
-      } else {
-        groups.set(key, { field, controls: [control] });
-      }
-    }
-
     const invalid: ValidatableControl[] = [];
-    for (const group of groups.values()) {
+    for (const group of this.#snapshot().groups.values()) {
+      this.#markTouched(group.key);
       const firstInvalid = this.#applyGroup(group);
       if (firstInvalid) invalid.push(firstInvalid);
     }
     return invalid;
   }
 
-  /** Re-validates the whole field a single control belongs to (or that control). */
-  #validateControl(control: ValidatableControl): void {
-    const field = this.#fieldFor(control);
-    const key = this.#keyFor(control, field);
-    const controls = this.#controls.filter(
-      (other) => this.#keyFor(other, this.#fieldFor(other)) === key,
-    );
-    this.#applyGroup({ field, controls });
+  /** Builds the current field table in one pass over form controls and DOM depth. */
+  #snapshot(): ValidationSnapshot {
+    const fields = this.#fieldOutlets();
+    const groups = new Map<FieldGroupKey, FieldGroup>();
+    const groupByControl = new Map<ValidatableControl | null, FieldGroup>();
+
+    for (const control of this.#controls) {
+      const field = this.#fieldFor(control, fields);
+      const key = this.#keyFor(control, field);
+      let group = groups.get(key);
+      if (!group) {
+        group = { key, field, controls: [] };
+        groups.set(key, group);
+      }
+      group.controls.push(control);
+      groupByControl.set(control, group);
+    }
+
+    return { groups, groupByControl };
+  }
+
+  /** Records that a whole field/group, rather than one sibling control, was visited. */
+  #markTouched(key: FieldGroupKey): void {
+    if (typeof key === "string") {
+      this.#touchedRadioGroups.add(key);
+    } else {
+      this.#touchedGroups.add(key);
+    }
+  }
+
+  #isTouched(key: FieldGroupKey): boolean {
+    return typeof key === "string"
+      ? this.#touchedRadioGroups.has(key)
+      : this.#touchedGroups.has(key);
   }
 
   /**
@@ -288,9 +338,18 @@ export class FormValidationController extends Controller<HTMLFormElement> {
     const firstInvalid = group.controls.find((control) => !control.checkValidity()) ?? null;
     if (group.field) {
       if (firstInvalid) {
-        group.field.setError(this.#messageFor(firstInvalid));
-      } else {
+        const message = this.#messageFor(firstInvalid);
+        const alreadyReported =
+          group.field.element.hasAttribute(FORM_FIELD_INVALID_ATTR) &&
+          this.#reportedErrors.get(group.field) === message;
+        if (!alreadyReported) group.field.setError(message, { focus: false });
+        this.#reportedErrors.set(group.field, message);
+      } else if (
+        group.field.element.hasAttribute(FORM_FIELD_INVALID_ATTR) ||
+        this.#reportedErrors.has(group.field)
+      ) {
         group.field.clearError();
+        this.#reportedErrors.delete(group.field);
       }
     }
     return firstInvalid;
@@ -298,57 +357,69 @@ export class FormValidationController extends Controller<HTMLFormElement> {
 
   /**
    * Resolves the message to show for an invalid control: a per-constraint
-   * override (`data-stimeo--form-field-message-<constraint>`) for the first failing
-   * `ValidityState` flag, then a generic `data-stimeo--form-field-message`
+   * override (`data-stimeo--form-validation-message-<constraint>`) for the first failing
+   * `ValidityState` flag, then a generic `data-stimeo--form-validation-message`
    * override, then the browser's native `validationMessage`. Authoring an override
    * gives controlled, localizable, theme-able wording with **no consumer JS** —
    * and sidesteps headless browsers that return an empty native message.
    */
   #messageFor(control: ValidatableControl): string {
+    // `setCustomValidity()` owns its wording. In particular, a consumer's custom
+    // error must not be replaced by a simultaneous native-constraint override.
+    if (control.validity.customError) return control.validationMessage;
     for (const [flag, key] of CONSTRAINT_MESSAGE_KEYS) {
       if (control.validity[flag]) {
         return (
-          control.getAttribute(`${MESSAGE_ATTR_PREFIX}${key}`) ??
-          control.getAttribute(MESSAGE_ATTR_GENERIC) ??
+          this.#authoredMessage(control, `${MESSAGE_ATTR_PREFIX}${key}`) ??
+          this.#authoredMessage(control, MESSAGE_ATTR_GENERIC) ??
           control.validationMessage
         );
       }
     }
-    // customError (our `disallow` rule, or a consumer's setCustomValidity): for our
-    // rule the message was already resolved with per-constraint > generic > default
-    // precedence when set, and a consumer error carries its own text — so return the
-    // live validationMessage as-is, falling back to the generic override then "".
-    return control.validationMessage || control.getAttribute(MESSAGE_ATTR_GENERIC) || "";
+    return control.validationMessage || this.#authoredMessage(control, MESSAGE_ATTR_GENERIC) || "";
   }
 
   /**
    * Applies (or clears) a declarative custom constraint via `setCustomValidity`,
-   * for controls that opt in with `data-stimeo--form-field-disallow`. The supported
+   * for controls that opt in with `data-stimeo--form-validation-disallow`. The supported
    * rule is `"whitespace"` — a value that is non-empty but blank
    * after trimming (which slips past `required` / `minlength`); its message follows
-   * the per-constraint (`value-missing`) → generic → default chain.
+   * the whitespace-specific → generic → default chain.
    *
-   * Don't-clobber-authored-state: an unknown/absent rule is never touched, and a
-   * custom error is only cleared when *we* set it (tracked in {@link #ownedCustomError}),
-   * so a consumer's own `setCustomValidity` on the same control survives.
+   * Don't-clobber-authored-state: an unknown/absent rule is never written, an
+   * existing consumer custom error wins, and a controller error is only cleared
+   * while the live message still equals the recorded controller write.
    */
   #syncCustomValidity(control: ValidatableControl): void {
+    const recorded = this.#ownedCustomErrors.get(control);
+    const ownsCurrent = recorded !== undefined && control.validationMessage === recorded;
+
     const violates =
       control.getAttribute(DISALLOW_ATTR) === "whitespace" &&
       control.value.length > 0 &&
       control.value.trim() === "";
-    if (violates) {
-      control.setCustomValidity(
-        control.getAttribute(`${MESSAGE_ATTR_PREFIX}value-missing`) ??
-          control.getAttribute(MESSAGE_ATTR_GENERIC) ??
-          DISALLOW_WHITESPACE_DEFAULT,
-      );
-      this.#ownedCustomError.add(control);
-    } else if (this.#ownedCustomError.has(control)) {
-      // Only clear the custom error this controller set; leave a consumer's intact.
-      this.#ownedCustomError.delete(control);
-      control.setCustomValidity("");
+    if (!violates) {
+      if (ownsCurrent) control.setCustomValidity("");
+      this.#ownedCustomErrors.delete(control);
+      return;
     }
+
+    // One custom-validity slot exists per control. Preserve a consumer's live
+    // entry; once they clear it, the next validation applies the declarative rule.
+    if (control.validity.customError && !ownsCurrent) return;
+
+    const message =
+      this.#authoredMessage(control, DISALLOW_WHITESPACE_MESSAGE) ??
+      this.#authoredMessage(control, MESSAGE_ATTR_GENERIC) ??
+      DISALLOW_WHITESPACE_DEFAULT;
+    if (!ownsCurrent || recorded !== message) control.setCustomValidity(message);
+    this.#ownedCustomErrors.set(control, message);
+  }
+
+  /** Returns a non-blank authored message, otherwise falls through to a fallback. */
+  #authoredMessage(control: ValidatableControl, attribute: string): string | null {
+    const message = control.getAttribute(attribute);
+    return message && message.trim().length > 0 ? message : null;
   }
 
   /**
@@ -356,7 +427,7 @@ export class FormValidationController extends Controller<HTMLFormElement> {
    * `stimeo--form-field` when present, else a radio group's shared `name`, else
    * the control itself (always distinct).
    */
-  #keyFor(control: ValidatableControl, field: FormFieldController | undefined): unknown {
+  #keyFor(control: ValidatableControl, field: FormFieldController | undefined): FieldGroupKey {
     if (field) return field;
     if (control instanceof HTMLInputElement && control.type === "radio" && control.name) {
       return `radio:${control.name}`;
@@ -374,19 +445,37 @@ export class FormValidationController extends Controller<HTMLFormElement> {
    * is deterministic and CSS-independent.
    */
   #focusTargetFor(control: ValidatableControl): HTMLElement | null {
-    if (!control.hidden) return control;
-    const field = this.#fieldFor(control);
+    if (canTakeFocus(control)) return control;
+    const field = this.#fieldFor(control, this.#fieldOutlets());
     if (!field?.hasControlTarget) return null;
     const root = field.controlTarget;
-    if (root.matches(FOCUSABLE)) return root;
-    return root.querySelector<HTMLElement>(FOCUSABLE);
+    if (isTabStop(root)) return root;
+    return firstTabStop(root);
   }
 
-  /** The `stimeo--form-field` outlet whose element contains `control`, if any. */
-  #fieldFor(control: ValidatableControl): FormFieldController | undefined {
+  /** Pairs each live outlet element with its controller once per operation. */
+  #fieldOutlets(): Map<HTMLElement, FormFieldController> {
+    const fields = new Map<HTMLElement, FormFieldController>();
     const elements = this.stimeoFormFieldOutletElements;
+    const outlets = this.stimeoFormFieldOutlets;
     for (let index = 0; index < elements.length; index++) {
-      if (elements[index]?.contains(control)) return this.stimeoFormFieldOutlets[index];
+      const element = elements[index];
+      const outlet = outlets[index];
+      if (element && outlet) fields.set(element, outlet);
+    }
+    return fields;
+  }
+
+  /** The nearest configured field ancestor of `control`, if any. */
+  #fieldFor(
+    control: ValidatableControl,
+    fields: ReadonlyMap<HTMLElement, FormFieldController>,
+  ): FormFieldController | undefined {
+    let ancestor: HTMLElement | null = control;
+    while (ancestor) {
+      const field = fields.get(ancestor);
+      if (field) return field;
+      ancestor = ancestor.parentElement;
     }
     return undefined;
   }
@@ -402,7 +491,9 @@ export class FormValidationController extends Controller<HTMLFormElement> {
 
   /** Narrows an event target to a validatable control. */
   #controlFrom(target: EventTarget | null): ValidatableControl | null {
-    return target instanceof Element && this.#isValidatable(target) ? target : null;
+    return target instanceof Element && this.#isValidatable(target) && target.form === this.element
+      ? target
+      : null;
   }
 
   #isValidatable(element: Element): element is ValidatableControl {
@@ -410,8 +501,9 @@ export class FormValidationController extends Controller<HTMLFormElement> {
       (element instanceof HTMLInputElement ||
         element instanceof HTMLSelectElement ||
         element instanceof HTMLTextAreaElement) &&
-      // `willValidate` already excludes disabled, read-only, hidden, and button
-      // controls — the exact set barred from constraint validation.
+      // `willValidate` already excludes disabled, read-only, input[type=hidden],
+      // and button-type controls. The `hidden` attribute intentionally does not
+      // bar a text mirror from constraint validation.
       element.willValidate
     );
   }

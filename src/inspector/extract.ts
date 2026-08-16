@@ -89,6 +89,12 @@ export interface ActionDescriptor {
   readonly identifier: string;
   /** The action method name after `#` (e.g. `toggle`), or `""` if absent. */
   readonly method: string;
+  /**
+   * The event type before `->` with any `@window` / `@document` scope removed
+   * (e.g. `click`), or `""` when the descriptor relies on the element's default
+   * event.
+   */
+  readonly eventType: string;
 }
 
 /**
@@ -105,10 +111,16 @@ export function actionDescriptors(dataActionValue: string): ActionDescriptor[] {
     if (hash === -1) continue;
     let lhs = descriptor.slice(0, hash);
     const arrow = lhs.indexOf("->");
-    if (arrow !== -1) lhs = lhs.slice(arrow + 2);
+    let eventType = "";
+    if (arrow !== -1) {
+      eventType = lhs.slice(0, arrow);
+      lhs = lhs.slice(arrow + 2);
+      const at = eventType.indexOf("@");
+      if (at !== -1) eventType = eventType.slice(0, at);
+    }
     if (!lhs.startsWith(NAMESPACE_PREFIX)) continue;
     const method = /^[a-zA-Z_$][\w$]*/.exec(descriptor.slice(hash + 1))?.[0] ?? "";
-    descriptors.push({ identifier: lhs, method });
+    descriptors.push({ identifier: lhs, method, eventType });
   }
   return descriptors;
 }

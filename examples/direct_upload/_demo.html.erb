@@ -1,8 +1,12 @@
 <%# Direct upload demo: there is no server, so demo.js fires the ActiveStorage
-    direct-upload:* events to drive the rows. The library clones the row template per
-    file, updates aria-valuenow / data-upload-state / the --stimeo--upload-progress
-    var, and announces completion into the status live region. This demo styles the
-    bars; the sr-only status carries the announcement. %>
+    direct-upload:* events to drive the rows — including one upload that fails
+    (error followed by end, the order ActiveStorage really uses). The library
+    clones the row template per file, updates aria-valuenow / aria-valuetext /
+    data-upload-state / the --stimeo--upload-progress var, and hands completion
+    and failure announcements to the shared announcer below. This demo styles
+    the bars. %>
+<% done_text = t("components.direct_upload.demo.done") %>
+<% error_text = t("components.direct_upload.demo.error") %>
 <div class="direct-upload-demo">
   <button type="button" class="demo-trigger" data-direct-upload-start>
     <%= t("components.direct_upload.demo.start") %>
@@ -10,8 +14,8 @@
   <div
     class="direct-upload"
     data-controller="stimeo--direct-upload"
-    data-stimeo--direct-upload-done-label-value="<%= t('components.direct_upload.demo.done') %>"
-    data-stimeo--direct-upload-error-label-value="<%= t('components.direct_upload.demo.error') %>">
+    data-stimeo--direct-upload-announce-done-text-value="<%= done_text %>"
+    data-stimeo--direct-upload-announce-error-text-value="<%= error_text %>">
     <div class="direct-upload__list" data-stimeo--direct-upload-target="list"></div>
     <template data-stimeo--direct-upload-target="row">
       <div class="direct-upload__row" role="progressbar" aria-valuemin="0" aria-valuemax="100">
@@ -20,7 +24,11 @@
         <span class="direct-upload__percent" data-field="percent"></span>
       </div>
     </template>
-    <span class="visually-hidden" data-stimeo--direct-upload-target="status"
-          aria-live="polite"></span>
+  </div>
+  <%# Shared announcer: completion and failure are the transitions worth reading;
+      per-tick progress stays on each row's aria-valuenow. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

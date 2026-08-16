@@ -19,6 +19,8 @@ import { IntersectionWatcher } from "../utils/intersection_watcher";
  * emits `load`. With `once` (default) it then stops observing; otherwise re-entry asks
  * Turbo to `reload()` the frame.
  *
+ * `load` dispatches `{ url }`.
+ *
  * @remarks
  * Behavior only — the load itself and the frame's content are Turbo's / the server's job,
  * and the loading UI (skeleton / `aria-busy`) belongs to Frame Loading State. The trigger

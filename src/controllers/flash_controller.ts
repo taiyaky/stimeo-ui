@@ -37,6 +37,10 @@ interface FlashTimer {
  * resumed only once both are released), and capped at `max` simultaneous messages.
  * A close button wired to the `dismiss` action removes one manually.
  *
+ * `dismiss` dispatches `{ element, reason }`.
+ *
+ * `show` dispatches `{ type, message }`.
+ *
  * @remarks
  * Reading is **delegated to the shared Announcer** — but only for the *initial*,
  * page-loaded messages: an in-place live region present at load is not announced by

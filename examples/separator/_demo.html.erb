@@ -1,68 +1,59 @@
-<%# Markup for the separator demo.
-    The top is a decorative separator (only role="separator" and aria-orientation).
-    The bottom is a valued, focusable separator that increments/decrements aria-valuenow
-    with the arrow keys and fires stimeo--separator:change. The actual pane-width change
-    (demo.js) and line rendering (demo.css) are the consumer's job. %>
+<%# Separator demo markup. The first separator is decorative; the other two are
+    focusable and value-bearing, dispatching change as the arrow keys adjust them.
+    The consumer-owned demo.js and demo.css turn that value into pane sizes and
+    the divider's appearance. %>
 <div class="separator-demo">
   <p class="separator-demo__text"><%= t("components.separator.demo.intro") %></p>
   <div
     class="separator separator--horizontal"
-    role="separator"
     data-controller="stimeo--separator"
     data-stimeo--separator-orientation-value="horizontal"></div>
   <p class="separator-demo__text"><%= t("components.separator.demo.after") %></p>
 
   <div class="separator-demo__split">
-    <%# The primary pane: demo.css sizes this one from --separator-split, so the
-        value the splitter reports is this pane's size. A vertical splitter can
-        only take the left pane as primary, because ArrowRight both moves the
-        handle right and increases the value. %>
+    <%# The primary pane. Its width follows --separator-split, so the separator's
+        Value reports this pane's size: ArrowRight raises the value while moving
+        the vertical divider right. %>
     <div class="separator-demo__pane" id="separator-demo-primary">
       <%= t("components.separator.demo.left") %>
     </div>
     <div
       class="separator separator--vertical"
-      role="separator"
-      tabindex="0"
-      <%# The pattern names the splitter after the primary pane, and that pane
-          carries its own visible text, so it is referenced instead of writing a
-          separate label. %>
+      <%# Reuse the primary pane's visible text as the separator's name. %>
       aria-labelledby="separator-demo-primary"
       aria-controls="separator-demo-primary"
-      aria-orientation="vertical"
-      aria-valuemin="20"
-      aria-valuemax="80"
-      aria-valuenow="50"
       data-controller="stimeo--separator"
+      data-stimeo--separator-orientation-value="vertical"
       data-stimeo--separator-focusable-value="true"
+      data-stimeo--separator-min-value="20"
+      data-stimeo--separator-max-value="80"
       data-stimeo--separator-step-value="5"
+      data-stimeo--separator-value-value="50"
       data-action="keydown->stimeo--separator#onKeydown"></div>
     <div class="separator-demo__pane"><%= t("components.separator.demo.right") %></div>
   </div>
 
   <p class="separator-demo__text"><%= t("components.separator.demo.after_horizontal") %></p>
 
-  <%# Horizontal, value-bearing separator (top/bottom split). aria-orientation="horizontal"
-      scopes the arrows to ArrowUp/ArrowDown. demo.js reuses the same --separator-split var. %>
+  <%# A horizontal separator takes ArrowUp and ArrowDown. demo.js maps the same
+      --separator-split custom property onto the top / bottom pane ratio. %>
   <div class="separator-demo__split separator-demo__split--stacked">
     <div class="separator-demo__pane"><%= t("components.separator.demo.top") %></div>
     <div
       class="separator separator--horizontal-handle"
-      role="separator"
-      tabindex="0"
       aria-labelledby="separator-demo-primary-stacked"
       aria-controls="separator-demo-primary-stacked"
-      aria-orientation="horizontal"
-      aria-valuemin="20"
-      aria-valuemax="80"
-      aria-valuenow="50"
       data-controller="stimeo--separator"
+      data-stimeo--separator-orientation-value="horizontal"
       data-stimeo--separator-focusable-value="true"
+      data-stimeo--separator-min-value="20"
+      data-stimeo--separator-max-value="80"
       data-stimeo--separator-step-value="5"
+      data-stimeo--separator-value-value="50"
       data-action="keydown->stimeo--separator#onKeydown"></div>
-    <%# The primary pane here is the bottom one: demo.css sizes the last child
-        from --separator-split, which is what lets ArrowUp both move the handle
-        up and increase the value. %>
+    <%# Here the lower pane is the primary one. Flexing the last child from
+        --separator-split makes ArrowUp raise the primary pane's value while
+        moving the divider up. %>
     <div class="separator-demo__pane" id="separator-demo-primary-stacked">
       <%= t("components.separator.demo.bottom") %>
     </div>

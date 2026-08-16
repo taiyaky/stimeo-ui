@@ -1,5 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
-import { FOCUSABLE } from "../utils/focus_trap";
+import {
+  canTakeFocus,
+  isRenderedForFocus,
+  isTabStop,
+  tabStopsWithin,
+} from "../utils/focus_candidate";
 
 /**
  * Headless "dismissible" behavior for banners, notices, and inline alerts.
@@ -18,6 +23,8 @@ import { FOCUSABLE } from "../utils/focus_trap";
  * keep focus from being orphaned: if focus is inside the element being removed,
  * it is moved to a safe place first so the close button vanishing never strands
  * the user (WCAG 2.4.3).
+ *
+ * `dismiss` dispatches `{ mode: "remove" | "hide" }`.
  *
  * @remarks
  * Behavior only — the consumer owns any exit transition (use `hide` mode, which
@@ -128,12 +135,12 @@ export class DismissibleController extends Controller<HTMLElement> {
     if (
       explicitFallback &&
       !root.contains(explicitFallback) &&
-      this.#isFocusAvailable(explicitFallback)
+      this.#isExplicitFocusAvailable(explicitFallback)
     ) {
       yield explicitFallback;
     }
 
-    const candidates = document.querySelectorAll<HTMLElement>(FOCUSABLE);
+    const candidates = tabStopsWithin(document);
     for (const element of candidates) {
       if (
         element === explicitFallback ||
@@ -142,11 +149,12 @@ export class DismissibleController extends Controller<HTMLElement> {
       ) {
         continue;
       }
-      if (this.#isFocusAvailable(element)) yield element;
+      yield element;
     }
 
     for (let index = candidates.length - 1; index >= 0; index -= 1) {
-      const element = candidates.item(index);
+      const element = candidates[index];
+      if (!element) continue;
       if (
         element === explicitFallback ||
         root.contains(element) ||
@@ -154,25 +162,13 @@ export class DismissibleController extends Controller<HTMLElement> {
       ) {
         continue;
       }
-      if (this.#isFocusAvailable(element)) yield element;
+      yield element;
     }
   }
 
-  /** Whether focus is allowed by the element and its semantic ancestors. */
-  #isFocusAvailable(element: HTMLElement): boolean {
-    if (
-      !element.matches(FOCUSABLE) &&
-      !element.hasAttribute("tabindex") &&
-      !element.isContentEditable
-    ) {
-      return false;
-    }
-    if (element.matches(":disabled")) return false;
-    if (element instanceof HTMLInputElement && element.type === "hidden") return false;
-
-    for (let current: HTMLElement | null = element; current; current = current.parentElement) {
-      if (current.hidden || current.inert) return false;
-    }
-    return true;
+  /** Whether an explicit fallback can receive programmatic focus right now. */
+  #isExplicitFocusAvailable(element: HTMLElement): boolean {
+    const programmaticallyFocusable = element.hasAttribute("tabindex") || isTabStop(element);
+    return programmaticallyFocusable && canTakeFocus(element) && isRenderedForFocus(element);
   }
 }

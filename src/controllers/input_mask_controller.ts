@@ -80,6 +80,8 @@ export function applyMask(
  *          data-action="input->stimeo--input-mask#format">
  *   <input type="hidden" name="zip" data-stimeo--input-mask-unmask>
  *
+ * `change` dispatches `{ masked, unmasked, complete }`.
+ *
  * @remarks
  * Behavior only and **idempotent** — the formatted value lives only in the input and
  * the hidden field (no module-scope state), so `connect()` re-formats the existing

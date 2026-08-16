@@ -26,6 +26,8 @@ const miniManifest: Manifest = {
       events: [],
       requiredTargets: ["panel"],
       conditionalTargets: [],
+      requiredActions: [],
+      actionCompletion: [],
       a11y: [],
       keyboard: [],
       hosts: [],

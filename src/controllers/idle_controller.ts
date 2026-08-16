@@ -30,6 +30,8 @@ const DEFAULT_ACTIVITY_EVENTS = [
  * (`visibilitychange` → visible) counts as activity too. While idle the controller
  * element carries `data-idle`.
  *
+ * `prompt` dispatches `{ remaining }`; `idle` and `active` dispatch `{}`.
+ *
  * @remarks
  * Behavior only — it renders no warning UI (pair with Dialog/Confirm) and never
  * touches the server session. Timers are owned by {@link SafeTimeout} and the

@@ -50,6 +50,16 @@ export interface ControllerManifest {
    */
   readonly conditionalTargets: readonly ConditionalTargetRule[];
   /**
+   * Actions required on a particular element in one Value configuration. See
+   * {@link RequiredActionRule}.
+   */
+  readonly requiredActions: readonly RequiredActionRule[];
+  /**
+   * States an action opens that the consumer's wiring has to close. See
+   * {@link ActionCompletionRule}.
+   */
+  readonly actionCompletion: readonly ActionCompletionRule[];
+  /**
    * Accessibility requirements the *consumer's markup* must satisfy (stage 3):
    * ARIA attributes the controller does **not** set at runtime and therefore
    * relies on the author to provide (e.g. a dialog's `role`/`aria-modal`/name).
@@ -142,6 +152,8 @@ export interface ControllerManifest {
 export interface ValueCondition {
   /** Value name (camelCase, as declared in `static values`). */
   readonly value: string;
+  /** Stimulus decoder used before comparing the effective value. */
+  readonly type: "boolean" | "string";
   /** Effective values that arm the rule. */
   readonly equals: readonly string[];
   /** The value's declared default, used when the attribute is absent. */
@@ -625,6 +637,88 @@ export interface ConditionalTargetRule {
    * controller then refuses to build from.
    */
   readonly requireInside?: boolean;
+  /**
+   * Require each {@link require} entry to share its nearest enclosing host —
+   * the closest ancestor matching one of these selectors — with the
+   * `whenPresent` element.
+   *
+   * Neither presence nor {@link requireInside} can express a pair that must sit
+   * in the *same* container without being nested in one another. A controller
+   * that swaps one host's two halves reads them per host, so halves split
+   * across two hosts leave each host with an incomplete pair, and the swap
+   * silently does nothing on markup where both names are present.
+   *
+   * Only a pair whose halves both resolve to a host is judged. A template
+   * helper that emits the host leaves nothing in the parsed markup, so an
+   * element with no host above it is indistinguishable from one whose host is
+   * generated — reporting either would be a guess, and the check stays quiet.
+   */
+  readonly requireSameHost?: readonly HostSelector[];
+  /**
+   * What to call the shared host in the diagnostic (e.g. `submit control`).
+   * The selectors' tag names read as a disjunction of element names, which
+   * names the mechanism rather than the thing the author is looking at.
+   */
+  readonly hostLabel?: string;
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
+/**
+ * One element shape that can act as a host for {@link
+ * ConditionalTargetRule.requireSameHost}.
+ *
+ * A tag alone is too coarse where the element's `type` decides its role, so an
+ * optional attribute filter narrows it. Omitting {@link attr} accepts the tag
+ * however it is spelled.
+ */
+export interface HostSelector {
+  /** Lowercased tag name. */
+  readonly tag: string;
+  /** Attribute that must carry one of {@link values} for the tag to qualify. */
+  readonly attr?: string;
+  /** Accepted lowercased values of {@link attr}. */
+  readonly values?: readonly string[];
+}
+
+/**
+ * An action that puts a controller into a state it cannot leave on its own.
+ *
+ * A controller whose busy state is opened declaratively has no way to know the
+ * consumer never wired the matching exit: nothing throws, the markup is
+ * well-formed, and the only symptom is a control that stays disabled for the
+ * rest of the page's life. The check reads the wiring the author did declare
+ * and says so before it ships.
+ */
+export interface ActionCompletionRule {
+  /** Action that opens the state. */
+  readonly opens: string;
+  /** Any one of these actions closes it again. */
+  readonly closedBy: readonly string[];
+  /** Event types for {@link opens} that the controller cannot complete itself. */
+  readonly whenTriggeredBy: readonly string[];
+  /** Value whose non-zero number supplies an automatic exit instead. */
+  readonly escapeValue?: string;
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
+/**
+ * An action binding that must exist for one configured behavior to be usable.
+ *
+ * Declaring an action method on the controller only proves the method exists;
+ * Stimulus still needs the consumer to wire it. Optional interactive variants
+ * can otherwise enter the Tab order while every key silently does nothing.
+ */
+export interface RequiredActionRule {
+  /** Target whose element must carry the action; `""` means the scope element. */
+  readonly target: string;
+  /** Public controller action method that must be wired. */
+  readonly action: string;
+  /** Event types that make the binding usable for this contract. */
+  readonly eventTypes: readonly string[];
+  /** Configuration in which the binding becomes mandatory. */
+  readonly when?: ValueCondition;
   /** Human-readable fix suggestion shown by the CLI (stage 4). */
   readonly suggestion: string;
 }
@@ -636,10 +730,10 @@ export interface ConditionalTargetRule {
  * ""))`) before applying these bounds. ERB-generated values are undecidable and
  * skipped rather than guessed.
  */
-export interface ValueConstraint {
+export interface NumericValueConstraint {
   /** Value name (camelCase, as declared in `static values`). */
   readonly value: string;
-  /** Decoder family. Numeric bounds are the first supported semantic family. */
+  /** Decoder family. */
   readonly type: "number";
   /** Reject `NaN` and infinities when true. */
   readonly finite?: boolean;
@@ -650,6 +744,21 @@ export interface ValueConstraint {
   /** Human-readable fix suggestion shown by the CLI (stage 4). */
   readonly suggestion: string;
 }
+
+/** A statically checkable finite set of accepted String Value literals. */
+export interface StringValueConstraint {
+  /** Value name (camelCase, as declared in `static values`). */
+  readonly value: string;
+  /** Decoder family. */
+  readonly type: "string";
+  /** Exact authored literals accepted by the public contract. */
+  readonly allowedValues: readonly string[];
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
+/** A statically checkable semantic contract on one declared Stimulus Value. */
+export type ValueConstraint = NumericValueConstraint | StringValueConstraint;
 
 /**
  * A statically checkable relationship between two numeric Stimulus Values.
@@ -679,6 +788,8 @@ export type StructureRules = Readonly<
     {
       readonly requiredTargets?: readonly string[];
       readonly conditionalTargets?: readonly ConditionalTargetRule[];
+      readonly requiredActions?: readonly RequiredActionRule[];
+      readonly actionCompletion?: readonly ActionCompletionRule[];
     }
   >
 >;
@@ -734,6 +845,8 @@ export const DIAGNOSTIC_CODES = [
   "orphan-target",
   "missing-required-target",
   "missing-conditional-target",
+  "missing-required-action",
+  "missing-action-completion",
   "missing-aria",
   "invalid-aria-value",
   "keyboard-inaccessible",
@@ -745,6 +858,7 @@ export const DIAGNOSTIC_CODES = [
   "undeclared-target",
   "cardinality-violation",
   "forbidden-aria",
+  "missing-announcer",
   "unknown-ignore-code",
 ] as const;
 

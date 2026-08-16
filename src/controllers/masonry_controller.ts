@@ -23,6 +23,8 @@ const COLUMNS_PROPERTY = "--stimeo--masonry-columns";
  * element as the `--stimeo--masonry-columns` custom property and each item gets a
  * `data-column` index, so the consumer's CSS owns the actual placement.
  *
+ * `layout` dispatches `{ columns: number }`.
+ *
  * @remarks
  * Behavior only. **DOM order is never changed** — reading order and focus order
  * stay the source markup order (WCAG 1.3.2). The visual packing is purely the

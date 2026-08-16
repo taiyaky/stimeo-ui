@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { canTakeFocus } from "../../src/utils/focus_candidate";
+import {
+  canTakeFocus,
+  firstTabStop,
+  hasTabStop,
+  isTabStop,
+  tabStopsWithin,
+} from "../../src/utils/focus_candidate";
 
 /**
  * Tests for {@link canTakeFocus}.
@@ -42,6 +48,11 @@ describe("canTakeFocus", () => {
       // The common shape: the rescue destination is fine, the wrapper is what
       // just got hidden.
       document.body.innerHTML = '<div hidden><button id="a">A</button></div>';
+      expect(canTakeFocus(el("#a"))).toBe(false);
+    });
+
+    it("rejects a type=hidden input without the hidden attribute", () => {
+      document.body.innerHTML = '<input id="a" type="hidden">';
       expect(canTakeFocus(el("#a"))).toBe(false);
     });
   });
@@ -93,5 +104,101 @@ describe("canTakeFocus", () => {
       document.body.innerHTML = '<fieldset><button id="a">A</button></fieldset>';
       expect(canTakeFocus(el("#a"))).toBe(true);
     });
+  });
+});
+
+describe("sequential Tab stops", () => {
+  const candidate = (html: string): HTMLElement => {
+    document.body.innerHTML = html;
+    const element = document.querySelector<HTMLElement>("#candidate");
+    if (!element) throw new Error("Expected #candidate");
+    return element;
+  };
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it.each([
+    ["link", '<a id="candidate" href="#target">Link</a>'],
+    ["image-map area", '<map><area id="candidate" href="#target"></map>'],
+    ["button", '<button id="candidate">Save</button>'],
+    ["text input", '<input id="candidate">'],
+    ["select", '<select id="candidate"><option>One</option></select>'],
+    ["textarea", '<textarea id="candidate"></textarea>'],
+    ["first summary", '<details><summary id="candidate">Details</summary></details>'],
+    ["iframe", '<iframe id="candidate" title="Preview"></iframe>'],
+    ["audio controls", '<audio id="candidate" controls style="display:block"></audio>'],
+    ["video controls", '<video id="candidate" controls></video>'],
+    ["authored tabindex", '<div id="candidate" tabindex="0"></div>'],
+    ["bare contenteditable", '<div id="candidate" contenteditable></div>'],
+    ["editable true", '<div id="candidate" contenteditable="TRUE"></div>'],
+    ["plaintext editor", '<div id="candidate" contenteditable="plaintext-only"></div>'],
+    ["aria-disabled button", '<button id="candidate" aria-disabled="true">Save</button>'],
+  ])("accepts a %s", (_name, html) => {
+    expect(isTabStop(candidate(html))).toBe(true);
+  });
+
+  it.each([
+    ["hidden input", '<input id="candidate" type="hidden">'],
+    ["disabled button", '<button id="candidate" disabled>Save</button>'],
+    [
+      "fieldset-disabled button",
+      '<fieldset disabled><button id="candidate">Save</button></fieldset>',
+    ],
+    [
+      "second summary",
+      '<details><summary>First</summary><summary id="candidate">Second</summary></details>',
+    ],
+    ["orphan summary", '<summary id="candidate">Orphan</summary>'],
+    ["negative tabindex", '<button id="candidate" tabindex="-1">Save</button>'],
+    ["explicitly non-editable element", '<div id="candidate" contenteditable="false"></div>'],
+    ["invalid editable value", '<div id="candidate" contenteditable="invalid"></div>'],
+    ["hidden subtree", '<div hidden><button id="candidate">Save</button></div>'],
+    ["inert subtree", '<div inert><button id="candidate">Save</button></div>'],
+    ["CSS-hidden button", '<button id="candidate" style="display:none">Save</button>'],
+  ])("rejects a %s", (_name, html) => {
+    expect(isTabStop(candidate(html))).toBe(false);
+  });
+
+  it("keeps the disabled-fieldset first-legend exception", () => {
+    expect(
+      isTabStop(
+        candidate(
+          '<fieldset disabled><legend><button id="candidate">Save</button></legend></fieldset>',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("falls back safely when checkVisibility is unavailable", () => {
+    const element = candidate('<button id="candidate">Save</button>');
+    Object.defineProperty(element, "checkVisibility", { configurable: true, value: undefined });
+
+    expect(isTabStop(element)).toBe(true);
+  });
+
+  it("collects only usable descendants in DOM order", () => {
+    document.body.innerHTML = `
+      <div id="root">
+        <button id="first">First</button>
+        <input type="hidden">
+        <a id="second" href="#target">Second</a>
+      </div>
+    `;
+    const root = document.getElementById("root");
+    if (!root) throw new Error("Expected #root");
+
+    expect(tabStopsWithin(root).map((element) => element.id)).toEqual(["first", "second"]);
+    expect(firstTabStop(root)?.id).toBe("first");
+    expect(hasTabStop(root)).toBe(true);
+  });
+
+  it("reports an empty subtree", () => {
+    const root = document.createElement("div");
+
+    expect(tabStopsWithin(root)).toEqual([]);
+    expect(firstTabStop(root)).toBeNull();
+    expect(hasTabStop(root)).toBe(false);
   });
 });

@@ -16,6 +16,11 @@ interface AttributeLeaseRecord {
  * A `null` write deliberately removes the attribute while retaining the lease. This
  * is useful for derived ARIA whose valid absence is itself controller state, such as
  * an unbounded `aria-valuemin` or a blank spinbutton's `aria-valuenow`.
+ *
+ * The lease has no lifecycle of its own, so it never subscribes to document events.
+ * A consumer that must not let a derived value become the authored baseline of a
+ * cached page returns its leases from its own `turbo:before-cache` rewind, where the
+ * matching `disconnect()` also releases the subscription.
  */
 export class AttributeLease<T extends Element = Element> {
   readonly #attribute: string;
@@ -38,8 +43,7 @@ export class AttributeLease<T extends Element = Element> {
       });
     }
 
-    if (value === null) element.removeAttribute(this.#attribute);
-    else element.setAttribute(this.#attribute, value);
+    this.#reflect(element, value);
   }
 
   /** Returns one lease without overwriting a value subsequently authored by a consumer. */
@@ -47,10 +51,15 @@ export class AttributeLease<T extends Element = Element> {
     const record = this.#records.get(element);
     if (!record) return;
     this.#records.delete(element);
-    if (element.getAttribute(this.#attribute) !== record.written) return;
+    const stillOwned = element.getAttribute(this.#attribute) === record.written;
+    if (stillOwned) this.#reflect(element, record.original);
+  }
 
-    if (record.original === null) element.removeAttribute(this.#attribute);
-    else element.setAttribute(this.#attribute, record.original);
+  /** Reflects only a real value transition, avoiding self-triggered mutation work. */
+  #reflect(element: T, value: string | null): void {
+    if (element.getAttribute(this.#attribute) === value) return;
+    if (value === null) element.removeAttribute(this.#attribute);
+    else element.setAttribute(this.#attribute, value);
   }
 
   /** Returns every outstanding lease using the same ownership check as {@link return}. */

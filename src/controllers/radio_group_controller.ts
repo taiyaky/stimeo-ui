@@ -50,6 +50,9 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  * radios; native `<input type="radio">` already owns its activation and form
  * semantics and should be preferred when its appearance is sufficient.
  *
+ * `change` dispatches `{ value: string, radio: HTMLElement }`; `reconcile` dispatches
+ * `{ value: string, radio: HTMLElement | null }`.
+ *
  * @remarks
  * Behavior only — selection is exposed through `aria-checked`, the single Tab
  * stop through roving `tabindex` ({@link RovingTabindex}); the consumer styles

@@ -45,10 +45,13 @@ export const NATIVELY_LABELLED = ["input", "select", "textarea"];
  *    `combobox`, `tabpanel`, `slider`, `spinbutton`, `meter`, `progressbar`)
  *    reports as an **error**; Recommended (`menu`, `menubar`, `tablist`,
  *    `toolbar`) as a **warning**, because the pattern still works unnamed;
- *    discretionary names (a focusable `separator`) are checked only once the
- *    file holds enough of them to make the name load-bearing. Conditional
- *    levels are written as conditions, not rounded off: a toolbar's name
- *    escalates to Required on the second toolbar in the file;
+ *    discretionary names (a generic focusable `separator`) are checked only
+ *    once the file holds enough of them to make the name load-bearing. A
+ *    controller that explicitly adopts a stricter APG pattern may strengthen
+ *    that role-level baseline; `stimeo--separator`, for example, implements the
+ *    Window Splitter pattern and always requires its primary pane's name.
+ *    Conditional levels are written as conditions, not rounded off: a
+ *    toolbar's name escalates to Required on the second toolbar in the file;
  * 4. no legitimate alternative spelling exists (e.g. `<td>` inside a
  *    `role="grid"` table is an *implicit* gridcell, so cell roles on
  *    table-based grids are not required; a controller that documents an
@@ -655,7 +658,12 @@ export const a11yRules: A11yRules = {
     },
     {
       target: "",
-      when: { value: "orientation", equals: ["vertical"], default: "horizontal" },
+      when: {
+        value: "orientation",
+        type: "string",
+        equals: ["vertical"],
+        default: "horizontal",
+      },
       attrs: ["aria-orientation"],
       values: ["vertical"],
       suggestion:
@@ -870,9 +878,25 @@ export const a11yRules: A11yRules = {
       suggestion: "Name the meter target via aria-label or aria-labelledby.",
     },
   ],
-  // Window splitter (APG): the separator handle's role and name are authored;
-  // aria-valuenow/min/max are controller-managed. (The standalone
-  // stimeo--separator is intentionally absent: it defaults its own role.)
+  // Standalone Window Splitter: role and range ARIA are controller-managed,
+  // while the primary pane relationship remains an author-owned reference.
+  "stimeo--separator": [
+    {
+      target: "",
+      attrs: ["aria-controls"],
+      when: { value: "focusable", type: "boolean", equals: ["true"], default: "false" },
+      suggestion: "Point the separator at its primary pane via aria-controls.",
+    },
+    {
+      target: "",
+      attrs: ["aria-label", "aria-labelledby"],
+      when: { value: "focusable", type: "boolean", equals: ["true"], default: "false" },
+      suggestion:
+        "Name the focusable separator after its primary pane via aria-label or aria-labelledby.",
+    },
+  ],
+  // Resizable Window Splitter: the separator target's role is authored;
+  // aria-valuenow/min/max are controller-managed.
   "stimeo--resizable": [
     {
       target: "separator",
@@ -922,15 +946,6 @@ export const a11yRules: A11yRules = {
       values: ["status", "alert"],
       or: [{ attrs: ["aria-live"], values: ["polite", "assertive"] }],
       suggestion: 'Add role="status" (or aria-live="polite") to the status target.',
-    },
-  ],
-  "stimeo--form-field": [
-    {
-      target: "error",
-      attrs: ["role"],
-      values: ["alert", "status"],
-      or: [{ attrs: ["aria-live"], values: ["assertive", "polite"] }],
-      suggestion: 'Add role="alert" (or aria-live="assertive") to the error target.',
     },
   ],
 };

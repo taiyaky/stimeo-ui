@@ -30,6 +30,8 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * the last is N. Unlike a generic radio group, arrows deliberately clamp rather
  * than wrap because the values have an ordered lower and upper bound.
  *
+ * `change` and `reconcile` dispatch `{ value: number }`.
+ *
  * @remarks
  * Behavior only — consumers style `[aria-checked]` and `data-rating-hover`. In
  * `readonly` mode the group becomes `role="img"`; the consumer supplies the

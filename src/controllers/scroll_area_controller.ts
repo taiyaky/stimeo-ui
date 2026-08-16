@@ -1,33 +1,27 @@
 import { Controller } from "@hotwired/stimulus";
 import { AttributeLease } from "../utils/attribute_lease";
+import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { hasTabStop } from "../utils/focus_candidate";
 import { LayoutObserver } from "../utils/layout_observer";
 import { logicalScrollMetrics } from "../utils/logical_scroll";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { StylePropertyLease } from "../utils/style_property_lease";
 import { TabindexLoan } from "../utils/tabindex_loan";
-
-/** A CSS selector for natively focusable / author-focusable descendants. */
-const FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  "[tabindex]:not([tabindex='-1'])",
-  "[contenteditable='true']",
-].join(",");
 
 /** Distance from an edge (px) treated as fully reached; absorbs sub-pixel scroll. */
 const EDGE_EPSILON = 1;
 
-/** `Element.checkVisibility` (widely available); absent in older engines. */
-interface VisibilityCheckable {
-  checkVisibility?: (options?: { visibilityProperty?: boolean }) => boolean;
+type Edge = "start" | "end";
+
+/** The event surface used by `document.fonts` without requiring it in older engines. */
+interface FontEventSource {
+  addEventListener(type: string, listener: EventListener): void;
+  removeEventListener(type: string, listener: EventListener): void;
 }
 
 /**
  * Headless **Scroll Area** behavior: keyboard reachability and scroll-state hooks
- * for a natively scrolling region. No custom scrollbar — the native one is
- * respected; this only adds a11y and CSS state.
+ * for a natively scrolling region. No custom scrollbar is introduced.
  *
  * Markup contract (identifier: `stimeo--scroll-area`):
  *   <div data-controller="stimeo--scroll-area"
@@ -37,19 +31,26 @@ interface VisibilityCheckable {
  *     </div>
  *   </div>
  *
- * When the content overflows and the viewport holds no focusable elements of its
- * own, the viewport is made keyboard-scrollable (`tabindex="0"`, plus `role="region"`
- * when it already has an accessible name). Scroll position is published as
- * `data-scroll` (`start`/`middle`/`end`), overflow as `data-overflow`, and progress
- * as `--stimeo--scroll-progress` (0–1) so consumer CSS can draw scroll shadows.
+ * When content overflows and the viewport has no sequential Tab stop of its own,
+ * the viewport receives a borrowed `tabindex="0"`. A named viewport also receives
+ * a borrowed `role="region"`. Position is exposed through `data-scroll`, overflow
+ * through `data-overflow`, and normalized progress through
+ * `--stimeo--scroll-progress` so consumer CSS can render state without prescribing
+ * appearance.
+ *
+ * The `reach` event is emitted once when an overflowing edge state is established,
+ * including initial connection and a fit-to-overflow transition. Moving away from
+ * that edge rearms the next arrival.
+ *
+ * `reach` dispatches `{ edge: "start" | "end" }`.
  *
  * @remarks
- * Behavior only. The `scroll` listener and {@link LayoutObserver} (element +
- * viewport resize) are torn down on `disconnect()` (Turbo navigation included).
- * Runtime replacement of the viewport rebinds those resources and the content
- * observer as one lifecycle unit.
- * `role="region"` is added only when the viewport is already named, so a scrollable
- * region never becomes an unlabeled landmark.
+ * Behavior only. Scroll work is coalesced to one animation frame and never scans
+ * descendants. Resize, content, accessible-name source, descendant-load, and font
+ * completion changes run the full measurement pass. Every listener, observer,
+ * animation frame, borrowed attribute, and state hook is released on disconnect
+ * and before Turbo caches the page. Runtime viewport replacement rebinds the whole
+ * resource set as one lifecycle unit.
  */
 export class ScrollAreaController extends Controller<HTMLElement> {
   static override targets = ["viewport"];
@@ -63,34 +64,68 @@ export class ScrollAreaController extends Controller<HTMLElement> {
 
   declare orientationValue: string;
 
-  readonly #layout = new LayoutObserver(() => this.#update());
-  /** Current element receiving scroll, resize, mutation, and keyboard-reach behavior. */
-  #viewport: HTMLElement | null = null;
-  /** Guards target callbacks before connect and after disconnect. */
-  #connected = false;
-  /** Collapses target replacement callbacks into one final-DOM rebind. */
+  readonly #layout = new LayoutObserver(() => this.#refresh());
   readonly #rebind = new MicrotaskCoalescer(() => this.#syncViewport());
-  /** Re-checks the tab stop when the viewport's focusable content comes or goes. */
-  #content: MutationObserver | null = null;
-  /** Last edge reported via `reach`, so the event fires once per arrival. */
-  #lastEdge: "start" | "end" | null = null;
-  /** Whether this controller added `tabindex`, so teardown only removes its own. */
+  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   readonly #tabindex = new TabindexLoan("0");
-  /** Temporarily owns a derived `role="region"` without losing an authored replacement. */
   readonly #role = new AttributeLease<HTMLElement>("role");
+  readonly #overflowState = new AttributeLease<HTMLElement>("data-overflow");
+  readonly #scrollState = new AttributeLease<HTMLElement>("data-scroll");
+  readonly #progress = new StylePropertyLease<HTMLElement>("--stimeo--scroll-progress");
+
+  #viewport: HTMLElement | null = null;
+  #content: MutationObserver | null = null;
+  #nameSources: MutationObserver | null = null;
+  #nameGraph: MutationObserver | null = null;
+  #observedNameIds = new Set<string>();
+  #observedNameSources: Element[] = [];
+  #fonts: FontEventSource | null = null;
+  #scrollFrame: number | null = null;
+  #overflowing = false;
+  #lastEdge: Edge | null = null;
+  readonly #ownedHostMutations = new Map<string, string | null>();
 
   readonly #onScroll = (): void => {
-    this.#update();
+    if (this.#scrollFrame !== null) return;
+    this.#scrollFrame = requestAnimationFrame(() => {
+      this.#scrollFrame = null;
+      const viewport = this.#viewport;
+      if (viewport) this.#syncPosition(viewport, this.#overflowing);
+    });
+  };
+
+  readonly #onLoad = (): void => {
+    this.#refresh();
+  };
+
+  readonly #onFontsSettled: EventListener = () => {
+    this.#refresh();
   };
 
   override connect(): void {
-    this.#connected = true;
+    this.#beforeCache.activate();
     this.#rebind.activate();
     this.#layout.observeViewport();
+    this.#bindFonts();
     this.#syncViewport();
   }
 
-  /** Schedules a complete observer/listener rebind for a runtime viewport target. */
+  override disconnect(): void {
+    this.#beforeCache.deactivate();
+    this.#rebind.cancel();
+    this.#cancelScrollFrame();
+    if (this.#viewport) this.#unbindViewport(this.#viewport);
+    this.#layout.disconnect();
+    this.#unbindFonts();
+    this.#clearHostState();
+  }
+
+  /** Re-measures when a retained viewport's orientation Value is morphed. */
+  orientationValueChanged(): void {
+    this.#refresh();
+  }
+
+  /** Schedules a complete resource rebind for a runtime viewport target. */
   viewportTargetConnected(): void {
     this.#rebind.schedule();
   }
@@ -100,189 +135,350 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     this.#rebind.schedule();
   }
 
-  /** Rebinds every viewport-owned resource against the final target in this mutation batch. */
+  /** Rebinds every viewport-owned resource against the final target in the mutation batch. */
   #syncViewport(): void {
-    if (!this.#connected) return;
     const next = this.hasViewportTarget ? this.viewportTarget : null;
     if (next === this.#viewport) {
-      this.#update();
+      if (next) this.#refresh();
+      else this.#clearHostState();
       return;
     }
+
     if (this.#viewport) this.#unbindViewport(this.#viewport);
     this.#viewport = next;
-    if (!next) return;
+    if (!next) {
+      this.#clearHostState();
+      return;
+    }
 
     next.addEventListener("scroll", this.#onScroll, { passive: true });
+    next.addEventListener("load", this.#onLoad, true);
     this.#layout.observe(next);
-    // Overflow follows the box, but focusability follows the content, and the two
-    // change independently: revealing a button inside a fixed-height viewport fires
-    // no resize and no scroll. Without this the tab stop would be stale until the
-    // next unrelated event.
-    //
-    // No `attributeFilter`: what makes a control appear is not confined to its own
-    // attributes — a state hook on an ancestor (`[data-has-new] .jump { display: block }`)
-    // flips it just as well, and that set cannot be enumerated.
-    //
-    // The overflow value is re-measured here rather than reused. A content change moves
-    // the scroll extent without touching the viewport's own box, so a fixed-height
-    // viewport fires no resize when its content shrinks — reusing a cached value would
-    // hand the tab stop to a box that does not scroll. Position and `reach` are
-    // deliberately left alone: the event contract is arrival at an edge, and a content
-    // change is not an arrival.
-    if (typeof MutationObserver !== "undefined") {
-      this.#content = new MutationObserver(() => {
-        if (this.#viewport !== next) return;
-        this.#syncKeyboardReach(next, this.#syncOverflow(next));
-      });
-      this.#content.observe(next, {
-        subtree: true,
-        childList: true,
-        attributes: true,
-      });
+    this.#bindContentObserver(next);
+    this.#refresh();
+  }
+
+  /** Observes structural and attribute changes that can alter overflow or Tab stops. */
+  #bindContentObserver(viewport: HTMLElement): void {
+    this.#content = new MutationObserver((records) => {
+      if (this.#viewport !== viewport || !this.#hasRelevantContentMutation(records)) return;
+      this.#refresh();
+    });
+    this.#content.observe(viewport, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true,
+    });
+  }
+
+  /** Ignores only state-hook mutations whose exact value this controller just wrote. */
+  #hasRelevantContentMutation(records: MutationRecord[]): boolean {
+    let relevant = false;
+    const consumed = new Set<string>();
+    for (const record of records) {
+      const attribute = record.attributeName;
+      if (
+        record.type === "attributes" &&
+        record.target === this.element &&
+        attribute !== null &&
+        this.#ownedHostMutations.has(attribute) &&
+        this.element.getAttribute(attribute) === this.#ownedHostMutations.get(attribute)
+      ) {
+        consumed.add(attribute);
+      } else {
+        relevant = true;
+      }
     }
-    this.#update();
+    for (const attribute of consumed) this.#ownedHostMutations.delete(attribute);
+    return relevant;
   }
 
-  override disconnect(): void {
-    this.#connected = false;
-    this.#rebind.cancel();
-    if (this.#viewport) this.#unbindViewport(this.#viewport);
-    this.#layout.disconnect();
-    this.#lastEdge = null;
-  }
-
-  /** Releases every resource and derived attribute owned by one former viewport. */
+  /** Releases every resource and borrowed attribute owned by one former viewport. */
   #unbindViewport(viewport: HTMLElement): void {
+    this.#cancelScrollFrame();
     viewport.removeEventListener("scroll", this.#onScroll);
+    viewport.removeEventListener("load", this.#onLoad, true);
     this.#layout.unobserve(viewport);
     this.#content?.disconnect();
     this.#content = null;
-    // Remove only the keyboard-reach attributes this controller added, so a
-    // Turbo cache snapshot never preserves a controller-owned tab stop /
-    // landmark (controller-added state must not outlive the controller).
-    this.#clearAddedAttributes(viewport);
-    if (this.#viewport === viewport) this.#viewport = null;
+    this.#disconnectNameSources();
+    this.#clearViewportAttributes(viewport);
+    this.#ownedHostMutations.clear();
+    this.#viewport = null;
+    this.#overflowing = false;
     this.#lastEdge = null;
   }
 
-  /** Re-measures overflow and scroll position and reflects the state hooks. */
-  #update(): void {
-    const vp = this.#viewport;
-    if (!vp) return;
-    const overflowing = this.#syncOverflow(vp);
-    this.#syncKeyboardReach(vp, overflowing);
-
-    const { position, progress } = this.#measurePosition(vp);
-    this.element.setAttribute("data-scroll", position);
-    this.element.style.setProperty("--stimeo--scroll-progress", String(progress));
-
-    const edge = position === "start" ? "start" : position === "end" ? "end" : null;
-    if (overflowing && edge && edge !== this.#lastEdge) {
-      this.#lastEdge = edge;
-      this.dispatch("reach", { detail: { edge } });
-    } else if (!edge) {
-      this.#lastEdge = null;
-    }
+  /** Runs the full structural and positional measurement pass. */
+  #refresh(): void {
+    const viewport = this.#viewport;
+    if (!viewport) return;
+    this.#cancelScrollFrame();
+    this.#syncNameSources(viewport);
+    this.#overflowing = this.#syncOverflow(viewport);
+    this.#syncKeyboardReach(viewport, this.#overflowing);
+    this.#syncPosition(viewport, this.#overflowing);
   }
 
-  /**
-   * Measures overflow and reflects the `data-overflow` hook.
-   *
-   * The write is skipped when the value is unchanged. An identical `setAttribute` still
-   * queues a MutationRecord, and markup that puts the viewport target on the controller
-   * element itself would then have the content observer trigger its own next callback.
-   */
-  #syncOverflow(vp: HTMLElement): boolean {
-    const overflowing = this.#measureOverflow(vp);
-    const next = overflowing ? "true" : "false";
-    if (this.element.getAttribute("data-overflow") !== next) {
-      this.element.setAttribute("data-overflow", next);
-    }
+  /** Measures overflow and reflects the state hook without identical DOM writes. */
+  #syncOverflow(viewport: HTMLElement): boolean {
+    const overflowing = this.#measureOverflow(viewport);
+    this.#writeHostAttribute(this.#overflowState, "data-overflow", overflowing ? "true" : "false");
     return overflowing;
   }
 
-  #measureOverflow(vp: HTMLElement): boolean {
-    const o = this.orientationValue;
-    const vertical = o !== "horizontal" && vp.scrollHeight > vp.clientHeight + EDGE_EPSILON;
-    const horizontal = o !== "vertical" && vp.scrollWidth > vp.clientWidth + EDGE_EPSILON;
+  /** Measures the primary-axis position and dispatches a newly established edge. */
+  #syncPosition(viewport: HTMLElement, overflowing: boolean): void {
+    const { position, progress } = this.#measurePosition(viewport);
+    this.#writeHostAttribute(this.#scrollState, "data-scroll", position);
+    this.#writeHostProgress(String(progress));
+
+    const edge: Edge | null =
+      overflowing && (position === "start" || position === "end") ? position : null;
+    if (edge === this.#lastEdge) return;
+    this.#lastEdge = edge;
+    if (edge) this.dispatch("reach", { detail: { edge } });
+  }
+
+  /** Writes one leased host attribute and records self-generated observer input. */
+  #writeHostAttribute(lease: AttributeLease<HTMLElement>, attribute: string, value: string): void {
+    const before = this.element.getAttribute(attribute);
+    lease.write(this.element, value);
+    this.#recordOwnedHostMutation(attribute, before);
+  }
+
+  /** Writes the leased progress property and records its serialized style mutation. */
+  #writeHostProgress(value: string): void {
+    const before = this.element.getAttribute("style");
+    this.#progress.write(this.element, value);
+    this.#recordOwnedHostMutation("style", before);
+  }
+
+  /** Records an exact host mutation only when the host is also the observed viewport. */
+  #recordOwnedHostMutation(attribute: string, before: string | null): void {
+    if (this.#viewport !== this.element) return;
+    const after = this.element.getAttribute(attribute);
+    if (after !== before) this.#ownedHostMutations.set(attribute, after);
+  }
+
+  /** Returns host hooks to authored values and clears edge bookkeeping. */
+  #clearHostState(): void {
+    this.#overflowState.returnAll();
+    this.#scrollState.returnAll();
+    this.#progress.returnAll();
+    this.#ownedHostMutations.clear();
+    this.#overflowing = false;
+    this.#lastEdge = null;
+  }
+
+  /** Whether the configured axis currently has a scroll range. */
+  #measureOverflow(viewport: HTMLElement): boolean {
+    const orientation = this.orientationValue;
+    const vertical =
+      orientation !== "horizontal" && viewport.scrollHeight > viewport.clientHeight + EDGE_EPSILON;
+    const horizontal =
+      orientation !== "vertical" && viewport.scrollWidth > viewport.clientWidth + EDGE_EPSILON;
     return vertical || horizontal;
   }
 
-  /**
-   * Reports the scroll position bucket and 0–1 progress on the primary axis. For
-   * `both`, the vertical axis is used when it overflows, otherwise the horizontal.
-   */
-  #measurePosition(vp: HTMLElement): {
+  /** Reports the primary-axis position bucket and normalized 0–1 progress. */
+  #measurePosition(viewport: HTMLElement): {
     position: "start" | "middle" | "end";
     progress: number;
   } {
     const horizontalPrimary =
       this.orientationValue === "horizontal" ||
-      (this.orientationValue === "both" && vp.scrollHeight <= vp.clientHeight + EDGE_EPSILON);
-
-    const { position: scrollPos, max: maxScroll } = logicalScrollMetrics(vp, horizontalPrimary);
+      (this.orientationValue === "both" &&
+        viewport.scrollHeight <= viewport.clientHeight + EDGE_EPSILON);
+    const { position: scrollPosition, max: maxScroll } = logicalScrollMetrics(
+      viewport,
+      horizontalPrimary,
+    );
 
     if (maxScroll <= EDGE_EPSILON) return { position: "start", progress: 0 };
-
-    const progress = Math.min(1, Math.max(0, scrollPos / maxScroll));
-    if (scrollPos <= EDGE_EPSILON) return { position: "start", progress };
-    if (scrollPos >= maxScroll - EDGE_EPSILON) return { position: "end", progress };
+    const progress = Math.min(1, Math.max(0, scrollPosition / maxScroll));
+    if (scrollPosition <= EDGE_EPSILON) return { position: "start", progress };
+    if (scrollPosition >= maxScroll - EDGE_EPSILON) return { position: "end", progress };
     return { position: "middle", progress };
   }
 
-  /**
-   * Makes the viewport keyboard-scrollable when it overflows and contains no
-   * focusable elements of its own (avoiding a double tab stop). Adds `role="region"`
-   * only when the viewport already carries an accessible name.
-   */
-  #syncKeyboardReach(vp: HTMLElement, overflowing: boolean): void {
-    const wantsTabindex = overflowing && !this.#hasFocusableContent(vp);
+  /** Borrows keyboard reach only when no usable descendant already owns a Tab stop. */
+  #syncKeyboardReach(viewport: HTMLElement, overflowing: boolean): void {
+    const wantsTabindex = overflowing && !hasTabStop(viewport);
+    if (!wantsTabindex) {
+      this.#clearViewportAttributes(viewport);
+      return;
+    }
 
-    if (wantsTabindex) {
-      this.#tabindex.lend(vp);
-      if (!vp.hasAttribute("role") && this.#hasAccessibleName(vp)) {
-        this.#role.write(vp, "region");
-      }
+    this.#tabindex.lend(viewport);
+    if (this.#hasAccessibleName(viewport)) {
+      if (!viewport.hasAttribute("role")) this.#role.write(viewport, "region");
     } else {
-      this.#clearAddedAttributes(vp);
+      this.#role.return(viewport);
     }
   }
 
-  /** Removes (and resets the flags for) only the attributes this controller added. */
-  #clearAddedAttributes(vp: HTMLElement): void {
+  /** Returns only the viewport attributes borrowed by this controller. */
+  #clearViewportAttributes(viewport: HTMLElement): void {
     this.#tabindex.returnAll();
-    this.#role.return(vp);
+    this.#role.return(viewport);
   }
 
-  /**
-   * Whether the viewport owns something the user can Tab to *right now*.
-   *
-   * The selector alone is not enough: a `display: none` button still matches it,
-   * so a viewport whose only control is revealed on demand would never get a tab
-   * stop — leaving it unreachable by keyboard exactly while it has nothing else to
-   * offer. Only rendered candidates count.
-   */
-  #hasFocusableContent(vp: HTMLElement): boolean {
-    return Array.from(vp.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).some((el) =>
-      this.#isRendered(el),
+  /** Whether the viewport already has a non-empty accessible name. */
+  #hasAccessibleName(viewport: HTMLElement): boolean {
+    const sources = this.#resolveNameSources(viewport);
+    if (sources.length > 0) {
+      return sources.some((source) => {
+        const label = source.getAttribute("aria-label")?.trim();
+        return Boolean(label || source.textContent?.trim());
+      });
+    }
+    return Boolean(viewport.getAttribute("aria-label")?.trim());
+  }
+
+  /** Resolves unique, live `aria-labelledby` references in authored order. */
+  #resolveNameSources(viewport: HTMLElement): Element[] {
+    const ids = this.#nameReferenceIds(viewport);
+    const sources: Element[] = [];
+    const seen = new Set<Element>();
+    for (const id of ids) {
+      const source = viewport.ownerDocument.getElementById(id);
+      if (source && !seen.has(source)) {
+        seen.add(source);
+        sources.push(source);
+      }
+    }
+    return sources;
+  }
+
+  /** Observes external name sources so a retained region never becomes unnamed. */
+  #syncNameSources(viewport: HTMLElement): void {
+    const ids = this.#nameReferenceIds(viewport);
+    const sources = this.#resolveNameSources(viewport).filter(
+      (source) => !viewport.contains(source),
+    );
+    if (
+      ids.length === this.#observedNameIds.size &&
+      ids.every((id) => this.#observedNameIds.has(id)) &&
+      sources.length === this.#observedNameSources.length &&
+      sources.every((source, index) => source === this.#observedNameSources[index])
+    ) {
+      return;
+    }
+
+    this.#disconnectNameSources();
+    this.#observedNameIds = new Set(ids);
+    this.#observedNameSources = sources;
+    if (ids.length > 0) {
+      this.#nameGraph = new MutationObserver((records) => {
+        if (this.#viewport === viewport && this.#hasRelevantNameGraphMutation(records)) {
+          this.#refresh();
+        }
+      });
+      const documentElement = viewport.ownerDocument.documentElement;
+      if (documentElement) {
+        this.#nameGraph.observe(documentElement, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          attributeFilter: ["id"],
+          attributeOldValue: true,
+        });
+      }
+    }
+
+    if (sources.length === 0) return;
+    this.#nameSources = new MutationObserver(() => {
+      this.#refresh();
+    });
+    for (const source of sources) {
+      this.#nameSources.observe(source, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+      });
+    }
+  }
+
+  /** Returns normalized unique label-reference ids in authored order. */
+  #nameReferenceIds(viewport: HTMLElement): string[] {
+    const tokens = viewport.getAttribute("aria-labelledby")?.trim().split(/\s+/).filter(Boolean);
+    return Array.from(new Set(tokens));
+  }
+
+  /** Whether document-graph changes can resolve or invalidate a referenced id. */
+  #hasRelevantNameGraphMutation(records: MutationRecord[]): boolean {
+    for (const record of records) {
+      if (record.type === "attributes") {
+        const current = (record.target as Element).id;
+        if (
+          this.#observedNameIds.has(current) ||
+          this.#observedNameIds.has(record.oldValue ?? "")
+        ) {
+          return true;
+        }
+        continue;
+      }
+
+      for (const node of [...record.addedNodes, ...record.removedNodes]) {
+        if (this.#nodeContainsObservedNameId(node)) return true;
+      }
+    }
+    return false;
+  }
+
+  /** Whether a changed subtree contains one of the current label-reference ids. */
+  #nodeContainsObservedNameId(node: Node): boolean {
+    if (!(node instanceof Element)) return false;
+    if (this.#observedNameIds.has(node.id)) return true;
+    return Array.from(node.querySelectorAll<HTMLElement>("[id]")).some((element) =>
+      this.#observedNameIds.has(element.id),
     );
   }
 
-  /**
-   * Whether `el` is actually rendered, and so can hold focus.
-   *
-   * `checkVisibility()` answers this for every way CSS can remove a box, including
-   * a class-driven `display: none` that no attribute reveals. The `hidden` walk in
-   * front of it is not redundant: it is the one case a DOM-only environment with no
-   * layout engine has to be told about explicitly.
-   */
-  #isRendered(el: HTMLElement): boolean {
-    if (el.closest("[hidden]") !== null) return false;
-    const check = (el as HTMLElement & VisibilityCheckable).checkVisibility;
-    return typeof check === "function" ? check.call(el, { visibilityProperty: true }) : true;
+  /** Stops observing accessible-name sources. */
+  #disconnectNameSources(): void {
+    this.#nameSources?.disconnect();
+    this.#nameSources = null;
+    this.#nameGraph?.disconnect();
+    this.#nameGraph = null;
+    this.#observedNameIds.clear();
+    this.#observedNameSources = [];
   }
 
-  #hasAccessibleName(vp: HTMLElement): boolean {
-    return vp.hasAttribute("aria-label") || vp.hasAttribute("aria-labelledby");
+  /** Subscribes to font completion when the current engine exposes `document.fonts`. */
+  #bindFonts(): void {
+    const fonts = (this.element.ownerDocument as Document & { fonts?: FontEventSource }).fonts;
+    if (!fonts || this.#fonts === fonts) return;
+    this.#unbindFonts();
+    this.#fonts = fonts;
+    fonts.addEventListener("loadingdone", this.#onFontsSettled);
+    fonts.addEventListener("loadingerror", this.#onFontsSettled);
+  }
+
+  /** Removes the font completion subscriptions. */
+  #unbindFonts(): void {
+    this.#fonts?.removeEventListener("loadingdone", this.#onFontsSettled);
+    this.#fonts?.removeEventListener("loadingerror", this.#onFontsSettled);
+    this.#fonts = null;
+  }
+
+  /** Cancels a pending scroll frame. */
+  #cancelScrollFrame(): void {
+    if (this.#scrollFrame === null) return;
+    cancelAnimationFrame(this.#scrollFrame);
+    this.#scrollFrame = null;
+  }
+
+  /** Suspends live resources and returns all derived state before snapshotting. */
+  #rewindForCache(): void {
+    this.#rebind.cancel();
+    this.#cancelScrollFrame();
+    if (this.#viewport) this.#unbindViewport(this.#viewport);
+    this.#layout.disconnect();
+    this.#unbindFonts();
+    this.#clearHostState();
   }
 }

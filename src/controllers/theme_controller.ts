@@ -37,6 +37,8 @@ const isMode = (value: unknown): value is ThemeMode =>
  *   <button data-controller="stimeo--theme" data-action="click->stimeo--theme#toggle"
  *           aria-pressed="false">Dark mode</button>
  *
+ * `change` dispatches `{ mode, resolved }`.
+ *
  * @remarks
  * Behavior only — the actual palette is the consumer's CSS keyed off `data-theme`
  * on the root. It applies `data-theme` (the *resolved* light/dark) and a matching
@@ -211,8 +213,8 @@ export class ThemeController extends Controller<HTMLElement> {
 
   /** Reads a persisted, validated mode from `localStorage` (null when absent/blocked). */
   #readStored(): ThemeMode | null {
-    const value = readLocalStorage(this.storageKeyValue);
-    return isMode(value) ? value : null;
+    const result = readLocalStorage(this.storageKeyValue);
+    return result.ok && isMode(result.value) ? result.value : null;
   }
 
   /** Persists the mode, swallowing storage errors (private mode / quota). */
