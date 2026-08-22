@@ -136,7 +136,7 @@ describe("buildManifest", () => {
       "restoreFocus",
     ]);
     expect(submitOnce?.actions).toEqual(["cancel", "finish", "start"]);
-    expect(submitOnce?.events).toEqual(["start", "end"]);
+    expect(submitOnce?.events).toEqual(["start", "end", "reconcile"]);
     const hosts = [{ tag: "button" }, { tag: "input", attr: "type", values: ["submit", "image"] }];
     expect(submitOnce?.conditionalTargets).toEqual([
       {

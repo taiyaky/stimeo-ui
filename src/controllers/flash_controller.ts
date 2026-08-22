@@ -40,6 +40,8 @@ interface FlashTimer {
  * `dismiss` dispatches `{ element, reason }`.
  *
  * `show` dispatches `{ type, message }`.
+ * `reconcile` dispatches `{ removed: number }` — the messages the Turbo cache
+ * rewind took out, which no `dismiss` will report because nobody dismissed them.
  *
  * @remarks
  * Reading is **delegated to the shared Announcer** — but only for the *initial*,
@@ -65,7 +67,7 @@ export class FlashController extends Controller<HTMLElement> {
     max: { type: Number, default: 0 },
   };
   static actions = ["dismiss"] as const;
-  static events = ["show", "dismiss"] as const;
+  static events = ["show", "dismiss", "reconcile"] as const;
 
   declare readonly regionTarget: HTMLElement;
   declare readonly messageTargets: HTMLElement[];
@@ -131,12 +133,14 @@ export class FlashController extends Controller<HTMLElement> {
    * only: `dismiss` reports a dismissal, and freezing the page is not one.
    */
   #rewindForCache(): void {
+    const removed = this.#order.length;
     for (const message of [...this.#order]) {
       message.remove();
       this.#forget(message);
     }
     for (const message of this.#leaving) message.remove();
     this.#leaving.clear();
+    if (removed > 0) this.dispatch("reconcile", { detail: { removed } });
   }
 
   /** Follows a `region` element swapped in — or arriving — at runtime (Turbo Stream). */

@@ -40,6 +40,16 @@ function nonNegativeCharacterCount(value: "max" | "warnAt"): ValueConstraint {
 
 /** Literal Stimulus Value contracts that reflection cannot derive from types. */
 export const valueConstraintRules: ValueConstraintRules = {
+  "stimeo--carousel": [
+    {
+      value: "interval",
+      type: "number",
+      finite: true,
+      greaterThan: 0,
+      suggestion:
+        "Set interval to a finite number of milliseconds greater than 0 — anything else falls back to 5000 at runtime.",
+    },
+  ],
   "stimeo--character-counter": [
     nonNegativeCharacterCount("max"),
     nonNegativeCharacterCount("warnAt"),

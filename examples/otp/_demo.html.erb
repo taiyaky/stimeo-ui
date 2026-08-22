@@ -1,18 +1,17 @@
 <%# Markup for the otp (OTP PIN passcode) demo.
-    Provides auto-advance on entry in each field, Backspace to go back, paste
-    distribution, and value sync. %>
+    Provides auto-advance on entry in each field, Backspace to clear, paste and
+    autofill splitting, and value sync. The digit count is the number of fields. %>
 <div
   class="otp-demo"
   id="otp-passcode"
   data-controller="stimeo--otp"
-  data-stimeo--otp-length-value="6"
   data-stimeo--otp-pattern-value="[0-9]"
   role="group"
   aria-label="<%= t("components.otp.demo.label") %>"
 >
-  
+
   <div class="otp-demo__label"><%= t("components.otp.demo.label") %></div>
-  
+
   <div class="otp-demo__fields">
     <% 6.times do |i| %>
       <input
@@ -20,11 +19,13 @@
         type="text"
         inputmode="numeric"
         maxlength="1"
+        autocomplete="one-time-code"
         data-stimeo--otp-target="field"
         data-action="
           input->stimeo--otp#onInput
           keydown->stimeo--otp#onKeydown
           paste->stimeo--otp#onPaste
+          pointerdown->stimeo--otp#onPointerDown
         "
         aria-label="<%= t("components.otp.demo.digit_label", position: i + 1) %>"
       />
@@ -52,12 +53,17 @@
     </span>
   </div>
 
-  <%# Placeholder for the completion celebration message. %>
-  <div id="otp-complete-message" class="otp-demo__message" style="display: none;">
+  <%# The completion message is shown by CSS reading data-state on the root, so the
+      demo script only has to fill in the code itself. %>
+  <div id="otp-complete-message" class="otp-demo__message">
     <span class="otp-demo__success-badge">✓</span>
     <span class="otp-demo__success-text">
       <%= t("components.otp.demo.complete_msg") %>
       <strong id="otp-success-code"></strong>
     </span>
   </div>
+
+  <button type="button" class="demo-trigger otp-demo__clear" data-action="stimeo--otp#clear">
+    <%= t("components.otp.demo.clear") %>
+  </button>
 </div>

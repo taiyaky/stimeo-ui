@@ -536,6 +536,23 @@ describe("DirectUploadController", () => {
     expect(rows()).toHaveLength(1);
   });
 
+  it("reports the uploads the cache rewind discarded", async () => {
+    await mount();
+    fire("direct-upload:initialize", { id: 1, file: { name: "a.png" } });
+    const reports: unknown[] = [];
+    element().addEventListener("stimeo--direct-upload:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    // The upload cannot survive the navigation, and `done` would claim it did.
+    expect(reports).toEqual([{ ids: ["1"] }]);
+
+    // No rows left, so a second snapshot has nothing to report.
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(reports).toEqual([{ ids: ["1"] }]);
+  });
+
   it("rewinds rows, timers, and the aggregate before Turbo caches the page", async () => {
     await mount('data-stimeo--direct-upload-remove-on-done-value="true"');
     fire("direct-upload:initialize", { id: 1, file: { name: "a.png" } });

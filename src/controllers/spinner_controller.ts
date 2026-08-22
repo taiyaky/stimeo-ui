@@ -42,7 +42,8 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * - `stimeo--spinner:timeout` — `timeout` elapsed with the load still running;
  *   the controller then ends it exactly as `stop` would, so a `hide` follows.
  *
- * `hide`, `show` and `timeout` dispatch `{}`.
+ * `hide`, `show`, `timeout`, and `reconcile` dispatch `{}`. The last of those
+ * reports that the Turbo cache rewind returned a running cycle to idle.
  *
  * @remarks
  * Behavior only — the visual spinner is the consumer's, alongside the text and
@@ -60,7 +61,7 @@ export class SpinnerController extends Controller<HTMLElement> {
     timeout: { type: Number, default: 0 },
   };
   static actions = ["start", "stop"] as const;
-  static events = ["hide", "show", "timeout"] as const;
+  static events = ["hide", "show", "timeout", "reconcile"] as const;
 
   declare readonly indicatorTarget: HTMLElement;
   declare readonly regionTarget: HTMLElement;
@@ -207,16 +208,18 @@ export class SpinnerController extends Controller<HTMLElement> {
    * Returns the loading state to idle for the snapshot Turbo is about to take,
    * so a page reached with the Back button is not restored mid-load with a
    * spinner nothing can stop. State only: `data-state`, the indicator's `hidden`,
-   * and `aria-busy`. No `hide` is dispatched — the load was never observed to
-   * finish, and a snapshot rewind is not a lifecycle event the consumer can act
-   * on. The live page keeps its timers, so a navigation that never completes
-   * leaves the running cycle intact.
+   * and `aria-busy`. No `hide` is dispatched — that would claim the load finished.
+   * The rewind reports itself as `reconcile` instead, so a consumer painting from
+   * `show` can drop it before the snapshot is taken. The live page keeps its
+   * timers, so a navigation that never completes leaves the running cycle intact.
    */
   #rewindForCache(): void {
+    const running = this.element.getAttribute("data-state") !== "idle";
     this.#cancelTimeout();
     this.#setBusy(false);
     if (this.hasIndicatorTarget) this.indicatorTarget.hidden = true;
     this.element.setAttribute("data-state", "idle");
+    if (running) this.dispatch("reconcile", { detail: {} });
   }
 
   /** Reflects busy state onto the controlled region (if present). */

@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.8.0] - 2026-08-22
+
+Minor release with no new components. Eight existing ones are reworked —
+auto-submit, carousel, currency-input, file-dropzone, input-mask, nested-form,
+otp, and textarea-autosize — and of those, carousel, otp, and file-dropzone also
+changed their markup contracts, so read Removed and Changed before upgrading. The
+Inspector manifest stays on schema v12.
+
+### Removed
+
+- otp: `length` — the number of `field` targets is the passcode length.
+- file-dropzone: the `status` target, `dragLabel`, and the
+  `data-file-dropzone-slot` attributes.
+
+### Added
+
+- `reconcile` on auto-submit, direct-upload, file-dropzone, flash, frame-loading,
+  input-mask, nested-form, otp, spinner, and submit-once — it also reports the
+  state a Turbo rewind discarded, carrying what that component lost
+  (`{ files }`, `{ ids }`, `{ forms }`, `{ removed }`, or `{}`).
+- carousel: `data-state`, `inert` on inactive slides, `prefers-reduced-motion`,
+  and optional pickers. otp: `clear` / `onPointerDown`, and text carrying several
+  characters spread across the following fields. file-dropzone:
+  `allowDuplicates`, a `thumb` target, and the `announce*Text` wording.
+- Characters an IME commits full-width are read as their half-width form in
+  input-mask, otp, and currency-input.
+- Inspector: rules for the reworked markup — carousel's controller-owned ARIA,
+  the `playToggle` an `autoplay` carousel needs, the `prev` / `next` pair, a
+  finite positive `interval`, otp's group and field names, and the parts
+  file-dropzone's item template must contain.
+
+### Changed
+
+- carousel: drop the `data-action` wiring and any authored `aria-pressed` —
+  clicks, picker keys, hover, and focus are delegated, and `aria-pressed` /
+  `aria-disabled` / `aria-live` / `aria-atomic` are controller-owned. Name the
+  toggle with `aria-label`, pair `prev` with `next`, and give an `autoplay`
+  carousel a `playToggle` (WCAG 2.2.2).
+- otp: the root needs `role="group"` and a name, and each `field` its own.
+  `invalid` reports only input that filled no field.
+- file-dropzone: put a `stimeo--announcer` on the page, set the `announce*Text`
+  wording, and use `name` / `thumb` / `remove` targets in the item template with
+  an authored `aria-label`. Validation runs `type` → `size` → `duplicate` →
+  `count`, and `change` precedes `reject`.
+- input-mask: `change` fires only for a user edit; normalization and runtime
+  Value changes report `reconcile`. The manifest reports `tokens` as `String`
+  where it reported `Object`.
+- textarea-autosize: `resize` no longer fires when a connect leaves the height
+  unchanged; width, font, and runtime `minRows` / `maxRows` changes are followed.
+- currency-input keeps what was typed while typing and rounds on blur;
+  nested-form absorbs rows added or removed outside it; auto-submit follows a
+  swapped `form` target.
+
+### Fixed
+
+- carousel: the play toggle stops rotation — the `focusin` before the click no
+  longer makes the press resume instead. otp: a full-width commit into one field
+  fills the following ones. currency-input: a locale with non-Latin digits
+  reparses its own output. nested-form: a discarded-but-visible row's remove
+  button no longer swallows the click.
+
 ## [0.7.0] - 2026-08-16
 
 Minor release reworking the form stack, separator, and scroll-area, with
@@ -634,6 +695,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.8.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.8.0
 [0.7.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.7.0
 [0.6.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.6.0
 [0.5.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.5.0

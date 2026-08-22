@@ -1,10 +1,13 @@
 <%# Markup for the carousel demo.
     The library handles slide advance, autoplay, syncing the current slide's
-    data-state / hidden, and the pickers' (tabs) aria-selected and roving.
-    Autoplay deliberately demonstrates WCAG 2.2.2: it pauses while the pointer hovers
-    and hard-stops when keyboard focus enters the carousel (it does not auto-resume on
-    focus out — press play). This is intentional and is spelled out in the on-screen
-    note below the carousel. Transitions and layout are the consumer's CSS. %>
+    data-state / hidden / inert, the pickers' (tabs) aria-selected and roving, the
+    aria-disabled of controls that cannot be reached, and the viewport's aria-live.
+    There is no data-action anywhere: the controller delegates clicks, picker keys,
+    hover, and focus from its own element, so the markup only declares targets.
+    Autoplay deliberately demonstrates WCAG 2.2.2: the play toggle is what stops it for
+    good, while hovering, focusing, or backgrounding the tab only suspends it until that
+    condition ends. This is spelled out in the on-screen note below the carousel.
+    Transitions and layout are the consumer's CSS. %>
 <section
   class="carousel"
   data-controller="stimeo--carousel"
@@ -12,32 +15,27 @@
   aria-label="<%= t("components.carousel.demo.label") %>"
   data-stimeo--carousel-autoplay-value="false"
   data-stimeo--carousel-interval-value="2500"
-  data-stimeo--carousel-loop-value="true"
-  data-action="
-    mouseenter->stimeo--carousel#pause
-    mouseleave->stimeo--carousel#resume
-    focusin->stimeo--carousel#pause
-    focusout->stimeo--carousel#resume">
+  data-stimeo--carousel-loop-value="true">
   <div class="carousel__bar">
     <button
       type="button"
       class="carousel__play"
-      aria-pressed="false"
       aria-label="<%= t("components.carousel.demo.autoplay") %>"
-      data-stimeo--carousel-target="playToggle"
-      data-action="click->stimeo--carousel#togglePlay">
-      <%# The library toggles aria-pressed; demo.css swaps the glyph off it so the
-          control visibly reflects play (❚❚) vs. paused (▶). The icons are decorative;
-          the accessible name comes from aria-label above. %>
+      data-stimeo--carousel-target="playToggle">
+      <%# The library owns aria-pressed (the autoplay Value is the intent it mirrors);
+          demo.css swaps the glyph off it so the control visibly reflects play (❚❚) vs.
+          paused (▶). The icons are decorative; the accessible name comes from aria-label
+          above. %>
       <span class="carousel__play-icon carousel__play-icon--play" aria-hidden="true">▶</span>
       <span class="carousel__play-icon carousel__play-icon--pause" aria-hidden="true">❚❚</span>
     </button>
+    <%# A visual read-out only. The library makes the viewport the live region, so a
+        second one here would make a screen reader announce the change twice. %>
     <p
       class="carousel__status"
       data-carousel-status
       data-template="<%= t("components.carousel.demo.status_template") %>"
-      data-playing-suffix="<%= t("components.carousel.demo.status_playing") %>"
-      aria-live="polite"></p>
+      data-playing-suffix="<%= t("components.carousel.demo.status_playing") %>"></p>
   </div>
 
   <div class="carousel__viewport" data-stimeo--carousel-target="viewport">
@@ -50,7 +48,7 @@
         aria-label="<%= "#{i + 1} of #{t('components.carousel.demo.slides').size}" %>"
         aria-labelledby="carousel-dot-<%= i + 1 %>"
         data-stimeo--carousel-target="slide"
-        <%= "hidden" if i.positive? %>>
+        <%= "hidden inert" if i.positive? %>>
         <h3 class="carousel__title"><%= slide[:title] %></h3>
         <p><%= slide[:body] %></p>
       </div>
@@ -60,12 +58,10 @@
   <div class="carousel__nav">
     <button type="button" class="carousel__arrow"
       aria-label="<%= t("components.carousel.demo.prev") %>"
-      data-stimeo--carousel-target="prev"
-      data-action="click->stimeo--carousel#prev">‹</button>
+      data-stimeo--carousel-target="prev">‹</button>
     <button type="button" class="carousel__arrow"
       aria-label="<%= t("components.carousel.demo.next") %>"
-      data-stimeo--carousel-target="next"
-      data-action="click->stimeo--carousel#next">›</button>
+      data-stimeo--carousel-target="next">›</button>
   </div>
 
   <div class="carousel__dots" role="tablist"
@@ -79,9 +75,7 @@
         aria-controls="carousel-slide-<%= i + 1 %>"
         aria-label="<%= slide[:title] %>"
         tabindex="<%= i.zero? ? 0 : -1 %>"
-        data-stimeo--carousel-target="picker"
-        data-action="click->stimeo--carousel#goto
-                     keydown->stimeo--carousel#onPickerKeydown"></button>
+        data-stimeo--carousel-target="picker"></button>
     <% end %>
   </div>
 </section>

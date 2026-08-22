@@ -87,6 +87,9 @@ const BUTTON_BUSY_LABEL = "data-submit-once-busy-label";
  *
  * Events:
  * - `stimeo--submit-once:start` — `{ form, submitter }`.
+ * - `stimeo--submit-once:reconcile` — `{ forms: HTMLFormElement[] }`, the forms
+ *   whose in-flight submission the Turbo cache rewind abandoned. `end` would
+ *   claim the submission resolved, so the rewind reports itself instead.
  * - `stimeo--submit-once:end` — `{ form, submitter, reason, success? }`, where
  *   `reason` is `"turbo"`, `"timeout"`, `"manual"`, or `"canceled"`. Only
  *   `"canceled"` skips the completion announcement, because no operation ran.
@@ -111,7 +114,7 @@ export class SubmitOnceController extends Controller<HTMLElement> {
     restoreFocus: { type: Boolean, default: false },
   };
   static actions = ["cancel", "finish", "start"] as const;
-  static events = ["start", "end"] as const;
+  static events = ["start", "end", "reconcile"] as const;
 
   declare readonly submitTargets: SubmitControl[];
   declare readonly idleTargets: HTMLElement[];
@@ -375,7 +378,11 @@ export class SubmitOnceController extends Controller<HTMLElement> {
 
   /** Keeps Turbo's cached snapshot idle, without events, announcements, or focus moves. */
   #rewindForCache(): void {
+    const forms = [...this.#sessions.keys()];
     this.#abandonSessions();
+    // A submission in flight dies with the navigation, so a consumer still
+    // painting "submitting" from `start` would never be released.
+    if (forms.length > 0) this.dispatch("reconcile", { detail: { forms } });
   }
 
   /** Tears down a true detach; an in-page move is canceled by the next `connect()`. */

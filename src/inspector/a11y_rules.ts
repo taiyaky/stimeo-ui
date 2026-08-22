@@ -544,10 +544,12 @@ export const a11yRules: A11yRules = {
       suggestion: "Name each panel via aria-labelledby (its tab's id) or aria-label.",
     },
   ],
-  // Tabbed carousel (APG): picker dots are tabs and slides are tabpanels with
-  // the "slide" role description; the container announces itself as a
-  // carousel and must therefore be named. Slide selection (aria-selected) is
-  // controller-managed.
+  // Carousel (APG), in both of the pattern's spellings: with pickers the dots
+  // are tabs and the slides they control are tabpanels; without pickers the
+  // slides are plain groups the previous/next buttons step through. Either way
+  // each slide carries the "slide" role description and the container announces
+  // itself as a carousel, so it must be named. Slide selection (aria-selected)
+  // is controller-managed.
   "stimeo--carousel": [
     {
       target: "",
@@ -564,7 +566,16 @@ export const a11yRules: A11yRules = {
       target: "slide",
       attrs: ["role"],
       values: ["tabpanel"],
-      suggestion: 'Add role="tabpanel" to each slide target.',
+      whenContains: { target: "picker", within: "scope", min: 1 },
+      suggestion: 'Add role="tabpanel" to each slide target — its picker is the tab.',
+    },
+    {
+      target: "slide",
+      attrs: ["role"],
+      values: ["group"],
+      whenContains: { target: "picker", within: "scope", max: 0 },
+      suggestion:
+        'Add role="group" to each slide target — a carousel with no pickers has no tabs, so its slides are groups rather than tabpanels.',
     },
     {
       target: "slide",
@@ -572,9 +583,9 @@ export const a11yRules: A11yRules = {
       values: ["slide"],
       suggestion: 'Add aria-roledescription="slide" to each slide target.',
     },
-    // A slide is a `tabpanel`, whose name ARIA requires. Unnamed, every slide
-    // is announced as "slide" and the position the roledescription promised is
-    // exactly the thing the user cannot hear.
+    // A slide is a `tabpanel` or a `group`, whose name ARIA requires. Unnamed,
+    // every slide is announced as "slide" and the position the roledescription
+    // promised is exactly the thing the user cannot hear.
     {
       target: "slide",
       attrs: ["aria-labelledby", "aria-label"],
@@ -861,6 +872,28 @@ export const a11yRules: A11yRules = {
       target: "",
       attrs: ["aria-label", "aria-labelledby"],
       suggestion: "Name the progress bar via aria-label or aria-labelledby.",
+    },
+  ],
+  // One-time passcode: no APG widget of its own, so it is a named group of
+  // labelled text inputs. Each field is a separate control a screen reader
+  // announces on its own, so "digit 3 of 6" has to come from its own name —
+  // the group's name cannot supply it.
+  "stimeo--otp": [
+    {
+      target: "",
+      attrs: ["role"],
+      values: ["group"],
+      suggestion: 'Add role="group" to the controller element.',
+    },
+    {
+      target: "",
+      attrs: ["aria-label", "aria-labelledby"],
+      suggestion: "Name the passcode group via aria-label or aria-labelledby.",
+    },
+    {
+      target: "field",
+      attrs: ["aria-label", "aria-labelledby"],
+      suggestion: "Name each field target after its position via aria-label or aria-labelledby.",
     },
   ],
   // Password strength readout: the meter target is an ARIA meter the

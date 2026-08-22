@@ -579,14 +579,41 @@ describe("checkSource", () => {
             <button data-stimeo--file-dropzone-target="trigger">Choose</button>
             <div data-stimeo--file-dropzone-target="${target}"></div>
           </div>`;
-        const withTemplate = checkSource(dropzone("itemTemplate"), manifest).filter(
+        const messages = (target: string) =>
+          checkSource(dropzone(target), manifest)
+            .filter((d) => d.code === "missing-conditional-target")
+            .map((d) => d.message);
+        expect(messages("itemTemplate").some((m) => m.includes('"list"'))).toBe(true);
+        expect(messages("list").some((m) => m.includes('"itemTemplate"'))).toBe(true);
+      });
+
+      it("requires the file-dropzone item parts to live inside the template", () => {
+        const dropzone = (template: string) => `
+          <div data-controller="stimeo--file-dropzone">
+            <input type="file" data-stimeo--file-dropzone-target="input">
+            <button data-stimeo--file-dropzone-target="trigger">Choose</button>
+            <ul data-stimeo--file-dropzone-target="list"></ul>
+            ${template}
+          </div>`;
+        const complete = `
+            <template data-stimeo--file-dropzone-target="itemTemplate">
+              <li data-stimeo--file-dropzone-target="item">
+                <span data-stimeo--file-dropzone-target="name"></span>
+                <button data-stimeo--file-dropzone-target="remove" aria-label="Remove {name}">x</button>
+              </li>
+            </template>`;
+        const outside = `
+            <template data-stimeo--file-dropzone-target="itemTemplate">
+              <li data-stimeo--file-dropzone-target="item"></li>
+            </template>
+            <span data-stimeo--file-dropzone-target="name"></span>
+            <button data-stimeo--file-dropzone-target="remove" aria-label="Remove {name}">x</button>`;
+
+        expect(codes(dropzone(complete))).toEqual([]);
+        const stranded = checkSource(dropzone(outside), manifest).filter(
           (d) => d.code === "missing-conditional-target",
         );
-        const withList = checkSource(dropzone("list"), manifest).filter(
-          (d) => d.code === "missing-conditional-target",
-        );
-        expect(withTemplate[0]?.message).toContain('"list"');
-        expect(withList[0]?.message).toContain('"itemTemplate"');
+        expect(stranded[0]?.message).toContain('"name"');
       });
 
       it("requires both halves of a submit-once structured label", () => {
@@ -2564,8 +2591,8 @@ describe("checkSource", () => {
 
     it("does not treat event names inside <script> as attributes", () => {
       const source = `
-        <div data-controller="stimeo--otp" id="x">
-          <input data-stimeo--otp-target="field">
+        <div data-controller="stimeo--otp" id="x" role="group" aria-label="Passcode">
+          <input data-stimeo--otp-target="field" aria-label="Digit 1">
         </div>
         <script>document.getElementById('x').addEventListener('stimeo--otp:complete', () => {});</script>`;
       expect(checkSource(source, manifest)).toEqual([]);

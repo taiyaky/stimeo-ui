@@ -60,7 +60,11 @@ export const cardinalityRules: CardinalityRules = {
     },
   ],
   // The picker's selected dot mirrors the visible slide; two of them means the
-  // author asked for two slides at once, and connect keeps the first.
+  // author asked for two slides at once, and connect keeps the first. The
+  // toggle is the mechanism WCAG 2.2.2 requires of content that starts moving
+  // on its own, so a carousel that declares autoplay without one has no way to
+  // stop — and the lower bound is the only layer that can say so, because at
+  // runtime a missing target simply means "no toggle to sync".
   "stimeo--carousel": [
     {
       within: "",
@@ -70,6 +74,14 @@ export const cardinalityRules: CardinalityRules = {
       max: 1,
       suggestion:
         'Leave aria-selected="true" on exactly one picker and set the others to "false" — the carousel shows one slide, and connect keeps the first.',
+    },
+    {
+      within: "",
+      target: "playToggle",
+      min: 1,
+      when: { value: "autoplay", type: "boolean", equals: ["true"], default: "false" },
+      suggestion:
+        'Add a "playToggle" button wired to stimeo--carousel#togglePlay — a carousel that rotates on its own needs a control that stops it (WCAG 2.2.2).',
     },
   ],
   // Rows are singly selectable only in the single configuration; the multiple

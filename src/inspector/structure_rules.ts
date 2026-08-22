@@ -58,7 +58,28 @@ export const structureRules: StructureRules = {
   },
   "stimeo--bulk-select": { requiredTargets: ["item", "bar"] },
   "stimeo--calendar": { requiredTargets: ["grid"] },
-  "stimeo--carousel": { requiredTargets: ["slide", "picker"] },
+  // Only the slides are structural: the APG pattern covers both the tabbed
+  // spelling and a plain previous/next one, and the controller restores the
+  // visible slide from the slides themselves, so pickers are a choice rather
+  // than a prerequisite. A one-way stepper is not a choice, though — an author
+  // who wires one direction meant both.
+  "stimeo--carousel": {
+    requiredTargets: ["slide"],
+    conditionalTargets: [
+      {
+        whenPresent: "prev",
+        require: ["next"],
+        suggestion:
+          'Add the "next" button that pairs with "prev" — a carousel the reader can only step backwards through cannot reach the slides ahead of it.',
+      },
+      {
+        whenPresent: "next",
+        require: ["prev"],
+        suggestion:
+          'Add the "prev" button that pairs with "next" — a carousel the reader can only step forwards through cannot return to a slide they passed.',
+      },
+    ],
+  },
   // No required targets: works on a bare <textarea>/<input> (no `input` target), and
   // the count display (`output`) is optional.
   "stimeo--character-counter": {},
@@ -113,6 +134,13 @@ export const structureRules: StructureRules = {
         require: ["itemTemplate"],
         suggestion:
           'Add an "itemTemplate" target — a "list" has no item markup to clone without it.',
+      },
+      {
+        whenPresent: "itemTemplate",
+        require: ["item", "name", "remove"],
+        requireInside: true,
+        suggestion:
+          'Complete the item template: inside it, it needs an "item" root, a "name" element for the file name, and a "remove" button. Parts declared outside the template never reach the clone, so no file can render.',
       },
     ],
   },

@@ -296,6 +296,23 @@ describe("SpinnerController", () => {
     expect(region().getAttribute("aria-busy")).toBe("false");
   });
 
+  it("reports the cycle the Turbo snapshot rewind returned to idle", async () => {
+    await start();
+    const reports: unknown[] = [];
+    root().addEventListener("stimeo--spinner:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+    instance().start();
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    // `hide` would claim the load finished; the rewind only says it is idle now.
+    expect(reports).toEqual([{}]);
+
+    // Already idle: a second snapshot has nothing to report.
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(reports).toEqual([{}]);
+  });
+
   it("rewinds a pending start for the Turbo snapshot too", async () => {
     await start('data-stimeo--spinner-delay-value="150"');
     instance().start();

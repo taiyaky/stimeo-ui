@@ -22,6 +22,7 @@ export const ANNOUNCING_CONTROLLERS: readonly string[] = [
   "stimeo--countdown",
   "stimeo--direct-upload",
   "stimeo--empty-state",
+  "stimeo--file-dropzone",
   "stimeo--flash",
   "stimeo--form-field",
   "stimeo--frame-loading",

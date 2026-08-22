@@ -1,14 +1,33 @@
 <%# Markup for the file-dropzone (file drag & drop / image preview) demo.
     Click or keyboard launches the native file input, and drag & drop also adds files.
-    It validates accept / maxSize / count and shows image thumbnails via objectURL.
-    The library handles the drop bridge, validation, preview create/revoke, focus
-    handoff on removal, and live announcements. Drag & drop is only an aid — selection
-    is always possible via click / keyboard. %>
+    It validates accept / maxSize / duplicates / count and shows image thumbnails via
+    objectURL. The library handles the drop bridge, validation, preview create/revoke,
+    focus handoff on removal, mirroring the accepted files back onto the native input,
+    and the announcements read by the shared announcer seated below. Drag & drop is
+    only an aid — selection is always possible via click / keyboard. %>
 <div class="file-dropzone" data-controller="stimeo--file-dropzone"
      data-stimeo--file-dropzone-max-size-value="5242880"
      data-stimeo--file-dropzone-max-files-value="4"
-     data-stimeo--file-dropzone-drag-label-value="<%= t(
+     data-stimeo--file-dropzone-announce-drag-text-value="<%= t(
        'components.file_dropzone.demo.drag_label'
+     ) %>"
+     data-stimeo--file-dropzone-announce-added-text-value="<%= t(
+       'components.file_dropzone.demo.announce_added'
+     ) %>"
+     data-stimeo--file-dropzone-announce-removed-text-value="<%= t(
+       'components.file_dropzone.demo.announce_removed'
+     ) %>"
+     data-stimeo--file-dropzone-announce-rejected-type-text-value="<%= t(
+       'components.file_dropzone.demo.announce_reject_type'
+     ) %>"
+     data-stimeo--file-dropzone-announce-rejected-size-text-value="<%= t(
+       'components.file_dropzone.demo.announce_reject_size'
+     ) %>"
+     data-stimeo--file-dropzone-announce-rejected-duplicate-text-value="<%= t(
+       'components.file_dropzone.demo.announce_reject_duplicate'
+     ) %>"
+     data-stimeo--file-dropzone-announce-rejected-count-text-value="<%= t(
+       'components.file_dropzone.demo.announce_reject_count'
      ) %>">
   <div
     class="file-dropzone__zone"
@@ -38,36 +57,43 @@
     aria-label="<%= t('components.file_dropzone.demo.list_label') %>"
     data-stimeo--file-dropzone-target="list"></ul>
 
-  <%# Demo-only: the library accepts only images within the limits (5 MB / 4 files) and
-      fires stimeo--file-dropzone:reject for the rest — accepted images get a thumbnail
-      preview. Surface the reason visibly so a rejected file (e.g. an over-size photo) is
-      not mistaken for a broken preview. demo.js fills this from the reject event; the
-      reason copy is localized here. %>
+  <%# Demo-only: the library accepts only unique images within the limits (5 MB / 4 files)
+      and fires stimeo--file-dropzone:reject for the rest — accepted images get a thumbnail
+      preview. The reason is already spoken by the shared announcer; this repeats it on
+      screen so a rejected file (e.g. an over-size photo) is not mistaken for a broken
+      preview. demo.js fills this from the reject event; the reason copy is localized here. %>
   <p class="file-dropzone__error"
      data-file-dropzone-error
      hidden
      data-reason-type="<%= t('components.file_dropzone.demo.reject_type') %>"
      data-reason-size="<%= t('components.file_dropzone.demo.reject_size') %>"
+     data-reason-duplicate="<%= t('components.file_dropzone.demo.reject_duplicate') %>"
      data-reason-count="<%= t('components.file_dropzone.demo.reject_count') %>"></p>
-
-  <span
-    role="status"
-    aria-live="polite"
-    class="file-dropzone__status visually-hidden"
-    data-stimeo--file-dropzone-target="status"></span>
 
   <template data-stimeo--file-dropzone-target="itemTemplate">
     <li class="file-dropzone__item" data-stimeo--file-dropzone-target="item">
-      <img class="file-dropzone__thumb" data-file-dropzone-slot="thumb" alt="" hidden />
-      <span class="file-dropzone__name" data-file-dropzone-slot="name"></span>
+      <img class="file-dropzone__thumb" data-stimeo--file-dropzone-target="thumb" alt="" hidden />
+      <span class="file-dropzone__name" data-stimeo--file-dropzone-target="name"></span>
       <%# Removal is handled by a delegated listener on the list container, so it
           works instantly without waiting on Stimulus wiring a data-action onto the
-          dynamically-added button. %>
+          dynamically-added button. The library keeps this aria-label and only
+          expands {name}, so the accessible name stays in the page's language. %>
       <button
         type="button"
-        class="file-dropzone__remove">
+        class="file-dropzone__remove"
+        aria-label="<%= t('components.file_dropzone.demo.remove_label') %>"
+        data-stimeo--file-dropzone-target="remove">
         <%= t("components.file_dropzone.demo.remove") %>
       </button>
     </li>
   </template>
+
+  <%# Shared announcer: additions, rejections, removals, and the drag affordance are
+      the transitions worth reading. The dropzone owns no live region of its own. %>
+  <div data-controller="stimeo--announcer">
+    <div class="visually-hidden"
+         data-stimeo--announcer-target="polite"
+         aria-live="polite"
+         aria-atomic="true"></div>
+  </div>
 </div>

@@ -255,6 +255,23 @@ describe("FlashController", () => {
     expect(dismissed).toEqual([]); // caching a page is not a dismissal
   });
 
+  it("reports the messages the cache rewind took out", async () => {
+    await mount(region(message("notice", "Saved")));
+    const reports: unknown[] = [];
+    root().addEventListener("stimeo--flash:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    // Nobody dismissed them, so `dismiss` would misreport; the rewind says how
+    // many it removed so a consumer counting messages can follow.
+    expect(reports).toEqual([{ removed: 1 }]);
+
+    // The region is empty now, so a second snapshot has nothing to report.
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(reports).toEqual([{ removed: 1 }]);
+  });
+
   it("takes a message mid-dismissal out of the page before Turbo caches it", async () => {
     const real = window.getComputedStyle;
     window.getComputedStyle = (() =>

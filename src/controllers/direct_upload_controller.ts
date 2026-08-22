@@ -62,6 +62,8 @@ const REMOVE_DELAY = 4000;
  *   on each progress update, after clamping.
  * - `stimeo--direct-upload:done` dispatches `{ id: string }` when an upload
  *   completes successfully.
+ * - `stimeo--direct-upload:reconcile` dispatches `{ ids: string[] }` — the uploads
+ *   the Turbo cache rewind discarded, none of which can still finish
  * - `stimeo--direct-upload:error` dispatches `{ id: string, error: string }`
  *   when an upload fails.
  *
@@ -92,7 +94,7 @@ export class DirectUploadController extends Controller<HTMLElement> {
     announceErrorText: { type: String, default: "" },
     scope: { type: String, default: "" },
   };
-  static events = ["progress", "done", "error"] as const;
+  static events = ["progress", "done", "error", "reconcile"] as const;
 
   declare readonly listTarget: HTMLElement;
   declare readonly rowTarget: HTMLTemplateElement;
@@ -106,7 +108,7 @@ export class DirectUploadController extends Controller<HTMLElement> {
 
   readonly #timeouts = new SafeTimeout();
   readonly #rows = new Map<string, HTMLElement>();
-  readonly #beforeCache = new BeforeCacheReset(() => this.#reset());
+  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
 
   /** The validated `scope` selector; a broken declaration falls back to `""`. */
   #scopeSelector = "";
@@ -345,6 +347,17 @@ export class DirectUploadController extends Controller<HTMLElement> {
    * Returns the widget to its pre-upload state just before Turbo caches the
    * page, so the snapshot never replays rows for uploads that cannot resume.
    */
+  /**
+   * Rewinds for the snapshot and reports what that discarded. An upload in flight
+   * cannot survive the navigation, so a consumer mirroring the rows would keep a
+   * progress bar that never resolves.
+   */
+  #rewindForCache(): void {
+    const ids = [...this.#rows.keys()];
+    this.#reset();
+    if (ids.length > 0) this.dispatch("reconcile", { detail: { ids } });
+  }
+
   #reset(): void {
     for (const row of this.#rows.values()) row.remove();
     this.#rows.clear();

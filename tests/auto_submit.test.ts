@@ -7,9 +7,11 @@ import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
- * Behavioral tests for {@link AutoSubmitController}: debounced submission, rapid
- * coalescing, the `on` allowlist, the pending/busy state hooks, the submit/done
- * events, the optional Announcer bridge, the `form` target, and teardown.
+ * Behavioral tests for {@link AutoSubmitController}: debounced submission (and the
+ * 300ms default), rapid coalescing, the `on` allowlist, the pending/busy state
+ * hooks and their `turbo:before-cache` rewind, the submit/done events and the
+ * `done` detail shape, the optional Announcer bridge (and its opt-in default),
+ * the `form` target across runtime replacement/addition/removal, and teardown.
  */
 
 describe("AutoSubmitController", () => {
@@ -57,6 +59,20 @@ describe("AutoSubmitController", () => {
     input().dispatchEvent(new Event("input", { bubbles: true }));
     expect(submit).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(300);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it("submits after the default 300ms debounce when the value is unset", async () => {
+    await start(`
+      <form data-controller="stimeo--auto-submit"
+            data-action="input->stimeo--auto-submit#submit">
+        <input type="search" name="q">
+      </form>`);
+    const submit = stubSubmit();
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(299);
+    expect(submit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
     expect(submit).toHaveBeenCalledTimes(1);
   });
 
@@ -150,6 +166,47 @@ describe("AutoSubmitController", () => {
     expect(done).toBe(1);
   });
 
+  it("dispatches done with detail { message: undefined } when message is unset", async () => {
+    await start(SEARCH);
+    const details: Array<{ message?: string }> = [];
+    form().addEventListener("stimeo--auto-submit:done", (event) => {
+      details.push((event as CustomEvent<{ message?: string }>).detail);
+    });
+    form().dispatchEvent(new Event("turbo:submit-end"));
+    expect(details).toStrictEqual([{ message: undefined }]);
+  });
+
+  it("dispatches done with the configured message in detail", async () => {
+    await start(`
+      <form data-controller="stimeo--auto-submit"
+            data-stimeo--auto-submit-message-value="Results updated">
+        <input type="search" name="q">
+      </form>`);
+    const details: Array<{ message?: string }> = [];
+    form().addEventListener("stimeo--auto-submit:done", (event) => {
+      details.push((event as CustomEvent<{ message?: string }>).detail);
+    });
+    form().dispatchEvent(new Event("turbo:submit-end"));
+    expect(details).toStrictEqual([{ message: "Results updated" }]);
+  });
+
+  it("does not bridge to the Announcer when announce is left at its default", async () => {
+    // A message alone must not announce: the bridge is opt-in via `announce`.
+    await start(`
+      <form data-controller="stimeo--auto-submit"
+            data-stimeo--auto-submit-message-value="Results updated">
+        <input type="search" name="q">
+      </form>`);
+    const messages: string[] = [];
+    const onAnnounce = (event: Event) => {
+      messages.push((event as CustomEvent<{ message: string }>).detail.message);
+    };
+    window.addEventListener("stimeo--announcer:announce", onAnnounce);
+    form().dispatchEvent(new Event("turbo:submit-end"));
+    window.removeEventListener("stimeo--announcer:announce", onAnnounce);
+    expect(messages).toEqual([]);
+  });
+
   it("bridges to the Announcer on done when announce + message are set", async () => {
     await start(`
       <form data-controller="stimeo--auto-submit"
@@ -232,6 +289,142 @@ describe("AutoSubmitController", () => {
     expect(submit).toHaveBeenCalledTimes(1);
   });
 
+  const NESTED_FORM = `
+    <form data-stimeo--auto-submit-target="form"
+          data-action="input->stimeo--auto-submit#submit">
+      <input type="search" name="q">
+    </form>`;
+
+  it("follows a form target replaced at runtime", async () => {
+    await start(`
+      <div data-controller="stimeo--auto-submit"
+           data-stimeo--auto-submit-debounce-value="300">${NESTED_FORM}
+      </div>`);
+    const host = query<HTMLElement>("[data-controller='stimeo--auto-submit']");
+    // A Turbo Stream replacing the form must move the subscriptions with it.
+    form().remove();
+    host.insertAdjacentHTML("beforeend", NESTED_FORM);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const submit = stubSubmit();
+    let done = 0;
+    host.addEventListener("stimeo--auto-submit:done", () => {
+      done += 1;
+    });
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(form().getAttribute("aria-busy")).toBe("true");
+    form().dispatchEvent(new Event("turbo:submit-end"));
+    expect(form().hasAttribute("aria-busy")).toBe(false);
+    expect(done).toBe(1);
+  });
+
+  it("binds a form target added after connect and releases it on disconnect", async () => {
+    await start(`
+      <div data-controller="stimeo--auto-submit"
+           data-stimeo--auto-submit-debounce-value="300"></div>`);
+    const host = query<HTMLElement>("[data-controller='stimeo--auto-submit']");
+    host.insertAdjacentHTML("beforeend", NESTED_FORM);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const submit = stubSubmit();
+    let done = 0;
+    host.addEventListener("stimeo--auto-submit:done", () => {
+      done += 1;
+    });
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(submit).toHaveBeenCalledTimes(1);
+    form().dispatchEvent(new Event("turbo:submit-end"));
+    expect(done).toBe(1);
+
+    // After disconnect the released form must not produce completion events.
+    const controller = application.getControllerForElementAndIdentifier(
+      host,
+      "stimeo--auto-submit",
+    ) as AutoSubmitController;
+    controller.disconnect();
+    form().dispatchEvent(new Event("turbo:submit-end"));
+    expect(done).toBe(1);
+  });
+
+  it("drops the pending submit when the form target is removed mid-debounce", async () => {
+    await start(`
+      <div data-controller="stimeo--auto-submit"
+           data-stimeo--auto-submit-debounce-value="300">${NESTED_FORM}
+      </div>`);
+    const submit = stubSubmit();
+    const removed = form();
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    expect(removed.getAttribute("data-auto-submit-pending")).toBe("true");
+    removed.remove();
+    await vi.advanceTimersByTimeAsync(0);
+    // The pending submit described the removed form: dropped, hook returned.
+    expect(removed.hasAttribute("data-auto-submit-pending")).toBe(false);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("stays inert without a resolvable form (non-form root, no target)", async () => {
+    await start(`
+      <div data-controller="stimeo--auto-submit"
+           data-stimeo--auto-submit-debounce-value="300">
+        <input type="search" name="q">
+      </div>`);
+    const host = query<HTMLElement>("[data-controller='stimeo--auto-submit']");
+    const controller = application.getControllerForElementAndIdentifier(
+      host,
+      "stimeo--auto-submit",
+    ) as AutoSubmitController;
+    // The public action must be a safe no-op: nothing to submit, nothing thrown.
+    expect(() => controller.submit(new Event("input"))).not.toThrow();
+    expect(host.hasAttribute("data-auto-submit-pending")).toBe(false);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(host.hasAttribute("aria-busy")).toBe(false);
+  });
+
+  it("rewinds data-auto-submit-pending on turbo:before-cache", async () => {
+    await start(SEARCH);
+    const submit = stubSubmit();
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    expect(form().getAttribute("data-auto-submit-pending")).toBe("true");
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(form().hasAttribute("data-auto-submit-pending")).toBe(false);
+    // The page is about to be frozen: the pending submit must not fire into it.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("reports the submission the cache rewind dropped", async () => {
+    await start(SEARCH);
+    stubSubmit();
+    const reports: unknown[] = [];
+    form().addEventListener("stimeo--auto-submit:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    // `done` would claim a response arrived; the rewind only says the pending
+    // submission is gone.
+    expect(reports).toEqual([{}]);
+
+    // Nothing pending or busy now, so a second snapshot has nothing to report.
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(reports).toEqual([{}]);
+  });
+
+  it("rewinds aria-busy on turbo:before-cache while a submit is in flight", async () => {
+    await start(SEARCH);
+    stubSubmit();
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(form().getAttribute("aria-busy")).toBe("true");
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(form().hasAttribute("aria-busy")).toBe(false);
+  });
+
   it("clears the debounce timer on disconnect", async () => {
     await start(SEARCH);
     const submit = stubSubmit();
@@ -243,6 +436,21 @@ describe("AutoSubmitController", () => {
     controller.disconnect();
     await vi.advanceTimersByTimeAsync(300);
     expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("stops listening for turbo:submit-end after disconnect", async () => {
+    await start(SEARCH);
+    const controller = application.getControllerForElementAndIdentifier(
+      query("[data-controller='stimeo--auto-submit']"),
+      "stimeo--auto-submit",
+    ) as AutoSubmitController;
+    let done = 0;
+    form().addEventListener("stimeo--auto-submit:done", () => {
+      done += 1;
+    });
+    controller.disconnect();
+    form().dispatchEvent(new Event("turbo:submit-end"));
+    expect(done).toBe(0);
   });
 
   it("has no machine-detectable a11y violations", async () => {

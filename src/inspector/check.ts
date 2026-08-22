@@ -370,8 +370,9 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   ): boolean => {
     if (!condition) return true;
     const nodes = targetNodes.get(scope)?.get(identifier)?.get(condition.target) ?? [];
+    const container = condition.within === "scope" ? scope : element;
     let held = 0;
-    for (const node of nodes) if (isWithin(node, element)) held += 1;
+    for (const node of nodes) if (isWithin(node, container)) held += 1;
     if (condition.min !== undefined && held < condition.min) return false;
     if (condition.max !== undefined && held > condition.max) return false;
     return true;

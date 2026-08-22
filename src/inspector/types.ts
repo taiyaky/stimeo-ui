@@ -172,12 +172,19 @@ export interface ValueCondition {
  * emptiness alone, since the controller cannot tell "still loading" from
  * "nothing to show" and therefore never infers it.
  *
+ * `within: "scope"` widens the count to the whole controller scope, for the
+ * contracts where a *sibling* decides the requirement: a carousel's slides are
+ * `tabpanel`s when the carousel has pickers to control them and `group`s when it
+ * has none, and no slide ever holds a picker of its own.
+ *
  * Bounds are inclusive and independently optional; a condition with neither is
  * meaningless and rejected by the manifest tests.
  */
 export interface ContentCondition {
-  /** Target name counted **inside** the element the rule applies to. */
+  /** Target name counted inside the counting container. */
   readonly target: string;
+  /** Where to count: the element the rule applies to, or the controller scope. */
+  readonly within?: "element" | "scope";
   /** Arms the rule when the count is at least this. */
   readonly min?: number;
   /** Arms the rule when the count is at most this. */

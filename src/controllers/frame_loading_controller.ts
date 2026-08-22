@@ -24,7 +24,9 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * net so the state never sticks). `minDuration` keeps the skeleton up long enough to
  * avoid a flicker.
  *
- * `start` and `end` dispatch `{}`.
+ * `start`, `end`, and `reconcile` dispatch `{}`. The last of those reports that
+ * the Turbo cache rewind ended a load the frame never finished — `end` would
+ * claim the frame arrived.
  *
  * @remarks
  * Behavior only — it ships no skeleton markup or styling (pair with Skeleton/CSS);
@@ -47,7 +49,7 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     minDuration: { type: Number, default: 0 },
     restoreFocus: { type: Boolean, default: true },
   };
-  static events = ["start", "end"] as const;
+  static events = ["start", "end", "reconcile"] as const;
 
   declare readonly contentTarget: HTMLElement;
   declare readonly skeletonTarget: HTMLElement;
@@ -146,6 +148,9 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     this.#loading = false;
     this.#floor.cancel();
     this.#rewindHooks();
+    // The fetch does not survive the navigation, so a consumer still painting
+    // "loading" from `start` would never be released by `end`.
+    this.dispatch("reconcile", { detail: {} });
   }
 
   /**

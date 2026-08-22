@@ -262,6 +262,23 @@ describe("FrameLoadingController", () => {
     expect(document.activeElement).not.toBe(inside);
   });
 
+  it("reports the load the cached snapshot rewind ended", async () => {
+    await mount();
+    const reports: unknown[] = [];
+    frame().addEventListener("stimeo--frame-loading:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+    fire("turbo:before-fetch-request");
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    // `end` would claim the frame arrived; the rewind only says the load is gone.
+    expect(reports).toEqual([{}]);
+
+    // Nothing is loading now, so a second snapshot has nothing to report.
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(reports).toEqual([{}]);
+  });
+
   it("rewinds an overlay for the cached snapshot too", async () => {
     await mount(
       "",

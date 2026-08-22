@@ -758,6 +758,24 @@ describe("SubmitOnceController", () => {
     expect(button.disabled).toBe(false);
   });
 
+  it("reports the submission the cache rewind abandoned", async () => {
+    await mount("", '<button id="send" type="submit">Send</button>');
+    const button = control("#send");
+    const reports: unknown[] = [];
+    form().addEventListener("stimeo--submit-once:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+    turboStart(button);
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    // `end` would claim the submission resolved; the rewind only says it is gone.
+    expect(reports).toEqual([{ forms: [form()] }]);
+
+    // No session left, so a second snapshot has nothing to report.
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(reports).toEqual([{ forms: [form()] }]);
+  });
+
   it("rewinds before Turbo cache without events, announcements, or focus", async () => {
     await mount(
       'data-stimeo--submit-once-restore-focus-value="true" data-stimeo--submit-once-announce-ready-text-value="Done"',
