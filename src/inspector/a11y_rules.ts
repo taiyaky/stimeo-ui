@@ -817,9 +817,10 @@ export const a11yRules: A11yRules = {
       suggestion: "Name the endThumb via aria-label or aria-labelledby.",
     },
   ],
-  // Color picker channels: each channel is an APG slider. aria-valuemin/max
-  // are deliberately NOT required — the controller documents per-channel
-  // fallbacks when they are omitted.
+  // Color picker channels: each channel is an APG slider. aria-valuemin/max/now
+  // and aria-valuetext are controller-managed: an authored range is honoured and
+  // an omitted one resolves to the channel default, which the controller then
+  // writes, so only role and name are required of the markup.
   "stimeo--color-picker": [
     {
       target: "slider",

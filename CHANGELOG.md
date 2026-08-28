@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.9.0] - 2026-08-28
+
+Minor release with no new components. Ten existing ones are reworked —
+bulk-select, clipboard, color-picker, data-grid, editable, filter, masonry, otp,
+reset-before-cache, and resizable — and of those, bulk-select, clipboard,
+data-grid, and editable also changed their markup contracts, so read Removed and
+Changed before upgrading. The Inspector manifest stays on schema v12.
+
+### Removed
+
+- bulk-select: `announce`, and the `aria-live` on the `bar` target that went with
+  it — the count goes through the page's `stimeo--announcer` now.
+- clipboard: the live-region requirement on the `feedback` target. Drop the
+  `role="status"` and `aria-live`; the slot is a plain visible label.
+- editable: the `onBlur` action. Drop `blur->stimeo--editable#onBlur` — the
+  departure is watched on the controller element.
+
+### Added
+
+- bulk-select: `announceText`, carrying `{count}`, and a `reconcile` event.
+- clipboard: `announceCopiedText` and `announceErrorText`. Like `announceText`
+  they default to empty, so seat a `stimeo--announcer` on the page and write the
+  wording you want read.
+- editable: `save` / `cancel` / `revert` actions, and `data-value` on the
+  `display` target for a display that renders the value rather than being it.
+- color-picker: `data-value-text`, an `aria-valuetext` template whose `{value}`
+  carries the channel value, for pages that are not in English.
+- Declarations read once are followed when they change — filter's `match`,
+  masonry's `minColumnWidth` / `gap`, resizable's `min` / `max` — as are targets
+  swapped in later by color-picker, editable, masonry, and resizable, and masonry
+  also relays out when a descendant resource finishes loading.
+
+### Changed
+
+- bulk-select: `selectAllPages` checks the rows on the page too, so a row that
+  arrives while the mode is on lands checked. Hiding the bar hands focus to the
+  select-all box, and a `bar` carrying `role="toolbar"` wants `stimeo--toolbar`
+  alongside it for the arrow keys and the single tab stop.
+- clipboard: `copied` and `error` are transient `data-state` values — a
+  `connect()` that finds either returns to `idle`, and the state is rewound
+  before Turbo caches the page. Any other authored `data-state` is left alone.
+- color-picker: `aria-valuenow` / `aria-valuetext` / `aria-valuemin` /
+  `aria-valuemax` are controller-owned, so the markup supplies `role="slider"`
+  and a name; an omitted range resolves to the channel default (hue `0`–`360`,
+  the rest `0`–`100`). Only a primary-button press drags, and an `alpha` slider
+  is inert unless `alpha` is on.
+- data-grid: a keystroke or click that reached a control inside a cell, and one
+  an IME is composing, belongs to that control — no move, no sort, no selection.
+  The exception is a click on a sortable header's own `<button>`, which needs
+  `tabindex="-1"`; host `gridcell` / `columnheader` on `td` / `th`.
+- editable: the mode is read back from the DOM and the controller writes no ARIA.
+  Focus landing inside the component has not left the edit, so a Save or Cancel
+  button beside the input keeps it open, and the value is trimmed once at the save.
+- reset-before-cache: `data-reset-value` returns a field to what the markup
+  declares — `defaultValue`, `defaultChecked`, the `selected` option — instead of
+  emptying it; a file input empties and `hidden` / `submit` / `reset` / `button` /
+  `image` are left alone.
+- resizable: a separator with no `aria-orientation` reads as `horizontal`, and
+  `toggle` reopens at the position the pane collapsed from. Pointer capture and
+  the drag listeners sit on the `separator` target, not on `event.target` and
+  `document`.
+- masonry: `layout` fires when the result moves, not only on a column count
+  change, and every relayout after the first is deferred to a microtask. otp:
+  `reconcile` reports a move in the pair (joined value, `data-state`).
+- A declaration that cannot be read falls back to its default instead of reaching
+  ARIA or CSS as `NaN` — masonry's `minColumnWidth` / `gap`, resizable's `min` /
+  `max` / `value` / `step`, bulk-select's `totalCount`, and reset-before-cache's
+  `scope`, which no longer aborts the whole sweep.
+- Inspector: clipboard's `feedback` is no longer required, a color-picker
+  `slider` is checked for `role` and a name only, and bulk-select and clipboard
+  join the components that need a `stimeo--announcer`.
+
+### Fixed
+
+- data-grid: `Enter` and `Space` on a `<button>` nested in a cell reach it, so a
+  row-action button is keyboard-reachable, and rows coming and going at runtime
+  re-establish exactly one tab stop. editable: tabbing past a Save or Cancel
+  button no longer strands the editor open, and a display removed mid-edit no
+  longer throws. bulk-select: a nested bulk-select's rows stay out of the outer
+  container's count.
+- clipboard: a copy that resolved after disconnect wrote to the detached element
+  and armed a timer past the teardown, and a repeat inside the feedback window is
+  read out again. In color-picker a drag belongs to the pointer that started it,
+  in masonry an item removed and re-appended in one batch keeps its layout hooks,
+  and in resizable `data-dragging` no longer rides a Turbo snapshot.
+- reset-before-cache: `data-reset-value` wrote an empty string into a checkbox's
+  `value` attribute, and could leave a select with nothing selected at all.
+
 ## [0.8.0] - 2026-08-22
 
 Minor release with no new components. Eight existing ones are reworked —
@@ -695,6 +783,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.9.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.9.0
 [0.8.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.8.0
 [0.7.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.7.0
 [0.6.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.6.0

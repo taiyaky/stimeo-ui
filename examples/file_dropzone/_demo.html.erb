@@ -3,8 +3,10 @@
     It validates accept / maxSize / duplicates / count and shows image thumbnails via
     objectURL. The library handles the drop bridge, validation, preview create/revoke,
     focus handoff on removal, mirroring the accepted files back onto the native input,
-    and the announcements read by the shared announcer seated below. Drag & drop is
-    only an aid — selection is always possible via click / keyboard. %>
+    and the announcements read by the shared stimeo--announcer your app seats once,
+    in its layout (additions, rejections, removals, and the drag affordance are the
+    transitions worth reading; the dropzone owns no live region of its own).
+    Drag & drop is only an aid — selection is always possible via click / keyboard. %>
 <div class="file-dropzone" data-controller="stimeo--file-dropzone"
      data-stimeo--file-dropzone-max-size-value="5242880"
      data-stimeo--file-dropzone-max-files-value="4"
@@ -87,13 +89,4 @@
       </button>
     </li>
   </template>
-
-  <%# Shared announcer: additions, rejections, removals, and the drag affordance are
-      the transitions worth reading. The dropzone owns no live region of its own. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden"
-         data-stimeo--announcer-target="polite"
-         aria-live="polite"
-         aria-atomic="true"></div>
-  </div>
 </div>

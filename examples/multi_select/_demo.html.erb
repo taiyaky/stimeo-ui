@@ -2,8 +2,10 @@
     Filter candidates as you type, select several, and show the selected ones as chips.
     Focus stays on the input; the active candidate is shown via aria-activedescendant
     and selection via aria-selected. The library handles filtering, multi-select
-    toggling, chip create/remove, roving, shared announcements, and dismiss. Placement
-    lives in demo.css. %>
+    toggling, chip create/remove, roving, dismiss, and the selection announcements read
+    by the shared stimeo--announcer your app seats once, in its layout (selecting and
+    removing a value are the transitions worth reading; the multi-select owns no live
+    region of its own). Placement lives in demo.css. %>
 <% announce_selected = t("components.multi_select.demo.announce_selected") %>
 <% announce_removed = t("components.multi_select.demo.announce_removed") %>
 <% remove_label = t("components.multi_select.demo.remove_label") %>
@@ -71,10 +73,4 @@
         data-stimeo--multi-select-target="remove">×</button>
     </li>
   </template>
-
-  <%# Selection announcements go to the shared announcer that lives in the page. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden" data-stimeo--announcer-target="polite"
-         aria-live="polite" aria-atomic="true"></div>
-  </div>
 </div>

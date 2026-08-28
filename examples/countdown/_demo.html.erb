@@ -2,7 +2,9 @@
     Fills the days/hours/minutes/seconds slots with the time remaining until the
     deadline, updating every interval (default 1000ms). role="timer" + aria-live="off"
     avoids per-second announcements; the status slot carries the completion text
-    visually and the shared announcer reads it out, so it is said exactly once.
+    visually and the shared stimeo--announcer your app seats once, in its layout,
+    reads it out, so it is said exactly once (reaching zero is the transition worth
+    reading; the ticking numbers in between are state the reader can query).
     The deadline is computed in ERB to always be in the future.
     The pause/resume/reset buttons sit outside the timer (a role="timer" live region
     should not wrap unrelated controls), so they drive it through the countdown:* events
@@ -57,12 +59,5 @@
     <button class="demo-trigger" type="button" data-countdown-reset>
       <%= t("components.countdown.demo.reset") %>
     </button>
-  </div>
-
-  <%# Shared announcer: reaching zero is the transition worth reading; the ticking
-      numbers in between are state the reader can query. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden"
-         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

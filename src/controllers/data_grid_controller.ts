@@ -1,5 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { INTERACTIVE_HOST_SELECTOR, isInteractiveHost } from "../utils/interactive_host";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
 /** Cycle order for a sortable column header's `aria-sort`. */
 const SORT_CYCLE = ["none", "ascending", "descending"] as const;
@@ -49,13 +51,27 @@ function nextSortDirection(current: string): SortDirection {
  * Behavior only — the consumer performs the actual data sort/render in response to
  * the `sort` event and owns all styling. No timers or observers are held, so there
  * is nothing to leak across Turbo navigations; `connect()` rebuilds the single tab
- * stop idempotently from the DOM.
+ * stop idempotently from the DOM, and the target callbacks rebuild it again after
+ * rows or cells are added or removed at runtime.
  *
  * Behavior provided:
  * - `Arrow*` move between cells (clamped at edges); `Home`/`End` to the row's
  *   first/last cell; `Ctrl+Home`/`Ctrl+End` to the grid's first/last cell.
  * - `Enter`/`Space` cycles a header's sort (`none→ascending→descending`) or toggles
  *   the focused row's selection when selection is enabled.
+ *
+ * Consumer contract — controls nested inside a cell or header:
+ * - APG's grid hosts working controls in its cells, so a keystroke or click that
+ *   reached one — {@link INTERACTIVE_HOST_SELECTOR}, an editable host, or any
+ *   widget that already called `preventDefault()` — is left to it entirely: no
+ *   move, no sort, no selection. The one control that hands the event on is a
+ *   sortable header's own `<button>`, whose activation is what the click carries.
+ * - A control keeps its own Tab behavior, so give it `tabindex="-1"` to preserve
+ *   the grid's single Tab stop. A sortable `columnheader` hosting a `<button>` is
+ *   the common case: the roving position stays on the header, and the button's
+ *   own activation reaches `sort` through the click that bubbles to it.
+ * - Host `role="gridcell"` / `role="columnheader"` on a non-interactive element
+ *   (`td`, `th`); an interactive host makes the grid stand down on that cell.
  */
 export class DataGridController extends Controller<HTMLElement> {
   static override targets = ["columnHeader", "row", "cell"];
@@ -70,8 +86,15 @@ export class DataGridController extends Controller<HTMLElement> {
   declare readonly cellTargets: HTMLElement[];
   declare selectionValue: string;
 
-  /** Gates the row callback so it does not re-walk every row once per authored row on mount. */
-  #connected = false;
+  /**
+   * Collapses the per-element target callbacks of one DOM mutation into a single
+   * baseline pass, and refuses to run before `connect()` or after `disconnect()`.
+   *
+   * Stimulus reports every target one at a time, so an ungated pass would re-walk
+   * the whole grid once per authored cell on mount and once per streamed cell
+   * afterwards — quadratic in the cell count both times.
+   */
+  readonly #reconcile = new MicrotaskCoalescer(() => this.#restoreBaseline());
 
   /**
    * Establishes a single tab stop across all navigable cells/headers and brings
@@ -83,16 +106,32 @@ export class DataGridController extends Controller<HTMLElement> {
    * attribute, so the Value callback does not fire a second time.
    */
   override connect(): void {
-    const cells = this.#navigableCells();
-    const active = cells.find((cell) => cell.tabIndex === 0) ?? cells[0];
-    this.#setActiveCell(active, { focus: false });
-    this.#normalizeSelection();
-    this.#connected = true;
+    this.#restoreBaseline();
+    this.#reconcile.activate();
   }
 
-  /** Reopens the row callback for the next mount. */
+  /** Closes the reconcile window so a queued pass cannot run against a detached tree. */
   override disconnect(): void {
-    this.#connected = false;
+    this.#reconcile.cancel();
+  }
+
+  /**
+   * Rebuilds both DOM-owned baselines from the live grid: exactly one navigable
+   * cell is in the Tab sequence, and every selectable row carries an explicit
+   * `aria-selected`.
+   *
+   * The tab stop keeps whichever cell already holds it, so a rebuild triggered by
+   * an unrelated row arriving does not throw the user's position away; only when
+   * no cell holds it — the grid is fresh, or the holder was removed — does the
+   * first navigable cell take over. Without that fallback a grid whose active row
+   * is removed keeps every cell at `-1` and drops out of the Tab sequence
+   * entirely.
+   */
+  #restoreBaseline(): void {
+    const cells = this.#navigableCells();
+    const active = cells.find((cell) => cell.tabIndex === 0) ?? cells[0];
+    if (active) this.#setActiveCell(active, { focus: false }, cells);
+    this.#normalizeSelection();
   }
 
   /**
@@ -105,16 +144,29 @@ export class DataGridController extends Controller<HTMLElement> {
     this.#normalizeSelection();
   }
 
-  /**
-   * Re-establishes the row baseline for a row added after connect.
-   *
-   * Each pass walks every row, and Stimulus reports the authored rows one by one
-   * before `connect()`, so the mount is gated to keep it linear in the row count
-   * rather than quadratic; `connect()` runs the single baseline pass instead.
-   */
+  /** Re-establishes the baselines for a row added after connect. */
   rowTargetConnected(): void {
-    if (!this.#connected) return;
-    this.#normalizeSelection();
+    this.#reconcile.schedule();
+  }
+
+  /** Re-establishes the tab stop when a cell joins the grid after connect. */
+  cellTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Re-establishes the tab stop when a cell leaves the grid. */
+  cellTargetDisconnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Re-establishes the tab stop when a header joins the grid after connect. */
+  columnHeaderTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Re-establishes the tab stop when a header leaves the grid. */
+  columnHeaderTargetDisconnected(): void {
+    this.#reconcile.schedule();
   }
 
   /**
@@ -166,6 +218,13 @@ export class DataGridController extends Controller<HTMLElement> {
   sort(event: Event): void {
     const header = event.currentTarget as HTMLElement;
     if (!this.columnHeaderTargets.includes(header)) return;
+    if (event.defaultPrevented) return;
+    // A sortable header hosts a `<button>`, and that button's activation is
+    // exactly what this click carries, so it is the one control that does not
+    // take the event away. A link or a field inside the header is its own
+    // destination, and sorting on its click would act in parallel.
+    const control = this.#claimingControl(event, header);
+    if (control && !(control instanceof HTMLButtonElement)) return;
 
     const direction = nextSortDirection(header.getAttribute("aria-sort") ?? "none");
 
@@ -183,7 +242,12 @@ export class DataGridController extends Controller<HTMLElement> {
     // The pointer path guards on `selection="none"` exactly as the keyboard path
     // does, so a grid that declares itself unselectable never grows selected rows.
     if (this.selectionValue === "none") return;
-    const row = (event.currentTarget as HTMLElement).closest<HTMLElement>("[role='row']");
+    // A widget that handled the click owns it, exactly as the keyboard path
+    // stands down on a keystroke a descendant consumed.
+    if (event.defaultPrevented) return;
+    const host = event.currentTarget as HTMLElement;
+    if (this.#claimedByDescendant(event, host)) return;
+    const row = host.closest<HTMLElement>("[role='row']");
     if (row && this.rowTargets.includes(row)) this.#toggleRow(row);
   }
 
@@ -193,7 +257,12 @@ export class DataGridController extends Controller<HTMLElement> {
     // nested menu) must not ALSO act on it — composition depends on this yield.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if (event.isComposing) return;
     const cell = event.currentTarget as HTMLElement;
+    // A native control inside the cell never calls `preventDefault()` — its
+    // activation IS the default action — so the yield above cannot see it. This
+    // recognises those by element shape instead.
+    if (this.#claimedByDescendant(event, cell)) return;
     const matrix = this.#matrix();
     const position = this.#locate(matrix, cell);
     if (!position) return;
@@ -236,8 +305,36 @@ export class DataGridController extends Controller<HTMLElement> {
 
     if (target) {
       event.preventDefault();
-      this.#setActiveCell(target, { focus: true });
+      this.#setActiveCell(target, { focus: true }, matrix.flat());
     }
+  }
+
+  /**
+   * Whether the event was addressed to a control inside `host` rather than to the
+   * grid.
+   *
+   * Cells and headers hold consumer markup, and APG's grid pattern expects that
+   * markup to include working controls — a row action button, an inline editor.
+   * Those own their own keystrokes and clicks, so the grid stands down entirely
+   * rather than acting in parallel. An editable host (its `contenteditable` state
+   * is inherited, so the walk is explicit) counts the same way.
+   */
+  #claimedByDescendant(event: Event, host: HTMLElement): boolean {
+    return this.#claimingControl(event, host) !== null;
+  }
+
+  /**
+   * The nested control this event belongs to, or `null` when the host owns it.
+   *
+   * Naming the control, rather than answering yes or no, is what lets the click
+   * path treat a sortable header's `<button>` as the activation it is while every
+   * other control still takes the event away.
+   */
+  #claimingControl(event: Event, host: HTMLElement): HTMLElement | null {
+    const source = event.target as HTMLElement;
+    const control = source.closest<HTMLElement>(INTERACTIVE_HOST_SELECTOR);
+    if (control && host.contains(control)) return control;
+    return isInteractiveHost(source) ? source : null;
   }
 
   /** Performs a header's sort or a cell row's selection toggle on activation. */
@@ -277,11 +374,26 @@ export class DataGridController extends Controller<HTMLElement> {
     this.dispatch("selectionchange", { detail: { rows } });
   }
 
-  /** Makes `cell` the single tabbable cell (roving) and optionally focuses it. */
-  #setActiveCell(cell: HTMLElement | undefined, { focus }: { focus: boolean }): void {
-    if (!cell) return;
-    for (const candidate of this.#navigableCells()) {
-      candidate.tabIndex = candidate === cell ? 0 : -1;
+  /**
+   * Makes `cell` the single tabbable cell (roving) and optionally focuses it.
+   *
+   * `cells` lets a caller that already walked the grid hand its collection over,
+   * so one keystroke rebuilds the matrix once instead of twice. The write is
+   * skipped where the attribute already holds the wanted value — comparing the
+   * attribute rather than the IDL property, because a cell with no `tabindex` at
+   * all reports `-1` and would then never receive the attribute it needs to be
+   * focusable.
+   */
+  #setActiveCell(
+    cell: HTMLElement,
+    { focus }: { focus: boolean },
+    cells?: readonly HTMLElement[],
+  ): void {
+    for (const candidate of cells ?? this.#navigableCells()) {
+      const wanted = candidate === cell ? "0" : "-1";
+      if (candidate.getAttribute("tabindex") !== wanted) {
+        candidate.setAttribute("tabindex", wanted);
+      }
     }
     if (focus) cell.focus();
   }

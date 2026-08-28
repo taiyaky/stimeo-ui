@@ -1,8 +1,10 @@
 <%# Markup for the nested / dynamic fields demo (invoice-style line items).
     The controller clones the <template> row (renumbering __INDEX__), removes rows by
     dropping unsaved ones / flagging _destroy on persisted ones, enforces min/max, and
-    announces the count through a shared stimeo--announcer. Remove buttons are handled
-    by delegation, so cloned rows need no per-row wiring. %>
+    hands the row count to the shared stimeo--announcer your app seats once, in its
+    layout (count changes are read out without moving focus away; the row list owns no
+    live region of its own). Remove buttons are handled by delegation, so cloned rows
+    need no per-row wiring. %>
 <%
   item_label = t("components.nested_form.demo.item_label")
   remove_label = t("components.nested_form.demo.remove")
@@ -51,10 +53,4 @@
           data-action="click->stimeo--nested-form#add">
     <%= t("components.nested_form.demo.add") %>
   </button>
-
-  <%# Shared announcer: row count changes are read out without moving focus away. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden" data-stimeo--announcer-target="polite"
-         aria-live="polite" aria-atomic="true"></div>
-  </div>
 </div>

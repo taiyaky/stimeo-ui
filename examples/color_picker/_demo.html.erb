@@ -2,7 +2,9 @@
     The library manages each channel's (hue / saturation / lightness) role="slider"
     value, composes them into a color two-way-synced with the hex input, and updates
     --stimeo--color for the preview. The 2D palette is decomposed into independent 1D
-    sliders for accessibility. Thumb position and look are the consumer's CSS. %>
+    sliders for accessibility. Thumb position and look are the consumer's CSS.
+    data-value-text carries the announced wording, so this catalog announces the
+    channel in the reader's own language instead of the library's English. %>
 <div
   class="color-picker"
   data-controller="stimeo--color-picker"
@@ -24,6 +26,7 @@
           role="slider"
           aria-label="<%= label %>"
           data-channel="<%= channel %>"
+          data-value-text="<%= t("components.color_picker.demo.value_text.#{channel}") %>"
           tabindex="0"
           aria-valuemin="0"
           aria-valuemax="<%= max %>"

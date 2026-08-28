@@ -2,7 +2,9 @@
     Enter or a comma (delimiter) turns the input value into a tag, blocking duplicates /
     empties / over-limit. Tag remove buttons move via roving (left/right keys), and
     Backspace on an empty input deletes the previous tag. The library handles tag
-    create/remove, hidden-field sync, focus handoff, and shared announcements. %>
+    create/remove, hidden-field sync, focus handoff, and the add / remove announcements
+    read by the shared stimeo--announcer your app seats once, in its layout (the tag list
+    owns no live region of its own). %>
 <% announce_added = t("components.tags_input.demo.announce_added") %>
 <% announce_removed = t("components.tags_input.demo.announce_removed") %>
 <% remove_label = t("components.tags_input.demo.remove_label") %>
@@ -46,10 +48,4 @@
         data-stimeo--tags-input-target="remove">×</button>
     </li>
   </template>
-
-  <%# Tag announcements go to the shared announcer that lives in the page. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden" data-stimeo--announcer-target="polite"
-         aria-live="polite" aria-atomic="true"></div>
-  </div>
 </div>

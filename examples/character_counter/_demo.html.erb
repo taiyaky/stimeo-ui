@@ -1,8 +1,9 @@
 <%# Markup for the character-counter demo. The visible output updates on every
     keystroke, while the settled remaining count is debounced into the shared
-    stimeo--announcer seated below. This demo's CSS styles the root's near/over
-    hooks and the over-limit aria-invalid; watching the field needs no consumer
-    JavaScript. %>
+    stimeo--announcer your app seats once, in its layout (the settled count is the
+    transition worth reading; the visible output is not itself a live region). This
+    demo's CSS styles the root's near/over hooks and the over-limit aria-invalid;
+    watching the field needs no consumer JavaScript. %>
 <% announcement = t("components.character_counter.demo.announcement") %>
 <div class="character-counter-demo">
   <label class="character-counter-demo__label" for="cc-message">
@@ -25,11 +26,5 @@
       id="cc-message-count"
       class="character-counter__output"
       data-stimeo--character-counter-target="output"></span>
-    <div data-controller="stimeo--announcer">
-      <div class="visually-hidden"
-           data-stimeo--announcer-target="polite"
-           aria-live="polite"
-           aria-atomic="true"></div>
-    </div>
   </div>
 </div>

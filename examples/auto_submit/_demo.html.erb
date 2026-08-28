@@ -3,7 +3,8 @@
     Playground has no search backend, so demo.js cancels the native submit, filters
     the list in the browser, completes the Turbo lifecycle with a synthetic
     turbo:submit-end (so the controller clears aria-busy and emits done), and
-    announces the result count through a shared stimeo--announcer. %>
+    announces the result count through the shared stimeo--announcer your app seats
+    once, in its layout (the result count is read out without moving focus). %>
 <%
   items = t("components.auto_submit.demo.items")
   count_template = t("components.auto_submit.demo.count_template")
@@ -27,10 +28,4 @@
       <li data-auto-submit-value="<%= item.downcase %>"><%= item %></li>
     <% end %>
   </ul>
-
-  <%# Shared announcer: the result count is read out without moving focus. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden"
-         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
-  </div>
 </div>

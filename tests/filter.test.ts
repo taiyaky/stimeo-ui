@@ -189,6 +189,76 @@ describe("FilterController", () => {
     await expectNoA11yViolations(root());
   });
 
+  it("re-evaluates when the match declaration changes at runtime", async () => {
+    // A morph swaps the attribute on the live element without re-running connect,
+    // and the declaration decides which items are shown — so the display has to
+    // follow it rather than wait for the next control interaction.
+    await mount(`${control("a")}${control("b")}${item("a")}${item("c")}`);
+    const inputs = Array.from(document.querySelectorAll<HTMLInputElement>("input"));
+    for (const input of inputs) setChecked(input, true);
+    expect(items()[0]?.hidden).toBe(true); // AND: "a" alone does not carry "b"
+
+    root().setAttribute("data-stimeo--filter-match-value", "any");
+    await tick();
+
+    expect(items()[0]?.hidden).toBe(false);
+    expect(items()[1]?.hidden).toBe(true);
+  });
+
+  it("evaluates once on connect, not once per declaration callback", async () => {
+    // Stimulus delivers the value callback before connect, so an ungated one
+    // would make merely connecting emit an extra evaluation.
+    document.body.innerHTML = `<div data-controller="stimeo--filter" data-stimeo--filter-match-value="any">${control("a")}${item("a")}${item("b")}</div>`;
+    const seen: unknown[] = [];
+    root().addEventListener("stimeo--filter:change", (event) => {
+      seen.push((event as CustomEvent).detail);
+    });
+    application = Application.start();
+    application.register("stimeo--filter", FilterController);
+    await tick();
+
+    expect(seen).toHaveLength(1);
+  });
+
+  it("shows every item under match='any' while no control is active", async () => {
+    // The empty-active guard is the only thing keeping "any" from hiding
+    // everything: an empty set satisfies "every" by vacuity but never "some".
+    await mount(`${control("a")}${item("a")}${item("b")}`, 'data-stimeo--filter-match-value="any"');
+
+    expect(items().every((node) => !node.hidden)).toBe(true);
+  });
+
+  it("takes no token from a non-input control that declares none", async () => {
+    // The value fallback is for form controls; a button's `value` is not a facet
+    // declaration, so such a control contributes nothing and nothing is filtered.
+    await mount(
+      `<button type="button" aria-pressed="true" value="a"
+               data-stimeo--filter-target="control">A</button>
+       ${item("a")}${item("b")}`,
+    );
+
+    expect(items().every((node) => !node.hidden)).toBe(true);
+  });
+
+  it("evaluates the authored control state on connect", async () => {
+    // The restore path: a control that arrives already on has to filter before
+    // anyone interacts, and the initial evaluation has to report itself.
+    document.body.innerHTML = `<div data-controller="stimeo--filter"><input type="checkbox" checked data-stimeo--filter-target="control" data-value="a">${item("a")}${item("b")}</div>`;
+    const seen: Array<{ active: string[]; visible: number; total: number }> = [];
+    root().addEventListener("stimeo--filter:change", (event) => {
+      seen.push(
+        (event as CustomEvent<{ active: string[]; visible: number; total: number }>).detail,
+      );
+    });
+    application = Application.start();
+    application.register("stimeo--filter", FilterController);
+    await tick();
+
+    expect(items()[0]?.hidden).toBe(false);
+    expect(items()[1]?.hidden).toBe(true);
+    expect(seen).toEqual([{ active: ["a"], visible: 1, total: 2 }]);
+  });
+
   it("removes its change listener on disconnect (teardown)", async () => {
     await mount(`${control("a")}${item("a")}${item("b")}`);
     controllerFor().disconnect();

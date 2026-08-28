@@ -4,7 +4,7 @@ import { MasonryController } from "../src/controllers/masonry_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link MasonryController}: responsive column count derived
@@ -77,10 +77,13 @@ describe("MasonryController", () => {
     // The first card grows once its image loads; the capture-phase `load` listener
     // must re-pack so the third card avoids the now-tall first column. A bare `load`
     // dispatched on the item reaches the root's capture listener without mutating
-    // the DOM (so the MutationObserver is not what re-packs here).
+    // the DOM (so the MutationObserver is not what re-packs here). The pass is
+    // folded into a microtask, so awaiting one is enough — and awaiting only one
+    // is what pins that contract.
     const tall = items()[0] as HTMLElement;
     tall.getBoundingClientRect = () => new DOMRect(0, 0, 0, 200);
     tall.dispatchEvent(new Event("load"));
+    await flushMicrotasks();
 
     expect(items().map((item) => item.getAttribute("data-column"))).toEqual(["0", "1", "1"]);
   });
@@ -144,5 +147,247 @@ describe("MasonryController", () => {
     await start(3, 800);
     const phrases = await captureSpeech({ container: root(), steps: 2 });
     expect(phrases).toEqual(["Card 1", "Card 2", "Card 3"]);
+  });
+  describe("declarations that cannot be read as numbers", () => {
+    // A unit suffix is the ordinary typo here, and Stimulus' Number reader turns
+    // it into NaN rather than raising. Every fixture below picks a numeric prefix
+    // that differs from the default, so "fell back to the default" is
+    // distinguishable from "parsed the prefix".
+
+    it("falls back to the default column width", async () => {
+      // 400 would give one column; the default 240 gives three.
+      await start(6, 800, 'data-stimeo--masonry-min-column-width-value="400px"');
+      expect(columns()).toBe("3");
+      expect(items().every((item) => item.hasAttribute("data-column"))).toBe(true);
+    });
+
+    it("falls back to the default gap", async () => {
+      // At 750px a gap of 0 would give three columns; the default 16 gives two.
+      await start(3, 750, 'data-stimeo--masonry-gap-value="0px"');
+      expect(columns()).toBe("2");
+    });
+
+    it("falls back when a value is not finite", async () => {
+      // An infinite gap makes both sides of the division infinite, so the count
+      // would be NaN and the column bookkeeping could not be allocated.
+      await start(3, 800, 'data-stimeo--masonry-gap-value="Infinity"');
+      expect(columns()).toBe("3");
+      expect(items().every((item) => item.hasAttribute("data-column"))).toBe(true);
+    });
+  });
+  describe("following runtime changes", () => {
+    it("re-lays out when the column width declaration changes", async () => {
+      await start(6, 800);
+      expect(columns()).toBe("3");
+
+      root().setAttribute("data-stimeo--masonry-min-column-width-value", "400");
+      await tick();
+
+      expect(columns()).toBe("1");
+    });
+
+    it("re-lays out when the gap declaration changes", async () => {
+      await start(3, 750);
+      expect(columns()).toBe("2");
+
+      root().setAttribute("data-stimeo--masonry-gap-value", "0");
+      await tick();
+
+      expect(columns()).toBe("3");
+    });
+
+    it("packs an element that becomes an item without moving in the DOM", async () => {
+      // A morph that only syncs attributes produces no child-list change, so the
+      // element has to be noticed as a target rather than as a new node.
+      await start(2, 800);
+      const late = document.createElement("div");
+      late.textContent = "Late";
+      root().appendChild(late);
+      await tick();
+
+      late.setAttribute("data-stimeo--masonry-target", "item");
+      await tick();
+
+      expect(late.getAttribute("data-column")).toBe("2");
+    });
+
+    it("reclaims the column hook from an element that stops being an item", async () => {
+      await start(3, 800);
+      const dropped = items()[1] as HTMLElement;
+      expect(dropped.hasAttribute("data-column")).toBe(true);
+
+      dropped.removeAttribute("data-stimeo--masonry-target");
+      await tick();
+
+      expect(dropped.hasAttribute("data-column")).toBe(false);
+    });
+  });
+
+  describe("hot-path work", () => {
+    /** Counts how many times the container's box is measured. */
+    const countMeasurements = async (act: () => void) => {
+      const element = root();
+      const measure = element.getBoundingClientRect.bind(element);
+      let calls = 0;
+      element.getBoundingClientRect = () => {
+        calls += 1;
+        return measure();
+      };
+      act();
+      await tick();
+      return calls;
+    };
+
+    /** Records the `data-column` mutations inside the grid while `act` runs. */
+    const countColumnWrites = async (act: () => void) => {
+      let writes = 0;
+      const observer = new MutationObserver((records) => {
+        writes += records.length;
+      });
+      observer.observe(root(), {
+        attributes: true,
+        subtree: true,
+        attributeFilter: ["data-column"],
+      });
+      act();
+      await tick();
+      observer.disconnect();
+      return writes;
+    };
+
+    it("folds a burst of resizes into a single pass", async () => {
+      await start(6, 800);
+
+      const measurements = await countMeasurements(() => {
+        for (let i = 0; i < 20; i += 1) window.dispatchEvent(new Event("resize"));
+      });
+
+      expect(measurements).toBe(1);
+    });
+
+    it("writes only the assignments that actually change", async () => {
+      await start(6, 800);
+
+      const writes = await countColumnWrites(() => {
+        window.dispatchEvent(new Event("resize"));
+      });
+
+      // Nothing about the box changed, so the pass has nothing to publish.
+      expect(writes).toBe(0);
+    });
+
+    it("stays silent when items leave and rejoin the target set in one batch", async () => {
+      await start(3, 800);
+      const fired: number[] = [];
+      root().addEventListener("stimeo--masonry:layout", (event) => {
+        fired.push((event as CustomEvent<{ columns: number }>).detail.columns);
+      });
+
+      const container = root();
+      const writes = await countColumnWrites(() => {
+        // Re-appending the same elements in the same order reports every item as
+        // disconnected and then connected again, so the reclaim queue holds items
+        // that are still owned. The packing it produces is identical, so nothing
+        // may be stripped, rewritten, or published.
+        for (const item of items()) container.appendChild(item);
+      });
+
+      expect(writes).toBe(0);
+      expect(fired).toEqual([]);
+      expect(items().map((item) => item.getAttribute("data-column"))).toEqual(["0", "1", "2"]);
+    });
+
+    it("emits layout for a re-pack that leaves the column count alone", async () => {
+      await start(3, 800);
+      const fired: number[] = [];
+      root().addEventListener("stimeo--masonry:layout", (event) => {
+        fired.push((event as CustomEvent<{ columns: number }>).detail.columns);
+      });
+
+      const extra = document.createElement("div");
+      extra.setAttribute("data-stimeo--masonry-target", "item");
+      root().appendChild(extra);
+      await tick();
+
+      expect(extra.getAttribute("data-column")).toBe("0");
+      expect(fired).toEqual([3]);
+    });
+  });
+  describe("the declared triggers, from both sides", () => {
+    it("re-derives the column count when the container is resized", async () => {
+      await start(6, 800);
+      expect(columns()).toBe("3");
+
+      stubWidth(root(), 500);
+      window.dispatchEvent(new Event("resize"));
+      await tick();
+
+      // floor((500 + 16) / (240 + 16)) = floor(2.01…) = 2 columns.
+      expect(columns()).toBe("2");
+    });
+
+    it("ignores a descendant load after disconnect", async () => {
+      await start(3, 800);
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--masonry",
+      ) as MasonryController;
+      controller.disconnect();
+
+      stubWidth(root(), 300);
+      (items()[0] as HTMLElement).dispatchEvent(new Event("load"));
+      await tick();
+
+      expect(columns()).toBe("3");
+    });
+
+    it("ignores a viewport resize after disconnect", async () => {
+      await start(3, 800);
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--masonry",
+      ) as MasonryController;
+      controller.disconnect();
+
+      stubWidth(root(), 300);
+      window.dispatchEvent(new Event("resize"));
+      await tick();
+
+      expect(columns()).toBe("3");
+    });
+
+    it("keeps the column hooks when the controller disconnects", async () => {
+      // Teardown reports every target as disconnected, and the hooks have to
+      // survive it: a Turbo snapshot is taken from the DOM the teardown leaves.
+      await start(3, 800);
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--masonry",
+      ) as MasonryController;
+
+      controller.disconnect();
+      await tick();
+
+      expect(items().every((item) => item.hasAttribute("data-column"))).toBe(true);
+    });
+
+    it("keeps one column when the declared width and gap leave nothing to divide by", async () => {
+      // `0` is a number the reader accepts, so it reaches the arithmetic as a
+      // zero divisor rather than as an unreadable declaration.
+      await start(
+        3,
+        800,
+        'data-stimeo--masonry-min-column-width-value="0" data-stimeo--masonry-gap-value="0"',
+      );
+      expect(columns()).toBe("1");
+      expect(items().every((item) => item.getAttribute("data-column") === "0")).toBe(true);
+    });
+
+    it("counts the gap on both sides of the division", async () => {
+      // 496px is a width where the two readings part: with the gap in the
+      // numerator floor(512 / 256) = 2, without it floor(496 / 256) = 1.
+      await start(4, 496);
+      expect(columns()).toBe("2");
+    });
   });
 });

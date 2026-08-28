@@ -8,9 +8,9 @@ import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ResetBeforeCacheController}: the turbo:before-cache
- * sweep (attribute removal, form/value clearing, re-hiding, node removal), the
- * reset/request events, the dispatchReset toggle, scope narrowing, idempotency,
- * the manual reset action, and listener teardown.
+ * sweep (attribute removal, form reset, restoring a field to its authored state,
+ * re-hiding, node removal), the reset/request events, the dispatchReset toggle,
+ * scope narrowing, idempotency, the manual reset action, and listener teardown.
  */
 
 describe("ResetBeforeCacheController", () => {
@@ -66,15 +66,75 @@ describe("ResetBeforeCacheController", () => {
     expect(input.value).toBe("");
   });
 
-  it("clears the value of a standalone field", async () => {
+  it("returns a standalone field to the value the author wrote", async () => {
+    // A reset restores the initial state, and for a text field that state is the
+    // authored value — discarding it would destroy markup the page shipped with.
     await start(`<input id="i" data-reset-value value="seed">`);
     const input = query<HTMLInputElement>("#i");
     input.value = "changed";
     fireBeforeCache();
-    expect(input.value).toBe("");
+    expect(input.value).toBe("seed");
   });
 
-  it("clears textarea and select values too", async () => {
+  it("returns a checkbox to its authored checkedness without touching its value", async () => {
+    // The value of a checkbox is what it submits, not what the user changed; the
+    // transient part is the checkedness.
+    await start(`<input id="c" type="checkbox" data-reset-value value="agree" checked>`);
+    const box = query<HTMLInputElement>("#c");
+    box.checked = false;
+    fireBeforeCache();
+    expect(box.checked).toBe(true);
+    expect(box.getAttribute("value")).toBe("agree");
+  });
+
+  it("returns a radio to its authored checkedness", async () => {
+    await start(`
+      <input id="r1" type="radio" name="g" data-reset-value value="a" checked>
+      <input id="r2" type="radio" name="g" data-reset-value value="b">`);
+    query<HTMLInputElement>("#r2").checked = true;
+    fireBeforeCache();
+    expect(query<HTMLInputElement>("#r1").checked).toBe(true);
+    expect(query<HTMLInputElement>("#r2").checked).toBe(false);
+  });
+
+  it("returns a select to the option the author marked selected", async () => {
+    // Without an option to fall back to, clearing a select leaves nothing
+    // selected at all — a state the page never had.
+    await start(`
+      <select id="s" data-reset-value>
+        <option value="a">A</option><option value="b" selected>B</option>
+      </select>`);
+    const select = query<HTMLSelectElement>("#s");
+    select.value = "a";
+    fireBeforeCache();
+    expect(select.value).toBe("b");
+  });
+
+  it("returns a multi-select to every option the author marked selected", async () => {
+    await start(`
+      <select id="m" multiple data-reset-value>
+        <option value="a" selected>A</option><option value="b" selected>B</option>
+        <option value="c">C</option>
+      </select>`);
+    const select = query<HTMLSelectElement>("#m");
+    for (const option of Array.from(select.options)) option.selected = option.value === "c";
+    fireBeforeCache();
+    expect(Array.from(select.selectedOptions).map((option) => option.value)).toEqual(["a", "b"]);
+  });
+
+  it("leaves a field that carries no user state alone", async () => {
+    // A hidden field holds a value the page shipped, never one the user typed;
+    // writing to it would rewrite the markup instead of restoring it. The second
+    // field has no value at all, and writing its default back would give it one.
+    await start(`
+      <input id="h" type="hidden" data-reset-value value="token-1">
+      <input id="n" type="hidden" data-reset-value>`);
+    fireBeforeCache();
+    expect(query<HTMLInputElement>("#h").getAttribute("value")).toBe("token-1");
+    expect(query<HTMLInputElement>("#n").hasAttribute("value")).toBe(false);
+  });
+
+  it("restores textarea and select fields too", async () => {
     await start(`
       <textarea id="ta" data-reset-value></textarea>
       <select id="sel" data-reset-value>
@@ -125,6 +185,54 @@ describe("ResetBeforeCacheController", () => {
     expect(requests).toBe(0);
   });
 
+  it("still sweeps and still reports when the request event is switched off", async () => {
+    // The switch decides whether other controllers are asked to close, not
+    // whether the sweep happens — reading it as a master switch would silently
+    // disable the part.
+    await start(
+      `<button id="a" data-reset-attr="aria-expanded" aria-expanded="true"></button>`,
+      `data-stimeo--reset-before-cache-dispatch-reset-value="false"`,
+    );
+    let resets = 0;
+    root().addEventListener("stimeo--reset-before-cache:reset", () => {
+      resets += 1;
+    });
+
+    fireBeforeCache();
+
+    expect(query("#a").hasAttribute("aria-expanded")).toBe(false);
+    expect(resets).toBe(1);
+  });
+
+  it("asks controllers to close before it sweeps", async () => {
+    // The order is the contract: the declarative sweep is the last word, so a
+    // controller that closes itself late still gets tidied up after.
+    await start(`<button id="a" data-reset-attr="aria-expanded" aria-expanded="true"></button>`);
+    let attributeWhenAsked: string | null = "unset";
+    root().addEventListener("stimeo--reset-before-cache:request", () => {
+      attributeWhenAsked = query("#a").getAttribute("aria-expanded");
+    });
+
+    fireBeforeCache();
+
+    expect(attributeWhenAsked).toBe("true");
+    expect(query("#a").hasAttribute("aria-expanded")).toBe(false);
+  });
+
+  it("carries an empty detail on both events", async () => {
+    await start(`<div data-reset-attr="open"></div>`);
+    const details: unknown[] = [];
+    for (const name of ["request", "reset"]) {
+      root().addEventListener(`stimeo--reset-before-cache:${name}`, (event) => {
+        details.push((event as CustomEvent).detail);
+      });
+    }
+
+    fireBeforeCache();
+
+    expect(details).toEqual([{}, {}]);
+  });
+
   it("only resets within the configured scope", async () => {
     await start(
       `
@@ -136,6 +244,30 @@ describe("ResetBeforeCacheController", () => {
     expect(query("#a").hasAttribute("aria-expanded")).toBe(false);
     // Outside the scope, the attribute is left untouched.
     expect(query("#b").getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("keeps sweeping when the scope declaration matches nothing", async () => {
+    // A readable selector that finds no element is not an instruction to sweep
+    // nothing: the root falls back to the controller element, exactly as an
+    // unreadable declaration does.
+    await start(
+      `<button id="a" data-reset-attr="aria-expanded" aria-expanded="true"></button>`,
+      `data-stimeo--reset-before-cache-scope-value=".does-not-exist"`,
+    );
+    fireBeforeCache();
+    expect(query("#a").hasAttribute("aria-expanded")).toBe(false);
+  });
+
+  it("keeps sweeping when the scope declaration cannot be parsed", async () => {
+    // A declaration the engine cannot read must not take the sweep down with it:
+    // this part exists to keep a cached page from freezing mid-interaction, and a
+    // typo in one attribute would otherwise disable that for the whole document.
+    await start(
+      `<button id="a" data-reset-attr="aria-expanded" aria-expanded="true"></button>`,
+      `data-stimeo--reset-before-cache-scope-value="#panel["`,
+    );
+    fireBeforeCache();
+    expect(query("#a").hasAttribute("aria-expanded")).toBe(false);
   });
 
   it("is idempotent across repeated runs", async () => {

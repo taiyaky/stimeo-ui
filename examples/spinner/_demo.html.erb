@@ -2,8 +2,10 @@
     The indicator is the visual half — its text plus a spinner marked aria-hidden="true" —
     and the controlled region reflects aria-busy. An indicator revealed at the moment of
     the change is not reliably read, so the loading / ready wording goes to the shared
-    announcer and is said exactly once. A show delay and a minimum display time suppress
-    flicker. The Start/Stop buttons call the controller's methods directly. %>
+    stimeo--announcer your app seats once, in its layout, and is said exactly once
+    (loading ↔ ready is the transition worth reading; aria-busy is state the reader can
+    query, not a notification). A show delay and a minimum display time suppress flicker.
+    The Start/Stop buttons call the controller's methods directly. %>
 <div
   class="spinner-demo"
   data-controller="stimeo--spinner"
@@ -43,12 +45,5 @@
     aria-busy="false"
     data-stimeo--spinner-target="region">
     <%= t("components.spinner.demo.content") %>
-  </div>
-
-  <%# Shared announcer: loading ↔ ready is the transition worth reading; aria-busy is
-      state the reader can query, not a notification. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden"
-         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

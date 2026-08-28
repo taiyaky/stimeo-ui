@@ -31,9 +31,12 @@ type FilterControl = HTMLElement;
  *
  * @remarks
  * Behavior only — the consumer owns all styling and the controls' own accessible
- * state (e.g. `aria-pressed`). Visibility is re-derived from the live DOM on
- * `connect()` (Morph/Turbo-safe) and on every native `change` that bubbles to the
- * root; button toggles that emit no native `change` wire their event to the `apply`
+ * state (e.g. `aria-pressed`); the one exception is `clear`, which writes those
+ * controls one way, to off. Visibility is re-derived from the live DOM on
+ * `connect()`, on every native `change` that bubbles to the root, on the `apply`
+ * and `clear` actions, and when `match` changes at runtime — the declaration
+ * decides what is shown, so an element kept across a morph still follows it.
+ * Button toggles that emit no native `change` wire their event to the `apply`
  * action (e.g. `stimeo--toggle-group:change->stimeo--filter#apply`).
  */
 export class FilterController extends Controller<HTMLElement> {
@@ -53,17 +56,51 @@ export class FilterController extends Controller<HTMLElement> {
     this.apply();
   };
 
+  /**
+   * Gates the declaration callback to the connected window.
+   *
+   * Stimulus delivers a Value callback ahead of `connect()` and again for every
+   * runtime change; without the gate, merely connecting would emit an evaluation
+   * — and its `change` — before `connect()` runs its own.
+   */
+  #connected = false;
+
   override connect(): void {
-    this.apply();
+    this.#evaluate();
     this.element.addEventListener("change", this.#onChange);
+    this.#connected = true;
   }
 
   override disconnect(): void {
+    this.#connected = false;
     this.element.removeEventListener("change", this.#onChange);
+  }
+
+  /**
+   * Re-evaluates when the match declaration changes at runtime.
+   *
+   * The declaration decides which items are shown, so an element kept across a
+   * morph — where `connect()` does not run again — still has to follow it instead
+   * of waiting for the next control interaction. The evaluation is the ordinary
+   * one, `change` included: a declaration swap is an evaluation like any other.
+   */
+  matchValueChanged(): void {
+    if (!this.#connected) return;
+    this.#evaluate();
   }
 
   /** Re-derives every item's visibility from the active tokens and syncs groups/empty. */
   apply(): void {
+    this.#evaluate();
+  }
+
+  /**
+   * The evaluation itself: every item's visibility from the active tokens, then
+   * the groups and the empty element, then the `change` event.
+   *
+   * @stimeoRenderRoot
+   */
+  #evaluate(): void {
     const active = this.#activeTokens();
     let visibleCount = 0;
     for (const item of this.itemTargets) {

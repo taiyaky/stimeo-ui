@@ -1,7 +1,9 @@
 <%# Submit-once demo. A structured idle / busy target pair keeps the DOM the
-    consumer authored while the button is disabled. This catalog has no server,
-    so demo.js fires Turbo's start / end lifecycle around a short fake round
-    trip. %>
+    consumer authored while the button is disabled. The busy ↔ ready transition
+    goes to the shared stimeo--announcer your app seats once, in its layout,
+    where it is read without moving focus; aria-busy stays state the reader can
+    query, not a notification. This catalog has no server, so demo.js fires
+    Turbo's start / end lifecycle around a short fake round trip. %>
 <% announce_start = t("components.submit_once.demo.announce_start") %>
 <% announce_ready = t("components.submit_once.demo.announce_ready") %>
 <% submit_label = t("components.submit_once.demo.submit") %>
@@ -20,11 +22,4 @@
       <span data-stimeo--submit-once-target="busy" hidden><%= busy_label %></span>
     </button>
   </form>
-
-  <%# aria-busy exposes state that can be queried; this always-present region is
-      what announces the transition itself, without moving focus. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden" data-stimeo--announcer-target="polite"
-         aria-live="polite" aria-atomic="true"></div>
-  </div>
 </div>

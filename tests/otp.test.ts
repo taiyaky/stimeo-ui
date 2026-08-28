@@ -766,6 +766,66 @@ describe("OtpController", () => {
     expect(reconcileHandler.mock.calls[0]?.[0]?.detail).toEqual({ value: "123" });
   });
 
+  it("reports completion reached by dropping a trailing empty field", async () => {
+    const digits = fields();
+    type(digits[0] as HTMLInputElement, "1");
+    type(digits[1] as HTMLInputElement, "2");
+    type(digits[2] as HTMLInputElement, "3");
+    await tick();
+    expect(combined()).toBe("123");
+    expect(root().getAttribute("data-state")).toBe("partial");
+
+    // The combined value does not move, but three of three digits is a complete
+    // passcode where three of four was not.
+    const editHandler = listen("change", "complete");
+    const reconcileHandler = listen("reconcile");
+    digits[3]?.remove();
+    await tick();
+
+    expect(combined()).toBe("123");
+    expect(root().getAttribute("data-state")).toBe("complete");
+    expect(editHandler).not.toHaveBeenCalled();
+    expect(reconcileHandler).toHaveBeenCalledOnce();
+    expect(reconcileHandler.mock.calls[0]?.[0]?.detail).toEqual({ value: "123" });
+  });
+
+  it("reports completion lost when an empty field arrives", async () => {
+    paste(fields()[0] as HTMLElement, "1234");
+    await tick();
+    expect(root().getAttribute("data-state")).toBe("complete");
+
+    const editHandler = listen("change", "complete");
+    const reconcileHandler = listen("reconcile");
+    const arrived = document.createElement("input");
+    arrived.className = "field";
+    arrived.setAttribute("data-stimeo--otp-target", "field");
+    arrived.setAttribute("aria-label", "Digit 5");
+    root().insertBefore(arrived, document.getElementById("error"));
+    await tick();
+
+    expect(combined()).toBe("1234"); // the string is untouched
+    expect(root().getAttribute("data-state")).toBe("partial");
+    expect(editHandler).not.toHaveBeenCalled();
+    expect(reconcileHandler).toHaveBeenCalledOnce();
+    expect(reconcileHandler.mock.calls[0]?.[0]?.detail).toEqual({ value: "1234" });
+  });
+
+  it("stays silent when a dropped empty field leaves the state where it was", async () => {
+    const digits = fields();
+    type(digits[0] as HTMLInputElement, "1");
+    await tick();
+    expect(root().getAttribute("data-state")).toBe("partial");
+
+    // One of four and one of three are both partial, so nothing public moved.
+    const handler = listen("reconcile", "change", "complete");
+    digits[3]?.remove();
+    await tick();
+
+    expect(combined()).toBe("1");
+    expect(root().getAttribute("data-state")).toBe("partial");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("stays silent when a field arrives without moving the value", async () => {
     const reconcileHandler = listen("reconcile", "change");
     const added = document.createElement("input");

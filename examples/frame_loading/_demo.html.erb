@@ -1,8 +1,11 @@
 <%# Frame-loading demo: the controller subscribes to a turbo-frame's fetch lifecycle
     and toggles aria-busy / data-frame-loading, the skeleton, content inert, and focus.
-    This catalog has no Turbo backend, so demo.js fires the turbo:before-fetch-request →
-    turbo:frame-load pair to reproduce a frame fetch. The library only toggles state and
-    hidden; demo.css owns the skeleton bars and the dimmed content. %>
+    The skeleton is revealed at the moment of the change, which is not reliably read, so
+    the loading / ready wording goes to the shared stimeo--announcer your app seats once,
+    in its layout. This catalog has no Turbo backend, so demo.js fires the
+    turbo:before-fetch-request → turbo:frame-load pair to reproduce a frame fetch. The
+    library only toggles state and hidden; demo.css owns the skeleton bars and the dimmed
+    content. %>
 <div class="frame-demo">
   <button type="button" class="demo-trigger" data-frame-demo-reload>
     <%= t("components.frame_loading.demo.reload") %>
@@ -32,12 +35,5 @@
       </button>
       <span class="frame-demo__result" data-frame-demo-result role="status"></span>
     </div>
-  </div>
-
-  <%# Shared announcer: the frame's own skeleton is revealed at the moment of the
-      change, which is not reliably read, so the loading / ready wording goes here. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden"
-         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

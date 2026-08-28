@@ -21,8 +21,7 @@ const markup = (submitOnBlur = true) => `
                          keydown->stimeo--editable#onDisplayKeydown">Original</button>
     <input type="text" aria-label="Title" hidden
            data-stimeo--editable-target="input"
-           data-action="keydown->stimeo--editable#onKeydown
-                        blur->stimeo--editable#onBlur" />
+           data-action="keydown->stimeo--editable#onKeydown" />
   </div>`;
 
 describe("EditableController", () => {
@@ -66,6 +65,19 @@ describe("EditableController", () => {
     expect(input().hidden).toBe(false);
     expect(input().value).toBe("Original");
     expect(document.activeElement).toBe(input());
+  });
+
+  it("keeps editing when hiding the display reports its own departure", async () => {
+    // A real click focuses the display first, so hiding it to enter edit mode
+    // reports a focusout with nowhere to go. Reading that as "the user left"
+    // would commit and close the editor the moment it opened.
+    await mount();
+    display().focus();
+    display().click();
+    display().dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+
+    expect(root().dataset.mode).toBe("editing");
+    expect(input().hidden).toBe(false);
   });
 
   it("enters edit mode on F2 from the display element", async () => {
@@ -195,7 +207,7 @@ describe("EditableController", () => {
     await mount(true);
     display().click();
     input().value = "Blurred";
-    input().dispatchEvent(new FocusEvent("blur"));
+    input().dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
     expect(root().dataset.mode).toBe("display");
     expect(display().textContent).toBe("Blurred");
   });
@@ -204,7 +216,7 @@ describe("EditableController", () => {
     await mount(false);
     display().click();
     input().value = "Kept";
-    input().dispatchEvent(new FocusEvent("blur"));
+    input().dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
     expect(root().dataset.mode).toBe("editing");
   });
 
@@ -219,8 +231,7 @@ describe("EditableController", () => {
                            keydown->stimeo--editable#onDisplayKeydown">Original</button>
       <textarea aria-label="Notes" hidden
                 data-stimeo--editable-target="input"
-                data-action="keydown->stimeo--editable#onKeydown
-                             blur->stimeo--editable#onBlur"></textarea>
+                data-action="keydown->stimeo--editable#onKeydown"></textarea>
     </div>`;
 
   const mountMultiline = async (submitOnBlur = true) => {
@@ -259,6 +270,392 @@ describe("EditableController", () => {
     input().value = "Editing";
     key(input(), { key: "Enter" });
     expect(root().dataset.mode).toBe("editing");
+  });
+
+  // --- Declared value (`data-value`) ------------------------------------------
+
+  const declaredMarkup = () => `
+    <div data-controller="stimeo--editable">
+      <button type="button" aria-label="Edit date"
+              data-value="2026-08-23"
+              data-stimeo--editable-target="display"
+              data-action="click->stimeo--editable#edit"><span class="icon" aria-hidden="true">*</span>August 23, 2026</button>
+      <input type="text" aria-label="Date" hidden
+             data-stimeo--editable-target="input"
+             data-action="keydown->stimeo--editable#onKeydown" />
+    </div>`;
+
+  it("edits the value a display declares, leaving its rendered text alone", async () => {
+    // A display whose text renders the value (a formatted date, an icon beside a
+    // label) declares the value itself. Seeding from the text would hand the
+    // input `*August 23, 2026`, which `type="date"` sanitizes away entirely.
+    document.body.innerHTML = declaredMarkup();
+    application = Application.start();
+    application.register("stimeo--editable", EditableController);
+    await tick();
+
+    const changes: Array<{ value: string; previous: string }> = [];
+    root().addEventListener("stimeo--editable:change", (event) => {
+      changes.push((event as CustomEvent).detail);
+    });
+
+    display().click();
+    expect(input().value).toBe("2026-08-23");
+
+    input().value = "2026-09-01";
+    key(input(), { key: "Enter" });
+
+    expect(display().dataset.value).toBe("2026-09-01");
+    expect(display().querySelector(".icon")).not.toBeNull();
+    expect(display().textContent).toBe("*August 23, 2026");
+    expect(changes).toEqual([{ value: "2026-09-01", previous: "2026-08-23" }]);
+  });
+
+  // --- Save / cancel / revert actions ------------------------------------------
+
+  const withControlsMarkup = () => `
+    <div data-controller="stimeo--editable">
+      <button type="button" aria-label="Edit title"
+              data-stimeo--editable-target="display"
+              data-action="click->stimeo--editable#edit">Original</button>
+      <input type="text" aria-label="Title" hidden
+             data-stimeo--editable-target="input"
+             data-action="keydown->stimeo--editable#onKeydown" />
+      <button type="button" id="save" data-action="click->stimeo--editable#save">Save</button>
+      <button type="button" id="cancel" data-action="click->stimeo--editable#cancel">Cancel</button>
+      <button type="button" id="revert" data-action="click->stimeo--editable#revert">Revert</button>
+    </div>`;
+
+  const mountWithControls = async () => {
+    document.body.innerHTML = withControlsMarkup();
+    application = Application.start();
+    application.register("stimeo--editable", EditableController);
+    await tick();
+  };
+  const control = (id: string) => document.getElementById(id) as HTMLButtonElement;
+
+  it("commits through the save action", async () => {
+    await mountWithControls();
+    display().click();
+    input().value = "Updated";
+    control("save").click();
+    expect(root().dataset.mode).toBe("display");
+    expect(display().textContent).toBe("Updated");
+    expect(document.activeElement).toBe(display());
+  });
+
+  it("discards through the cancel action", async () => {
+    await mountWithControls();
+    let cancelled = false;
+    root().addEventListener("stimeo--editable:cancel", () => {
+      cancelled = true;
+    });
+    display().click();
+    input().value = "Throwaway";
+    control("cancel").click();
+    expect(root().dataset.mode).toBe("display");
+    expect(display().textContent).toBe("Original");
+    expect(cancelled).toBe(true);
+  });
+
+  it("keeps editing while focus moves to a control beside the input", async () => {
+    // The blur fires before the button's own click. Without the containment
+    // check the commit would beat it, so Cancel would save what it discards.
+    await mountWithControls();
+    display().click();
+    input().value = "Throwaway";
+    input().dispatchEvent(
+      new FocusEvent("focusout", { bubbles: true, relatedTarget: control("cancel") }),
+    );
+    expect(root().dataset.mode).toBe("editing");
+    expect(display().textContent).toBe("Original");
+  });
+
+  it("saves when focus leaves the editor entirely", async () => {
+    await mountWithControls();
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    display().click();
+    input().value = "Blurred";
+    input().dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: outside }));
+    expect(root().dataset.mode).toBe("display");
+    expect(display().textContent).toBe("Blurred");
+  });
+
+  it("saves when focus leaves from a control beside the input", async () => {
+    // Tabbing input → Cancel → out of the editor passes straight through the
+    // button without activating it. The departure is watched on the controller
+    // element, so it is seen from there too — binding the input alone would
+    // strand the editor open with the edit neither saved nor discarded.
+    await mountWithControls();
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    display().click();
+    input().value = "Tabbed past";
+    input().dispatchEvent(
+      new FocusEvent("focusout", { bubbles: true, relatedTarget: control("cancel") }),
+    );
+    expect(root().dataset.mode).toBe("editing");
+
+    control("cancel").dispatchEvent(
+      new FocusEvent("focusout", { bubbles: true, relatedTarget: outside }),
+    );
+
+    expect(root().dataset.mode).toBe("display");
+    expect(display().textContent).toBe("Tabbed past");
+  });
+
+  it("puts back the value the last save replaced, and only once", async () => {
+    await mountWithControls();
+    display().click();
+    input().value = "Rejected by the server";
+    key(input(), { key: "Enter" });
+    expect(display().textContent).toBe("Rejected by the server");
+
+    control("revert").click();
+    expect(display().textContent).toBe("Original");
+
+    // A second undo has nothing left to undo.
+    display().textContent = "Something else";
+    control("revert").click();
+    expect(display().textContent).toBe("Something else");
+  });
+
+  it("stays silent when it reverts", async () => {
+    // A `change` here would re-enter the handler that asked for the undo.
+    await mountWithControls();
+    display().click();
+    input().value = "Rejected";
+    key(input(), { key: "Enter" });
+
+    let events = 0;
+    root().addEventListener("stimeo--editable:change", () => {
+      events += 1;
+    });
+    root().addEventListener("stimeo--editable:cancel", () => {
+      events += 1;
+    });
+    control("revert").click();
+    expect(display().textContent).toBe("Original");
+    expect(events).toBe(0);
+  });
+
+  it("has nothing to revert when no save changed anything", async () => {
+    await mountWithControls();
+    display().click();
+    key(input(), { key: "Enter" });
+    control("revert").click();
+    expect(display().textContent).toBe("Original");
+  });
+
+  // --- Runtime target changes ---------------------------------------------------
+
+  it("hides an editing control that renders after connect", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--editable">
+        <button type="button" aria-label="Edit title"
+                data-stimeo--editable-target="display"
+                data-action="click->stimeo--editable#edit">Original</button>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--editable", EditableController);
+    await tick();
+
+    const late = document.createElement("input");
+    late.type = "text";
+    late.setAttribute("data-stimeo--editable-target", "input");
+    root().appendChild(late);
+    await tick();
+
+    expect(display().hidden).toBe(false);
+    expect(input().hidden).toBe(true);
+  });
+
+  it("shows an editing control that replaces the live one mid-edit", async () => {
+    // A server-rendered replacement arrives in its resting form, `hidden`. With
+    // `submitOnBlur` off nothing else re-derives it, so both elements would be
+    // hidden and no pointer or key could reach the widget again.
+    await mount(false);
+    display().click();
+    input().value = "half typed";
+
+    const fresh = document.createElement("input");
+    fresh.type = "text";
+    fresh.hidden = true;
+    fresh.setAttribute("data-stimeo--editable-target", "input");
+    fresh.setAttribute("data-action", "keydown->stimeo--editable#onKeydown");
+    input().replaceWith(fresh);
+    await tick();
+
+    expect(root().dataset.mode).toBe("editing");
+    expect(input().hidden).toBe(false);
+    expect(display().hidden).toBe(true);
+  });
+
+  it("hides a display element that replaces the live one mid-edit", async () => {
+    await mount(false);
+    display().click();
+
+    const fresh = document.createElement("button");
+    fresh.type = "button";
+    fresh.setAttribute("aria-label", "Edit title");
+    fresh.setAttribute("data-stimeo--editable-target", "display");
+    fresh.setAttribute("data-action", "click->stimeo--editable#edit");
+    fresh.textContent = "Original";
+    display().replaceWith(fresh);
+    await tick();
+
+    expect(display().hidden).toBe(true);
+    expect(input().hidden).toBe(false);
+  });
+
+  it("still reports the outcome when the display element is gone", async () => {
+    await mount();
+    display().click();
+    input().value = "typed";
+    display().remove();
+    await tick();
+
+    const changes: Array<{ value: string; previous: string }> = [];
+    root().addEventListener("stimeo--editable:change", (event) => {
+      changes.push((event as CustomEvent).detail);
+    });
+    key(input(), { key: "Enter" });
+    expect(changes).toEqual([{ value: "typed", previous: "Original" }]);
+    expect(root().dataset.mode).toBe("display");
+  });
+
+  it("still announces a cancel when the display element is gone", async () => {
+    await mount();
+    display().click();
+    display().remove();
+    await tick();
+
+    let cancelled = false;
+    root().addEventListener("stimeo--editable:cancel", () => {
+      cancelled = true;
+    });
+    key(input(), { key: "Escape" });
+    expect(cancelled).toBe(true);
+    expect(root().dataset.mode).toBe("display");
+  });
+
+  // --- Guards outside edit mode --------------------------------------------------
+
+  it("does nothing when the editing control has not rendered yet", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--editable">
+        <button type="button" aria-label="Edit title"
+                data-stimeo--editable-target="display"
+                data-action="click->stimeo--editable#edit">Original</button>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--editable", EditableController);
+    await tick();
+
+    expect(() => display().click()).not.toThrow();
+    expect(root().dataset.mode).toBe("display");
+    expect(display().hidden).toBe(false);
+  });
+
+  it("ignores an Enter that reaches the input outside edit mode", async () => {
+    await mount();
+    let fired = false;
+    root().addEventListener("stimeo--editable:change", () => {
+      fired = true;
+    });
+    input().hidden = false;
+    input().value = "never typed";
+    key(input(), { key: "Enter" });
+    expect(fired).toBe(false);
+    expect(display().textContent).toBe("Original");
+  });
+
+  it("ignores an Escape that reaches the input outside edit mode", async () => {
+    await mount();
+    let cancelled = false;
+    root().addEventListener("stimeo--editable:cancel", () => {
+      cancelled = true;
+    });
+    input().hidden = false;
+    key(input(), { key: "Escape" });
+    expect(cancelled).toBe(false);
+  });
+
+  // --- Contract details ----------------------------------------------------------
+
+  it("saves on blur with no attribute written, taking the declared default", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--editable">
+        <button type="button" aria-label="Edit title"
+                data-stimeo--editable-target="display"
+                data-action="click->stimeo--editable#edit">Original</button>
+        <input type="text" aria-label="Title" hidden
+               data-stimeo--editable-target="input"
+               data-action="keydown->stimeo--editable#onKeydown" />
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--editable", EditableController);
+    await tick();
+
+    display().click();
+    input().value = "Blurred";
+    input().dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    expect(root().dataset.mode).toBe("display");
+    expect(display().textContent).toBe("Blurred");
+  });
+
+  it("carries an empty detail on cancel", async () => {
+    await mount();
+    const details: unknown[] = [];
+    root().addEventListener("stimeo--editable:cancel", (event) => {
+      details.push((event as CustomEvent).detail);
+    });
+    display().click();
+    key(input(), { key: "Escape" });
+    expect(details).toEqual([{}]);
+  });
+
+  it("selects the seeded text so typing replaces it", async () => {
+    await mount();
+    display().click();
+    expect(input().selectionStart).toBe(0);
+    expect(input().selectionEnd).toBe("Original".length);
+  });
+
+  it("leaves focus where the user moved it when blur saves", async () => {
+    await mount(true);
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    display().click();
+    input().value = "Blurred";
+    outside.focus();
+    input().dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: outside }));
+    expect(root().dataset.mode).toBe("display");
+    expect(document.activeElement).not.toBe(display());
+  });
+
+  it("stores what it shows, so re-committing an untouched value changes nothing", async () => {
+    // The seed, the stored value, and the detail all pass through the same
+    // normalization; otherwise a padded value silently rewrites the display
+    // while reporting that nothing changed.
+    await mount();
+    const changes: Array<{ value: string; previous: string }> = [];
+    root().addEventListener("stimeo--editable:change", (event) => {
+      changes.push((event as CustomEvent).detail);
+    });
+
+    display().click();
+    input().value = "  Padded  ";
+    key(input(), { key: "Enter" });
+    expect(display().textContent).toBe("Padded");
+    expect(changes).toEqual([{ value: "Padded", previous: "Original" }]);
+
+    display().click();
+    expect(input().value).toBe("Padded");
+    key(input(), { key: "Enter" });
+    expect(display().textContent).toBe("Padded");
+    expect(changes).toHaveLength(1);
   });
 
   it("announces the editable trigger by its accessible name", async () => {

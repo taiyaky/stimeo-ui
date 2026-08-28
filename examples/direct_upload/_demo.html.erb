@@ -3,8 +3,10 @@
     (error followed by end, the order ActiveStorage really uses). The library
     clones the row template per file, updates aria-valuenow / aria-valuetext /
     data-upload-state / the --stimeo--upload-progress var, and hands completion
-    and failure announcements to the shared announcer below. This demo styles
-    the bars. %>
+    and failure announcements to the shared stimeo--announcer your app seats once,
+    in its layout (completion and failure are the transitions worth reading;
+    per-tick progress stays on each row's aria-valuenow). This demo styles the
+    bars. %>
 <% done_text = t("components.direct_upload.demo.done") %>
 <% error_text = t("components.direct_upload.demo.error") %>
 <div class="direct-upload-demo">
@@ -24,11 +26,5 @@
         <span class="direct-upload__percent" data-field="percent"></span>
       </div>
     </template>
-  </div>
-  <%# Shared announcer: completion and failure are the transitions worth reading;
-      per-tick progress stays on each row's aria-valuenow. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden"
-         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

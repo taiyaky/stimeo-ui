@@ -18,7 +18,9 @@ export const ANNOUNCER_IDENTIFIER = "stimeo--announcer";
  */
 export const ANNOUNCING_CONTROLLERS: readonly string[] = [
   "stimeo--auto-submit",
+  "stimeo--bulk-select",
   "stimeo--character-counter",
+  "stimeo--clipboard",
   "stimeo--countdown",
   "stimeo--direct-upload",
   "stimeo--empty-state",

@@ -120,9 +120,9 @@ describe("DataGridController", () => {
 
   it("cycles aria-sort none → ascending → descending on click and emits sort", async () => {
     await start();
-    const detail: string[] = [];
+    const detail: Array<{ column: HTMLElement; direction: string }> = [];
     root().addEventListener("stimeo--data-grid:sort", (event) => {
-      detail.push((event as CustomEvent<{ direction: string }>).detail.direction);
+      detail.push((event as CustomEvent<{ column: HTMLElement; direction: string }>).detail);
     });
     const name = header(0);
     name.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -131,7 +131,10 @@ describe("DataGridController", () => {
     expect(name.getAttribute("aria-sort")).toBe("descending");
     name.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(name.getAttribute("aria-sort")).toBe("none");
-    expect(detail).toEqual(["ascending", "descending", "none"]);
+    expect(detail.map((entry) => entry.direction)).toEqual(["ascending", "descending", "none"]);
+    // The consumer resolves which column to sort from this element, so its
+    // identity is part of the event contract.
+    expect(detail.every((entry) => entry.column === name)).toBe(true);
   });
 
   it("advances to ascending from an unexpected aria-sort value", async () => {
@@ -239,9 +242,9 @@ describe("DataGridController", () => {
 
   it("toggles a single selected row and emits selectionchange", async () => {
     await start("single");
-    const detail: number[] = [];
+    const detail: HTMLElement[][] = [];
     root().addEventListener("stimeo--data-grid:selectionchange", (event) => {
-      detail.push((event as CustomEvent<{ rows: HTMLElement[] }>).detail.rows.length);
+      detail.push((event as CustomEvent<{ rows: HTMLElement[] }>).detail.rows);
     });
     press(cell(0), "Enter"); // selects row 0
     expect(row(0).getAttribute("aria-selected")).toBe("true");
@@ -249,7 +252,9 @@ describe("DataGridController", () => {
     press(cell(2), "Enter"); // selects row 1, row 0 cleared (single)
     expect(row(0).getAttribute("aria-selected")).toBe("false");
     expect(row(1).getAttribute("aria-selected")).toBe("true");
-    expect(detail).toEqual([1, 1]);
+    // The consumer reads the selection off these elements, so the event carries
+    // the rows themselves, not just how many there are.
+    expect(detail).toEqual([[row(0)], [row(1)]]);
   });
 
   it("keeps multiple rows selected in multiple mode", async () => {
@@ -464,6 +469,404 @@ describe("DataGridController", () => {
       expect(writes).toHaveLength(rows * 2);
       expect(writes.length).toBeLessThan(rows * rows);
       expect(selectedStates()).toEqual(Array(rows).fill("false"));
+    });
+  });
+
+  describe("roving tab stop lifecycle", () => {
+    const navigable = () => [...headers(), ...cells()];
+    const tabbable = () => navigable().filter((el) => el.tabIndex === 0);
+
+    it("re-establishes the single tab stop when the active row is removed", async () => {
+      await start();
+      press(cell(0), "ArrowDown"); // carry the tab stop into the second body row
+      const active = cell(2);
+      expect(active.tabIndex).toBe(0);
+
+      (active.closest("tr") as HTMLElement).remove();
+      await tick();
+
+      // Losing the only tabbable cell drops the whole grid out of the Tab
+      // sequence, so the baseline is rebuilt from whatever survived.
+      expect(tabbable()).toHaveLength(1);
+    });
+
+    it("re-establishes the single tab stop when the active header is removed", async () => {
+      await start();
+      press(cell(0), "ArrowUp"); // the header row sits above the first body row
+      expect(header(0).tabIndex).toBe(0);
+
+      header(0).remove();
+      await tick();
+
+      expect(tabbable()).toHaveLength(1);
+    });
+
+    it("keeps one tab stop when a row arrives carrying its own tabindex", async () => {
+      await start();
+      const late = document.createElement("tr");
+      late.setAttribute("role", "row");
+      late.setAttribute("data-stimeo--data-grid-target", "row");
+      // A row streamed from the same template as the authored ones repeats that
+      // template's `tabindex="0"` on its first cell.
+      late.innerHTML =
+        '<td role="gridcell" tabindex="0" data-stimeo--data-grid-target="cell"' +
+        ' data-action="keydown->stimeo--data-grid#onKeydown">Late</td>';
+      (document.querySelector("tbody") as HTMLElement).append(late);
+      await tick();
+
+      expect(tabbable()).toHaveLength(1);
+      expect(tabbable()[0]).toBe(cell(0)); // the established position wins
+    });
+  });
+  describe("controls nested inside a cell", () => {
+    /** Appends `tag` to the first body cell and returns it. */
+    const nest = <K extends keyof HTMLElementTagNameMap>(tag: K) => {
+      const control = document.createElement(tag);
+      cell(0).append(control);
+      return control;
+    };
+    const fire = (el: HTMLElement, key: string, init: KeyboardEventInit = {}) => {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+        ...init,
+      });
+      el.dispatchEvent(event);
+      return event;
+    };
+
+    it("leaves Enter to a native control inside a cell", async () => {
+      // A native control never calls preventDefault — its activation IS the
+      // default action — so the grid cannot rely on the defaultPrevented yield
+      // to recognise that the key was not addressed to it.
+      await start("single");
+      const button = nest("button");
+
+      const event = fire(button, "Enter");
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(row(0).getAttribute("aria-selected")).toBe("false");
+    });
+
+    it("leaves a key pressed on markup inside a native control alone", async () => {
+      // The source can be a label or an icon nested in the control, which is not
+      // itself a control — recognising the key by the source alone would miss it.
+      await start("single");
+      const button = nest("button");
+      const label = document.createElement("span");
+      button.append(label);
+
+      const event = fire(label, "Enter");
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(row(0).getAttribute("aria-selected")).toBe("false");
+    });
+
+    it("leaves Space to a native control inside a cell", async () => {
+      await start("single");
+      const button = nest("button");
+
+      const event = fire(button, " ");
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(row(0).getAttribute("aria-selected")).toBe("false");
+    });
+
+    it("leaves an arrow key to a text field inside a cell", async () => {
+      await start();
+      const field = nest("input");
+      field.focus();
+
+      const event = fire(field, "ArrowRight");
+
+      // The caret belongs to the field; the roving position must not move.
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(field);
+      expect(cell(0).tabIndex).toBe(0);
+    });
+
+    it("leaves the keys of an editable cell alone", async () => {
+      await start("single");
+      cell(0).setAttribute("contenteditable", "true");
+
+      const event = fire(cell(0), "Enter");
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(row(0).getAttribute("aria-selected")).toBe("false");
+    });
+
+    it("ignores a keystroke that is confirming an IME composition", async () => {
+      await start("single");
+
+      const event = fire(cell(0), "Enter", { isComposing: true });
+
+      expect(event.isComposing).toBe(true); // guards against a dropped init
+      expect(event.defaultPrevented).toBe(false);
+      expect(row(0).getAttribute("aria-selected")).toBe("false");
+    });
+
+    it("sorts on a header button's own click", async () => {
+      // A sortable header hosts its own `<button>`, and that button's activation
+      // is exactly what this click carries, so the grid acts on it.
+      await start();
+      const button = document.createElement("button");
+      button.type = "button";
+      button.tabIndex = -1;
+      header(0).append(button);
+
+      button.click();
+
+      expect(header(0).getAttribute("aria-sort")).toBe("ascending");
+    });
+
+    it("leaves a click on a non-button control inside a header alone", async () => {
+      // A field or a link in the header is its own destination; sorting on its
+      // click would act in parallel with whatever the control does.
+      await start();
+      const field = document.createElement("input");
+      field.type = "text";
+      field.tabIndex = -1;
+      header(0).append(field);
+
+      field.click();
+
+      expect(header(0).getAttribute("aria-sort")).toBe("none");
+    });
+
+    it("leaves a header click a widget already handled alone", async () => {
+      await start();
+      const widget = document.createElement("span");
+      widget.addEventListener("click", (event) => event.preventDefault());
+      header(0).append(widget);
+
+      widget.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+      expect(header(0).getAttribute("aria-sort")).toBe("none");
+    });
+
+    it("leaves a cell click a widget already handled alone", async () => {
+      // The keyboard path yields on a consumed keystroke; the pointer path owes
+      // the same to a widget that called preventDefault on its click.
+      await start("single");
+      const widget = document.createElement("span");
+      widget.addEventListener("click", (event) => event.preventDefault());
+      cell(0).setAttribute("data-action", "click->stimeo--data-grid#toggleSelect");
+      cell(0).append(widget);
+      await tick();
+
+      widget.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+      expect(row(0).getAttribute("aria-selected")).toBe("false");
+    });
+
+    it("leaves a pointer activation to a native control inside a cell", async () => {
+      document.body.innerHTML = `
+        <table data-controller="stimeo--data-grid" role="grid" aria-label="Users"
+               data-stimeo--data-grid-selection-value="single">
+          <tbody>
+            <tr role="row" data-stimeo--data-grid-target="row">
+              <td role="gridcell" tabindex="0" data-stimeo--data-grid-target="cell"
+                  data-action="click->stimeo--data-grid#toggleSelect">
+                Jane <button type="button">Remove</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>`;
+      application = Application.start();
+      application.register("stimeo--data-grid", DataGridController);
+      await tick();
+
+      (document.querySelector("button") as HTMLElement).click();
+
+      expect(row(0).getAttribute("aria-selected")).toBe("false");
+    });
+  });
+  describe("hot-path recomputation", () => {
+    /** Records the attribute mutations of `name` inside the grid while `act` runs. */
+    const countWrites = async (name: string, act: () => void) => {
+      const writes: string[] = [];
+      const observer = new MutationObserver((records) => {
+        for (const record of records) if (record.attributeName) writes.push(record.attributeName);
+      });
+      observer.observe(root(), { attributes: true, subtree: true, attributeFilter: [name] });
+      act();
+      await tick();
+      observer.disconnect();
+      return writes;
+    };
+
+    it("moves the tab stop with two attribute writes per keystroke", async () => {
+      await start();
+
+      const writes = await countWrites("tabindex", () => {
+        press(cell(0), "ArrowRight");
+      });
+
+      // Only the cell that gives the tab stop up and the one that takes it over
+      // change; a held-down arrow repeats this, so it must not scale with the
+      // grid.
+      expect(writes).toHaveLength(2);
+    });
+
+    it("rebuilds the row baseline once for a batch of reordered rows", async () => {
+      // A consumer that sorts by re-appending rows detaches and re-attaches every
+      // one of them, so a rebuild per callback would walk the whole grid once per
+      // row — quadratic in the row count on every sort.
+      const size = 6;
+      document.body.innerHTML = `
+        <table data-controller="stimeo--data-grid" role="grid" aria-label="Users"
+               data-stimeo--data-grid-selection-value="multiple">
+          <tbody>
+            ${Array.from(
+              { length: size },
+              (_, index) => `
+              <tr role="row" data-stimeo--data-grid-target="row">
+                <td role="gridcell" tabindex="${index === 0 ? 0 : -1}"
+                    data-stimeo--data-grid-target="cell">Row ${index}</td>
+              </tr>`,
+            ).join("")}
+          </tbody>
+        </table>`;
+      application = Application.start();
+      application.register("stimeo--data-grid", DataGridController);
+      await tick();
+
+      const body = document.querySelector("tbody") as HTMLElement;
+      const writes = await countWrites("aria-selected", () => {
+        const ordered = Array.from(body.querySelectorAll<HTMLElement>("tr")).reverse();
+        for (const tr of ordered) body.append(tr);
+      });
+
+      expect(writes).toHaveLength(size);
+      expect(writes.length).toBeLessThan(size * size);
+    });
+  });
+  describe("contract coverage", () => {
+    it("resets other columns to none when a header is sorted from the keyboard", async () => {
+      // Both activation paths cycle the same state, so both owe the same reset.
+      await start();
+      press(header(0), "Enter");
+      press(header(1), "Enter");
+
+      expect(header(0).getAttribute("aria-sort")).toBe("none");
+      expect(header(1).getAttribute("aria-sort")).toBe("ascending");
+    });
+
+    it("emits sort with the activated column from the keyboard too", async () => {
+      await start();
+      const detail: Array<{ column: HTMLElement; direction: string }> = [];
+      root().addEventListener("stimeo--data-grid:sort", (event) => {
+        detail.push((event as CustomEvent<{ column: HTMLElement; direction: string }>).detail);
+      });
+
+      press(header(1), "Enter");
+
+      expect(detail).toHaveLength(1);
+      expect(detail[0]?.column).toBe(header(1));
+      expect(detail[0]?.direction).toBe("ascending");
+    });
+
+    it("ignores a sort activation from an element that is not a column header", async () => {
+      // The action is authored markup and can land anywhere; only the declared
+      // headers own a sort.
+      document.body.innerHTML = markup().replace(
+        'data-action="keydown->stimeo--data-grid#onKeydown">Jane',
+        'data-action="click->stimeo--data-grid#sort keydown->stimeo--data-grid#onKeydown">Jane',
+      );
+      application = Application.start();
+      application.register("stimeo--data-grid", DataGridController);
+      await tick();
+      let fired = 0;
+      root().addEventListener("stimeo--data-grid:sort", () => {
+        fired += 1;
+      });
+
+      cell(0).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+      expect(headers().map((el) => el.getAttribute("aria-sort"))).toEqual(["none", "none"]);
+      expect(fired).toBe(0);
+    });
+
+    it("ignores a keystroke from an element outside the cell matrix", async () => {
+      // A caption or a toolbar inside the grid may carry the action; neither
+      // takes part in the navigation.
+      document.body.innerHTML = markup().replace(
+        "<thead>",
+        '<caption data-action="keydown->stimeo--data-grid#onKeydown">Users</caption><thead>',
+      );
+      application = Application.start();
+      application.register("stimeo--data-grid", DataGridController);
+      await tick();
+      const caption = document.querySelector("caption") as HTMLElement;
+
+      const event = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      caption.dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(cell(0).tabIndex).toBe(0);
+    });
+
+    it("defaults the selection mode to none when the attribute is absent", async () => {
+      document.body.innerHTML = markup().replace(
+        'data-stimeo--data-grid-selection-value="none"',
+        "",
+      );
+      application = Application.start();
+      application.register("stimeo--data-grid", DataGridController);
+      await tick();
+
+      expect(rows().every((el) => !el.hasAttribute("aria-selected"))).toBe(true);
+      expect(root().hasAttribute("aria-multiselectable")).toBe(false);
+
+      press(cell(0), "Enter");
+
+      expect(rows().every((el) => !el.hasAttribute("aria-selected"))).toBe(true);
+    });
+
+    it("consumes the keys it acts on", async () => {
+      // Nesting rests on this: an outer widget yields to a key its child claimed,
+      // so a move that leaves the event uncancelled makes both widgets act.
+      await start();
+
+      const moved = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(cell(0).dispatchEvent(moved)).toBe(false);
+
+      const jumped = new KeyboardEvent("keydown", {
+        key: "Home",
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(cell(1).dispatchEvent(jumped)).toBe(false);
+
+      const sorted = new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(header(0).dispatchEvent(sorted)).toBe(false);
+    });
+
+    it("reads the writing direction from the grid, not from the focused cell", async () => {
+      // `direction` is inherited, so setting it on the container alone cannot
+      // tell an implementation that reads the cell apart from one that reads the
+      // grid. The cell is given the opposite direction to separate them.
+      await start();
+      root().style.direction = "rtl";
+      for (const el of cells()) el.style.direction = "ltr";
+      cell(0).focus();
+
+      press(cell(0), "ArrowLeft"); // "next column" under the grid's direction
+
+      expect(document.activeElement).toBe(cell(1));
     });
   });
 });

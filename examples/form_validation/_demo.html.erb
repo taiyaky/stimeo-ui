@@ -2,7 +2,10 @@
     stimeo--form-validation orchestrates WHEN native constraint validation runs
     (submit / blur / change / input) and routes each control's message into its
     stimeo--form-field visual error — the ARIA wiring stays in form-field, and
-    the speech goes to the shared announcer seated at the end of this form.
+    the speech goes to the shared stimeo--announcer your app seats once, in its
+    layout (one assertive receiver serves every field, and it is already in the
+    accessibility tree before the first error, which is what makes the message
+    observable).
     Rules are plain markup attributes (required, type="email", plus the
     declarative disallow="whitespace"); the wording comes from localized
     data-stimeo--form-validation-message-* overrides rather than the browser, so
@@ -27,7 +30,7 @@
            data-stimeo--form-validation-message-type-mismatch=
              "<%= t('components.form_validation.demo.messages.email_type') %>"
            data-stimeo--form-field-target="control" />
-    <%# Visual error only. Speech goes through the shared announcer seated below. %>
+    <%# Visual error only. Speech goes through the shared stimeo--announcer. %>
     <p class="form-validation-demo__error" hidden
        data-stimeo--form-field-target="error"></p>
   </div>
@@ -102,12 +105,4 @@
   <p class="form-validation-demo__status" id="fv-status" aria-live="polite"
      data-valid-text="<%= t('components.form_validation.demo.valid_status') %>"
      data-invalid-template="<%= t('components.form_validation.demo.invalid_template') %>"></p>
-
-  <%# Assertive announcement target for the field errors form-field sets. One
-      receiver serves every field, and it is seated in the accessibility tree
-      ahead of the first error, which is what makes the message observable. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden" data-stimeo--announcer-target="assertive"
-         aria-live="assertive" aria-atomic="true"></div>
-  </div>
 </form>

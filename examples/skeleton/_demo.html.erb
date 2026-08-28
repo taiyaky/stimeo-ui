@@ -2,6 +2,9 @@
     Initially the skeleton is shown, the real content hidden, and aria-busy="true". On
     ready it swaps and sets aria-busy="false". The skeleton is decorative
     (aria-hidden="true"). A minimum display time prevents flicker.
+    The arrival of the content is handed to the shared stimeo--announcer your app seats
+    once, in its layout — aria-busy going false is state, not a notification, so it is
+    read out from a region that stands in the page independently of the card.
     The Load / Reset buttons sit outside the busy card (so aria-busy stays scoped to the
     loading region, not the controls), so they drive it through events the controller
     listens for (see demo.js): Load fires content:ready — the same signal a consumer
@@ -45,13 +48,5 @@
       <h3 class="skeleton-content__title"><%= t("components.skeleton.demo.title") %></h3>
       <p><%= t("components.skeleton.demo.body") %></p>
     </div>
-  </div>
-
-  <%# Shared announcer: aria-busy going false is state, not a notification, so the
-      arrival of the content is read out through a region that stands in the page
-      independently of the card. %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden"
-         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
   </div>
 </div>

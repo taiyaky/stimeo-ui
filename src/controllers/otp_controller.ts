@@ -25,6 +25,23 @@ function hasModifier(event: KeyboardEvent): boolean {
 }
 
 /**
+ * The controller-derived state a consumer can observe.
+ *
+ * The combined value alone does not identify it: the same string spread over a
+ * different number of fields reads as a different `data-state`, so completeness
+ * is carried alongside the value rather than inferred from it.
+ */
+interface OtpState {
+  readonly value: string;
+  readonly state: string;
+}
+
+/** Compares exactly the derived state the root publishes. */
+function statesDiffer(left: OtpState, right: OtpState): boolean {
+  return left.value !== right.value || left.state !== right.state;
+}
+
+/**
  * Headless, accessible One-Time Password / PIN input logic.
  *
  * Markup contract (identifier: `stimeo--otp`):
@@ -63,8 +80,11 @@ function hasModifier(event: KeyboardEvent): boolean {
  * `change` and `complete` dispatch `{ value: string }` and fire only when the
  * combined value actually moves — one confirmed IME character emits one event,
  * and a passcode re-completed with a different digit reports the new value.
- * A value moved by adding or removing fields is the page's doing rather than an
+ * State moved by adding or removing fields is the page's doing rather than an
  * edit, so it is reported as `reconcile` with the same `{ value: string }`.
+ * Completeness belongs to that state: dropping a trailing empty field completes
+ * a passcode whose combined value never moved, and that transition is reported
+ * too, so a consumer reading `data-state` is never left behind a silent move.
  * `invalid` dispatches `{ pattern: string }` carrying the compiled pattern.
  *
  * Controller-owned output: `data-filled` on each entered field, `data-state`
@@ -100,8 +120,8 @@ export class OtpController extends Controller<HTMLElement> {
   #pattern = new RegExp(`^${DEFAULT_PATTERN}$`);
   /** Source of {@link #pattern}, reported in `invalid` so consumers can word it. */
   #patternSource = DEFAULT_PATTERN;
-  /** Combined value carried by the last dispatch; keeps a no-op sync silent. */
-  #lastValue: string | null = null;
+  /** Public state carried by the last dispatch; keeps a no-op sync silent. */
+  #published: OtpState | null = null;
   /** Field whose confirming `input` after `compositionend` is already handled. */
   #confirmedField: HTMLInputElement | null = null;
   /** True between connect and disconnect, so pre-connect Value changes stay silent. */
@@ -147,7 +167,7 @@ export class OtpController extends Controller<HTMLElement> {
     this.#beforeCache.activate();
     this.#reconcile.activate();
     this.#adopt();
-    this.#lastValue = this.#sync();
+    this.#sync();
   }
 
   override disconnect(): void {
@@ -387,19 +407,23 @@ export class OtpController extends Controller<HTMLElement> {
   }
 
   /**
-   * Absorbs a batch of field additions or removals as one value transition.
+   * Absorbs a batch of field additions or removals as one state transition.
    *
-   * The page, not the user, moved the value here, so it is reported as
+   * The page, not the user, moved the state here, so it is reported as
    * `reconcile`: automation listening for `change` must not read a re-render as
    * an edit, and a passcode that happens to end up full must not fire the
    * `complete` that submits it.
+   *
+   * Completeness moves on its own when the field count changes: dropping a
+   * trailing empty field completes a passcode whose combined value never moved,
+   * and adding one un-completes it. Comparing the whole derived state, not the
+   * string it contains, is what makes those transitions reportable.
    */
   #reconcileFields(): void {
-    const previous = this.#lastValue;
-    const combined = this.#sync();
-    if (combined === previous) return;
-    this.#lastValue = combined;
-    this.dispatch("reconcile", { detail: { value: combined } });
+    const previous = this.#published;
+    const current = this.#sync();
+    if (previous && !statesDiffer(previous, current)) return;
+    this.dispatch("reconcile", { detail: { value: current.value } });
   }
 
   /**
@@ -517,16 +541,22 @@ export class OtpController extends Controller<HTMLElement> {
     return fields.length > 0 && fields.every((field) => field.value.length > 0);
   }
 
-  /** Mirrors the combined value into the form and the root's readable state. */
-  #sync(): string {
+  /**
+   * Mirrors the combined value into the form and the root's readable state, and
+   * records what was published so the next pass can compare against it.
+   */
+  #sync(): OtpState {
     const combined = this.#combinedValue();
 
     if (this.hasValueTarget) {
       this.valueTarget.value = combined;
     }
-    this.#state.write(this.element, this.#stateName(combined));
+    const state = this.#stateName(combined);
+    this.#state.write(this.element, state);
 
-    return combined;
+    const published: OtpState = { value: combined, state };
+    this.#published = published;
+    return published;
   }
 
   #stateName(combined: string): string {
@@ -535,9 +565,9 @@ export class OtpController extends Controller<HTMLElement> {
   }
 
   #syncAndDispatch(): void {
-    const combined = this.#sync();
-    if (combined === this.#lastValue) return;
-    this.#lastValue = combined;
+    const previous = this.#published;
+    const { value: combined } = this.#sync();
+    if (previous?.value === combined) return;
 
     this.dispatch("change", { detail: { value: combined } });
 

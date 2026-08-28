@@ -86,7 +86,7 @@ export const structureRules: StructureRules = {
   // No required targets: parent-only and child-only groups are both supported,
   // and an empty root degrades to the explicit `none` aggregate.
   "stimeo--checkbox": {},
-  "stimeo--clipboard": { requiredTargets: ["button", "feedback"] },
+  "stimeo--clipboard": { requiredTargets: ["button"] },
   "stimeo--collapsible": { requiredTargets: ["trigger", "content"] },
   "stimeo--color-picker": { requiredTargets: ["slider"] },
   "stimeo--combobox": { requiredTargets: ["input", "list"] },

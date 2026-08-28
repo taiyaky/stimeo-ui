@@ -1,14 +1,24 @@
 <%# Markup for the bulk-select / batch action bar demo.
     The controller links the select-all box to the rows (with indeterminate), reveals
-    the sticky bar once one or more rows are selected, keeps the count, and announces
-    it through the bar's own aria-live region. Row changes are handled by delegation,
-    so the "Add row" button (demo.js) works without per-row wiring. %>
+    the sticky bar once one or more rows are selected, keeps the count, and hands that
+    count to the shared stimeo--announcer your app seats once, in its layout, using the
+    wording in announce-text-value (the bar is revealed with its count already in place,
+    which a live region of its own could not announce). Row changes are handled by
+    delegation, so the "Add row" button (demo.js) works without per-row wiring, and rows
+    it appends are reconciled on their own. %>
 <%# Sample rows come from the locale file so the table reads in the page language. %>
 <%
   rows = t("components.bulk_select.demo.rows")
+  announce_text = t("components.bulk_select.demo.announce_text")
 %>
+<%# The two-stage pattern only reads if the page says it is one page of many, so the
+    demo states where total-count-value's 42 comes from. Nothing here is required by
+    the controller — a single-page table simply omits the selectAllPages control. %>
 <div class="bulk-demo" data-controller="stimeo--bulk-select"
-     data-stimeo--bulk-select-total-count-value="42">
+     data-stimeo--bulk-select-total-count-value="42"
+     data-stimeo--bulk-select-announce-text-value="<%= announce_text %>">
+  <p class="bulk-demo__context"><%= t("components.bulk_select.demo.page_context") %></p>
+
   <table class="bulk-demo__table">
     <thead>
       <tr>
@@ -44,9 +54,10 @@
     <%= t("components.bulk_select.demo.add_row") %>
   </button>
 
-  <%# Sticky batch action bar: its aria-live region announces the count. %>
+  <%# Sticky batch action bar. It carries role="toolbar", so stimeo--toolbar is composed
+      onto it for the arrow-key movement and single tab stop that role calls for. %>
   <div class="bulk-demo__bar" data-stimeo--bulk-select-target="bar" hidden
-       role="toolbar" aria-live="polite"
+       role="toolbar" data-controller="stimeo--toolbar"
        aria-label="<%= t("components.bulk_select.demo.bar_label") %>">
     <span class="bulk-demo__count">
       <span data-stimeo--bulk-select-target="count">0</span>
@@ -54,12 +65,18 @@
     </span>
     <button class="demo-trigger" type="button"
             data-stimeo--bulk-select-target="selectAllPages"
+            data-stimeo--toolbar-target="control"
             data-action="click->stimeo--bulk-select#selectAllPages">
       <%= t("components.bulk_select.demo.select_all_pages") %>
     </button>
     <button class="demo-trigger" type="button"
+            data-stimeo--toolbar-target="control"
             data-action="click->stimeo--bulk-select#clear">
       <%= t("components.bulk_select.demo.clear") %>
     </button>
   </div>
+
+  <%# Shown only while the whole set is selected. CSS reads data-all-pages on the
+      root, so the demo needs no script to keep this in step with the mode. %>
+  <p class="bulk-demo__all-pages-note"><%= t("components.bulk_select.demo.all_pages_note") %></p>
 </div>

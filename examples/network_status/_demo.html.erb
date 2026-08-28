@@ -2,10 +2,10 @@
     The library checks navigator.onLine initially and subscribes to the window's
     online/offline events, toggling the corresponding banner's hidden. The banners are
     the visual half only: a region revealed at the moment of the change is not reliably
-    read, so the wording goes to the shared announcer instead — assertively when the
-    connection drops, politely when it comes back. Since real online/offline is
-    environment-dependent, the demo's demo.js fakes the window events to reproduce the
-    behavior. %>
+    read, so the wording goes instead to the shared stimeo--announcer your app seats once,
+    in its layout — losing the connection interrupts (assertive), regaining it waits its
+    turn (polite). Since real online/offline is environment-dependent, the demo's demo.js
+    fakes the window events to reproduce the behavior. %>
 <div class="network-demo">
   <div class="network-demo__controls">
     <button class="demo-trigger" type="button" data-network-demo="offline">
@@ -34,15 +34,6 @@
       data-stimeo--network-status-target="online">
       <%= t("components.network_status.demo.online_message") %>
     </div>
-  </div>
-
-  <%# Shared announcer: losing the connection interrupts (assertive), regaining it
-      waits its turn (polite). %>
-  <div data-controller="stimeo--announcer">
-    <div class="visually-hidden"
-         data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
-    <div class="visually-hidden"
-         data-stimeo--announcer-target="assertive" aria-live="assertive" aria-atomic="true"></div>
   </div>
 
   <p class="network-demo__note"><%= t("components.network_status.demo.note") %></p>
