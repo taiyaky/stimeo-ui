@@ -328,7 +328,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
 
   /**
    * Arms `region`'s single pending timer. Callers reach here with the slot
-   * already free — `#announce` releases it, and a fired timer clears its own
+   * already free — `#drain` releases it before writing, and a fired timer clears its own
    * entry below — so this does not cancel again.
    */
   #schedule(region: HTMLElement, callback: () => void, delay: number): void {

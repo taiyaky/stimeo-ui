@@ -18,7 +18,7 @@ const REMOVE_DELAY = 4000;
  * Headless progress UI for ActiveStorage Direct Uploads: subscribes to the
  * `direct-upload:*` events and renders a per-file progress row (no dedicated APG
  * pattern; the rows follow the `role="progressbar"` practice). The companion to
- * {@link "file-dropzone"}, which leaves transport out of scope.
+ * {@link FileDropzoneController}, which leaves transport out of scope.
  *
  * Markup contract (identifier: `stimeo--direct-upload`):
  *   <div data-controller="stimeo--direct-upload"
@@ -63,7 +63,7 @@ const REMOVE_DELAY = 4000;
  * - `stimeo--direct-upload:done` dispatches `{ id: string }` when an upload
  *   completes successfully.
  * - `stimeo--direct-upload:reconcile` dispatches `{ ids: string[] }` — the uploads
- *   the Turbo cache rewind discarded, none of which can still finish
+ *   the Turbo cache rewind discarded, none of which can still finish.
  * - `stimeo--direct-upload:error` dispatches `{ id: string, error: string }`
  *   when an upload fails.
  *
@@ -344,10 +344,6 @@ export class DirectUploadController extends Controller<HTMLElement> {
   }
 
   /**
-   * Returns the widget to its pre-upload state just before Turbo caches the
-   * page, so the snapshot never replays rows for uploads that cannot resume.
-   */
-  /**
    * Rewinds for the snapshot and reports what that discarded. An upload in flight
    * cannot survive the navigation, so a consumer mirroring the rows would keep a
    * progress bar that never resolves.
@@ -392,7 +388,7 @@ export class DirectUploadController extends Controller<HTMLElement> {
     return (event as CustomEvent<UploadDetail>).detail ?? {};
   }
 
-  /** The file name every ActiveStorage `direct-upload:*` event carries. */
+  /** The event's file name, or `""` when it carries none. */
   #name(detail: UploadDetail): string {
     return detail.file?.name ?? "";
   }

@@ -5,9 +5,9 @@
  * the exemption is per fieldset — a control legal in one legend can still be
  * disabled by a second, outer fieldset, so the walk continues upward.
  *
- * Exported for the consumer that needs this rule *without* the rest of
- * {@link canTakeFocus}: `toolbar` bounds its own `hidden` walk at the toolbar
- * root, which is a different rule, so it composes the two itself.
+ * Exported on its own for callers that need the disabled-inheritance rule without
+ * the rest of {@link canTakeFocus} — a control's availability check, or a `hidden`
+ * walk bounded at a widget root, which is a different rule to compose with.
  */
 export function inheritsFieldsetDisabled(control: HTMLElement): boolean {
   let fieldset: Element | null = control.closest("fieldset[disabled]");

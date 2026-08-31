@@ -32,6 +32,7 @@ export const ANNOUNCING_CONTROLLERS: readonly string[] = [
   "stimeo--multi-select",
   "stimeo--nested-form",
   "stimeo--network-status",
+  "stimeo--password-strength",
   "stimeo--progress",
   "stimeo--skeleton",
   "stimeo--spinner",

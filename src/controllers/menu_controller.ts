@@ -30,7 +30,7 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * `keydown->stimeo--menu#onItemKeydown`) is supported alongside it. A
  * focus-moving key runs once (the action claims it and the delegate stands
  * down), and `activate`, reachable on both paths, claims the click so one
- * gesture activates once. See {@link #onDelegatedItemClick}.
+ * gesture activates once. See the delegated click listener below.
  *
  * Implements the WAI-ARIA APG **Menu Button** pattern (a button that opens a menu
  * of commands). Unlike `stimeo--dropdown` (a disclosure for arbitrary content),

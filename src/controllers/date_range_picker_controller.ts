@@ -140,7 +140,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
       parseISODateString(this.#startDate) ?? this.#clampToBounds(new Date()) ?? new Date();
     this.#focusedDate = anchor;
     this.#viewMonth = toISOMonthString(anchor);
-    // Two cells carry `aria-selected="true"` whenever a range is confirmed, so the
+    // A confirmed range can carry `aria-selected="true"` on two cells, so the
     // grid has to say that more than one is selectable — otherwise a single-select
     // grid is claiming two selections.
     if (this.hasGridTarget) this.gridTarget.setAttribute("aria-multiselectable", "true");

@@ -47,7 +47,7 @@ interface ReflectableController {
  *
  * The core controllers and the opt-in {@link positioningControllers} and
  * {@link cableControllers} are reflected, so `stimeo check` recognizes every
- * controller shipped through those public entrypoints. Reflecting positioning imports
+ * controller shipped through those entrypoints. Reflecting positioning imports
  * `@floating-ui/dom` here, but only at **build time** for manifest generation —
  * `manifest.ts` is not a shipped browser artifact. The core entrypoint
  * (`dist/index.js` / `import "stimeo-ui"`) still never imports it; only the opt-in

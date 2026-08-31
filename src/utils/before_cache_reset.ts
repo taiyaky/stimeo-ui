@@ -17,7 +17,7 @@
  * `deactivate()`, and one shared document listener no matter how many instances
  * are live. *What* to return to its initial state — which `data-state`, which
  * `hidden`, which `aria-busy` — stays in the controller, because no two
- * consumers answer it the same way (the `MicrotaskCoalescer` split).
+ * consumers answer it the same way.
  *
  * **Rewind state, not appearance.** The pass writes attributes the controller
  * itself owns; the visual result of those attributes is the consumer's CSS, and

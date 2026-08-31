@@ -419,8 +419,8 @@ describe("FormValidationController with multiple controls in one field", () => {
 
 /**
  * Field lookup is intentionally linear in controls plus DOM depth. Counting
- * `contains()` calls pins that property: the former field-by-control nested scan
- * performs one call per field/control pair and fails this bound decisively.
+ * `contains()` calls pins that property: a field-by-control nested scan would
+ * perform one call per field/control pair and blow this bound decisively.
  */
 describe("FormValidationController field lookup complexity", () => {
   let application: Application;

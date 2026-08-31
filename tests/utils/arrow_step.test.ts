@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  hasModifierChord,
   isReservedArrowChord,
   logicalArrowKey,
   logicalArrowStep,
@@ -131,5 +132,27 @@ describe("isReservedArrowChord", () => {
     expect(isReservedArrowChord(chord("ArrowUp", { altKey: true, shiftKey: true }), all)).toBe(
       false,
     );
+  });
+
+  describe("hasModifierChord", () => {
+    it("reserves a press carrying any single modifier", () => {
+      expect(hasModifierChord(chord("Home", { altKey: true }))).toBe(true);
+      expect(hasModifierChord(chord("Home", { ctrlKey: true }))).toBe(true);
+      expect(hasModifierChord(chord("End", { metaKey: true }))).toBe(true);
+      expect(hasModifierChord(chord("End", { shiftKey: true }))).toBe(true);
+    });
+
+    it("leaves a bare press to the widget", () => {
+      expect(hasModifierChord(chord("Home"))).toBe(false);
+      expect(hasModifierChord(chord("End"))).toBe(false);
+    });
+
+    it("answers for any key, unlike the arrow-only reservation", () => {
+      // The two predicates split the keyboard: arrows go to the one with the
+      // allow list, everything else to this one.
+      const press = chord("Home", { ctrlKey: true });
+      expect(isReservedArrowChord(press)).toBe(false);
+      expect(hasModifierChord(press)).toBe(true);
+    });
   });
 });

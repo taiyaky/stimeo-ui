@@ -173,6 +173,171 @@ describe("AnchoredController", () => {
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
+  it("re-attaches to a floating target swapped in at runtime", async () => {
+    await mount();
+    await runUpdate();
+    const fresh = document.createElement("div");
+    fresh.id = "fresh-floating";
+    fresh.setAttribute("data-stimeo--anchored-target", "floating");
+    fresh.setAttribute("role", "tooltip");
+    query("#floating").replaceWith(fresh);
+    await tick();
+
+    // The engine holds the element it was handed, so a swap has to re-attach or
+    // it keeps measuring and writing to the node that just left the document.
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(autoUpdate).toHaveBeenCalledTimes(2);
+    expect((autoUpdate.mock.calls.at(-1) as [Element, HTMLElement])[1]).toBe(fresh);
+
+    await runUpdate();
+    expect(fresh.style.left).toBe("12px");
+    expect(fresh.getAttribute("data-anchored-placement")).toBe("top-start");
+  });
+
+  it("re-attaches to an anchor swapped in at runtime", async () => {
+    await mount();
+    const fresh = document.createElement("button");
+    fresh.id = "fresh-anchor";
+    fresh.setAttribute("data-stimeo--anchored-target", "anchor");
+    query("#anchor").replaceWith(fresh);
+    await tick();
+
+    expect(autoUpdate).toHaveBeenCalledTimes(2);
+    expect((autoUpdate.mock.calls.at(-1) as [Element, HTMLElement])[0]).toBe(fresh);
+  });
+
+  it("starts tracking when the targets arrive after connect", async () => {
+    document.body.innerHTML = '<div id="root" data-controller="stimeo--anchored"></div>';
+    application = Application.start();
+    application.register("stimeo--anchored", AnchoredController);
+    await tick();
+    expect(autoUpdate).not.toHaveBeenCalled();
+
+    const root = query("#root");
+    const anchor = document.createElement("button");
+    anchor.setAttribute("data-stimeo--anchored-target", "anchor");
+    const floating = document.createElement("div");
+    floating.setAttribute("data-stimeo--anchored-target", "floating");
+    root.append(anchor, floating);
+    await tick();
+
+    // A stream that renders the frame first and fills it in later still gets
+    // positioned; nothing else would ever start the tracking.
+    expect(autoUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a pass that lands after the floating target left", async () => {
+    await mount();
+    const floating = query("#floating");
+    const call = autoUpdate.mock.calls.at(-1) as unknown[];
+    (call[2] as () => void)(); // start a pass; the computation is still pending
+    floating.remove();
+    await tick();
+    await tick();
+    // Reaching for a target that has left rejects inside the engine's promise
+    // chain — one unhandled rejection per tracked update, which fails this file.
+    expect(floating.hasAttribute("data-anchored-placement")).toBe(false);
+  });
+
+  it("neither writes nor dispatches once the controller is gone", async () => {
+    await mount();
+    const root = query("#root");
+    const floating = query("#floating");
+    const seen: unknown[] = [];
+    root.addEventListener("stimeo--anchored:position", (event) => seen.push(event));
+    const call = autoUpdate.mock.calls.at(-1) as unknown[];
+    (call[2] as () => void)();
+    root.remove();
+    await tick();
+    await tick();
+
+    // The cleanup stops future updates but cannot cancel one already computing,
+    // so the landing pass is what has to stand down.
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([]);
+    expect(floating.hasAttribute("data-anchored-placement")).toBe(false);
+  });
+
+  it("drops a pass from an attach that was superseded on the same elements", async () => {
+    await mount('data-stimeo--anchored-offset-value="8"');
+    let landStale!: (result: unknown) => void;
+    computePosition.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          landStale = resolve;
+        }),
+    );
+    const call = autoUpdate.mock.calls[0] as unknown[];
+    (call[2] as () => void)(); // a pass is now in flight against the first attach
+
+    await setValue("offset", "0"); // re-attaches against the very same pair
+
+    const seen: unknown[] = [];
+    query("#root").addEventListener("stimeo--anchored:position", (event) => seen.push(event));
+    landStale({ x: 99, y: 88, placement: "left", strategy: "absolute" });
+    await tick();
+
+    // Neither element changed, so only the attach's own identity separates the
+    // superseded pass from the live one.
+    expect(seen).toEqual([]);
+    expect(query("#floating").getAttribute("data-anchored-placement")).toBeNull();
+  });
+
+  it("falls back to the default placement when the declaration is not one", async () => {
+    await mount('data-stimeo--anchored-placement-value="sideways"');
+    await runUpdate();
+    const config = computePosition.mock.calls.at(-1)?.[2] as { placement: string };
+    // The hook is a published CSS contract carrying a resolved placement, so a
+    // value outside the set must not reach it.
+    expect(config.placement).toBe("bottom");
+  });
+
+  it("falls back to no offset and no padding when they are not finite", async () => {
+    await mount(
+      'data-stimeo--anchored-offset-value="1e999" data-stimeo--anchored-padding-value="oops"',
+    );
+    await runUpdate();
+    // A non-finite value poisons the computed coordinate, and the browser drops
+    // the whole declaration, leaving that axis wherever CSS had it.
+    expect(offset).not.toHaveBeenCalled();
+    expect(flip).toHaveBeenCalledWith({ padding: 0 });
+    expect(shift).toHaveBeenCalledWith({ padding: 0 });
+  });
+
+  it("maps flip, shift, and padding onto the engine", async () => {
+    await mount('data-stimeo--anchored-flip-value="false" data-stimeo--anchored-padding-value="6"');
+    await runUpdate();
+    expect(flip).not.toHaveBeenCalled();
+    expect(shift).toHaveBeenCalledWith({ padding: 6 });
+
+    vi.clearAllMocks();
+    autoUpdate.mockReturnValue(cleanup);
+    computePosition.mockResolvedValue({ x: 1, y: 2, placement: "bottom", strategy: "absolute" });
+    await setValue("shift", "false");
+    await runUpdate();
+    expect(shift).not.toHaveBeenCalled();
+  });
+
+  it("does not re-attach when a rewritten Value resolves to the same options", async () => {
+    await mount();
+    expect(autoUpdate).toHaveBeenCalledTimes(1);
+    // Writing the default explicitly is a real attribute change, so only the key
+    // comparison keeps the burst from stacking attach/detach cycles.
+    await setValue("placement", "bottom");
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(autoUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("collapses a multi-attribute batch into a single re-attach", async () => {
+    await mount();
+    const root = query("#root");
+    root.setAttribute("data-stimeo--anchored-placement-value", "left");
+    root.setAttribute("data-stimeo--anchored-offset-value", "12");
+    await tick();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(autoUpdate).toHaveBeenCalledTimes(2);
+  });
+
   it("has no a11y violations", async () => {
     await mount();
     await runUpdate();

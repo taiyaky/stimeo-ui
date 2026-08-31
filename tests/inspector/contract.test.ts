@@ -8,8 +8,7 @@ import { describeContractGuard } from "../helpers/contract";
 
 /**
  * Contract drift guard for the core + opt-in positioning controllers (see
- * `tests/helpers/contract.ts` for the shared checks and their rationale; other
- * registries run the same guard from their own suites, next to themselves).
+ * `tests/helpers/contract.ts` for the shared checks and their rationale).
  */
 // Resolve from the project root (Vitest's cwd) rather than `import.meta.url`:
 // under the coverage runner the module URL is not always a `file:` URL, so

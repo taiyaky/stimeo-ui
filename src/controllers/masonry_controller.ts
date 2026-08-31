@@ -64,7 +64,9 @@ function usableNumber(value: number, fallback: number): number {
  * Consumer contract:
  * - A declaration that cannot be read as a number (`"240px"`, an infinity) falls
  *   back to that Value's default and the grid keeps working; `0` and negatives are
- *   readable numbers and collapse to a single column instead.
+ *   readable numbers and are used as declared; the count falls back to one column
+ *   only when `minColumnWidth + gap` is not positive, or the container has no
+ *   measurable width.
  * - `data-column` belongs to this controller: it is written on every item it owns
  *   and taken back from an element that stops being one.
  */

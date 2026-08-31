@@ -348,7 +348,7 @@ export class DataGridController extends Controller<HTMLElement> {
     if (row && this.rowTargets.includes(row)) this.#toggleRow(row);
   }
 
-  /** Shared sort logic for both click and keyboard activation. */
+  /** Cycles a header's sort on keyboard activation and emits `sort`. */
   #cycleSort(header: HTMLElement): void {
     const direction = nextSortDirection(header.getAttribute("aria-sort") ?? "none");
     for (const other of this.columnHeaderTargets) {
@@ -361,8 +361,8 @@ export class DataGridController extends Controller<HTMLElement> {
   #toggleRow(row: HTMLElement): void {
     const selected = row.getAttribute("aria-selected") === "true";
     // Enforce single-ness on every toggle, not only when turning a row on:
-    // switching one *off* would otherwise leave a second `true` behind, and
-    // nothing else clears it for the rest of the session.
+    // switching one *off* would otherwise leave a second `true` behind until
+    // the next baseline pass.
     if (this.selectionValue === "single") {
       for (const other of this.rowTargets) {
         if (other !== row) other.setAttribute("aria-selected", "false");

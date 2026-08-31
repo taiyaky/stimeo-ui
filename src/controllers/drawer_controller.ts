@@ -81,8 +81,8 @@ export class DrawerController extends Controller<HTMLElement> {
    * rather than being re-derived from the declarative `open` Value (which would
    * close a user-opened drawer). The `open` Value only seeds a genuinely fresh
    * render. We normalize to a clean closed baseline first so {@link open} runs its
-   * full reveal + trap activation — the {@link FocusTrap} is a fresh instance
-   * after a reconnect and must be re-activated.
+   * full reveal + trap activation — the {@link FocusTrap} is inactive after a
+   * disconnect and must be re-activated.
    */
   override connect(): void {
     this.#connected = true;

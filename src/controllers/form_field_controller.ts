@@ -90,7 +90,7 @@ export class FormFieldController extends Controller<HTMLElement> {
 
   /** Collapses one target/morph batch into one silent ARIA reconciliation. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileDom());
-  /** ARIA ownership is scoped to the current singular control target. */
+  /** Returns borrowed control ARIA before Turbo snapshots the page. */
   readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   readonly #ariaDescribedBy = new AttributeLease<HTMLElement>("aria-describedby");
   readonly #ariaErrorMessage = new AttributeLease<HTMLElement>("aria-errormessage");

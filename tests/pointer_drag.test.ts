@@ -497,7 +497,7 @@ describe("PointerDragController", () => {
 
       // Turbo teardown detaches the element before disconnect() runs; an
       // element still in the DOM at disconnect time is an in-page MOVE and
-      // deliberately keeps its session (see the move-survival test).
+      // deliberately keeps its session.
       const instance = controller();
       const li = root();
       const parent = li.parentElement as HTMLElement;

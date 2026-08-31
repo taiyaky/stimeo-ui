@@ -4,8 +4,8 @@ import { IntersectionWatcher } from "../utils/intersection_watcher";
 /**
  * Headless **lazy frame**: defers a `<turbo-frame>`'s load until it nears the viewport
  * (or focus reaches it), to keep the initial render light. Turbo's own `loading="lazy"`
- * fires on *render*, not on viewport entry, so this drives an explicit `IntersectionObserver`
- * with a configurable `rootMargin` for early loading, plus a focus fallback so keyboard /
+ * observes with no margin, so the frame loads only once it is already in view; this
+ * drives an explicit `IntersectionObserver` with a configurable `rootMargin`, plus a focus fallback so keyboard /
  * assistive-tech users trigger the load too (no APG pattern).
  *
  * Markup contract (identifier: `stimeo--lazy-frame`):

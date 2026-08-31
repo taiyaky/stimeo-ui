@@ -22,10 +22,11 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *     </ul>
  *   </div>
  *
- * Implements the WAI-ARIA APG **Menu** pattern; the only differences from
- * `stimeo--menu` are the *trigger* (a `contextmenu` event or `Shift+F10` /
- * `ContextMenu` key, not a button click) and that the menu is shown at the
- * pointer coordinate.
+ * Implements the WAI-ARIA APG **Menu** pattern. The trigger is a `contextmenu`
+ * event or the `Shift+F10` / `ContextMenu` key rather than a button click, the
+ * menu is shown at the pointer coordinate, open state is exposed as `data-state`
+ * rather than `aria-expanded`, and each item carries its own `data-action`
+ * bindings.
  *
  * @remarks
  * Behavior only — the controller reflects the click coordinate as the CSS custom

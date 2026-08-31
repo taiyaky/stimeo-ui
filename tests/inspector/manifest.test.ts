@@ -73,8 +73,8 @@ describe("buildManifest", () => {
   });
 
   it("includes every core, positioning, and cable controller identifier", () => {
-    // Combined builds may merge additional registries, so this shared suite asserts
-    // the public registries as a required subset rather than an exact upper bound.
+    // A required subset, not an exact upper bound: every registry identifier has
+    // to be in the manifest, and the count is not what this pins.
     expect(Object.keys(manifest.controllers)).toEqual(
       expect.arrayContaining(Object.keys(allControllers)),
     );
@@ -701,7 +701,7 @@ describe("buildManifest", () => {
     // needs it to judge an *absent* attribute. A changed controller default
     // would otherwise silently arm the rule against the configuration it was
     // written to exempt — the same drift the composition guard above prevents,
-    // now that three rule families carry conditions.
+    // across all three rule families that carry conditions.
     const conditions: Array<[string, ValueCondition]> = [];
     for (const [id, rules] of Object.entries(a11yRules)) {
       for (const rule of rules) if (rule.when) conditions.push([id, rule.when]);

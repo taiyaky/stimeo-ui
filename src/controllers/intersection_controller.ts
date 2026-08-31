@@ -15,9 +15,10 @@ const RATIO_EPSILON = 0.01;
 /**
  * Headless **intersection primitive**: a thin declarative wrapper over
  * {@link IntersectionObserver} that turns viewport visibility into events and
- * state hooks. It is the scroll-triggered building block that infinite-scroll,
- * reading-progress, count-up ("animate when visible") and smart sticky headers
- * compose from, without each writing its own observer. No APG widget — a pure
+ * state hooks. It is the scroll-triggered building block for
+ * scroll-driven behavior — loading more on approach, "animate when visible"
+ * (compose it with `stimeo--count-up`), progress and sticky-header work — so a
+ * consumer does not write its own observer. No APG widget — a pure
  * state-detection utility. Core (zero dependencies).
  *
  * Markup contract (identifier: `stimeo--intersection`):

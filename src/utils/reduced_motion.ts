@@ -1,7 +1,6 @@
 /**
  * Shared `prefers-reduced-motion` lookup for the motion-aware controllers
- * (count-up, highlight, overflow-indicator, scroll-visibility, stick-to-bottom,
- * transition).
+ *.
  *
  * This one-liner keeps the media query string and the environment guard
  * single-sourced across them. The preference is intentionally re-read on every

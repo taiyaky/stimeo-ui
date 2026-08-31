@@ -22,8 +22,7 @@
  * check is the synchronous fast path (no probe, no reliance on batching), the
  * microtask probe is the fallback for the genuinely ambiguous remainder.
  *
- * Policy stays with the consumer (the `SafeTimeout` / `FocusTrap` lineage —
- * this util owns the discrimination only):
+ * Policy stays with the consumer; this util owns the discrimination only:
  *
  * - **Probe** ({@link disconnected}) when the teardown must eventually happen —
  *   live drag sessions, document listeners, teleported *content*. Call

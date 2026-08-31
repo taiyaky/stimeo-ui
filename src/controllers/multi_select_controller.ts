@@ -453,9 +453,9 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // detached node before the callback gets its turn.
     this.#reconcileActiveForInteraction();
     // Logical, not physical. The key is normalised rather than a new case added:
-    // the two horizontal branches are not mirror images — only one guards its
-    // edge, and the other hands focus back to the input — so swapping the key
-    // keeps each branch, guards and all, with its own direction. Both handlers
+    // the horizontal branches are not mirror images — one guards its edge and the
+    // other hands focus back to the input — so normalising the key keeps each
+    // branch, guards and all, with its own direction. Both handlers
     // read the same element on purpose; probing the focused child would let the
     // input and the chips disagree at the boundary between them.
     switch (logicalArrowKey(event.key, this.element)) {
@@ -893,7 +893,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     return this.#selectedOptions.map((option) => this.#optionValue(option));
   }
 
-  /** Normalized cardinality cap: zero is unlimited and positive fractions round down. */
+  /** Normalized cardinality cap: zero and below are unlimited; a positive value floors, never below 1. */
   get #selectionLimit(): number {
     if (!Number.isFinite(this.maxValue) || this.maxValue <= 0) return 0;
     return Math.max(1, Math.floor(this.maxValue));

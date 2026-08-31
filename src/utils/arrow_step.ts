@@ -105,3 +105,28 @@ export function isReservedArrowChord(
     (event.shiftKey && !allow.includes("shift"))
   );
 }
+
+/**
+ * True when a press arrived carrying any modifier, for the keys the browser and
+ * the OS own outright: return without calling `preventDefault()` and without
+ * moving any state.
+ *
+ * `Control+Home` and `Control+End` jump the document to its ends, and a widget
+ * that swallows them makes the shortcut work or not depending on where focus
+ * happens to sit. {@link isReservedArrowChord} answers the same question for the
+ * arrows, but returns `false` for every other key so that this one can decide.
+ *
+ * There is no `allow` list here on purpose. APG assigns no modifier chord to
+ * `Home`/`End`, so a widget that wanted one would be claiming a combination the
+ * pattern never gave it.
+ *
+ * @example
+ * ```ts
+ * case "Home":
+ * case "End":
+ *   if (hasModifierChord(event)) return;
+ * ```
+ */
+export function hasModifierChord(event: KeyboardEvent): boolean {
+  return event.altKey || event.ctrlKey || event.metaKey || event.shiftKey;
+}

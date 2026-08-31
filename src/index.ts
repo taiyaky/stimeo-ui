@@ -218,8 +218,9 @@ export {
 };
 
 /**
- * Maps Stimeo controller identifiers to their controller classes.
- * Identifiers use the official `stimeo--` namespace.
+ * Maps the core controller identifiers to their controller classes. The opt-in
+ * `stimeo-ui/positioning` and `stimeo-ui/cable` entry points export their own maps.
+ * Identifiers use the `stimeo--` namespace.
  */
 export const stimeoControllers = {
   "stimeo--accordion": AccordionController,
@@ -332,7 +333,9 @@ export const stimeoControllers = {
 } as const;
 
 /**
- * Registers all official Stimeo controllers on a Stimulus Application.
+ * Registers every controller in {@link stimeoControllers} on a Stimulus Application.
+ * The opt-in `stimeo-ui/positioning` and `stimeo-ui/cable` entry points register
+ * theirs separately.
  *
  * @param application - The Stimulus application to register controllers on.
  *

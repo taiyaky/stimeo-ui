@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { prefersReducedMotion } from "../utils/reduced_motion";
 import { TransitionCompletion } from "../utils/transition_completion";
 
@@ -20,9 +21,9 @@ const tokensOf = (value: string): string[] => value.split(/\s+/).filter(Boolean)
  *        data-stimeo--transition-leave-from-value="opacity-100"
  *        data-stimeo--transition-leave-to-value="opacity-0" hidden>…</div>
  *
- * `enter()` unhides the element, applies `enter` + `enterFrom`, then on the next frame
- * swaps `enterFrom` → `enterTo` so the CSS transition runs, and settles to `entered`
- * once the transition completes. `leave()` mirrors it and re-applies `hidden`.
+ * `enter()` unhides the element, applies `enter` + `enterFrom`, commits that frame,
+ * then on the next frame swaps `enterFrom` → `enterTo` so the CSS transition runs, and
+ * settles to `entered` once the transition completes. `leave()` mirrors it and re-applies `hidden`.
  * `toggle()` reverses the current direction. The element carries `data-transition-state`
  * (`entering` / `entered` / `leaving` / `left`) and `entered` / `left` events fire on
  * completion.
@@ -39,10 +40,14 @@ const tokensOf = (value: string): string[] => value.split(/\s+/).filter(Boolean)
  * fallback verbatim and keeps the wait armed even for a computed 0ms transition.
  * Under `prefers-reduced-motion: reduce` it switches instantly (no staging). An
  * interrupting call cancels the in-flight transition and starts the new one. State
- * lives solely in `hidden` / `data-transition-state`, and `connect()` reconciles to a
- * stable state (stripping any half-applied stage classes from a Turbo cache); the
- * terminal-event listeners, rAF, and fallback timer are released on `disconnect()`
- * (Turbo navigation included).
+ * lives solely in `hidden` / `data-transition-state`, and `connect()` reconciles it to
+ * the element's visibility. Only the classes this controller applied are ever removed:
+ * a stage token already on the element is the consumer's standing class, so it is
+ * neither claimed nor stripped — declare a token as a stage Value *or* author it, not
+ * both, because a token held by the consumer cannot be staged and the property it
+ * drives then resolves from their CSS alone. A half-applied stage is rewound on
+ * `turbo:before-cache` so it never reaches a snapshot. The terminal-event listeners,
+ * rAF, and fallback timer are released on `disconnect()` (Turbo navigation included).
  */
 export class TransitionController extends Controller<HTMLElement> {
   static override values = {
@@ -67,16 +72,26 @@ export class TransitionController extends Controller<HTMLElement> {
 
   /** Owns the cancellable completion wait (terminal events + bounded fallback). */
   readonly #transition = new TransitionCompletion();
+  /** Rewinds a half-applied stage before Turbo copies the page into its snapshot. */
+  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   #rafId: number | null = null;
+  /**
+   * Stage classes this controller put on the element. Removing by declaration
+   * instead would take a token the consumer also authored, and would strand the
+   * token that was applied when a Value changes mid-transition.
+   */
+  readonly #staged = new Set<string>();
 
   override connect(): void {
-    // Drop any half-applied stage classes a cache may have captured, then settle the
-    // state hook to match the element's current visibility.
-    this.#strip();
-    this.element.setAttribute("data-transition-state", this.element.hidden ? "left" : "entered");
+    this.#beforeCache.activate();
+    // Settle the state hook to match the element's current visibility. Nothing is
+    // stripped here: a stage token present at connect was not staged by this
+    // instance, so it belongs to the consumer.
+    this.#settleState();
   }
 
   override disconnect(): void {
+    this.#beforeCache.deactivate();
     this.#cancel();
   }
 
@@ -113,6 +128,11 @@ export class TransitionController extends Controller<HTMLElement> {
     const to = isEnter ? this.enterToValue : this.leaveToValue;
 
     this.#add(base, from);
+    // Commit the "from" frame before the swap: a rAF callback runs before this
+    // frame's style is computed, and an element arriving from `display: none` has no
+    // before-change style, so the transition would never start and completion would
+    // always fall back to the timer.
+    void this.element.offsetWidth;
     this.#rafId = this.#raf(() => {
       this.#rafId = null;
       this.#remove(from);
@@ -138,6 +158,23 @@ export class TransitionController extends Controller<HTMLElement> {
     }
   }
 
+  /** Writes the state hook the element's visibility implies. */
+  #settleState(): void {
+    this.element.setAttribute("data-transition-state", this.element.hidden ? "left" : "entered");
+  }
+
+  /**
+   * Returns the element to a settled state before Turbo copies the page.
+   *
+   * The snapshot is taken while the controller is still connected, so stripping on
+   * the next `connect()` would only repair the page after it has been painted from
+   * the cache. The pass is silent: `connect()` derives the state again on restore.
+   */
+  #rewindForCache(): void {
+    this.#cancel();
+    this.#settleState();
+  }
+
   /** Cancels any in-flight transition (interruption / teardown). */
   #cancel(): void {
     if (this.#rafId !== null) {
@@ -148,26 +185,36 @@ export class TransitionController extends Controller<HTMLElement> {
     this.#strip();
   }
 
+  /**
+   * Applies the stage tokens this controller does not already find on the
+   * element, and claims exactly those.
+   *
+   * A token already on the element is left unclaimed: it is either the consumer's
+   * standing class or one an earlier stage of this transition already claimed, and
+   * in neither case may this call take ownership of it. That is what keeps a
+   * standing class the consumer also named as a stage Value; the cost is that such
+   * a token cannot be staged, so the property it drives resolves from their CSS.
+   */
   #add(...lists: string[]): void {
-    const tokens = lists.flatMap(tokensOf);
-    if (tokens.length > 0) this.element.classList.add(...tokens);
+    for (const token of lists.flatMap(tokensOf)) {
+      if (this.element.classList.contains(token)) continue;
+      this.element.classList.add(token);
+      this.#staged.add(token);
+    }
   }
 
+  /** Drops the named tokens that are this controller's to drop. */
   #remove(...lists: string[]): void {
-    const tokens = lists.flatMap(tokensOf);
-    if (tokens.length > 0) this.element.classList.remove(...tokens);
+    for (const token of lists.flatMap(tokensOf)) {
+      if (!this.#staged.delete(token)) continue;
+      this.element.classList.remove(token);
+    }
   }
 
-  /** Removes every stage class so no half-applied state lingers. */
+  /** Removes every stage class this controller applied, so none lingers. */
   #strip(): void {
-    this.#remove(
-      this.enterValue,
-      this.enterFromValue,
-      this.enterToValue,
-      this.leaveValue,
-      this.leaveFromValue,
-      this.leaveToValue,
-    );
+    this.element.classList.remove(...this.#staged);
+    this.#staged.clear();
   }
 
   #raf(callback: () => void): number {

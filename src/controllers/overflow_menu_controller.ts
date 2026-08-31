@@ -387,8 +387,8 @@ export class OverflowMenuController extends Controller<HTMLElement> {
    *
    * With no known child at all (a fresh instance connecting to markup that already
    * holds banked items), a fully-banked snapshot's inert boundary preserves whether an
-   * unindexed run was prepended or appended before connect. Older or server-rendered
-   * markup has no boundary; for that compatibility path the saved index is used as the
+   * unindexed run was prepended or appended before connect. Markup that holds banked items but no boundary —
+   * server-rendered or hand-authored — uses the saved index as the
    * offset, the inverse of the move that banked it.
    */
   #merge(

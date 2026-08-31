@@ -90,8 +90,8 @@ export class BulkSelectController extends Controller<HTMLElement> {
 
   /** All-pages mode is a transient UI state, mirrored to `data-all-pages` so a
    *  `connect()` over markup that already carries the attribute rehydrates the
-   *  mode — a morph, a Turbo Stream, or a server that renders it back. A restore
-   *  visit serves the server's markup instead, so the mode does not survive one. */
+   *  mode — a morph, a Turbo Stream, a server that renders it back, or a restore
+   *  visit, whose cached snapshot carries the attribute too. */
   #allPagesMode = false;
   /** Last emitted figures, so a recompute reports only on a real change. */
   #lastCount = -1;

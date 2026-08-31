@@ -52,13 +52,13 @@ describe("ThemeController", () => {
     <div data-controller="stimeo--theme" ${attrs} role="radiogroup" aria-label="Theme">
       <button data-stimeo--theme-target="option" role="radio"
               data-action="click->stimeo--theme#set"
-              data-stimeo--theme-mode-param="light">Light</button>
+              data-value="light">Light</button>
       <button data-stimeo--theme-target="option" role="radio"
               data-action="click->stimeo--theme#set"
-              data-stimeo--theme-mode-param="dark">Dark</button>
+              data-value="dark">Dark</button>
       <button data-stimeo--theme-target="option" role="radio"
               data-action="click->stimeo--theme#set"
-              data-stimeo--theme-mode-param="system">System</button>
+              data-value="system">System</button>
     </div>`;
 
   const TOGGLE = `
@@ -86,8 +86,7 @@ describe("ThemeController", () => {
 
   const options = () =>
     Array.from(document.querySelectorAll<HTMLElement>("[data-stimeo--theme-target='option']"));
-  const optionByMode = (mode: string) =>
-    query<HTMLElement>(`[data-stimeo--theme-mode-param='${mode}']`);
+  const optionByMode = (mode: string) => query<HTMLElement>(`[data-value='${mode}']`);
 
   it("applies the resolved theme to the root on connect (system → light)", async () => {
     await start(RADIOGROUP());
@@ -252,7 +251,7 @@ describe("ThemeController", () => {
            data-stimeo--theme-mode-value="light" role="radiogroup" aria-label="Theme">
         <button data-stimeo--theme-target="option" role="radio"
                 data-action="click->stimeo--theme#set"
-                data-stimeo--theme-mode-param="dark">Dark</button>
+                data-value="dark">Dark</button>
       </div>
       <div id="preview"></div>`;
     application = Application.start();
@@ -341,6 +340,347 @@ describe("ThemeController", () => {
     controller.disconnect();
     setSystemDark(true);
     expect(root().getAttribute("data-theme")).toBe("light");
+  });
+
+  // --- Firing condition ---------------------------------------------------------
+
+  const changeLog = () => {
+    const seen: Array<{ mode: string; resolved: string }> = [];
+    document.addEventListener("stimeo--theme:change", (event) => {
+      seen.push((event as CustomEvent).detail);
+    });
+    return seen;
+  };
+
+  it("stays silent when the option already chosen is chosen again", async () => {
+    // The event means the selection or the effective theme moved; re-choosing what
+    // is already chosen is neither.
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="dark"`));
+    const seen = changeLog();
+
+    optionByMode("dark").click();
+    optionByMode("dark").click();
+
+    expect(seen).toEqual([]);
+    expect(root().getAttribute("data-theme")).toBe("dark");
+  });
+
+  it("stays silent on Home when the first option is already the selection", async () => {
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
+    const seen = changeLog();
+
+    optionByMode("light").focus();
+    optionByMode("light").dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true }),
+    );
+
+    expect(seen).toEqual([]);
+  });
+
+  it("announces when only the effective theme moves", async () => {
+    await start(RADIOGROUP());
+    const seen = changeLog();
+
+    setSystemDark(true);
+    setSystemDark(false);
+
+    expect(seen).toEqual([
+      { mode: "system", resolved: "dark" },
+      { mode: "system", resolved: "light" },
+    ]);
+  });
+
+  // --- Declarations that cannot be read ------------------------------------------
+
+  it("falls back to the document root when the target selector cannot be parsed", async () => {
+    await start(
+      RADIOGROUP(`data-stimeo--theme-mode-value="dark" data-stimeo--theme-target-value="#panel["`),
+    );
+
+    // The widget survives the unreadable declaration: hooks, ARIA and the roving
+    // Tab stop are all established.
+    expect(root().getAttribute("data-theme")).toBe("dark");
+    expect(optionByMode("dark").getAttribute("aria-checked")).toBe("true");
+    expect(options().filter((option) => option.tabIndex === 0)).toHaveLength(1);
+  });
+
+  it("keeps answering clicks after a target selector falls back", async () => {
+    await start(RADIOGROUP(`data-stimeo--theme-target-value="#panel["`));
+    optionByMode("light").click();
+    expect(root().getAttribute("data-theme")).toBe("light");
+    expect(optionByMode("light").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("does nothing when the target selector matches no element", async () => {
+    await start(
+      RADIOGROUP(`data-stimeo--theme-mode-value="dark" data-stimeo--theme-target-value="#absent"`),
+    );
+    expect(root().hasAttribute("data-theme")).toBe(false);
+    // The controls still describe the selection even with nowhere to paint it.
+    expect(optionByMode("dark").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("falls back to system when the mode declaration is outside the three modes", async () => {
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="auto"`));
+    expect(optionByMode("system").getAttribute("aria-checked")).toBe("true");
+    expect(root().getAttribute("data-theme")).toBe("light");
+  });
+
+  it("follows the OS after the mode declaration falls back", async () => {
+    // Reading the declaration as `system` everywhere is what keeps it from
+    // freezing halfway: resolved once at connect, then never again.
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="auto"`));
+    setSystemDark(true);
+    expect(root().getAttribute("data-theme")).toBe("dark");
+  });
+
+  it("ignores a stored value outside the three modes", async () => {
+    window.localStorage.setItem("stimeo-theme", "{}<script>");
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="dark"`));
+    expect(root().getAttribute("data-theme")).toBe("dark");
+    expect(optionByMode("dark").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("resolves an explicit light while the OS prefers dark", async () => {
+    mediaMatches = true;
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
+    expect(root().getAttribute("data-theme")).toBe("light");
+  });
+
+  it("toggles from the OS-resolved theme when the mode is system and the OS is dark", async () => {
+    mediaMatches = true;
+    await start(TOGGLE);
+    expect(document.querySelector("button")?.getAttribute("aria-pressed")).toBe("true");
+
+    // `system` resolving dark, so the 2-value toggle goes to the opposite.
+    (document.querySelector("button") as HTMLElement).click();
+    expect(root().getAttribute("data-theme")).toBe("light");
+    expect(document.querySelector("button")?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  // --- Options that appear, leave, or declare nothing -----------------------------
+
+  const appendOption = (mode: string, label = mode) => {
+    const group = query<HTMLElement>("[data-controller='stimeo--theme']");
+    const button = document.createElement("button");
+    button.setAttribute("role", "radio");
+    button.setAttribute("data-stimeo--theme-target", "option");
+    button.setAttribute("data-action", "click->stimeo--theme#set");
+    button.setAttribute("data-value", mode);
+    button.textContent = label;
+    group.appendChild(button);
+    return button;
+  };
+
+  const EMPTY_GROUP = `
+    <div data-controller="stimeo--theme" data-stimeo--theme-mode-value="system"
+         role="radiogroup" aria-label="Theme"></div>`;
+
+  it("keeps a Tab stop when the selected option is removed", async () => {
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="dark"`));
+    expect(optionByMode("dark").tabIndex).toBe(0);
+
+    optionByMode("dark").remove();
+    await tick();
+
+    // Nothing is selected any more, so APG puts the stop back on the first radio.
+    expect(options().filter((option) => option.tabIndex === 0)).toHaveLength(1);
+    expect(options()[0]?.tabIndex).toBe(0);
+  });
+
+  it("keeps a single Tab stop when options render after connect", async () => {
+    await start(EMPTY_GROUP);
+    appendOption("light");
+    appendOption("dark");
+    appendOption("system");
+    await tick();
+
+    expect(options().filter((option) => option.tabIndex === 0)).toHaveLength(1);
+    expect(optionByMode("system").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("answers the arrow keys for options that rendered after connect", async () => {
+    await start(EMPTY_GROUP);
+    appendOption("light");
+    appendOption("dark");
+    appendOption("system");
+    await tick();
+
+    optionByMode("light").focus();
+    optionByMode("light").dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }),
+    );
+
+    expect(document.activeElement).toBe(optionByMode("dark"));
+    expect(optionByMode("dark").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("does not call a radiogroup with no options a toggle", async () => {
+    // `aria-pressed` belongs to the 2-value contract, and a group whose options
+    // have not rendered is not that.
+    await start(EMPTY_GROUP);
+    expect(
+      query<HTMLElement>("[data-controller='stimeo--theme']").hasAttribute("aria-pressed"),
+    ).toBe(false);
+  });
+
+  it("keeps the first option tabbable when the mode matches none of them", async () => {
+    await start(`
+      <div data-controller="stimeo--theme" data-stimeo--theme-mode-value="system"
+           role="radiogroup" aria-label="Theme">
+        <button data-stimeo--theme-target="option" role="radio"
+                data-action="click->stimeo--theme#set"
+                data-value="light">Light</button>
+        <button data-stimeo--theme-target="option" role="radio"
+                data-action="click->stimeo--theme#set"
+                data-value="dark">Dark</button>
+      </div>`);
+
+    expect(options().map((option) => option.getAttribute("aria-checked"))).toEqual([
+      "false",
+      "false",
+    ]);
+    expect(options().map((option) => option.tabIndex)).toEqual([0, -1]);
+  });
+
+  it("never lets an option outside the three modes become the selection", async () => {
+    // The click path already refused it; the keyboard path has to agree, or the
+    // group ends up with two checked radios.
+    await start(`
+      <div data-controller="stimeo--theme" data-stimeo--theme-mode-value="light"
+           role="radiogroup" aria-label="Theme">
+        <button data-stimeo--theme-target="option" role="radio"
+                data-action="click->stimeo--theme#set"
+                data-value="light">Light</button>
+        <button data-stimeo--theme-target="option" role="radio"
+                data-action="click->stimeo--theme#set"
+                data-value="drak">Typo</button>
+        <button data-stimeo--theme-target="option" role="radio"
+                data-action="click->stimeo--theme#set"
+                data-value="system">System</button>
+      </div>`);
+
+    const typo = query<HTMLElement>("[data-value='drak']");
+    typo.click();
+    expect(root().getAttribute("data-theme")).toBe("light");
+
+    optionByMode("light").focus();
+    optionByMode("light").dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }),
+    );
+
+    expect(document.activeElement).toBe(typo);
+    expect(
+      options().filter((option) => option.getAttribute("aria-checked") === "true"),
+    ).toHaveLength(1);
+    expect(optionByMode("light").getAttribute("aria-checked")).toBe("true");
+  });
+
+  // --- Keys that belong to the browser --------------------------------------------
+
+  it("ignores a key pressed on something that is not an option", async () => {
+    await start(`
+      <div data-controller="stimeo--theme" data-stimeo--theme-mode-value="system"
+           role="radiogroup" aria-label="Theme">
+        <a id="inside" href="#x">help</a>
+        <button data-stimeo--theme-target="option" role="radio"
+                data-action="click->stimeo--theme#set"
+                data-value="light">Light</button>
+        <button data-stimeo--theme-target="option" role="radio"
+                data-action="click->stimeo--theme#set"
+                data-value="dark">Dark</button>
+      </div>`);
+    const link = query<HTMLElement>("#inside");
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    link.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(options().map((option) => option.getAttribute("aria-checked"))).toEqual([
+      "false",
+      "false",
+    ]);
+  });
+
+  it("leaves a modified Home or End to the browser", async () => {
+    // Control+Home jumps the document; a widget that swallows it makes the
+    // shortcut depend on where focus happens to sit.
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="dark"`));
+    const seen = changeLog();
+
+    for (const key of ["Home", "End"]) {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      optionByMode("dark").focus();
+      optionByMode("dark").dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+
+    expect(seen).toEqual([]);
+    expect(optionByMode("dark").getAttribute("aria-checked")).toBe("true");
+    expect(document.activeElement).toBe(optionByMode("dark"));
+  });
+
+  it("refuses a quoted value through the click path too", async () => {
+    // The declaration is the raw attribute, so a quoted spelling is simply
+    // outside the three modes. The click path reads the lane the checked test
+    // reads, so neither can accept what the other refuses.
+    await start(`
+      <div data-controller="stimeo--theme" data-stimeo--theme-mode-value="light"
+           role="radiogroup" aria-label="Theme">
+        <button data-stimeo--theme-target="option" role="radio"
+                data-action="click->stimeo--theme#set"
+                data-value="light">Light</button>
+        <button data-stimeo--theme-target="option" role="radio"
+                data-action="click->stimeo--theme#set"
+                data-value='"dark"'>Quoted</button>
+      </div>`);
+
+    const quoted = options()[1] as HTMLElement;
+    quoted.click();
+
+    expect(root().getAttribute("data-theme")).toBe("light");
+    expect(window.localStorage.getItem("stimeo-theme")).toBeNull();
+    expect(
+      options().filter((option) => option.getAttribute("aria-checked") === "true"),
+    ).toHaveLength(1);
+    expect(optionByMode("light").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("hands the change detail out as a copy", async () => {
+    // The baseline that tells a move from a repeat is kept here; a listener that
+    // writes to what it was handed must not be able to move it.
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="dark"`));
+    const seen: Array<{ mode: string; resolved: string }> = [];
+    document.addEventListener("stimeo--theme:change", (event) => {
+      const detail = (event as CustomEvent).detail as { mode: string; resolved: string };
+      seen.push({ ...detail });
+      detail.mode = "poisoned";
+    });
+
+    optionByMode("light").click();
+    optionByMode("light").click();
+
+    expect(seen).toEqual([{ mode: "light", resolved: "light" }]);
+  });
+
+  it("does not react to an OS change once an explicit mode is chosen", async () => {
+    // Reacting is only visible when there is something to react to, so the hook
+    // is taken away first: an explicit mode must leave it taken away.
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="dark"`));
+    expect(root().getAttribute("data-theme")).toBe("dark");
+
+    root().removeAttribute("data-theme");
+    setSystemDark(true);
+
+    expect(root().hasAttribute("data-theme")).toBe(false);
   });
 
   it("has no machine-detectable a11y violations", async () => {

@@ -217,15 +217,25 @@ export class FocusTrap {
    * content cannot be focused or reached by assistive technology, honoring the
    * `aria-modal="true"` contract. An element that was *already* `inert` is left
    * untracked so `#releaseBackground` does not wrongly clear it.
+   *
+   * The walk climbs from the container to `body` and inerts each ancestor's other
+   * children. Scanning only `body`'s children would skip the branch the container
+   * sits in — everything beside it inside that branch is background too, and a
+   * nested container is the ordinary case.
    */
   #isolateBackground(): void {
     const container = this.#getContainer();
     this.#inertedSiblings = [];
-    for (const sibling of Array.from(document.body.children)) {
-      if (!(sibling instanceof HTMLElement)) continue;
-      if (sibling.contains(container) || sibling.inert) continue;
-      sibling.inert = true;
-      this.#inertedSiblings.push(sibling);
+    for (let node: HTMLElement = container; node !== document.body; ) {
+      const parent = node.parentElement;
+      if (!parent) break;
+      for (const sibling of Array.from(parent.children)) {
+        if (!(sibling instanceof HTMLElement)) continue;
+        if (sibling === node || sibling.inert) continue;
+        sibling.inert = true;
+        this.#inertedSiblings.push(sibling);
+      }
+      node = parent;
     }
   }
 

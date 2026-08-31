@@ -259,7 +259,7 @@ describe("callTool", () => {
   });
 
   it("keeps the component-name list on stimeo_catalog, the discovery entry point", () => {
-    // Tier 2 of the description contract: the enumeration lives on the tool a
+    // The other half of the description contract: the enumeration lives on the tool a
     // component-name query should land on, instead of being repeated across all
     // four (clients truncate descriptions — 2KB each in the tightest known one —
     // so padding them costs reach elsewhere). This pins the list's presence here

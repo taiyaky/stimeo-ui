@@ -27,7 +27,8 @@ import { RovingTabindex, type RovingWrap, rovingMove } from "../utils/roving_tab
  * are **delegated on the container** — `keydown` for movement and `focusin` to
  * sync the tab stop when focus arrives by click or programmatically — so
  * dynamically added/removed items need no per-item `data-action`. It emits
- * `change` whenever the tabbable item changes.
+ * `change` when a key press or an incoming focus moves the tabbable item; connect
+ * and target reconciliation re-establish the tab stop silently.
  *
  * `change` dispatches `{ index, item }`.
  *

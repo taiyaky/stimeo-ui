@@ -38,8 +38,7 @@ function restoreField(element: Element): void {
 }
 
 /**
- * Headless **before-cache reset** — the most Hotwire-specific gap part (no APG
- * pattern). On `turbo:before-cache` it returns transient UI (open menus/modals,
+ * Headless **before-cache reset** — Hotwire-specific, with no APG pattern. On `turbo:before-cache` it returns transient UI (open menus/modals,
  * typed-in values, spinning indicators) to its initial state, so a page restored by
  * the Back button is not frozen mid-interaction. Place one on `<body>`.
  *

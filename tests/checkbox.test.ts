@@ -726,7 +726,7 @@ describe("CheckboxController form reset reconciliation", () => {
 
     // happy-dom resets the controls even when the reset event is cancelled. The
     // durable assertion here is the controller contract: it must not reconcile
-    // that simulated reset. Chromium covers the browser's cancelled default too.
+    // that simulated reset.
     expect(root().getAttribute("data-state")).toBe("all");
   });
 

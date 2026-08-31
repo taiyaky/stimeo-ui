@@ -18,7 +18,7 @@ import type { CheckReport, ControllerManifest, Diagnostic, FileReport, Manifest 
  * This is the executable entry point bundled as the `stimeo` npm bin. It is a
  * thin shell around {@link checkSource} and the bundled manifest: discover
  * files, run the engine, format the report, and set the exit code. All checking
- * logic lives in the engine so the CLI and the project's own checks use exactly the same
+ * logic lives in the engine, so every caller reaches the same verdict from one
  * code path. Both commands accept `--json` to emit machine-readable output for
  * editor tooling and CI.
  */

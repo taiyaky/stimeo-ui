@@ -1223,7 +1223,7 @@ describe("checkSource", () => {
       });
 
       // Same live-region contract on the opt-in cable controller: the author
-      // supplies the status target's live semantics (spec: typing-indicator).
+      // supplies the status target's live semantics.
       const typing = (status: string) => `
         <div data-controller="stimeo--typing-indicator">
           <textarea aria-label="Message"></textarea>

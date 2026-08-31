@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.10.0] - 2026-08-31
+
+Minor release with no new components. Eight existing ones are reworked — anchored,
+focus, password-reveal, password-strength, scroll-restore, scroll-visibility,
+theme, and transition — and a shared change to the focus trap reaches the six
+modal overlays too. Most of them changed a contract, so read Removed and Changed
+before upgrading. The Inspector manifest stays on schema v12.
+
+### Removed
+
+- theme: the `mode` action param. Options declare their mode with
+  `data-value="light|dark|system"` — migrate every option or it can never become
+  the selection.
+- password-strength: the live region on the `label` target. Drop its `aria-live`,
+  seat a `stimeo--announcer` on the page, and set `announceText`.
+- focus: `[autofocus]` initial focus and the optional scroll lock, neither of
+  which was ever implemented. Initial focus is the `initial` target, else the
+  first focusable descendant, else the container.
+
+### Added
+
+- password-strength: `announceText` (`{level}` / `{score}` / `{max}` / `{band}`),
+  a `setScore` action for a score computed outside the built-in heuristic, and a
+  `reconcile` event.
+- `stimeo check` warns when a page uses password-strength with no
+  `stimeo--announcer`.
+
+### Changed
+
+- alert-dialog, command-palette, confirm, dialog, drawer, sidebar, and focus:
+  background isolation walks from the element up to `<body>` and inerts each
+  ancestor's other children, so one nested below `<body>` isolates its own branch.
+- transition: declare a token as a stage Value **or** author it as a standing
+  class, not both — a token already on the element is the consumer's and is never
+  applied or removed. `connect()` no longer strips half-applied stage classes.
+- A half-applied state is rewound before Turbo caches the page, silently:
+  transition's stage classes, focus's `data-focus-trapped`, password-reveal's
+  revealed field, and everything password-strength derives from the field value.
+- focus reads its declarations at fixed moments: only `trap` is watched, `auto`
+  and `inert` are read when the trap turns on, and `restore` when it turns off.
+- A declaration that cannot be read falls back to its default instead of poisoning
+  the widget — anchored's `placement` / `offset` / `padding`, theme's `mode` /
+  `target`, scroll-visibility's `offset` / `root` / `focusSelector`,
+  password-strength's `minScore` / `levels`.
+- Targets and declarations swapped in at runtime are followed: anchored's `anchor`
+  / `floating`, password-reveal's `input` / `toggle`, password-strength's targets,
+  theme's options, scroll-visibility's `element` / `offset` / `mode`, and
+  scroll-restore's `key` / `axis`.
+- Events report transitions only — theme's `change` when `mode` or `resolved`
+  actually moved, scroll-visibility's `change` on a real visibility change
+  (connecting is silent), password-strength's announcement when the level changes.
+  A scroll with no vertical movement leaves scroll-visibility alone.
+- Smaller contract shifts: password-strength's `data-strength` bands anchor both
+  ends of the declared scale (a level count other than four moves the boundaries)
+  and its `meter` target needs an accessible name; scroll-restore always restores
+  instantly (so `scroll-behavior: smooth` no longer animates it) and writes
+  nothing for an element it never restored and the reader never scrolled; theme writes
+  `aria-pressed` only on a button and passes modified `Home` / `End` through.
+
+### Fixed
+
+- transition: `enter()` from `hidden` runs the CSS transition instead of popping
+  in, so `entered` arrives on the real terminal event rather than the safety
+  timeout.
+- A control that owns focus is no longer hidden or stranded: scroll-visibility
+  holds the hide until it blurs and `toTop` focuses without scrolling, and focus's
+  state hook and events follow the controller's own record of trapping.
+- Stored and measured state holds: scroll-restore keeps a saved offset that a
+  clamped restore would have overwritten and never republishes it under a new
+  `key`; password-reveal arms the `autoHide` it skipped on an already-revealed
+  field; anchored measures a target swapped in at runtime and writes no stale
+  placement after teardown.
+
 ## [0.9.0] - 2026-08-28
 
 Minor release with no new components. Ten existing ones are reworked —
@@ -783,6 +856,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.10.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.10.0
 [0.9.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.9.0
 [0.8.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.8.0
 [0.7.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.7.0

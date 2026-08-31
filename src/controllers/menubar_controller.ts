@@ -331,8 +331,8 @@ export class MenubarController extends Controller<HTMLElement> {
     const menu = item.closest<HTMLElement>("[role='menu']");
     if (!menu) return;
     const items = this.#itemsIn(menu);
-    // -1 when the key came from a non-navigable item (still focusable by mouse):
-    // the relative moves below then land on the first navigable item.
+    // -1 when the key came from an item outside this menu's navigable set:
+    // ArrowDown then lands on the first item, ArrowUp on the second-to-last.
     const index = items.indexOf(item);
     const length = items.length;
 
@@ -546,8 +546,8 @@ export class MenubarController extends Controller<HTMLElement> {
    * being hidden itself, a menu can stay visible after its owning top was removed,
    * an open pair can appear from a morph with no layer registered for it, and the
    * Tab stop can end up on a now-inert top, on a runtime-added one, or on none at
-   * all. Nothing is remembered between calls (except which side of the Escape stack
-   * this layer is on, which the stack itself does not expose), so the outcome is the
+   * all. The only state carried between calls is the tracked focus record and which side
+   * of the Escape stack this layer is on (which the stack itself does not expose), so the outcome is the
    * same whichever mutation arrived and calling it more often than needed is free.
    */
   #reconcile(): void {

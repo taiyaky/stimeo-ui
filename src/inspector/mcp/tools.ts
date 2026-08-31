@@ -9,7 +9,7 @@ import { DIAGNOSTIC_CODES } from "../types";
  *
  * Each MCP tool wraps an existing pure engine function ({@link checkSource},
  * {@link buildCheckReport}, manifest lookups) so the server, the CLI, and the
- * project's own CI gate share exactly the same code path. Each handler takes
+ * editor integration reach the same verdict from one engine. Each handler takes
  * `args` plus the slice of {@link ToolContext} it needs (the manifest, the
  * example index, or both) and returns a plain JSON-serializable object; the
  * handlers perform no I/O, so they are unit-tested directly without a
@@ -86,7 +86,7 @@ const DIAGNOSTIC_SCHEMA = {
     message: { type: "string" },
     line: { type: "integer", description: "1-based line where the problem was detected." },
     column: { type: "integer", description: "1-based column where the problem was detected." },
-    suggestion: { type: "string", description: "Fix suggestion (stage 4), when available." },
+    suggestion: { type: "string", description: "Human-readable fix suggestion, when available." },
   },
   required: ["code", "severity", "message", "line", "column"],
 } as const;
@@ -148,7 +148,8 @@ const EXAMPLE_RESULT_SCHEMA: ToolOutputSchema = {
     id: { type: "string", description: 'Controller identifier, e.g. "stimeo--menu".' },
     file: {
       type: "string",
-      description: "Repo-relative provenance of the example (the catalog demo sidecar).",
+      description:
+        "Repo-relative path the example was read from, e.g. examples/menu/_demo.html.erb.",
     },
     source: { type: "string", description: "The HTML/ERB example source." },
     guidance: { type: "string", description: "How to consume the example correctly." },
@@ -618,7 +619,7 @@ export interface ExampleResult {
  * attributes are demo styling placeholders the consumer must replace.
  */
 export const EXAMPLE_GUIDANCE =
-  "Verified example from the official Stimeo UI catalog (it passes stimeo_check against the " +
+  "Verified example from the library's own demo markup (it passes stimeo_check against the " +
   "bundled manifest). Behavior and accessibility come from the data-* attributes and any " +
   "role/aria-* attributes shown; keep those intact. class attributes are demo styling " +
   "placeholders — the library ships no CSS, so replace them with your own classes. ERB " +
@@ -738,7 +739,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
     title: "Get one controller's verified example markup",
     description:
       "Fetch verified example markup for one Stimeo UI controller by identifier " +
-      '(e.g. "stimeo--menu"). The example is the official catalog demo — it passes ' +
+      '(e.g. "stimeo--menu"). The example is the library\'s own verified demo markup — it passes ' +
       "stimeo_check against the bundled manifest, so use it as the reference for correct " +
       "structure, required targets, and author-supplied ARIA. class attributes in it are " +
       "demo styling placeholders to replace; the stimeo--* data attributes and role/aria-* " +

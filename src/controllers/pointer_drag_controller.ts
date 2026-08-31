@@ -31,8 +31,9 @@ interface KeyboardSession {
  * Headless **pointer-drag primitive**: a normalized pointer/touch/mouse drag
  * lifecycle with a built-in keyboard alternative. It deliberately does NOT decide
  * what a drag *means* (reorder, dismiss, resize…) — it only emits a clean,
- * accessibility-friendly drag signal that higher-level behaviors (sortable,
- * swipe-actions, bottom-sheet, split-pane…) compose from. No dedicated APG
+ * accessibility-friendly drag signal that higher-level behaviors compose from —
+ * `stimeo--sortable` is one, and reordering, dismissal, and resizing are the usual
+ * meanings a consumer layers on. No dedicated APG
  * pattern exists for drag-and-drop; the keyboard model below is the accepted
  * alternative-input technique (WCAG 2.1.1 / 2.5.7 Dragging Movements). Core
  * (zero dependencies).
@@ -286,9 +287,7 @@ export class PointerDragController extends Controller<HTMLElement> {
 
     // A descendant widget that already claimed the key (a nested roving list, a
     // segmented field inside the handle) must not ALSO drive the drag —
-    // composition depends on this yield. This controller is the "grabbed drag
-    // handle" that the other yields name as the widget they defer to, so it owes
-    // the same courtesy downward.
+    // composition depends on this yield.
     if (event.defaultPrevented) return;
     // A chorded arrow belongs to the browser. "Someone already consumed it"
     // outranks that, so it is checked after the yield above.

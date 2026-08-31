@@ -257,7 +257,7 @@ export class ResizableController extends Controller<HTMLElement> {
     }
   }
 
-  /** Double-click or Enter to collapse the primary pane, or put it back. */
+  /** Collapses the primary pane to its minimum, or returns it to the last position. */
   toggle(): void {
     const { min, max } = this.#range;
     if (this.#position > min) {

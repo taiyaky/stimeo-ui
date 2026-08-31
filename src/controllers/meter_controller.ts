@@ -52,7 +52,7 @@ const OWNED_VALUE_TEXT = "data-stimeo--meter-owns-valuetext";
  * Behavior only. Because state must not be conveyed by color alone (WCAG 1.4.1),
  * a consumer-provided `valueText` template feeds `aria-valuetext` so the segment
  * is also available as text; a consumer that authors `aria-valuetext` itself keeps
- * it instead (see {@link OWNED_VALUE_TEXT}). Threshold presence is read from the
+ * it instead: only text this controller marked as its own is ever taken back. Threshold presence is read from the
  * *attributes* (an absent attribute means "no threshold"), not from a sentinel value.
  */
 export class MeterController extends Controller<HTMLElement> {

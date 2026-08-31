@@ -44,11 +44,6 @@ export class StepIndicatorController extends Controller<HTMLElement> {
   declare currentValue: number;
 
   /**
-   * Whether the target callbacks may render. Stimulus reports the authored steps
-   * as connected before `connect()` and the remaining ones as disconnected after
-   * `disconnect()`, so this keeps a connect at one render pass, not one per step.
-   */
-  /**
    * Collapses a batch of step callbacks — and a morph that swaps `current` with
    * them — into one repaint. Replacing a list of N steps delivers N callbacks, and
    * each one would otherwise rewrite every step's state.

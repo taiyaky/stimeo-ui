@@ -397,7 +397,7 @@ export class SubmitOnceController extends Controller<HTMLElement> {
     for (const element of Array.from(form.elements)) {
       if (this.#isNativeSubmitControl(element)) controls.add(element);
     }
-    // Browsers historically omit input[type=image] from form.elements. Search
+    // Browsers omit input[type=image] from form.elements. Search
     // the form's tree root as well so descendant and external `form=` image
     // submitters receive the same guard without broadening into sibling forms.
     const root = form.getRootNode() as ParentNode;

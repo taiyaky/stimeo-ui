@@ -29,7 +29,7 @@ import {
 /**
  * The core Inspector engine: checks a single HTML/ERB source string against the
  * manifest and returns diagnostics. It is **input-path agnostic** — the same
- * function backs both the project's own contract checks and the user-facing CLI.
+ * function backs the CLI, the MCP server, and an editor integration alike.
  *
  * The check runs in staged passes:
  * - **Stage 1 (names/spelling):** every `stimeo--*` controller, target, value,

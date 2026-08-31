@@ -57,8 +57,8 @@ export class AlertDialogController extends Controller<HTMLElement> {
   declare readonly hasInitialFocusTarget: boolean;
 
   /**
-   * Owns the modal side effects. Escape is routed through {@link cancel} so it
-   * emits the same event as the cancel button (tagged `"escape"`); focus falls
+   * Owns the modal side effects. Escape takes the same cancel path as
+   * {@link cancel} and emits the same event, tagged `"escape"` instead of `"user"`; focus falls
    * back to the trigger when nothing was focused before opening.
    */
   readonly #trap = new FocusTrap(() => this.dialogTarget, {

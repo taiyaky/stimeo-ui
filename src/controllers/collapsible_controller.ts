@@ -58,7 +58,7 @@ export class CollapsibleController extends Controller<HTMLElement> {
    * `open` Value disagrees. An already-open region remains open without a
    * close/reopen cycle. The Value only seeds a genuinely fresh render where no
    * state attribute is present yet; any opening animation in that case belongs to
-   * the consumer's CSS. Mirrors `sidebar`'s `#restoreCollapsed`.
+   * the consumer's CSS.
    */
   override connect(): void {
     this.#connected = true;

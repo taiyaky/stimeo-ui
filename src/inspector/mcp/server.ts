@@ -250,7 +250,7 @@ export class McpSession {
         uri: `${EXAMPLE_RESOURCE_PREFIX}${id}`,
         name: id,
         title: `Example markup — ${id}`,
-        description: `Verified catalog demo markup for ${id} (passes stimeo_check).`,
+        description: `Verified demo markup for ${id} (passes stimeo_check).`,
         mimeType: "text/x-erb",
       });
     }

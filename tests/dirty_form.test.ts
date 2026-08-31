@@ -257,7 +257,7 @@ describe("DirtyFormController", () => {
 
     submit();
     // happy-dom does not synchronously synthesize the platform formdata event
-    // from the constructor; the Chromium regression verifies that integration.
+    // from the constructor, so it is dispatched explicitly here.
     form().dispatchEvent(new Event("formdata"));
     const formSubmission = {};
     submitStart(formSubmission);

@@ -18,8 +18,7 @@ import { describe, expect, it } from "vitest";
  *    the prototype, indistinguishable from public actions, and make the reverse
  *    direction unsound.
  *
- * Every controller registry that `buildManifest` reflects must run this guard
- * from the suite that owns that registry.
+ * Call this from the suite that owns a manifest-reflected controller registry.
  */
 
 /** Lifecycle methods Stimulus calls; never user actions. */

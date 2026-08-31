@@ -169,7 +169,7 @@ describe("SubmitOnceController", () => {
       '<input id="image-submit" type="image" value="commit" alt="Send">',
     );
     const image = control("#image-submit") as HTMLInputElement;
-    // Real browsers historically exclude image submitters from form.elements.
+    // Real browsers exclude image submitters from form.elements.
     // Shadow happy-dom's broader collection so this test fixes that engine gap.
     vi.spyOn(HTMLFormElement.prototype, "elements", "get").mockReturnValue(
       [] as unknown as HTMLFormControlsCollection,

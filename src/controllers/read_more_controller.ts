@@ -61,7 +61,7 @@ export class ReadMoreController extends Controller<HTMLElement> {
     // explicit `data-state="expanded"`/`"collapsed"` is honored verbatim so a block
     // the user expanded *or* collapsed survives a back-navigation, even when the
     // declarative `collapsed` Value disagrees. The Value seeds only a genuinely fresh
-    // render (no `data-state` yet). Mirrors `sidebar`'s `#restoreCollapsed`.
+    // render (no `data-state` yet).
     this.#collapsed = this.#initialCollapsed();
     this.#syncTargets();
   }

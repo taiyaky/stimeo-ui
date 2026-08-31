@@ -28,8 +28,9 @@ const countElements = (nodes: NodeList): number => {
  * Scrolling recomputes pinned and reflects `data-pinned`, emitting `pin` on change; the
  * `scrollToBottom` action jumps back down (a "new messages" button).
  *
- * A container renders at `scrollTop` 0 — unpinned — so out of the box it flags the first
- * append rather than following it. `pinOnConnect` opts into the other starting point:
+ * A container that already overflows renders at `scrollTop` 0 — further than
+ * `threshold` from the bottom, so unpinned — and flags the first append rather
+ * than following it. `pinOnConnect` opts into the other starting point:
  * `connect()` jumps to the bottom and reads the state back from where it landed. It runs
  * on every connect, so a container inserted or re-rendered later (a Turbo Stream, a panel
  * built on open) starts at the bottom too — which a once-per-document page event cannot

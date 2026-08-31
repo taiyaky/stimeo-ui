@@ -1,15 +1,23 @@
 <%# Markup for the password-strength demo.
     The controller scores the field with a lightweight zero-dependency heuristic and
-    drives the meter (aria-valuenow), the data-strength token, and the 0–1 fill on the
-    --stimeo--password-strength custom property. The input sits inside the controller so
-    its data-action input->...#evaluate binds directly. Level labels are localized via
-    the levels value; demo.css colors the bar by the locale-independent data-strength band,
-    so the look never depends on the (translated) label text. The library writes no CSS. %>
+    drives the meter (aria-valuenow), the data-strength token, the 0–1 fill on the
+    --stimeo--password-strength custom property, and the visible readout — all on the
+    keystroke that caused them. The input sits inside the controller so its data-action
+    input->...#evaluate binds directly. Level labels are localized via the levels value;
+    demo.css colors the bar by the locale-independent data-strength band, so the look
+    never depends on the (translated) label text.
+
+    The readout is plain visible output, not a live region: the settled level is
+    debounced into the shared stimeo--announcer your app seats once, in its layout.
+    Announcing is opt-in through announce-text-value and only fires when the level
+    actually changes. The library writes no CSS. %>
 <% levels = t("components.password_strength.demo.levels").to_json %>
+<% announcement = t("components.password_strength.demo.announcement") %>
 <div
   class="password-strength"
   data-controller="stimeo--password-strength"
-  data-stimeo--password-strength-levels-value="<%= levels %>">
+  data-stimeo--password-strength-levels-value="<%= levels %>"
+  data-stimeo--password-strength-announce-text-value="<%= announcement %>">
   <label class="password-strength__label" for="password-strength-demo-input">
     <%= t("components.password_strength.demo.label") %>
   </label>
@@ -34,7 +42,6 @@
   <span
     class="password-strength__readout"
     id="password-strength-demo-readout"
-    aria-live="polite"
     data-stimeo--password-strength-target="label"></span>
 </div>
 <p class="password-strength__hint"><%= t("components.password_strength.demo.hint") %></p>

@@ -256,6 +256,310 @@ describe("ScrollVisibilityController", () => {
     expect(element().hidden).toBe(false);
   });
 
+  // --- Event contract ---------------------------------------------------------
+
+  it("does not announce anything when connecting alone", async () => {
+    const changes: boolean[] = [];
+    // The controller dispatches on its root element, which doesn't exist until
+    // mount; listen on document (and clean up) to catch any connect-time event.
+    const onChange = (event: Event) => {
+      changes.push((event as CustomEvent<{ visible: boolean }>).detail.visible);
+    };
+    document.addEventListener("stimeo--scroll-visibility:change", onChange);
+    try {
+      await start(offsetMarkup);
+      // Connecting reflects the state the markup already carries; it is not a
+      // transition, so a Turbo restore must not replay it.
+      expect(changes).toEqual([]);
+      expect(root().getAttribute("data-state")).toBe("hidden");
+    } finally {
+      document.removeEventListener("stimeo--scroll-visibility:change", onChange);
+    }
+  });
+
+  it("announces a transition once, not on every scroll that keeps the state", async () => {
+    await start(offsetMarkup);
+    const changes: boolean[] = [];
+    root().addEventListener("stimeo--scroll-visibility:change", (event) => {
+      changes.push((event as CustomEvent<{ visible: boolean }>).detail.visible);
+    });
+    await scrollToY(500);
+    await scrollToY(600);
+    await scrollToY(700);
+    expect(changes).toEqual([true]);
+    await scrollToY(100);
+    expect(changes).toEqual([true, false]);
+  });
+
+  it("stops the coalesced measurement so a burst cannot outlive disconnect", async () => {
+    await start(offsetMarkup);
+    const changes: boolean[] = [];
+    root().addEventListener("stimeo--scroll-visibility:change", (event) => {
+      changes.push((event as CustomEvent<{ visible: boolean }>).detail.visible);
+    });
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--scroll-visibility",
+    );
+    // Two events in one burst must coalesce into a single pending frame, so the
+    // one cancel in disconnect is enough to leave nothing running.
+    setScrollY(800);
+    window.dispatchEvent(new Event("scroll"));
+    window.dispatchEvent(new Event("scroll"));
+    controller?.disconnect();
+    await settle();
+    expect(element().hidden).toBe(true);
+    expect(changes).toEqual([]);
+  });
+
+  // --- Value declarations ------------------------------------------------------
+
+  it("falls back to the documented defaults when no value is declared", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility">
+        <button type="button" hidden
+                data-stimeo--scroll-visibility-target="element"
+                data-action="stimeo--scroll-visibility#toTop">Back to top</button>
+      </div>`);
+    // offset defaults to 400 …
+    await scrollToY(399);
+    expect(element().hidden).toBe(true);
+    await scrollToY(401);
+    expect(element().hidden).toBe(false);
+    // … and mode defaults to the amount threshold, not the direction one, so
+    // scrolling further down keeps it revealed.
+    await scrollToY(900);
+    expect(element().hidden).toBe(false);
+  });
+
+  it("reads an unparsable root selector as absent instead of dying on it", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-root-value="#broken[["
+           data-stimeo--scroll-visibility-offset-value="400">
+        <button type="button" hidden
+                data-stimeo--scroll-visibility-target="element"
+                data-action="stimeo--scroll-visibility#toTop">Back to top</button>
+      </div>`);
+    expect(root().getAttribute("data-state")).toBe("hidden");
+    await scrollToY(500);
+    expect(element().hidden).toBe(false);
+  });
+
+  it("reads an unparsable focus selector as absent instead of throwing per click", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-focus-selector-value="#broken(("
+           data-stimeo--scroll-visibility-offset-value="400">
+        <button type="button" data-stimeo--scroll-visibility-target="element"
+                data-action="stimeo--scroll-visibility#toTop">Top</button>
+      </div>
+      <main id="main">Content</main>`);
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--scroll-visibility",
+    ) as unknown as { toTop: () => void };
+    expect(() => controller.toTop()).not.toThrow();
+    expect(window.scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "smooth" });
+  });
+
+  it("reads a non-numeric offset as the default threshold", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-offset-value="lots">
+        <button type="button" hidden
+                data-stimeo--scroll-visibility-target="element"
+                data-action="stimeo--scroll-visibility#toTop">Back to top</button>
+      </div>`);
+    await scrollToY(500);
+    expect(element().hidden).toBe(false);
+  });
+
+  it("keeps the near-top reveal guarantee when the offset is non-numeric", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-offset-value="lots"
+           data-stimeo--scroll-visibility-mode-value="direction">
+        <header data-stimeo--scroll-visibility-target="element">Site header</header>
+      </div>`);
+    // Scrolling *down* inside the near-top band still reveals: the guarantee has
+    // to win over the direction reading, which a NaN threshold cannot do.
+    await scrollToY(50);
+    expect(element().hidden).toBe(false);
+    await scrollToY(1200); // past the default threshold, heading down → hidden
+    expect(element().hidden).toBe(true);
+  });
+
+  it("re-renders when the offset changes at runtime", async () => {
+    await start(offsetMarkup);
+    await scrollToY(200);
+    expect(element().hidden).toBe(true);
+    root().setAttribute("data-stimeo--scroll-visibility-offset-value", "100");
+    await tick();
+    expect(element().hidden).toBe(false);
+  });
+
+  it("re-renders when the mode changes at runtime", async () => {
+    await start(offsetMarkup);
+    await scrollToY(200);
+    expect(element().hidden).toBe(true); // below the amount threshold
+    // Direction mode always reveals near the very top, so the same position
+    // resolves the other way.
+    root().setAttribute("data-stimeo--scroll-visibility-mode-value", "direction");
+    await tick();
+    expect(element().hidden).toBe(false);
+  });
+
+  it("keeps the state when a mode change lands where direction has no answer", async () => {
+    await start(offsetMarkup);
+    await scrollToY(500);
+    expect(element().hidden).toBe(false);
+    // Past the threshold and with no movement since, direction mode has no
+    // direction to read, so the visible state stands until the next scroll.
+    root().setAttribute("data-stimeo--scroll-visibility-mode-value", "direction");
+    await tick();
+    expect(element().hidden).toBe(false);
+    await scrollToY(900); // now there is a downward movement to read
+    expect(element().hidden).toBe(true);
+  });
+
+  // --- Focus retention ---------------------------------------------------------
+
+  it("holds a hide back while the control itself owns focus", async () => {
+    await start(offsetMarkup);
+    const changes: boolean[] = [];
+    root().addEventListener("stimeo--scroll-visibility:change", (event) => {
+      changes.push((event as CustomEvent<{ visible: boolean }>).detail.visible);
+    });
+    await scrollToY(500);
+    element().focus();
+    expect(document.activeElement).toBe(element());
+
+    await scrollToY(100);
+    // Still reachable: hiding it here would drop focus to the document body.
+    expect(element().hidden).toBe(false);
+    expect(changes).toEqual([true]);
+
+    element().blur();
+    await settle();
+    expect(element().hidden).toBe(true);
+    expect(changes).toEqual([true, false]);
+  });
+
+  it("re-decides a held-back hide from the scroll position at blur time", async () => {
+    await start(offsetMarkup);
+    await scrollToY(500);
+    element().focus();
+    await scrollToY(100); // deferred
+    await scrollToY(700); // back past the threshold before focus leaves
+    element().blur();
+    await settle();
+    expect(element().hidden).toBe(false);
+  });
+
+  it("applies a hide deferred by a focused descendant once that descendant blurs", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-offset-value="400">
+        <div hidden data-stimeo--scroll-visibility-target="element">
+          <button type="button" id="nested"
+                  data-action="stimeo--scroll-visibility#toTop">Back to top</button>
+        </div>
+      </div>`);
+    const panel = element();
+    const nested = document.getElementById("nested") as HTMLElement;
+    await scrollToY(500);
+    expect(panel.hidden).toBe(false);
+
+    // `blur` does not bubble, so the deferral has to ride the focused button
+    // itself: a listener on the panel would never fire and the hide would be
+    // held forever.
+    nested.focus();
+    await scrollToY(100);
+    expect(panel.hidden).toBe(false);
+
+    nested.blur();
+    await settle();
+    expect(panel.hidden).toBe(true);
+  });
+
+  it("reflects state without a control to show, and without consulting focus", async () => {
+    // The host may carry only `data-state` and let CSS do the showing. Nothing
+    // on the path may reach for a target that was never declared.
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-offset-value="400"></div>`);
+    const changes: boolean[] = [];
+    root().addEventListener("stimeo--scroll-visibility:change", (event) => {
+      changes.push((event as CustomEvent<{ visible: boolean }>).detail.visible);
+    });
+    await scrollToY(500);
+    expect(root().getAttribute("data-state")).toBe("visible");
+    expect(changes).toEqual([true]);
+  });
+
+  // --- Target lifecycle --------------------------------------------------------
+
+  it("drops a hide held by a descendant when the target is disconnected", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-offset-value="400">
+        <div hidden data-stimeo--scroll-visibility-target="element">
+          <button type="button" id="nested">Back to top</button>
+        </div>
+      </div>`);
+    const panel = element();
+    const nested = document.getElementById("nested") as HTMLElement;
+    await scrollToY(500);
+    nested.focus();
+    await scrollToY(100); // held back while the nested button owns focus
+    expect(panel.hidden).toBe(false);
+
+    const changes: boolean[] = [];
+    root().addEventListener("stimeo--scroll-visibility:change", (event) => {
+      changes.push((event as CustomEvent<{ visible: boolean }>).detail.visible);
+    });
+    panel.remove();
+    await settle();
+    // The held-back hide left with its target: blurring the detached button must
+    // not drive the host from off-page state.
+    nested.blur();
+    await settle();
+    expect(changes).toEqual([]);
+    expect(root().getAttribute("data-state")).toBe("visible");
+  });
+
+  it("writes the current visibility onto a control that arrives after connect", async () => {
+    await start(offsetMarkup);
+    await scrollToY(500);
+    expect(element().hidden).toBe(false);
+    // A Turbo Stream replaces the control with its authored (hidden) markup.
+    root().innerHTML = `
+      <button type="button" hidden
+              data-stimeo--scroll-visibility-target="element"
+              data-action="stimeo--scroll-visibility#toTop">Back to top</button>`;
+    await settle();
+    expect(element().hidden).toBe(false);
+    expect(root().getAttribute("data-state")).toBe("visible");
+  });
+
+  // --- Direction mode edges ----------------------------------------------------
+
+  it("keeps the current visibility when a scroll carries no vertical movement", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-offset-value="100"
+           data-stimeo--scroll-visibility-mode-value="direction">
+        <header data-stimeo--scroll-visibility-target="element">Site header</header>
+      </div>`);
+    await scrollToY(600); // down → hidden
+    await scrollToY(300); // up → shown
+    expect(element().hidden).toBe(false);
+    // A horizontal scroll fires `scroll` without moving scrollY: no direction.
+    await scrollToY(300);
+    expect(element().hidden).toBe(false);
+  });
+
   it("has no machine-detectable a11y violations", async () => {
     await start(offsetMarkup);
     await scrollToY(500);

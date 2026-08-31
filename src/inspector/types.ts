@@ -617,15 +617,14 @@ export interface Manifest {
  * A target requirement that only exists once another *optional* target is
  * present.
  *
- * `requiredTargets` is unconditional, which cannot express the shape two
- * controllers actually have: a feature that is entirely opt-in, but **incomplete
- * without its whole set**. A breadcrumb without any `collapsible` is a valid plain
+ * `requiredTargets` is unconditional, which cannot express a feature that is
+ * entirely opt-in but **incomplete without its whole set**. A breadcrumb without any `collapsible` is a valid plain
  * trail; add one and the disclosure (`ellipsis` + `trigger`) becomes mandatory,
  * because without it the collapsed items have no control that can reveal them. A
  * file-dropzone without an `itemTemplate` never renders a list; add one without a
  * `list` and the selected files render nowhere.
  *
- * Both fail the same way: the required targets are *present enough* to pass every
+ * These fail the same way: the required targets are *present enough* to pass every
  * other check, the page loads, `stimeo check` is green — and the feature silently
  * does nothing. Making the trigger target unconditionally required is not an
  * option: it would reject the plain spelling, which is the common one.

@@ -30,7 +30,7 @@ const portalState = new WeakMap<Element, { node: HTMLElement; placeholder: Comme
  *
  * @remarks
  * Behavior only — no positioning (pair with `stimeo-ui/positioning`) and no focus
- * trapping (pair with a Focus Scope / the overlay). Moving a Stimulus element within
+ * trapping (pair with `stimeo--focus` or the overlay). Moving a Stimulus element within
  * the same document does not re-fire connect/disconnect, so the move is safe. For Turbo
  * compatibility prefer the `content`-target form: the controller then stays on the
  * in-place source, so its `disconnect()` fires when the original container is replaced

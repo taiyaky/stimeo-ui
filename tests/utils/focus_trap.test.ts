@@ -224,6 +224,44 @@ describe("FocusTrap", () => {
     above.deactivate();
   });
 
+  it("isolates the background beside a nested container too", () => {
+    // The container is normally nested, and everything beside it inside that
+    // branch is background just as much as a top-level sibling is. Scanning only
+    // `body`'s children would skip the whole branch the container sits in.
+    document.body.innerHTML = `
+      <div id="far">far</div>
+      <main id="main">
+        <div id="near">near</div>
+        <div id="box"><button id="first">First</button><button id="last">Last</button></div>
+      </main>`;
+    container = document.getElementById("box") as HTMLElement;
+
+    const t = trap();
+    t.activate();
+    expect(byId("far").inert).toBe(true);
+    expect(byId("near").inert).toBe(true);
+    expect(byId("main").inert).toBe(false); // an ancestor holds the container
+    expect(container.inert).toBe(false);
+
+    t.deactivate({ restoreFocus: false });
+    expect(byId("far").inert).toBe(false);
+    expect(byId("near").inert).toBe(false);
+  });
+
+  it("stops the isolation walk at a container that is not in the document", () => {
+    // The walk climbs until it reaches `body`. A container that was detached
+    // never will, so the climb has to end at the root of whatever tree it is in
+    // — otherwise it reads a parent off nothing.
+    const orphan = document.createElement("div");
+    orphan.innerHTML = '<button id="orphan-first">First</button>';
+    container = orphan;
+
+    const t = trap();
+    expect(() => t.activate()).not.toThrow();
+    expect(byId("background").inert).toBe(false);
+    expect(byId("opener").inert).toBe(false);
+  });
+
   it("does not track or clear elements that were already inert", () => {
     byId("background").inert = true; // pre-existing inert, not ours to clear
     const t = trap();

@@ -8,7 +8,6 @@ import { LayoutObserver } from "../utils/layout_observer";
  * Fractional layout metrics (zoom, `border-box` rounding, fractional font
  * metrics) routinely make `scrollWidth` exceed `clientWidth` by a fraction of a
  * pixel on a trail that visually fits, which would collapse it for no reason.
- * Same constant and rationale as `scroll_area_controller.ts`'s `EDGE_EPSILON`.
  */
 const OVERFLOW_EPSILON = 1;
 
@@ -311,8 +310,7 @@ export class BreadcrumbController extends Controller<HTMLElement> {
     const showEllipsis = this.#overflowing && this.collapsibleTargets.length > 0;
 
     // Decided *before* the writes below: once a focused item is hidden the browser
-    // drops focus to <body> and the information is gone (same reasoning as
-    // `overflow_menu_controller`'s pre-move focus decision).
+    // drops focus to <body> and the information is gone.
     const rescueFocus =
       collapsed &&
       this.hasTriggerTarget &&
@@ -321,7 +319,7 @@ export class BreadcrumbController extends Controller<HTMLElement> {
     for (const item of this.collapsibleTargets) item.hidden = collapsed;
     if (this.hasEllipsisTarget) this.#applyEllipsisVisibility(showEllipsis);
     if (this.hasTriggerTarget) {
-      // Never report expanded while the trail fits: the trigger is hidden then.
+      // Never report expanded while the trail fits: nothing is collapsed to reveal.
       const expanded = this.#overflowing && this.#expanded;
       this.triggerTarget.setAttribute("aria-expanded", expanded ? "true" : "false");
     }

@@ -142,8 +142,8 @@ export class ToastController extends Controller<HTMLElement> {
 
   /**
    * Stimulus lifecycle callback triggered automatically when a new item target
-   * enters the DOM. Perfectly handles dynamic client-side injections and server-side
-   * Turbo Stream appends alike.
+   * enters the DOM, from a client-side injection or a Turbo Stream append alike. An
+   * item already leaving, or parented outside `list`, is skipped.
    */
   itemTargetConnected(element: HTMLElement): void {
     this.enforceMaxLimit();

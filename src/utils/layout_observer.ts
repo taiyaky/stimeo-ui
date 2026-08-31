@@ -1,8 +1,8 @@
 /**
  * Unified element-size and viewport observation for Stimeo controllers.
  *
- * Layout-sensitive widgets (sliders, resizable panes, scroll spies, popovers)
- * need to react both to their *own* box changing — via {@link ResizeObserver} —
+ * Widgets whose output is measured — an overflow boundary, a masonry column count,
+ * an autosized textarea — need to react both to their *own* box changing — via {@link ResizeObserver} —
  * and to the *viewport* changing — via the `window` `resize` event. Wiring those
  * two sources by hand in every controller risks leaked listeners on
  * `disconnect()`. {@link LayoutObserver} owns both behind one callback and one

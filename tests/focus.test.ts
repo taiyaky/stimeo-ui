@@ -16,6 +16,11 @@ describe("FocusController", () => {
   let application: Application;
 
   const mount = async (attrs = "") => {
+    // A second mount in one test would otherwise leave the first application running,
+    // and it attaches its own controller to the new scope. That extra instance reacts
+    // to the same value writes one microtask later, so an assertion between the write
+    // and the callback reads a state no single controller ever produced.
+    if (application) disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <button id="outside">outside</button>
       <div id="scope" data-controller="stimeo--focus" ${attrs}>
@@ -131,6 +136,23 @@ describe("FocusController", () => {
     expect(outside2.inert).toBe(false);
   });
 
+  it("reads inert when the trap turns on, not while it is running", async () => {
+    await mount(); // inert defaults to false
+    const outside = query("#outside");
+    instance().activate();
+
+    scope().setAttribute("data-stimeo--focus-inert-value", "true");
+    await tick();
+    // The isolation belongs to the activation that started it, so a value written
+    // mid-trap describes the next one rather than reshaping this one.
+    expect(outside.inert).toBe(false);
+
+    instance().deactivate();
+    instance().activate();
+    expect(outside.inert).toBe(true);
+    instance().deactivate();
+  });
+
   it("never locks page scroll (it is a focus scope, not a modal)", async () => {
     await mount();
     document.body.style.overflow = "scroll";
@@ -147,12 +169,97 @@ describe("FocusController", () => {
 
   it("tears down without yanking focus on disconnect", async () => {
     await mount('data-stimeo--focus-trap-value="true"');
-    const moved: string[] = [];
-    document.addEventListener("focusin", () => moved.push("focusin"));
+    query("#outside").focus();
     scope().remove();
     await tick();
-    // Listeners removed: a stray Tab must not throw or trap.
-    expect(() => tab()).not.toThrow();
+
+    // Whether the listener is gone is read from the press itself. Focus is the wrong
+    // witness here: the removed scope holds no tab stops, so a surviving handler takes
+    // its empty-container path — it consumes the press and moves nothing, leaving
+    // `activeElement` exactly where an unhandled press would.
+    const press = new KeyboardEvent("keydown", { key: "Tab", cancelable: true });
+    document.dispatchEvent(press);
+    expect(press.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(query("#outside"));
+  });
+
+  it("keeps cycling through a focusable added after activation", async () => {
+    // The scope tracks live children rather than a list taken at activate time,
+    // so a control the application appends later joins the cycle.
+    await mount('data-stimeo--focus-trap-value="true"');
+    const late = document.createElement("button");
+    late.id = "late";
+    late.textContent = "late";
+    scope().append(late);
+
+    // The wrap is what the scope controls: a press in the middle of the order is
+    // left to the engine. Reaching `late` from the front edge is what shows the
+    // boundary moved — before it was appended, Shift+Tab from `#a` landed on `#c`.
+    query("#a").focus();
+    tab(true);
+    expect(document.activeElement).toBe(late);
+    tab();
+    expect(document.activeElement).toBe(query("#a"));
+  });
+
+  it("does not re-enter activation while already trapping", async () => {
+    await mount('data-stimeo--focus-trap-value="true"');
+    const events: string[] = [];
+    scope().addEventListener("stimeo--focus:activate", () => events.push("activate"));
+    query("#c").focus();
+
+    instance().activate();
+    await tick();
+
+    // Already trapping: no second announcement, and the caller keeps the focus it
+    // had rather than being sent back to the initial element.
+    expect(events).toEqual([]);
+    expect(document.activeElement).toBe(query("#c"));
+  });
+
+  it("does not announce a release when nothing is trapping", async () => {
+    await mount();
+    const events: string[] = [];
+    scope().addEventListener("stimeo--focus:deactivate", () => events.push("deactivate"));
+
+    instance().deactivate();
+    await tick();
+
+    expect(events).toEqual([]);
+    expect(scope().hasAttribute("data-focus-trapped")).toBe(false);
+  });
+
+  it("switches with the trap value at runtime", async () => {
+    await mount();
+    const events: string[] = [];
+    scope().addEventListener("stimeo--focus:activate", () => events.push("activate"));
+    scope().addEventListener("stimeo--focus:deactivate", () => events.push("deactivate"));
+
+    scope().setAttribute("data-stimeo--focus-trap-value", "true");
+    await tick();
+    expect(scope().getAttribute("data-focus-trapped")).toBe("true");
+
+    scope().setAttribute("data-stimeo--focus-trap-value", "false");
+    await tick();
+    expect(scope().hasAttribute("data-focus-trapped")).toBe(false);
+    // One announcement per switch, in the order the switches happened.
+    expect(events).toEqual(["activate", "deactivate"]);
+  });
+
+  it("returns the element to its untrapped form before the page is cached", async () => {
+    await mount('data-stimeo--focus-trap-value="true"');
+    const events: string[] = [];
+    scope().addEventListener("stimeo--focus:deactivate", () => events.push("deactivate"));
+    expect(scope().getAttribute("data-focus-trapped")).toBe("true");
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    await tick();
+
+    // The trap releases itself on the same event, so the hook is what would reach
+    // the snapshot — describing a scope that is no longer trapping.
+    expect(scope().hasAttribute("data-focus-trapped")).toBe(false);
+    // Silent: the page is being frozen, not closed by anyone.
+    expect(events).toEqual([]);
   });
 
   it("has no a11y violations", async () => {

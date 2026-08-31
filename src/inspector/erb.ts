@@ -84,9 +84,8 @@ interface ErbTag {
  *
  * Only **output** tags (`<%= … %>`) that name a `data:` option produce an
  * element: they are the ones that put a tag on the page. Every other ERB tag
- * stays invisible, exactly as before — a template full of `<% if %>` and
- * `<%= t(".title") %>` parses to the same tree it always did, so the change
- * cannot move a diagnostic that does not involve a `data:` hash.
+ * stays invisible, so a template full of `<% if %>` and `<%= t(".title") %>`
+ * parses to static markup alone and carries no diagnostic of its own.
  *
  * A helper that opens a Ruby block (`form_with … do |f|`) becomes a
  * **container**: the markup up to its matching `<% end %>` nests inside it, so

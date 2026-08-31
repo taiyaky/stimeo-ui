@@ -199,14 +199,18 @@ describe("ClipboardController", () => {
 
     await instance().copy();
     await instance().copy();
-    await delay(20);
+    // The announcer empties the region between two identical messages, because an
+    // unchanged node is not re-read. Landing, clearing and re-setting are three
+    // dependent tasks, each armed only when the previous one runs, so the wait is
+    // on the observable end state.
+    await vi.waitFor(() => {
+      expect(written).toContain("");
+      expect(region.textContent).toBe("Copied");
+    });
     observer.disconnect();
 
-    // The controller reports both attempts; the announcer empties the region
-    // between two identical messages, because an unchanged node is not re-read.
+    // The controller reports both attempts.
     expect(announcements).toEqual(["Copied", "Copied"]);
-    expect(written.filter((text) => text === "").length).toBeGreaterThan(0);
-    expect(region.textContent).toBe("Copied");
   });
 
   it("normalises a restored transient state on connect", async () => {

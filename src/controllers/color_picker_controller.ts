@@ -73,7 +73,7 @@ interface Hsla {
  * falling back per channel when they are absent or blank; the resolved pair is
  * written back, so assistive tech never hears the `slider` role's 0–100 default
  * over a hue that reaches 360. `aria-valuetext` is filled from the slider's
- * `{@link VALUE_TEXT_ATTRIBUTE}` template — `{value}` is the channel value — which
+ * `data-value-text` template — `{value}` is the channel value — which
  * keeps the announced wording i18n-neutral; without a template the text is English.
  *
  * A drag belongs to the pointer that started it: only a primary button opens one,

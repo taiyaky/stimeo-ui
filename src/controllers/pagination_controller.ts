@@ -25,7 +25,7 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * Generating/eliding the page buttons and fetching data stay with the consumer.
  *
  * `prev`/`next` must be real `<button>` elements: the boundary state is applied
- * through the native `disabled` property, which no other element honors.
+ * through the native `disabled` property, which a `<div>` or `<a>` does not honor.
  *
  * `change` dispatches `{ page: number, total: number, previous: number }`.
  *

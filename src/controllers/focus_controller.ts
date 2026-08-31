@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { FocusTrap } from "../utils/focus_trap";
 
 /**
@@ -19,6 +20,10 @@ import { FocusTrap } from "../utils/focus_trap";
  * is made `inert` (a hard, modal-style isolation); left off it is a soft boundary —
  * `Tab` still cycles but the background stays reachable. The element carries
  * `data-focus-trapped` while active and emits `activate` / `deactivate`.
+ *
+ * Only `trap` is watched for changes. `auto` and `inert` are read when the trap turns
+ * on and `restore` when it turns off, so rewriting one mid-trap describes the *next*
+ * activation rather than the one in progress.
  *
  * `activate` and `deactivate` dispatch `{}`.
  *
@@ -59,18 +64,48 @@ export class FocusController extends Controller<HTMLElement> {
     onEscape: () => this.deactivate(),
   });
 
+  /**
+   * Whether this scope is currently trapping.
+   *
+   * Held here rather than read back from the trap: the trap releases itself
+   * before Turbo caches the page, so its own flag stops answering for the state
+   * this controller publishes on the element and in its events.
+   */
+  #active = false;
+
+  /**
+   * Returns the element to its untrapped form before Turbo copies the page. The
+   * trap performs its own release on the same event, so what is left is the hook
+   * this controller owns — carried into the snapshot it would describe a scope
+   * that is no longer trapping.
+   *
+   * Silent, like `disconnect()`: the page is about to be frozen, and a release
+   * nobody asked for is not a close to report.
+   */
+  readonly #beforeCache = new BeforeCacheReset(() => {
+    this.#active = false;
+    this.element.removeAttribute("data-focus-trapped");
+  });
+
   /** Stimulus drives activation from the `trap` value (also fires on connect). */
   trapValueChanged(): void {
     if (this.trapValue) this.#activate();
     else this.#deactivate();
   }
 
+  override connect(): void {
+    this.#beforeCache.activate();
+  }
+
   override disconnect(): void {
     // Release without restoring focus — the element is leaving the DOM. This is a
     // teardown, not a user-driven close, so it intentionally does NOT emit
     // `deactivate` or reset `trapValue` (which would resurrect on a Turbo cache
-    // restore); only the public `deactivate()` action fires the event.
+    // restore); the event travels with a release asked for through the public
+    // `deactivate()` action or the `trap` value.
     this.#trap.deactivate({ restoreFocus: false });
+    this.#beforeCache.deactivate();
+    this.#active = false;
     this.element.removeAttribute("data-focus-trapped");
   }
 
@@ -87,14 +122,16 @@ export class FocusController extends Controller<HTMLElement> {
   }
 
   #activate(): void {
-    if (this.#trap.active) return;
+    if (this.#active) return;
+    this.#active = true;
     this.#trap.activate();
     this.element.setAttribute("data-focus-trapped", "true");
     this.dispatch("activate", { detail: {} });
   }
 
   #deactivate(): void {
-    if (!this.#trap.active) return;
+    if (!this.#active) return;
+    this.#active = false;
     this.#trap.deactivate({ restoreFocus: this.restoreValue });
     this.element.removeAttribute("data-focus-trapped");
     this.dispatch("deactivate", { detail: {} });

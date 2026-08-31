@@ -6,7 +6,10 @@ import { maxTransitionTotalMs } from "../utils/transition_completion";
 /** Flash types that map to an assertive `alert` (everything else is a polite `status`). */
 const ASSERTIVE_TYPES = new Set(["alert", "error"]);
 
-/** Selector for message targets, used by the MutationObserver to spot dynamic inserts. */
+/**
+ * Selector for message targets: spots dynamic inserts, resolves a close control's
+ * message, and confirms a departed target was one.
+ */
 const MESSAGE_SELECTOR = '[data-stimeo--flash-target="message"]';
 
 /** Per-message auto-dismiss timer bookkeeping (id 0 means paused). */

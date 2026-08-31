@@ -87,7 +87,7 @@ export class CountdownController extends Controller<HTMLElement> {
   #pausedAmount = 0;
   /**
    * The amount the slots are currently showing, floored to the second they render.
-   * It lags {@link currentAmount} by up to one tick, and it — not the live reading —
+   * It lags {@link #currentAmount} by up to one tick, and it — not the live reading —
    * is what a pause has to preserve: storing the fraction behind the display instead
    * makes the first tick after a resume step by two units.
    */

@@ -1,6 +1,33 @@
 import { Controller } from "@hotwired/stimulus";
+import { announce, fillTemplate } from "../utils/announce";
+import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { toFiniteNumber } from "../utils/coerce";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { parseStringList } from "../utils/string_list";
+
+/**
+ * Event shape {@link PasswordStrengthController.setScore} accepts: an action param
+ * `score` or a `detail.score`. Both are typed `number | string` because, while
+ * Stimulus coerces numeric action params to numbers, a `CustomEvent` (or a
+ * non-numeric-looking param) may carry a string.
+ */
+type SetScoreEvent = Event & {
+  params?: { score?: number | string };
+  detail?: { score?: number | string };
+};
+
+/** One scoring pass: the level it lands on plus everything drawn from it. */
+interface StrengthReading {
+  readonly score: number;
+  readonly level: string;
+  readonly max: number;
+  readonly meetsMin: boolean;
+  readonly band: string;
+}
+
+/** The public derived state `change` and `reconcile` both carry. */
+type PasswordStrengthDetail = Pick<StrengthReading, "score" | "level" | "max" | "meetsMin">;
 
 /** Character classes that contribute to password variety (one point each beyond the first). */
 const CLASS_PATTERNS: readonly RegExp[] = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/];
@@ -23,17 +50,26 @@ const MAX_POINTS = LENGTH_MILESTONES.length + (CLASS_PATTERNS.length - 1);
 const STRENGTH_BANDS = ["weak", "fair", "good", "strong"] as const;
 
 /**
+ * Fewest labels an ordered scale can carry. One label orders nothing and none
+ * leaves the meter a zero-width range, so a shorter declaration resolves to
+ * {@link DEFAULT_LEVELS} — which also makes `max >= 2` an invariant every
+ * consumer of the scale can rely on.
+ */
+const MIN_LEVELS = 2;
+
+/**
  * Headless password-strength behavior: scores the field with a lightweight
- * zero-dependency heuristic and drives a meter plus an `aria-live` label. No
+ * zero-dependency heuristic and drives a meter plus a visible level readout. No
  * dedicated APG pattern; the meter display follows {@link MeterController}.
  *
  * Markup contract (identifier: `stimeo--password-strength`):
- *   <div data-controller="stimeo--password-strength">
+ *   <div data-controller="stimeo--password-strength"
+ *        data-stimeo--password-strength-announce-text-value="Password strength: {level}">
  *     <input type="password" data-stimeo--password-strength-target="input"
  *            data-action="input->stimeo--password-strength#evaluate" aria-describedby="pw">
  *     <div data-stimeo--password-strength-target="meter" role="meter"
- *          aria-valuemin="0" aria-valuemax="4"></div>
- *     <span id="pw" data-stimeo--password-strength-target="label" aria-live="polite"></span>
+ *          aria-label="Password strength" aria-valuemin="0" aria-valuemax="4"></div>
+ *     <span id="pw" data-stimeo--password-strength-target="label"></span>
  *   </div>
  *
  * On each input the controller scores the password (length milestones + character
@@ -42,22 +78,30 @@ const STRENGTH_BANDS = ["weak", "fair", "good", "strong"] as const;
  * `--stimeo--password-strength`, and (when `minScore` is set) `data-below-min`,
  * and writes the level label into the label target.
  *
- * `change` dispatches `{ score, level, max, meetsMin }`.
+ * `change` and `reconcile` dispatch `{ score, level, max, meetsMin }`.
  *
  * @remarks
  * Behavior only — the meter/bar look is the consumer's, keyed off the data hooks.
  * `data-strength` is one of the fixed {@link STRENGTH_BANDS} (not the localizable
  * `levels` text), so consumers can style by it regardless of locale; the visible
- * label receives the matching `levels` entry. Non-text state (meter ARIA,
- * `data-strength`/`data-below-min`, the custom property, and the `change` event)
- * updates **immediately** on every keystroke so styling and consumers stay
- * responsive, while the label — in an `aria-live="polite"` region — is written on
- * a short debounce so a screen reader is not flooded mid-typing. The score is a
- * pure function of the input value (no module-scope state), so `connect()`
- * re-evaluates idempotently after a Turbo cache restore; the debounce timer is
- * owned by {@link SafeTimeout} and torn down on `disconnect()` (Turbo included).
- * The estimator is intentionally not a dictionary/zxcvbn-grade one (kept
- * zero-dep); swap a stronger one in on the consumer side if needed.
+ * label receives the matching `levels` entry. Every visible and non-text output
+ * updates on the keystroke that caused it, so the readout never trails the meter.
+ *
+ * Assistive notification is opt-in and i18n-neutral: `announceText` accepts
+ * `{level}`, `{score}`, `{max}` and `{band}`, and one settled message is handed to
+ * the page's shared `stimeo--announcer` after a short debounce. Only a level the
+ * reader has not already heard is sent, so typing inside one level stays quiet.
+ * The label target is plain visible output and is not itself a live region.
+ *
+ * The score is a pure function of the field value (no module-scope state), so
+ * `connect()` re-evaluates idempotently; the initial reflection never dispatches
+ * or announces. Runtime Value and target changes repaint on a microtask and
+ * dispatch `reconcile` only when the public derived state actually moves. Because
+ * the field value is not part of a Turbo snapshot, everything derived from it is
+ * rewound on `turbo:before-cache` — silently, since `connect()` derives it again
+ * after a restore. The estimator is intentionally not a dictionary/zxcvbn-grade
+ * one (kept zero-dep); a consumer that needs a stronger one computes the score
+ * itself and hands it over through {@link setScore}.
  */
 export class PasswordStrengthController extends Controller<HTMLElement> {
   static override targets = ["input", "meter", "label"];
@@ -67,9 +111,10 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
     // type: that reader throws out of the value observer before any callback
     // runs, so one malformed attribute would stop the meter connecting.
     levels: { type: String, default: "" },
+    announceText: { type: String, default: "" },
   };
-  static actions = ["evaluate"] as const;
-  static events = ["change"] as const;
+  static actions = ["evaluate", "setScore"] as const;
+  static events = ["change", "reconcile"] as const;
 
   declare readonly inputTarget: HTMLInputElement;
   declare readonly meterTarget: HTMLElement;
@@ -80,60 +125,170 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
 
   declare minScoreValue: number;
   declare levelsValue: string;
+  declare announceTextValue: string;
 
-  /** Delay (ms) before the polite live-region label is written, to throttle SR flooding. */
+  /** Delay (ms) before one settled level is sent to the shared announcer. */
   static readonly #announceDelay = 200;
 
   readonly #timers = new SafeTimeout();
+  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+  readonly #repaint = new MicrotaskCoalescer(() => this.#reconcile());
+  #levels: string[] = [...DEFAULT_LEVELS];
   #announceId: number | null = null;
+  #announcedLevel: string | null = null;
+  #externalScore: number | null = null;
+  #lastDetail: PasswordStrengthDetail | null = null;
 
+  /** Reflects the current DOM state and opens the reconciliation window. */
   override connect(): void {
-    // Reflect the current value synchronously (no announce): an autofilled or
-    // cache-restored field shows the right strength without queuing an SR message.
-    this.#update({ announce: false });
+    this.#repaint.activate();
+    this.#beforeCache.activate();
+    // Reflect the current value synchronously (no event, no announcement): an
+    // autofilled or cache-restored field shows the right strength without
+    // queuing a screen-reader message.
+    this.#lastDetail = this.#detail(this.#render());
   }
 
+  /** Releases the reconciliation window, the cache subscription and the debounce. */
   override disconnect(): void {
-    this.#timers.clearAll();
-    this.#announceId = null;
+    this.#repaint.cancel();
+    this.#beforeCache.deactivate();
+    this.#cancelAnnouncement();
+    this.#announcedLevel = null;
+    this.#externalScore = null;
+    this.#lastDetail = null;
   }
 
   /** Re-evaluates strength from the input. Bound via `data-action` (`input`). */
   evaluate(): void {
-    this.#update();
+    this.#externalScore = null;
+    this.#commit();
   }
 
   /**
-   * Recomputes the strength. The meter ARIA, data hooks, the custom property and
-   * the `change` event apply immediately; the live-region label text is debounced
-   * unless `announce` is `false` (the initial render).
+   * Adopts a score computed outside the built-in heuristic, clamped into the
+   * declared scale. An unreadable value leaves the current score standing, and
+   * the next `evaluate` hands scoring back to the heuristic.
    */
-  #update(options: { announce?: boolean } = {}): void {
-    const password = this.hasInputTarget ? this.inputTarget.value : "";
-    const labels = parseStringList(this.levelsValue, DEFAULT_LEVELS);
-    const max = labels.length;
-    const score = this.#score(password, max);
-    const label = score > 0 ? (labels[score - 1] ?? "") : "";
+  setScore(event: SetScoreEvent): void {
+    const next = toFiniteNumber(event.params?.score ?? event.detail?.score);
+    if (next === null) return;
+    this.#externalScore = next;
+    this.#commit();
+  }
+
+  /** Re-reads the scale when application code or a Turbo morph changes `levels`. */
+  levelsValueChanged(): void {
+    this.#levels = this.#readLevels();
+    this.#repaint.schedule();
+  }
+
+  /** Repaints when application code or a Turbo morph changes `minScore`. */
+  minScoreValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints when application code or a Turbo morph changes `announceText`. */
+  announceTextValueChanged(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Scores the field added or replaced at runtime. */
+  inputTargetConnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Falls back to the pristine state after the scored field is removed. */
+  inputTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Syncs a meter added or replaced at runtime, which carries no value yet. */
+  meterTargetConnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints the remaining output after a meter is removed. */
+  meterTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Fills a readout added or replaced at runtime. */
+  labelTargetConnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints the remaining output after a readout is removed. */
+  labelTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Reflects one confirmed scoring pass and offers its level to the reader. */
+  #commit(): void {
+    const reading = this.#render();
+    this.#lastDetail = this.#detail(reading);
+    this.dispatch("change", { detail: this.#lastDetail });
+    this.#scheduleAnnouncement(reading);
+  }
+
+  /** Repaints one mutation batch and reports a changed controller-derived state. */
+  #reconcile(): void {
+    const previous = this.#lastDetail;
+    // An edit inside the debounce window has already earned an announcement.
+    // Reconciliation never originates one, but it must not carry a stale one
+    // through either: the pending message is built from the level and the
+    // template that held when it was queued, and both can move here. It is
+    // retargeted at the settled reading so the reader hears what ends up shown.
+    const owed = this.#announceId !== null;
+    this.#cancelAnnouncement();
+    const reading = this.#render();
+    const detail = this.#detail(reading);
+    this.#lastDetail = detail;
+    // A blank readout has no level left to have been heard, here as much as on
+    // the keystroke that empties the field, so the next level typed is news.
+    if (reading.score === 0) this.#announcedLevel = null;
+    if (owed) this.#scheduleAnnouncement(reading);
+    if (previous && this.#detailsDiffer(previous, detail)) {
+      this.dispatch("reconcile", { detail });
+    }
+  }
+
+  /**
+   * Synchronizes the meter ARIA, the root state hooks, the fill custom property
+   * and the visible level readout.
+   *
+   * @stimeoRenderRoot
+   */
+  #render(): StrengthReading {
+    const max = this.#levels.length;
+    const score = this.#currentScore(max);
+    const level = this.#levels[score - 1] ?? "";
+    const meetsMin = score > 0 && score >= this.#minScore;
+    const band = this.#band(score, max);
 
     this.#reflectMeter(score, max);
-    this.#reflectRoot(score, max);
+    this.#reflectRoot(score, max, band, meetsMin);
+    this.#writeLabel(level);
+    return { score, level, max, meetsMin, band };
+  }
 
-    if (options.announce === false) {
-      // Initial render (connect / cache-restore): reflect without a change event
-      // or a queued screen-reader announcement.
-      this.#writeLabel(label);
-      return;
+  /**
+   * The declared minimum, or the Value's default (`0`, an inert gate) when the
+   * declaration cannot be read as a number. Every comparison against an unread
+   * number answers false, which would fail even the strongest password instead
+   * of leaving the gate off, so the unreadable declaration is confined to its
+   * own Value the way an unreadable scale is.
+   */
+  get #minScore(): number {
+    return Number.isFinite(this.minScoreValue) ? this.minScoreValue : 0;
+  }
+
+  /** The externally supplied score when one stands, else the heuristic's. */
+  #currentScore(max: number): number {
+    if (this.#externalScore !== null) {
+      return Math.min(max, Math.max(0, Math.round(this.#externalScore)));
     }
-
-    this.dispatch("change", {
-      detail: { score, level: label, max, meetsMin: score > 0 && score >= this.minScoreValue },
-    });
-
-    if (this.#announceId !== null) this.#timers.clear(this.#announceId);
-    this.#announceId = this.#timers.set(() => {
-      this.#writeLabel(label);
-      this.#announceId = null;
-    }, PasswordStrengthController.#announceDelay);
+    return this.#score(this.hasInputTarget ? this.inputTarget.value : "", max);
   }
 
   /** Syncs the meter target's ARIA value attributes (`0..levels.length`). */
@@ -149,31 +304,35 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
    * empty), the `data-below-min` hook when the score is under `minScore`, and the
    * `0–1` fill the consumer's CSS turns into the bar width.
    */
-  #reflectRoot(score: number, max: number): void {
-    const band = this.#band(score, max);
+  #reflectRoot(score: number, max: number, band: string, meetsMin: boolean): void {
     this.#toggle("data-strength", band, band.length > 0);
     // Empty/pristine input (`score === 0`) is never "below min": that would let CSS
-    // flag an untouched field as failing. Mirror the `change` event's `meetsMin`
-    // (`score > 0 && …`) so the hook only marks a *non-empty* password under the
-    // threshold. `minScore` defaults to 0, leaving the hook inert until set positive.
-    this.#toggle("data-below-min", "true", score > 0 && score < this.minScoreValue);
-    const ratio = max > 0 ? score / max : 0;
-    this.element.style.setProperty("--stimeo--password-strength", String(ratio));
+    // flag an untouched field as failing. The hook mirrors the event's `meetsMin`,
+    // so it only marks a *non-empty* password under the threshold. `minScore`
+    // defaults to 0, leaving the hook inert until set positive.
+    this.#toggle("data-below-min", "true", score > 0 && !meetsMin);
+    this.element.style.setProperty("--stimeo--password-strength", String(score / max));
   }
 
-  #writeLabel(label: string): void {
-    if (this.hasLabelTarget) this.labelTarget.textContent = label;
+  /** Writes the visible readout only when its text actually changed. */
+  #writeLabel(text: string): void {
+    if (!this.hasLabelTarget || this.labelTarget.textContent === text) return;
+    this.labelTarget.textContent = text;
   }
 
   /**
    * Locale-independent styling band (one of {@link STRENGTH_BANDS}) for `score`
-   * out of `max`. Empty input → `""`. Quantizes the `score/max` ratio into the
-   * four fixed bands, so a non-default level count still maps onto a stable hook.
+   * out of `max`. Empty input → `""`. Maps the position within the declared scale
+   * onto the position within the fixed bands, so both ends stay anchored on any
+   * level count: the weakest score is always `weak` and the strongest `strong`,
+   * and only the middle collapses when the scales differ in size.
    */
   #band(score: number, max: number): string {
-    if (score <= 0 || max <= 0) return "";
-    const index = Math.ceil((score / max) * STRENGTH_BANDS.length) - 1;
-    return STRENGTH_BANDS[Math.min(STRENGTH_BANDS.length - 1, Math.max(0, index))] ?? "";
+    if (score <= 0) return "";
+    const index = Math.round(((score - 1) / (max - 1)) * (STRENGTH_BANDS.length - 1));
+    // A scored password always lands inside the band list; an unplaceable one
+    // takes the weakest rather than claiming strength it was not measured to have.
+    return STRENGTH_BANDS[index] ?? STRENGTH_BANDS[0];
   }
 
   /** Sets `name` to `value` when `on`, else removes it (value/presence data hook). */
@@ -185,6 +344,12 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
     }
   }
 
+  /** The declared level labels, or the defaults when the scale cannot order. */
+  #readLevels(): string[] {
+    const declared = parseStringList(this.levelsValue, DEFAULT_LEVELS);
+    return declared.length >= MIN_LEVELS ? declared : [...DEFAULT_LEVELS];
+  }
+
   /**
    * Lightweight zero-dependency strength heuristic returning an integer in
    * `[0, max]` (`max` = number of levels). Empty input is `0` (no level); any
@@ -194,7 +359,7 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
    * alone cannot mask trivial repetition.
    */
   #score(password: string, max: number): number {
-    if (password.length === 0 || max === 0) return 0;
+    if (password.length === 0) return 0;
 
     let points = 0;
     for (const milestone of LENGTH_MILESTONES) {
@@ -207,5 +372,76 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
 
     const bucketed = Math.round((points / MAX_POINTS) * max);
     return Math.min(max, Math.max(1, bucketed));
+  }
+
+  /** Debounces one i18n-neutral message for a level transition into the announcer. */
+  #scheduleAnnouncement(reading: StrengthReading): void {
+    this.#cancelAnnouncement();
+    if (reading.score === 0) {
+      // An emptied field has no level to read, and the next one typed is news.
+      this.#announcedLevel = null;
+      return;
+    }
+    if (reading.level === this.#announcedLevel) return;
+
+    const message = fillTemplate(this.announceTextValue, {
+      level: reading.level,
+      score: reading.score,
+      max: reading.max,
+      band: reading.band,
+    });
+    if (message.trim().length === 0) return;
+
+    this.#announceId = this.#timers.set(() => {
+      this.#announcedLevel = reading.level;
+      announce(message);
+      this.#announceId = null;
+    }, PasswordStrengthController.#announceDelay);
+  }
+
+  /** Cancels the one outstanding message without touching visible output. */
+  #cancelAnnouncement(): void {
+    if (this.#announceId !== null) this.#timers.clear(this.#announceId);
+    this.#announceId = null;
+  }
+
+  /**
+   * Returns every output derived from the field value to its pristine form.
+   *
+   * The value itself is not carried in a Turbo snapshot, so a band, a fill or a
+   * readout left behind would describe a password the restored page no longer
+   * holds. The pass is silent: `connect()` derives the state again from whatever
+   * the restored field contains.
+   */
+  #rewindForCache(): void {
+    this.#cancelAnnouncement();
+    this.#announcedLevel = null;
+    this.#externalScore = null;
+    this.#lastDetail = null;
+    this.#reflectMeter(0, this.#levels.length);
+    this.#toggle("data-strength", "", false);
+    this.#toggle("data-below-min", "true", false);
+    this.element.style.removeProperty("--stimeo--password-strength");
+    this.#writeLabel("");
+  }
+
+  /** Selects the public event state from the richer internal reading. */
+  #detail(reading: StrengthReading): PasswordStrengthDetail {
+    return {
+      score: reading.score,
+      level: reading.level,
+      max: reading.max,
+      meetsMin: reading.meetsMin,
+    };
+  }
+
+  /** Compares exactly the state carried by `change` and `reconcile`. */
+  #detailsDiffer(left: PasswordStrengthDetail, right: PasswordStrengthDetail): boolean {
+    return (
+      left.score !== right.score ||
+      left.level !== right.level ||
+      left.max !== right.max ||
+      left.meetsMin !== right.meetsMin
+    );
   }
 }
