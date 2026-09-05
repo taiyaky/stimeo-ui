@@ -1,8 +1,8 @@
 <%# Preview-guard demo: data-turbo-preview is a Turbo-internal attribute, so this catalog
     has no real preview to show. demo.js toggles it on <html> for ~1.5s to reproduce a
-    preview window — exactly what Turbo does on a back/restore visit. The balance guards in
-    placeholder mode (swaps to —) and the timestamp in hide mode (becomes invisible, box
-    kept). The library only watches the attribute and reflects data-preview-hidden. %>
+    preview window — exactly what Turbo does on a back/restore visit. The balance declares a
+    placeholder, so it swaps to —; the timestamp declares none, so it goes invisible with its
+    box kept. The library only watches the attribute and reflects data-preview-hidden. %>
 <div class="preview-guard-demo">
   <button type="button" class="demo-trigger" data-preview-guard-demo-toggle>
     <%= t("components.preview_guard.demo.toggle") %>
@@ -15,7 +15,6 @@
         <span
           class="preview-guard-demo__value"
           data-controller="stimeo--preview-guard"
-          data-stimeo--preview-guard-mode-value="placeholder"
           data-stimeo--preview-guard-placeholder-value="—"
         ><%= t("components.preview_guard.demo.balance") %></span>
       </dd>

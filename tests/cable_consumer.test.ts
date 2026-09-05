@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CableSubscriptionMixin } from "../src/cable/consumer";
-import { createConfirmedSubscription, setCableConsumer } from "../src/cable/consumer";
+import {
+  createConfirmedSubscription,
+  getCableConsumer,
+  parseSubscriptionParams,
+  setCableConsumer,
+} from "../src/cable/consumer";
+import { flushMicrotasks } from "./helpers/timing";
 
 /**
  * Contract tests for {@link createConfirmedSubscription}: the confirmation
@@ -15,12 +21,14 @@ import { createConfirmedSubscription, setCableConsumer } from "../src/cable/cons
 
 describe("createConfirmedSubscription", () => {
   let inner: CableSubscriptionMixin | null = null;
+  let createCount = 0;
   let createdWith: Record<string, unknown> | string | null = null;
   const performMock = vi.fn();
   const unsubscribeMock = vi.fn();
 
   beforeEach(() => {
     inner = null;
+    createCount = 0;
     createdWith = null;
     performMock.mockClear();
     unsubscribeMock.mockClear();
@@ -29,6 +37,7 @@ describe("createConfirmedSubscription", () => {
         create(channel, mixin) {
           createdWith = channel;
           inner = mixin;
+          createCount += 1;
           return { perform: performMock, unsubscribe: unsubscribeMock };
         },
       },
@@ -125,5 +134,233 @@ describe("createConfirmedSubscription", () => {
     expect(performMock).toHaveBeenCalledWith("appear", { id: "alice" });
     subscription.unsubscribe();
     expect(unsubscribeMock).toHaveBeenCalledOnce();
+  });
+
+  describe("one wire subscription per identifier", () => {
+    // The server confirms an identifier once and ignores a repeated subscribe for it,
+    // so every caller with the same channel + params has to ride one wire subscription.
+    const room = { channel: "Channel", room: "doc_7" };
+
+    it("shares one wire subscription between callers with the same identifier", () => {
+      const a = createConfirmedSubscription(room, {});
+      const b = createConfirmedSubscription({ ...room }, {});
+      expect(createCount).toBe(1);
+      inner?.connected?.();
+      expect(a.confirmed).toBe(true);
+      expect(b.confirmed).toBe(true);
+      b.perform("typing", { name: "b" });
+      expect(performMock).toHaveBeenCalledWith("typing", { name: "b" });
+    });
+
+    it("treats a bare channel name and { channel } as the same identifier", () => {
+      createConfirmedSubscription("Channel", {});
+      createConfirmedSubscription({ channel: "Channel" }, {});
+      expect(createCount).toBe(1);
+    });
+
+    it("keeps different identifiers on separate wire subscriptions", () => {
+      createConfirmedSubscription(room, {});
+      createConfirmedSubscription({ channel: "Channel", room: "doc_8" }, {});
+      expect(createCount).toBe(2);
+    });
+
+    it("fans connected and disconnected out to every member", () => {
+      const a = { connected: vi.fn(), disconnected: vi.fn() };
+      const b = { connected: vi.fn(), disconnected: vi.fn() };
+      createConfirmedSubscription(room, a);
+      createConfirmedSubscription(room, b);
+      inner?.connected?.();
+      inner?.disconnected?.();
+      expect(a.connected).toHaveBeenCalledOnce();
+      expect(b.connected).toHaveBeenCalledOnce();
+      expect(a.disconnected).toHaveBeenCalledOnce();
+      expect(b.disconnected).toHaveBeenCalledOnce();
+    });
+
+    it("fans a refusal out to every member and shuts every gate", () => {
+      const a = { rejected: vi.fn() };
+      const b = { rejected: vi.fn() };
+      const first = createConfirmedSubscription(room, a);
+      const second = createConfirmedSubscription(room, b);
+      inner?.rejected?.();
+      expect(a.rejected).toHaveBeenCalledOnce();
+      expect(b.rejected).toHaveBeenCalledOnce();
+      expect(first.rejected).toBe(true);
+      expect(second.rejected).toBe(true);
+      expect(second.confirmed).toBe(false);
+    });
+
+    it("fans received broadcasts out to every member", () => {
+      const a = vi.fn();
+      const b = vi.fn();
+      createConfirmedSubscription(room, { received: a });
+      createConfirmedSubscription(room, { received: b });
+      inner?.received?.({ name: "Bob" });
+      expect(a).toHaveBeenCalledWith({ name: "Bob" });
+      expect(b).toHaveBeenCalledWith({ name: "Bob" });
+    });
+
+    it("confirms a member joining a confirmed identifier at once, and tells it connected after the call returns", async () => {
+      createConfirmedSubscription(room, {});
+      inner?.connected?.();
+      const connected = vi.fn();
+      const late = createConfirmedSubscription(room, { connected });
+      expect(createCount).toBe(1);
+      expect(late.confirmed).toBe(true);
+      // Not synchronous: the caller has not stored the returned subscription yet.
+      expect(connected).not.toHaveBeenCalled();
+      await flushMicrotasks();
+      expect(connected).toHaveBeenCalledOnce();
+    });
+
+    it("tells a late member connected exactly once when the wire reconfirms before the catch-up runs", async () => {
+      createConfirmedSubscription(room, {});
+      inner?.connected?.();
+      const connected = vi.fn();
+      createConfirmedSubscription(room, { connected });
+      inner?.disconnected?.();
+      inner?.connected?.();
+      await flushMicrotasks();
+      expect(connected).toHaveBeenCalledOnce();
+    });
+
+    it("drops the catch-up when the wire drops before it is delivered", async () => {
+      createConfirmedSubscription(room, {});
+      inner?.connected?.();
+      const connected = vi.fn();
+      const late = createConfirmedSubscription(room, { connected });
+      inner?.disconnected?.();
+      await flushMicrotasks();
+      expect(connected).not.toHaveBeenCalled();
+      expect(late.confirmed).toBe(false);
+    });
+
+    it("owes nothing to a late member that leaves before the catch-up runs", async () => {
+      // A controller can connect and disconnect within one task (a Turbo swap); a
+      // callback landing after its teardown would act on a dead instance.
+      createConfirmedSubscription(room, {});
+      inner?.connected?.();
+      const connected = vi.fn();
+      const late = createConfirmedSubscription(room, { connected });
+      late.unsubscribe();
+      await flushMicrotasks();
+      expect(connected).not.toHaveBeenCalled();
+    });
+
+    it("reports a refusal to a member joining after it, without a new wire subscription", async () => {
+      createConfirmedSubscription(room, {});
+      inner?.rejected?.();
+      const rejected = vi.fn();
+      const connected = vi.fn();
+      const late = createConfirmedSubscription(room, { rejected, connected });
+      expect(createCount).toBe(1);
+      expect(late.rejected).toBe(true);
+      expect(late.confirmed).toBe(false);
+      expect(rejected).not.toHaveBeenCalled();
+      await flushMicrotasks();
+      expect(rejected).toHaveBeenCalledOnce();
+      expect(connected).not.toHaveBeenCalled();
+    });
+
+    it("unsubscribes the wire only when the last member leaves", () => {
+      const a = createConfirmedSubscription(room, {});
+      const b = createConfirmedSubscription(room, {});
+      a.unsubscribe();
+      expect(unsubscribeMock).not.toHaveBeenCalled();
+      b.unsubscribe();
+      expect(unsubscribeMock).toHaveBeenCalledOnce();
+    });
+
+    it("ignores a second unsubscribe from the same member", () => {
+      const a = createConfirmedSubscription(room, {});
+      const b = createConfirmedSubscription(room, {});
+      a.unsubscribe();
+      a.unsubscribe();
+      expect(unsubscribeMock).not.toHaveBeenCalled();
+      b.unsubscribe();
+      expect(unsubscribeMock).toHaveBeenCalledOnce();
+    });
+
+    it("lets a stale unsubscribe neither evict a later member nor unsubscribe the wire twice", () => {
+      const first = createConfirmedSubscription(room, {});
+      first.unsubscribe();
+      expect(unsubscribeMock).toHaveBeenCalledOnce();
+      const next = createConfirmedSubscription(room, {});
+      first.unsubscribe(); // stale: its wire is gone and `next` owns the identifier now
+      expect(unsubscribeMock).toHaveBeenCalledOnce();
+      inner?.connected?.();
+      expect(next.confirmed).toBe(true);
+      createConfirmedSubscription(room, {});
+      expect(createCount).toBe(2); // the newcomer still rides the wire `next` opened
+    });
+
+    it("stops delivering to a member that left", () => {
+      const a = vi.fn();
+      const b = vi.fn();
+      const first = createConfirmedSubscription(room, { received: a });
+      createConfirmedSubscription(room, { received: b });
+      first.unsubscribe();
+      inner?.received?.({ name: "Bob" });
+      expect(a).not.toHaveBeenCalled();
+      expect(b).toHaveBeenCalledOnce();
+    });
+
+    it("starts a fresh wire subscription once every member has left", () => {
+      const first = createConfirmedSubscription(room, {});
+      inner?.connected?.();
+      first.unsubscribe();
+      const next = createConfirmedSubscription(room, {});
+      expect(createCount).toBe(2);
+      expect(next.confirmed).toBe(false);
+    });
+
+    it("keeps one registry per consumer", () => {
+      createConfirmedSubscription(room, {});
+      const otherCreate = vi.fn(() => ({ perform: vi.fn(), unsubscribe: vi.fn() }));
+      setCableConsumer({ subscriptions: { create: otherCreate } });
+      createConfirmedSubscription(room, {});
+      expect(createCount).toBe(1);
+      expect(otherCreate).toHaveBeenCalledOnce();
+    });
+  });
+});
+
+describe("getCableConsumer", () => {
+  afterEach(() => {
+    setCableConsumer(null);
+  });
+
+  it("creates one Action Cable consumer lazily when none was injected, and keeps it", () => {
+    setCableConsumer(null);
+    const consumer = getCableConsumer();
+    expect(consumer).toBeTruthy();
+    expect(getCableConsumer()).toBe(consumer);
+  });
+});
+
+describe("parseSubscriptionParams", () => {
+  it("reads a JSON object into identifier parameters", () => {
+    expect(parseSubscriptionParams('{"room":"chat_42","tier":2}')).toEqual({
+      room: "chat_42",
+      tier: 2,
+    });
+  });
+
+  it("falls back to no parameters when the declaration is absent", () => {
+    expect(parseSubscriptionParams("")).toEqual({});
+  });
+
+  it("falls back to no parameters when the declaration is unparseable", () => {
+    // Stimulus' own Object reader throws here, and the throw would take the whole
+    // subscription with it; the identifier has to keep naming the channel instead.
+    expect(parseSubscriptionParams("{")).toEqual({});
+    expect(parseSubscriptionParams("room: chat_42")).toEqual({});
+  });
+
+  it("falls back to no parameters for JSON that cannot name parameters", () => {
+    expect(parseSubscriptionParams("null")).toEqual({});
+    expect(parseSubscriptionParams("42")).toEqual({});
+    expect(parseSubscriptionParams('"chat_42"')).toEqual({});
+    expect(parseSubscriptionParams('["chat_42"]')).toEqual({});
   });
 });

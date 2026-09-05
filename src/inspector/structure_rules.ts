@@ -348,6 +348,6 @@ export const structureRules: StructureRules = {
   "stimeo--transition": {},
   "stimeo--tree-view": { requiredTargets: ["item"] },
   // Opt-in cable controller. No required targets: the input listener is delegated
-  // on the element (any descendant input works) and the status live region is optional.
+  // on the element (any descendant input works) and the visible status slot is optional.
   "stimeo--typing-indicator": {},
 };

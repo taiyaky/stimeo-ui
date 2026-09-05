@@ -9,7 +9,8 @@ import { tick } from "./helpers/timing";
 /**
  * Behavioral tests for {@link PortalController}: the teleport on connect with a comment
  * placeholder, append / prepend positioning, custom destinations, restore-on-disconnect
- * (and removal when restore is off), invalid-destination tolerance, the mount / unmount
+ * (and removal when restore is off), unparsable and empty destinations falling back to
+ * the default, the mount / unmount
  * events, and the "in-page move vs real detach" discrimination (DetachGate) — including
  * the scoped-application observed-root cases on both markup forms.
  */
@@ -78,6 +79,18 @@ describe("PortalController", () => {
     expect(query("#dest").firstElementChild?.id).toBe("c");
   });
 
+  it("appends to the end of the destination by default", async () => {
+    setup(
+      `<div id="dest"><span id="existing"></span></div>
+       <div id="src" data-controller="stimeo--portal" data-stimeo--portal-to-value="#dest">
+         <div data-stimeo--portal-target="content" id="c">hi</div>
+       </div>`,
+    );
+    await start();
+    expect(query("#dest").lastElementChild?.id).toBe("c");
+    expect(query("#dest").firstElementChild?.id).toBe("existing");
+  });
+
   it("defaults the destination to body", async () => {
     setup(
       `<div id="src" data-controller="stimeo--portal">
@@ -140,6 +153,31 @@ describe("PortalController", () => {
     await tick();
     expect(content().parentElement?.id).toBe("src"); // restored to its placeholder
     expect(content().hasAttribute("data-portaled")).toBe(false);
+  });
+
+  it("restores a no-content teleport to its original spot when the identifier is removed", async () => {
+    setup(
+      `<div id="dest"></div>
+       <div id="wrap"><span id="before"></span><div id="src" data-controller="stimeo--portal"
+            data-stimeo--portal-to-value="#dest">x</div><span id="after"></span></div>`,
+    );
+    await start();
+    const source = src();
+    expect(source.parentElement?.id).toBe("dest");
+    const details: unknown[] = [];
+    source.addEventListener("stimeo--portal:unmount", (event) => {
+      details.push((event as CustomEvent).detail);
+    });
+
+    source.removeAttribute("data-controller"); // a definite detach for the no-content form
+    await tick();
+    expect(source.parentElement?.id).toBe("wrap");
+    // Back at the recorded spot, not merely back in the wrapper.
+    expect(source.previousElementSibling?.id).toBe("before");
+    expect(source.nextElementSibling?.id).toBe("after");
+    expect(source.hasAttribute("data-portaled")).toBe(false);
+    expect(hasComment(query("#wrap"))).toBe(false);
+    expect(details).toEqual([{}]);
   });
 
   it("keeps the teleport when the source element moves within the page", async () => {
@@ -224,6 +262,33 @@ describe("PortalController", () => {
     expect(hasComment(query("#wrap"))).toBe(true); // bookkeeping persists by design
   });
 
+  it("keeps the teleport when a new instance takes the element over", async () => {
+    setup(
+      `<div id="dest"></div>
+       <div id="src" data-controller="stimeo--portal" data-stimeo--portal-to-value="#dest">
+         <div data-stimeo--portal-target="content" id="c">hi</div>
+       </div>`,
+    );
+    await start();
+    const source = src();
+    const node = content();
+    expect(node.parentElement?.id).toBe("dest");
+    const unmounts: number[] = [];
+    source.addEventListener("stimeo--portal:unmount", () => unmounts.push(1));
+
+    // Registering again swaps the instance on the same element: the outgoing one leaves
+    // a probe armed, and it must not rewind the teleport the incoming one now owns.
+    application.register("stimeo--portal", PortalController);
+    await tick();
+    expect(node.parentElement?.id).toBe("dest");
+    expect(unmounts).toEqual([]);
+
+    source.remove(); // the instance that took over still finishes the teardown
+    await tick();
+    expect(node.parentElement).toBe(source);
+    expect(unmounts).toEqual([1]);
+  });
+
   it("removes the node instead of restoring when restore is false", async () => {
     setup(
       `<div id="dest"></div>
@@ -234,10 +299,17 @@ describe("PortalController", () => {
     );
     await start();
     const node = content();
-    src().remove();
+    const source = src();
+    const details: unknown[] = [];
+    source.addEventListener("stimeo--portal:unmount", (event) => {
+      details.push((event as CustomEvent).detail);
+    });
+
+    source.remove();
     await tick();
     expect(node.isConnected).toBe(false);
     expect(query("#dest").children.length).toBe(0);
+    expect(details).toEqual([{}]); // the removal half of unmount, not just the restore half
   });
 
   it("does nothing when the destination does not exist", async () => {
@@ -251,14 +323,25 @@ describe("PortalController", () => {
     expect(content().hasAttribute("data-portaled")).toBe(false);
   });
 
-  it("tolerates an invalid selector without throwing", async () => {
+  it("falls back to the default destination when the selector cannot be parsed", async () => {
     setup(
       `<div id="src" data-controller="stimeo--portal" data-stimeo--portal-to-value=")(bad">
          <div data-stimeo--portal-target="content" id="c">hi</div>
        </div>`,
     );
-    await expect(start()).resolves.not.toThrow();
-    expect(content().parentElement?.id).toBe("src");
+    await start();
+    expect(content().parentElement).toBe(document.body);
+    expect(content().getAttribute("data-portaled")).toBe("true");
+  });
+
+  it("falls back to the default destination when the selector is empty", async () => {
+    setup(
+      `<div id="src" data-controller="stimeo--portal" data-stimeo--portal-to-value="">
+         <div data-stimeo--portal-target="content" id="c">hi</div>
+       </div>`,
+    );
+    await start();
+    expect(content().parentElement).toBe(document.body);
   });
 
   it("has no a11y violations", async () => {

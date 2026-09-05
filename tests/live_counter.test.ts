@@ -20,17 +20,21 @@ import { tick } from "./helpers/timing";
 describe("LiveCounterController", () => {
   let application: Application;
   let mixin: CableSubscriptionMixin | null = null;
+  /** Every mixin the double was asked to create, in order (one per wire subscription). */
+  let mixins: CableSubscriptionMixin[] = [];
   const performMock = vi.fn();
   const unsubscribeMock = vi.fn();
 
   beforeEach(() => {
     mixin = null;
+    mixins = [];
     performMock.mockClear();
     unsubscribeMock.mockClear();
     setCableConsumer({
       subscriptions: {
         create(_channel, subscriptionMixin) {
           mixin = subscriptionMixin;
+          mixins.push(subscriptionMixin);
           return { perform: performMock, unsubscribe: unsubscribeMock };
         },
       },
@@ -234,6 +238,29 @@ describe("LiveCounterController", () => {
       mixin?.rejected?.();
       expect(button().disabled).toBe(true);
       expect(root().getAttribute("data-live-counter-rejected")).toBe("true");
+    });
+
+    it("shares one confirmed subscription between two counters for the same channel", async () => {
+      const counter = (id: string) => `
+        <div id="${id}" data-controller="stimeo--live-counter"
+             data-stimeo--live-counter-channel-value="LikesChannel"
+             data-stimeo--live-counter-id-value="alice">
+          <span data-stimeo--live-counter-target="value">128</span>
+          <button type="button" aria-label="Like ${id}" ${TRIGGER}
+                  data-action="stimeo--live-counter#increment">♥</button>
+        </div>`;
+      document.body.innerHTML = `<main>${counter("a")}${counter("b")}</main>`;
+      application = Application.start();
+      application.register("stimeo--live-counter", LiveCounterController);
+      await tick();
+      // The server confirms an identifier once and ignores a repeated subscribe for it.
+      expect(mixins).toHaveLength(1);
+      const second = document.querySelector("#b button") as HTMLButtonElement;
+      expect(second.disabled).toBe(true);
+      mixins[0]?.connected?.();
+      expect(second.disabled).toBe(false);
+      second.click();
+      expect(performMock).toHaveBeenCalledWith("increment", { id: "alice", delta: 1 });
     });
 
     it("never disables triggers on a channel-less (local-only) counter", async () => {

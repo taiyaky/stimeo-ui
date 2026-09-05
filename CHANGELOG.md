@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.11.0] - 2026-09-05
+
+Minor release with no new components. Eight existing ones are reworked — the three
+cable controllers (live-counter, presence, typing-indicator) plus pointer-drag,
+portal, preview-guard, roving, and stick-to-bottom. Two of them changed a contract,
+so read Removed before upgrading. The Inspector manifest stays on schema v12.
+
+### Removed
+
+- preview-guard: the `mode` Value. `placeholder` alone decides the guard's form —
+  empty (the default) hides the element with `visibility`, and any other text takes
+  the place of its content.
+- typing-indicator: the live region on the `status` target. It is a plain visible
+  slot now — drop its `aria-live`, seat a `stimeo--announcer` on the page, and set
+  `announceOneText` / `announceManyText`. `stimeo check` stops asking for the
+  live-region semantics too.
+
+### Added
+
+- typing-indicator: `announceOneText` / `announceManyText` (`{name}` / `{names}` /
+  `{count}`), debounced through the shared announcer.
+- pointer-drag: a `reset` action that returns the element to its origin — dropping
+  the committed follow offset and cancelling an in-flight drag.
+
+### Changed
+
+- The cable controllers share one wire subscription per identifier (channel +
+  params), so a second widget on the same stream sends instead of waiting on a
+  confirmation that never comes. A caller joining a confirmed or refused
+  identifier is told so on the next microtask, and the wire is released when the
+  last one leaves.
+- Cable identifier parameters are read by the controller, so an unreadable
+  `params` declaration falls back to the channel alone instead of stopping the
+  subscription from being created at all.
+- An element moved within the page keeps what it was carrying: pointer-drag's
+  session and the attributes it lends its handles, portal's teleport,
+  preview-guard's guard, and roving's tab stop.
+- A declaration that cannot be read falls back to its default — typing-indicator's
+  `timeout` / `throttle`, stick-to-bottom's `threshold`, and portal's `to`, which
+  now lands the node at the default destination instead of leaving it in place.
+- A key that steers an IME conversion is left to the composition (pointer-drag,
+  roving), roving passes a modified `Home` / `End` through to the browser, and
+  pointer-drag leaves a press to a native control or editing surface inside the
+  handle.
+- roving: an item that cannot take focus — `hidden`, natively `disabled`,
+  including through a `fieldset` — is neither a move target nor a tab-stop
+  candidate, and the horizontal arrow pair follows the writing direction.
+- pointer-drag: the `touch-action` and `tabindex` lent to a handle are given back
+  when an element stops being one, and a handle that leaves the controller ends
+  its session in `cancel`.
+- preview-guard: the rewind Turbo's snapshot needs runs on `turbo:before-cache`,
+  the inline `visibility` is leased so an authored declaration survives, and the
+  child markup a placeholder displaced is put back intact.
+- Transient state is re-derived on connect rather than trusted from a restored
+  snapshot: the cable controllers' rejection hooks, stick-to-bottom's
+  `data-pinned` / `data-has-new`, and preview-guard's `data-preview-hidden`.
+- A swap at runtime is followed rather than left behind: typing-indicator repaints
+  a `status` slot swapped in mid-conversation, stick-to-bottom moves its append
+  watch onto a `content` target that arrives or leaves and re-derives pinned from a
+  `threshold` changed on the element, and preview-guard re-forms a guard that is
+  already up to match a changed `placeholder`.
+
+### Fixed
+
+- stick-to-bottom: a container connected without a box holds unpinned until the
+  layout arrives, so what arrives meanwhile is flagged rather than followed into a
+  box that cannot move.
+- pointer-drag: an in-flight follow offset leaves the DOM on teardown, so a
+  re-inserted element does not read it back as a committed base.
+- portal: an instance that has been replaced on the same element no longer rewinds
+  the teleport the live one holds.
+- typing-indicator: a name carrying `$&`, `` $` ``, `$'` or `$$` is written into the
+  status copy literally instead of expanding into the template's own text.
+
 ## [0.10.0] - 2026-08-31
 
 Minor release with no new components. Eight existing ones are reworked — anchored,
@@ -856,6 +930,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.11.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.11.0
 [0.10.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.10.0
 [0.9.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.9.0
 [0.8.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.8.0

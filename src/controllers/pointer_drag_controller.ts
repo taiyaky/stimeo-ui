@@ -2,6 +2,12 @@ import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { DetachGate } from "../utils/detach_gate";
 
+/**
+ * Elements whose own default action owns a key press. The browser never signals
+ * those through `defaultPrevented`, so a yield on that flag cannot see them.
+ */
+const NATIVE_KEY_OWNERS = "input, textarea, select, button, a[href], summary, [contenteditable]";
+
 /** How a drag session was initiated; surfaced in every event detail. */
 type DragPointerType = "mouse" | "touch" | "pen" | "keyboard";
 
@@ -86,6 +92,7 @@ export class PointerDragController extends Controller<HTMLElement> {
     disabled: { type: Boolean, default: false },
     follow: { type: Boolean, default: false },
   };
+  static actions = ["reset"] as const;
   static events = ["start", "move", "end", "cancel"] as const;
 
   declare readonly handleTargets: HTMLElement[];
@@ -154,33 +161,88 @@ export class PointerDragController extends Controller<HTMLElement> {
     this.#teardown();
   }
 
-  /** Prepares handles added at runtime (touch-action + focusability). */
+  /**
+   * Returns the element to its origin: drops the committed follow offset and the
+   * inline `translate` that carries it.
+   *
+   * In follow mode the inline `translate` belongs to this controller, and the
+   * committed offset lives in a field the DOM cannot reach — so a consumer that
+   * wants the element back at the start, or that has written a position of its
+   * own, needs this to make the two agree again. An in-flight drag is cancelled
+   * first, or its deltas would land on top of the offset just cleared.
+   */
+  reset(): void {
+    // Cancel first, then clear: the cancel contract snaps back to the committed
+    // offset, so clearing before it would be undone on the way out.
+    const live = this.#pointer?.started
+      ? this.#pointer.pointerType
+      : this.#keyboard
+        ? "keyboard"
+        : null;
+    if (this.#pointer || this.#keyboard) this.#teardownSessions();
+    if (live) this.#dispatchCancel(live);
+    this.#followBase = { x: 0, y: 0 };
+    this.#applyFollow(0, 0);
+  }
+
   handleTargetConnected(handle: HTMLElement): void {
+    // The element wears the handle contract only while it IS the handle; the
+    // first real handle takes it back. (Marker-guarded, so this is a no-op when
+    // the element never wore it.)
+    if (handle !== this.element) this.#restoreHandle(this.element);
     this.#prepareHandle(handle);
   }
 
   handleTargetDisconnected(handle: HTMLElement): void {
-    // A handle REMOVED mid-session can never deliver its keydown (the delegated
-    // listener sits on the container it left), so the session would leak — and
-    // the one-session guard would then reject every future pointerdown. End it
-    // silently: the DOM is changing under the user, same as disconnect. But
-    // target callbacks ALSO fire when the CONTROLLER disconnects (Stimulus
-    // stops the target observer — including the in-page move a live session
-    // must survive): a handle still inside the element was not removed, so
-    // that case is left to disconnect()'s deferred probe.
-    if (!this.element.contains(handle)) {
-      if (this.#pointer?.handle === handle) this.#endPointerSession();
-      if (this.#keyboard?.handle === handle) this.#clearKeyboardSession();
-    }
+    // The loan is due back the moment an element stops being a handle, and this
+    // callback is the only place that sees every such element: once the
+    // identifier token is gone, `#handles()` no longer resolves the targets.
+    // Across an in-page move `handleTargetConnected` lends it again in the same
+    // mutation batch.
     this.#restoreHandle(handle);
+    // Target callbacks ALSO fire when the CONTROLLER goes away (Stimulus stops
+    // the target observer after `disconnect()` has run) and across the in-page
+    // move a live session must survive. In both the handle is still inside the
+    // element: the session belongs to `disconnect()`, and handing the contract
+    // to the container here would bake a nameless tab stop onto it on every
+    // morph. Only a handle that actually LEFT is this callback's business.
+    if (this.element.contains(handle)) return;
+
+    // It can never deliver its keydown again (the delegated listener sits on the
+    // container it left), so a live session would leak and the one-session guard
+    // would reject every future pointerdown. The tree and the consumers are both
+    // alive here, so it ends the way every other keep-the-element teardown does:
+    // in `cancel`, or a composer like sortable strands its session bookkeeping.
+    const interrupted =
+      this.#pointer?.handle === handle && this.#pointer.started
+        ? this.#pointer.pointerType
+        : this.#keyboard?.handle === handle
+          ? ("keyboard" as const)
+          : null;
+    if (this.#pointer?.handle === handle) this.#endPointerSession();
+    if (this.#keyboard?.handle === handle) this.#clearKeyboardSession();
+    // With the last handle gone the element is the handle again (`#handles()`),
+    // so it needs the contract the departing handle just gave back.
+    if (!this.hasHandleTarget) this.#prepareHandle(this.element);
+    if (interrupted) this.#dispatchCancel(interrupted);
   }
 
-  /** Re-derives the handles' touch-action when the axis changes. */
-  axisValueChanged(): void {
+  /**
+   * Re-derives the handles' touch-action when the axis changes.
+   *
+   * Two layers, like the `tabindex` loan: the marker says the value was once
+   * ours, and the current inline value says it still is. A consumer that wrote
+   * its own `touch-action` after connect keeps it.
+   */
+  axisValueChanged(_value: string, previousValue: string | undefined): void {
+    // The value to recognize as ours is the one the previous axis lent. Stimulus
+    // also replays a value that did NOT change (ahead of every connect), and
+    // there the axis in force is the one it was lent under.
+    const lent = this.#touchActionFor(previousValue ?? this.axisValue);
     for (const handle of this.#handles()) {
-      if (handle.hasAttribute(PointerDragController.#TOUCH_ACTION_MARKER)) {
-        handle.style.touchAction = this.#touchActionForAxis();
-      }
+      if (!handle.hasAttribute(PointerDragController.#TOUCH_ACTION_MARKER)) continue;
+      if (handle.style.touchAction !== lent) continue;
+      handle.style.touchAction = this.#touchActionForAxis();
     }
   }
 
@@ -289,16 +351,19 @@ export class PointerDragController extends Controller<HTMLElement> {
     // segmented field inside the handle) must not ALSO drive the drag —
     // composition depends on this yield.
     if (event.defaultPrevented) return;
+    // A press that steers an IME conversion belongs to the composition, and an
+    // input method never says so through `defaultPrevented`.
+    if (event.isComposing) return;
+    // Neither does a native control or editing surface inside the handle: typing
+    // a space into a field and activating a link are default actions, not claims.
+    // Widgets that do claim their keys keep composing through the yield above.
+    if (this.#ownsNativeKeys(event.target, handle)) return;
     // A chorded arrow belongs to the browser. "Someone already consumed it"
-    // outranks that, so it is checked after the yield above.
+    // outranks that, so it is checked after the yields above.
     if (isReservedArrowChord(event)) return;
 
     // Escape cancels whichever session is live (pointer drag or keyboard grab).
     if (event.key === "Escape") {
-      // A press an inner handler already owned is yielded at the top of this
-      // handler. What is checked here is the IME half: a press during a
-      // composition steers the conversion, not the drag.
-      if (event.isComposing) return;
       if (this.#pointer?.started) {
         const { pointerType } = this.#pointer;
         this.#teardownSessions();
@@ -428,6 +493,9 @@ export class PointerDragController extends Controller<HTMLElement> {
         : null;
     this.#teardownSessions();
     for (const handle of this.#handles()) this.#restoreHandle(handle);
+    // An in-flight offset must leave the DOM even where nobody is listening: a
+    // re-inserted element would have `connect()` read it back as a committed base.
+    this.#followReset();
     if (interrupted && this.element.isConnected) this.#dispatchCancel(interrupted);
   }
 
@@ -510,8 +578,13 @@ export class PointerDragController extends Controller<HTMLElement> {
 
   /** `touch-action` that lets the page keep panning on the locked axis only. */
   #touchActionForAxis(): string {
-    if (this.axisValue === "x") return "pan-y";
-    if (this.axisValue === "y") return "pan-x";
+    return this.#touchActionFor(this.axisValue);
+  }
+
+  /** The `touch-action` an `axis` declaration lends, for any axis value. */
+  #touchActionFor(axis: string): string {
+    if (axis === "x") return "pan-y";
+    if (axis === "y") return "pan-x";
     return "none";
   }
 
@@ -523,11 +596,13 @@ export class PointerDragController extends Controller<HTMLElement> {
    * are marker-owned so `#restoreHandle` reverts them symmetrically on teardown.
    */
   #prepareHandle(handle: HTMLElement): void {
-    if (
-      handle.style.touchAction === "" ||
-      handle.hasAttribute(PointerDragController.#TOUCH_ACTION_MARKER)
-    ) {
-      handle.style.touchAction = this.#touchActionForAxis();
+    const lent = this.#touchActionForAxis();
+    // Two layers, as when the loan is returned: a free property is ours to take,
+    // and a marked one is still ours only while it reads back as what was lent.
+    // A consumer that wrote its own value keeps it across every reconnect.
+    const marked = handle.hasAttribute(PointerDragController.#TOUCH_ACTION_MARKER);
+    if (handle.style.touchAction === "" || (marked && handle.style.touchAction === lent)) {
+      handle.style.touchAction = lent;
       handle.setAttribute(PointerDragController.#TOUCH_ACTION_MARKER, "true");
     }
     if (handle.tabIndex < 0 && !handle.hasAttribute("tabindex")) {
@@ -536,21 +611,39 @@ export class PointerDragController extends Controller<HTMLElement> {
     }
   }
 
+  /** Whether the key belongs to a native control or editing surface in the handle. */
+  #ownsNativeKeys(target: EventTarget | null, handle: HTMLElement): boolean {
+    const owner = (target as Element | null)?.closest(NATIVE_KEY_OWNERS) ?? null;
+    return owner !== null && owner !== handle && handle.contains(owner);
+  }
+
   /** Reverts the marker-owned touch-action + tabindex (authored values untouched). */
   #restoreHandle(handle: HTMLElement): void {
     if (handle.hasAttribute(PointerDragController.#TOUCH_ACTION_MARKER)) {
-      handle.style.touchAction = "";
+      // Only give back what is still ours: a consumer may have written its own
+      // value since, and clearing then would lose it. The marker goes either
+      // way — the loan is over regardless of who ends up owning the value.
+      if (handle.style.touchAction === this.#touchActionForAxis()) {
+        handle.style.touchAction = "";
+      }
       handle.removeAttribute(PointerDragController.#TOUCH_ACTION_MARKER);
     }
     if (handle.hasAttribute(PointerDragController.#TABINDEX_MARKER)) {
-      handle.removeAttribute(PointerDragController.#TABINDEX_MARKER);
       // Only remove what is verifiably still ours and safe to remove: another
       // owner (e.g. a roving list) may have rewritten the value since, and
       // stripping tabindex off the focused element would blur it to <body>
       // (losing the user's place — worse than leaking one tab stop).
-      if (handle.getAttribute("tabindex") === "0" && document.activeElement !== handle) {
+      const ours = handle.getAttribute("tabindex") === "0";
+      if (ours && document.activeElement !== handle) {
         handle.removeAttribute("tabindex");
+        handle.removeAttribute(PointerDragController.#TABINDEX_MARKER);
+        return;
       }
+      // The loan ends when someone else owns the value; it stays recorded when
+      // the value is still ours and only the focus stopped us returning it —
+      // otherwise an in-page move (teardown + reconnect while focused) drops the
+      // record and the borrowed tab stop is never given back.
+      if (!ours) handle.removeAttribute(PointerDragController.#TABINDEX_MARKER);
     }
   }
 }

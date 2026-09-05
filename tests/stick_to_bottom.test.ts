@@ -104,6 +104,18 @@ describe("StickToBottomController", () => {
     content().appendChild(document.createElement("li"));
     await tick();
   };
+  /** The fallback markup: no `content` target, so the container is watched directly. */
+  const setupWithoutContentTarget = () => {
+    document.body.innerHTML = `
+      <div id="box" data-controller="stimeo--stick-to-bottom"><li>1</li></div>`;
+  };
+  const recordNews = () => {
+    const news: Array<{ count: number }> = [];
+    box().addEventListener("stimeo--stick-to-bottom:new", (e) =>
+      news.push((e as CustomEvent).detail),
+    );
+    return news;
+  };
   /**
    * Replaces `scrollTo` with a spy. Install it *before* `start()` to observe the
    * connect-time jump: happy-dom's own `scrollTo` writes `scrollTop`, which `setGeom`
@@ -419,6 +431,259 @@ describe("StickToBottomController", () => {
     contentEl.appendChild(document.createElement("li"));
     await tick();
     expect(news).toEqual([]); // observer severed
+  });
+
+  it("watches the container itself when no content target is declared", async () => {
+    setupWithoutContentTarget();
+    setGeom(1000, 400, 100); // unpinned
+    await start();
+    box().scrollTo = vi.fn();
+    const news = recordNews();
+
+    box().appendChild(document.createElement("li"));
+    await tick();
+    expect(box().getAttribute("data-has-new")).toBe("true");
+    expect(news).toEqual([{ count: 1 }]);
+  });
+
+  it("ignores a mutation that added no element", async () => {
+    setup();
+    setGeom(1000, 400, 100); // unpinned
+    await start();
+    box().scrollTo = vi.fn();
+    const news = recordNews();
+
+    content().appendChild(document.createTextNode("typing…"));
+    content().removeChild(content().children[0] as Element);
+    await tick();
+    expect(box().hasAttribute("data-has-new")).toBe(false);
+    expect(news).toEqual([]);
+    expect(box().scrollTo).not.toHaveBeenCalled();
+  });
+
+  it("counts every element a single batch added", async () => {
+    setup();
+    setGeom(1000, 400, 100); // unpinned
+    await start();
+    box().scrollTo = vi.fn();
+    const news = recordNews();
+
+    content().append(document.createElement("li"), document.createElement("li"));
+    await tick();
+    expect(news).toEqual([{ count: 2 }]);
+  });
+
+  it("reports the unpin transition too", async () => {
+    setup();
+    setGeom(1000, 400, 600); // pinned
+    await start();
+    const pins = recordPins();
+
+    setGeom(1000, 400, 100); // the user scrolled up: distance 500 > 80
+    box().dispatchEvent(new Event("scroll"));
+
+    expect(box().hasAttribute("data-pinned")).toBe(false);
+    expect(pins).toEqual([{ pinned: false }]);
+  });
+
+  it("degrades to flagging when there is no ResizeObserver to wait on", async () => {
+    // Without one the held decision never arrives, so the container has to stay usable on
+    // the unpinned side rather than throw or settle on a box it cannot measure.
+    originalResizeObserver = globalThis.ResizeObserver;
+    (globalThis as { ResizeObserver?: unknown }).ResizeObserver = undefined;
+    setup('data-stimeo--stick-to-bottom-pin-on-connect-value="true"');
+    setGeom(0, 0, 0); // no box, so the deferred decision is the path taken
+    spyOnLandingScrollTo();
+    await start();
+
+    const news = recordNews();
+    await appendChild();
+    expect(box().getAttribute("data-has-new")).toBe("true");
+    expect(news).toEqual([{ count: 1 }]);
+  });
+
+  it("honors a threshold other than the default", async () => {
+    setup('data-stimeo--stick-to-bottom-threshold-value="300"');
+    setGeom(1000, 400, 400); // distance 200: outside the default 80, inside 300
+    await start();
+    expect(box().getAttribute("data-pinned")).toBe("true");
+  });
+
+  it("counts the threshold distance itself as pinned", async () => {
+    setup('data-stimeo--stick-to-bottom-threshold-value="100"');
+    setGeom(1000, 400, 500); // distance exactly 100
+    await start();
+    expect(box().getAttribute("data-pinned")).toBe("true");
+
+    setGeom(1000, 400, 499); // distance 101: one past the threshold
+    box().dispatchEvent(new Event("scroll"));
+    expect(box().hasAttribute("data-pinned")).toBe(false);
+  });
+
+  it("re-derives pinned when the threshold changes at runtime", async () => {
+    setup();
+    setGeom(1000, 400, 100); // distance 500: unpinned at the default 80
+    await start();
+    const pins = recordPins();
+
+    box().setAttribute("data-stimeo--stick-to-bottom-threshold-value", "600");
+    await tick();
+
+    expect(box().getAttribute("data-pinned")).toBe("true");
+    expect(pins).toEqual([{ pinned: true }]);
+  });
+
+  it("falls back to the default when the threshold is not a readable number", async () => {
+    setup('data-stimeo--stick-to-bottom-threshold-value="abc"');
+    setGeom(1000, 400, 600); // distance 0: pinned under any usable threshold
+    await start();
+    expect(box().getAttribute("data-pinned")).toBe("true");
+  });
+
+  it("falls back to the default when the threshold is infinite", async () => {
+    // `Infinity` reads as a number but not as a distance: it would hold the container
+    // pinned wherever the reader scrolled to, taking the position the flag protects.
+    setup('data-stimeo--stick-to-bottom-threshold-value="Infinity"');
+    setGeom(1000, 400, 100); // distance 500: outside the default 80
+    await start();
+    expect(box().hasAttribute("data-pinned")).toBe(false);
+  });
+
+  it("falls back to the default when the threshold is negative", async () => {
+    // No distance is ever below zero, so a negative one refuses to pin even at the
+    // bottom — following would stop and every append would be flagged as new.
+    setup('data-stimeo--stick-to-bottom-threshold-value="-10"');
+    setGeom(1000, 400, 600); // distance 0
+    await start();
+    expect(box().getAttribute("data-pinned")).toBe("true");
+  });
+
+  it("pins only at the exact bottom when the threshold is zero", async () => {
+    setup('data-stimeo--stick-to-bottom-threshold-value="0"');
+    setGeom(1000, 400, 600); // distance exactly 0
+    await start();
+    expect(box().getAttribute("data-pinned")).toBe("true");
+
+    setGeom(1000, 400, 599); // distance 1: past a zero threshold
+    box().dispatchEvent(new Event("scroll"));
+    expect(box().hasAttribute("data-pinned")).toBe(false);
+  });
+
+  it("moves the append watch to a content target swapped at runtime", async () => {
+    setup();
+    setGeom(1000, 400, 100); // unpinned
+    await start();
+    box().scrollTo = vi.fn();
+
+    const fresh = document.createElement("ul");
+    fresh.setAttribute("data-stimeo--stick-to-bottom-target", "content");
+    content().replaceWith(fresh);
+    await tick();
+
+    fresh.appendChild(document.createElement("li"));
+    await tick();
+    expect(box().getAttribute("data-has-new")).toBe("true");
+  });
+
+  it("keeps an arrival in flight when the watch re-syncs to the same target", async () => {
+    setup();
+    setGeom(1000, 400, 100); // unpinned
+    await start();
+    box().scrollTo = vi.fn();
+    const news = recordNews();
+
+    content().appendChild(document.createElement("li")); // queued, not yet delivered
+    controller().contentTargetConnected(); // resolves to the target already held
+    await tick();
+
+    expect(news).toEqual([{ count: 1 }]);
+  });
+
+  it("skips the append watch when there is no MutationObserver", async () => {
+    setup();
+    setGeom(1000, 400, 100); // unpinned
+    await start();
+    const original = globalThis.MutationObserver;
+    const fresh = document.createElement("ul");
+    fresh.setAttribute("data-stimeo--stick-to-bottom-target", "content");
+    content().replaceWith(fresh);
+
+    try {
+      // Removed after start(): Stimulus needs one of its own to reach this controller.
+      (globalThis as { MutationObserver?: unknown }).MutationObserver = undefined;
+      expect(() => controller().contentTargetConnected()).not.toThrow();
+    } finally {
+      globalThis.MutationObserver = original;
+    }
+  });
+
+  it("does not announce a pin before connect", async () => {
+    setup();
+    setGeom(1000, 400, 600); // pinned: connect reflects that state without a transition
+    const pins = recordPins();
+
+    await start();
+    expect(box().getAttribute("data-pinned")).toBe("true");
+    expect(pins).toEqual([]);
+  });
+
+  it("stops reacting to scroll after disconnect", async () => {
+    setup();
+    setGeom(1000, 400, 100); // unpinned
+    await start();
+    const el = box();
+    el.remove();
+    await tick();
+
+    // Distance 0: a live controller would pin here.
+    Object.defineProperty(el, "scrollTop", { configurable: true, value: 600 });
+    el.dispatchEvent(new Event("scroll"));
+    expect(el.hasAttribute("data-pinned")).toBe(false);
+  });
+
+  it("drops a stale has-new flag on connect even while unpinned", async () => {
+    // The flag records an arrival this connection has not seen, and the restored DOM
+    // carries no evidence of one.
+    setup('data-has-new="true"');
+    setGeom(1000, 400, 100); // distance 500 > 80 → not pinned
+    await start();
+    expect(box().hasAttribute("data-has-new")).toBe(false);
+  });
+
+  describe("a container connected without a box", () => {
+    /** Connects with no layout, then hands the container one. */
+    const connectUnlaidOut = async (attrs = "") => {
+      stubResizeObserver();
+      setup(attrs);
+      setGeom(0, 0, 0); // display:none → every metric reads 0
+      const scrollTo = spyOnLandingScrollTo();
+      await start();
+      return scrollTo;
+    };
+
+    it("does not claim to be at the bottom", async () => {
+      await connectUnlaidOut();
+      expect(box().hasAttribute("data-pinned")).toBe(false);
+    });
+
+    it("flags an append that arrives before layout", async () => {
+      await connectUnlaidOut();
+      const news = recordNews();
+
+      await appendChild();
+      expect(box().getAttribute("data-has-new")).toBe("true");
+      expect(news).toEqual([{ count: 1 }]);
+    });
+
+    it("decides from the layout the user gets, leaving a top-anchored read alone", async () => {
+      const scrollTo = await connectUnlaidOut();
+
+      setGeom(1000, 400, 0); // revealed at the top of an overflowing box
+      FakeResizeObserver.instances[0]?.trigger();
+
+      expect(scrollTo).not.toHaveBeenCalled(); // no pinOnConnect: nothing jumps
+      expect(box().hasAttribute("data-pinned")).toBe(false);
+    });
   });
 
   it("has no a11y violations", async () => {

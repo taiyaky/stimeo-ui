@@ -2,13 +2,18 @@
     lock, pointer capture, touch-action, cancel) and adds a keyboard alternative.
     With the opt-in follow value it also moves the card itself — translate on
     move, committed on drop, restored on cancel — so the consumer JS below only
-    mirrors the signal into the status line. %>
+    mirrors the signal into the status line. The card can travel out of the
+    dashed area, which the area clips; the reset action brings it back, since
+    follow's committed offset is internal state a consumer cannot clear. The
+    button sits outside the controller element, so its click reaches the action
+    as a custom event the element's own data-action maps. %>
 <div class="pointer-drag-demo">
   <p class="pointer-drag-demo__hint"><%= t("components.pointer_drag.demo.hint") %></p>
   <div class="pointer-drag-demo__area">
     <button type="button" class="pointer-drag-demo__card" id="pointer-drag-card"
             data-controller="stimeo--pointer-drag"
-            data-stimeo--pointer-drag-follow-value="true">
+            data-stimeo--pointer-drag-follow-value="true"
+            data-action="demo:reset->stimeo--pointer-drag#reset">
       <svg class="demo-icon" viewBox="0 0 24 24" fill="currentColor" stroke="none"
            aria-hidden="true">
         <circle cx="9" cy="6" r="1.5"></circle><circle cx="15" cy="6" r="1.5"></circle>
@@ -18,6 +23,11 @@
       <%= t("components.pointer_drag.demo.card_label") %>
     </button>
   </div>
+  <p class="pointer-drag-demo__actions">
+    <button type="button" class="demo-trigger" data-pointer-drag-reset>
+      <%= t("components.pointer_drag.demo.reset_label") %>
+    </button>
+  </p>
   <p class="pointer-drag-demo__status" data-pointer-drag-status aria-live="polite"
      data-moved-template="<%= t("components.pointer_drag.demo.moved_template") %>"
      data-idle-text="<%= t("components.pointer_drag.demo.idle_text") %>"></p>

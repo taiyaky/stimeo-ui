@@ -24,6 +24,8 @@ describe("TypingIndicatorController", () => {
   let application: Application;
   let createdWith: Record<string, unknown> | string | null = null;
   let mixin: CableSubscriptionMixin | null = null;
+  /** Every mixin the double was asked to create, in order (one per wire subscription). */
+  let mixins: CableSubscriptionMixin[] = [];
   const performMock = vi.fn();
   const unsubscribeMock = vi.fn();
 
@@ -31,6 +33,7 @@ describe("TypingIndicatorController", () => {
     vi.useFakeTimers();
     createdWith = null;
     mixin = null;
+    mixins = [];
     performMock.mockClear();
     unsubscribeMock.mockClear();
     setCableConsumer({
@@ -38,6 +41,7 @@ describe("TypingIndicatorController", () => {
         create(channel, subscriptionMixin) {
           createdWith = channel;
           mixin = subscriptionMixin;
+          mixins.push(subscriptionMixin);
           return { perform: performMock, unsubscribe: unsubscribeMock };
         },
       },
@@ -52,7 +56,7 @@ describe("TypingIndicatorController", () => {
          data-stimeo--typing-indicator-timeout-value="3000"
          data-stimeo--typing-indicator-throttle-value="2000">
       <label>Message <textarea></textarea></label>
-      <p role="status" data-stimeo--typing-indicator-target="status"></p>
+      <p data-stimeo--typing-indicator-target="status"></p>
     </div>`;
 
   /** Mounts the fixture; fake timers require a manual Stimulus connect flush. */
@@ -89,6 +93,18 @@ describe("TypingIndicatorController", () => {
         ) as TypingIndicatorController | null)
       : null;
   const type = () => textarea().dispatchEvent(new Event("input", { bubbles: true }));
+  /** Collects everything handed to the page's shared announcer while `run` executes. */
+  const announcements = async (run: () => void | Promise<void>) => {
+    const messages: string[] = [];
+    const onAnnounce = (event: Event) => {
+      messages.push((event as CustomEvent<{ message: string }>).detail.message);
+    };
+    window.addEventListener("stimeo--announcer:announce", onAnnounce);
+    await run();
+    await vi.advanceTimersByTimeAsync(300); // past the announce debounce
+    window.removeEventListener("stimeo--announcer:announce", onAnnounce);
+    return messages;
+  };
   const confirm = () => mixin?.connected?.();
   const drop = () => mixin?.disconnected?.();
   const receive = (name: string) => mixin?.received?.({ name });
@@ -187,10 +203,20 @@ describe("TypingIndicatorController", () => {
         </div>`);
       // The fresh subscription re-decides rejection; the snapshot must not.
       expect(root().hasAttribute("data-typing-indicator-rejected")).toBe(false);
+      // …and it really is a fresh subscription, not a controller that failed to connect.
+      mixin?.rejected?.();
+      expect(root().getAttribute("data-typing-indicator-rejected")).toBe("true");
     });
   });
 
   describe("receiving", () => {
+    it("has a subscription to receive through", async () => {
+      // The helpers below reach the controller through `mixin?.`, so a run where no
+      // subscription was created would pass them all silently.
+      await mount();
+      expect(mixin).not.toBeNull();
+    });
+
     it("shows a received typer and flips the data-typing hook", async () => {
       await mount();
       receive("Bob");
@@ -271,7 +297,7 @@ describe("TypingIndicatorController", () => {
         <div data-controller="stimeo--typing-indicator" data-typing="true"
              data-stimeo--typing-indicator-channel-value="TypingChannel">
           <textarea aria-label="Message"></textarea>
-          <p role="status" data-stimeo--typing-indicator-target="status">Bob is typing…</p>
+          <p data-stimeo--typing-indicator-target="status">Bob is typing…</p>
         </div>`);
       expect(root().hasAttribute("data-typing")).toBe(false);
       expect(status().textContent).toBe("");
@@ -291,6 +317,201 @@ describe("TypingIndicatorController", () => {
     });
   });
 
+  describe("template substitution", () => {
+    // The name comes off the wire, so it must never reach a replacement *pattern*.
+    const withOne = (template: string) =>
+      fixture.replace(
+        'data-stimeo--typing-indicator-target="status"',
+        `data-stimeo--typing-indicator-target="status" data-one="${template}"`,
+      );
+
+    it("inserts a name containing $& literally", async () => {
+      await mount(withOne("%{name} is typing…"));
+      receive("$&");
+      expect(status().textContent).toBe("$& is typing…");
+    });
+
+    it("inserts a name containing $` and $' literally", async () => {
+      await mount(withOne("[%{name}]"));
+      receive("$`$'");
+      expect(status().textContent).toBe("[$`$']");
+    });
+
+    it("fills every occurrence of a placeholder", async () => {
+      await mount(withOne("%{name}: %{name} is typing…"));
+      receive("Bob");
+      expect(status().textContent).toBe("Bob: Bob is typing…");
+    });
+
+    it("does not re-substitute a name that contains a token", async () => {
+      await mount();
+      status().setAttribute("data-many", "%{names} (%{count})");
+      receive("%{count}");
+      receive("Bob");
+      expect(status().textContent).toBe("%{count}, Bob (2)");
+    });
+
+    it("leaves a placeholder it has no value for as authored", async () => {
+      await mount(withOne("%{name} / %{count}"));
+      receive("Bob");
+      expect(status().textContent).toBe("Bob / %{count}");
+    });
+  });
+
+  describe("declared values", () => {
+    /** The fixture with only the declarations a case needs — the rest take defaults. */
+    const declaring = (attrs = "") => `
+      <div data-controller="stimeo--typing-indicator"
+           data-stimeo--typing-indicator-channel-value="TypingChannel"
+           data-stimeo--typing-indicator-name-value="Alice" ${attrs}>
+        <label>Message <textarea></textarea></label>
+        <p data-stimeo--typing-indicator-target="status"></p>
+      </div>`;
+    const bare = declaring();
+
+    it("subscribes to the channel alone when no params are declared", async () => {
+      await mount(bare);
+      expect(createdWith).toEqual({ channel: "TypingChannel" });
+    });
+
+    it("keeps the subscription when the params declaration is unparseable", async () => {
+      // Stimulus' Object reader would throw here and take the subscription with it.
+      await mount(declaring('data-stimeo--typing-indicator-params-value="{"'));
+      expect(createdWith).toEqual({ channel: "TypingChannel" });
+    });
+
+    it("clears a typer after the default timeout of silence", async () => {
+      await mount(bare);
+      receive("Bob");
+      await vi.advanceTimersByTimeAsync(2900);
+      expect(status().textContent).toBe("Bob is typing…");
+      await vi.advanceTimersByTimeAsync(200); // past the default 3000
+      expect(status().textContent).toBe("");
+    });
+
+    it("throttles to the default interval when none is declared", async () => {
+      await mount(bare);
+      confirm();
+      type();
+      await vi.advanceTimersByTimeAsync(1900);
+      type(); // still inside the default 2000ms window
+      expect(performMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(200);
+      type();
+      expect(performMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("honors a throttle shorter than the default", async () => {
+      await mount(declaring('data-stimeo--typing-indicator-throttle-value="500"'));
+      confirm();
+      type();
+      await vi.advanceTimersByTimeAsync(600); // past 500, still inside the default 2000
+      type();
+      expect(performMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("honors a timeout shorter than the default", async () => {
+      await mount(declaring('data-stimeo--typing-indicator-timeout-value="1000"'));
+      receive("Bob");
+      await vi.advanceTimersByTimeAsync(1100); // past 1000, still inside the default 3000
+      expect(status().textContent).toBe("");
+    });
+
+    it.each(["abc", "-1", "Infinity"])(
+      "falls back to the default interval when throttle is %s",
+      async (declared) => {
+        // NaN and a negative gap leave the gate open on every keystroke; Infinity is
+        // never exceeded, so it would never open at all.
+        await mount(declaring(`data-stimeo--typing-indicator-throttle-value="${declared}"`));
+        confirm();
+        type();
+        type();
+        expect(performMock).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(["abc", "-1", "Infinity"])(
+      "falls back to the default silence when timeout is %s",
+      async (declared) => {
+        // Every one of these reaches setTimeout as "now", so the typer would vanish in
+        // the task it appeared in.
+        await mount(declaring(`data-stimeo--typing-indicator-timeout-value="${declared}"`));
+        receive("Bob");
+        await vi.advanceTimersByTimeAsync(1);
+        expect(status().textContent).toBe("Bob is typing…");
+      },
+    );
+  });
+
+  describe("without a status target", () => {
+    const hookOnly = `
+      <div data-controller="stimeo--typing-indicator"
+           data-stimeo--typing-indicator-channel-value="TypingChannel"
+           data-stimeo--typing-indicator-name-value="Alice">
+        <textarea aria-label="Message"></textarea>
+      </div>`;
+
+    it("still flips the hook and announces the change", async () => {
+      await mount(hookOnly);
+      const changes: string[][] = [];
+      root().addEventListener("stimeo--typing-indicator:change", (event) => {
+        changes.push((event as CustomEvent<{ names: string[] }>).detail.names);
+      });
+
+      receive("Bob");
+      expect(root().getAttribute("data-typing")).toBe("true");
+      expect(changes).toEqual([["Bob"]]);
+
+      await vi.advanceTimersByTimeAsync(3100);
+      expect(root().getAttribute("data-typing")).toBe("false");
+    });
+  });
+
+  it("paints the current copy into a status target swapped in mid-conversation", async () => {
+    // A Turbo Stream can replace the status slot while a peer is typing. Without a
+    // repaint the fresh slot stays empty while the hook still says someone is typing,
+    // leaving the state in the visual hook alone.
+    await mount();
+    receive("Bob");
+    const fresh = status().cloneNode(false) as HTMLElement;
+    status().replaceWith(fresh);
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(root().getAttribute("data-typing")).toBe("true");
+    expect(status().textContent).toBe("Bob is typing…");
+  });
+
+  describe("two indicators on the same channel and room", () => {
+    const indicator = (id: string) => `
+      <div id="${id}" data-controller="stimeo--typing-indicator"
+           data-stimeo--typing-indicator-channel-value="TypingChannel"
+           data-stimeo--typing-indicator-params-value='{"room":"chat_42"}'
+           data-stimeo--typing-indicator-name-value="Alice">
+        <textarea aria-label="Message ${id}"></textarea>
+        <p data-stimeo--typing-indicator-target="status"></p>
+      </div>`;
+    const statuses = () =>
+      [...document.querySelectorAll('[data-stimeo--typing-indicator-target="status"]')].map(
+        (element) => element.textContent,
+      );
+
+    it("shares one confirmed subscription, so the second indicator can send too", async () => {
+      await mount(indicator("a") + indicator("b"));
+      // The server confirms an identifier once and ignores a repeated subscribe for it.
+      expect(mixins).toHaveLength(1);
+      mixins[0]?.connected?.();
+      const second = document.querySelector("#b textarea") as HTMLTextAreaElement;
+      second.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(performMock).toHaveBeenCalledWith("typing", { name: "Alice" });
+    });
+
+    it("renders one broadcast into both indicators", async () => {
+      await mount(indicator("a") + indicator("b"));
+      mixins[0]?.received?.({ name: "Bob" });
+      expect(statuses()).toEqual(["Bob is typing…", "Bob is typing…"]);
+    });
+  });
+
   it("has no machine-detectable a11y violations", async () => {
     await mount(`<main>${fixture}</main>`);
     receive("Bob");
@@ -300,18 +521,78 @@ describe("TypingIndicatorController", () => {
 
   // --- Speech-order regression ------------------------------------------------
 
-  it("announces a typing peer through the status live region only", async () => {
+  it("reads the status slot as ordinary text, not as a live region", async () => {
+    // The slot is visible copy; assistive tech is reached through the shared announcer
+    // instead, so nothing here carries live-region semantics.
     await mount();
     confirm();
-    vi.useRealTimers(); // the virtual reader awaits real async work
-    const container = root();
-    const quiet = await captureSpeech({ container, steps: 2 });
-    // Freeze the whole ordered array: composer label + input + an empty status.
-    expect(quiet).toEqual(["Message", "textbox, Message", "status"]);
-
     receive("Bob");
     expect(status().textContent).toBe("Bob is typing…");
-    const typing = await captureSpeech({ container, steps: 3 });
-    expect(typing).toEqual(["Message", "textbox, Message", "status", "Bob is typing…"]);
+    expect(status().getAttribute("role")).toBeNull();
+    expect(status().getAttribute("aria-live")).toBeNull();
+
+    vi.useRealTimers(); // the virtual reader awaits real async work
+    const spoken = await captureSpeech({ container: root(), steps: 4 });
+    // Freeze the whole ordered array: the slot reads as a plain paragraph, with no
+    // live-region wording anywhere in it.
+    expect(spoken).toEqual([
+      "Message",
+      "textbox, Message",
+      "paragraph",
+      "Bob is typing…",
+      "end of paragraph",
+    ]);
+  });
+
+  describe("announcing through the shared announcer", () => {
+    const ONE = 'data-stimeo--typing-indicator-announce-one-text-value="{name} is typing"';
+    const MANY =
+      'data-stimeo--typing-indicator-announce-many-text-value="{count} people are typing: {names}"';
+    const announcing = (attrs: string) =>
+      fixture.replace(
+        'data-stimeo--typing-indicator-name-value="Alice"',
+        `data-stimeo--typing-indicator-name-value="Alice" ${attrs}`,
+      );
+
+    it("sends the settled single typer with the declared wording", async () => {
+      await mount(announcing(ONE));
+      expect(await announcements(() => receive("Bob"))).toEqual(["Bob is typing"]);
+    });
+
+    it("sends one announcement for a burst of arrivals", async () => {
+      await mount(announcing(`${ONE} ${MANY}`));
+      const messages = await announcements(() => {
+        receive("Bob");
+        receive("Carol");
+      });
+      expect(messages).toEqual(["2 people are typing: Bob, Carol"]);
+    });
+
+    it("announces nothing when the wording is not declared", async () => {
+      await mount();
+      expect(await announcements(() => receive("Bob"))).toEqual([]);
+    });
+
+    it("announces nothing when the last typer stops", async () => {
+      // Both templates are declared, so an empty set reaching the many branch would
+      // announce "0 people are typing: " instead of staying quiet.
+      await mount(announcing(`${ONE} ${MANY}`));
+      await announcements(() => receive("Bob"));
+      // The set emptying is not news worth interrupting a reader for.
+      const onStop = await announcements(async () => {
+        await vi.advanceTimersByTimeAsync(3100);
+      });
+      expect(onStop).toEqual([]);
+      expect(status().textContent).toBe("");
+    });
+
+    it("drops a pending announcement on disconnect", async () => {
+      await mount(announcing(ONE));
+      const messages = await announcements(() => {
+        receive("Bob");
+        controller()?.disconnect();
+      });
+      expect(messages).toEqual([]);
+    });
   });
 });

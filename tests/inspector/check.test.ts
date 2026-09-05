@@ -1222,32 +1222,20 @@ describe("checkSource", () => {
         expect(codes(source)).toContain("invalid-aria-value");
       });
 
-      // Same live-region contract on the opt-in cable controller: the author
-      // supplies the status target's live semantics.
+      // The opt-in cable controller reaches assistive tech through the page's shared
+      // announcer, so its status target is a plain visible slot with no live-region
+      // requirement of its own.
       const typing = (status: string) => `
         <div data-controller="stimeo--typing-indicator">
           <textarea aria-label="Message"></textarea>
           ${status}
         </div>`;
 
-      it("accepts either live-region spelling on typing-indicator's status", () => {
+      it("asks nothing of typing-indicator's status target", () => {
+        expect(codes(typing(`<p data-stimeo--typing-indicator-target="status"></p>`))).toEqual([]);
         expect(
           codes(typing(`<p role="status" data-stimeo--typing-indicator-target="status"></p>`)),
         ).toEqual([]);
-        expect(
-          codes(typing(`<p aria-live="polite" data-stimeo--typing-indicator-target="status"></p>`)),
-        ).toEqual([]);
-      });
-
-      it("flags a typing-indicator status target with no live-region semantics", () => {
-        expect(codes(typing(`<p data-stimeo--typing-indicator-target="status"></p>`))).toContain(
-          "missing-aria",
-        );
-      });
-
-      it("does not require the optional status target itself", () => {
-        // Silent mode (data-typing hook only) stays valid: the rule binds to
-        // the target when present, not to its existence.
         expect(codes(typing(""))).toEqual([]);
       });
 

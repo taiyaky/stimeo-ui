@@ -1,5 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
-import { type ConfirmedCableSubscription, createConfirmedSubscription } from "./consumer";
+import {
+  type ConfirmedCableSubscription,
+  createConfirmedSubscription,
+  parseSubscriptionParams,
+} from "./consumer";
 
 /**
  * Marker on triggers this controller disabled (mirroring submit-once's
@@ -36,6 +40,8 @@ const DISABLED_MARKER = "data-live-counter-disabled";
  * bump is skipped and the broadcast applies the increment exactly once — set
  * `id` (any per-client string, e.g. `SecureRandom.uuid`) for optimistic UX.
  *
+ * `change` dispatches `{ count }`.
+ *
  * @remarks
  * Behavior only — the displayed number IS the state, and the **DOM is the
  * source of truth**: the server renders the initial count into the `value`
@@ -61,7 +67,7 @@ export class LiveCounterController extends Controller<HTMLElement> {
   static override targets = ["value", "trigger"];
   static override values = {
     channel: { type: String, default: "" },
-    params: { type: Object, default: {} },
+    params: { type: String, default: "" },
     id: { type: String, default: "" },
   };
   static actions = ["increment"] as const;
@@ -71,10 +77,23 @@ export class LiveCounterController extends Controller<HTMLElement> {
   declare readonly valueTarget: HTMLElement;
   declare readonly triggerTargets: HTMLElement[];
   declare channelValue: string;
-  declare paramsValue: Record<string, unknown>;
+  declare paramsValue: string;
   declare idValue: string;
 
+  /** Identifier parameters parsed once from their declaration, never in the hot path. */
+  #params: Record<string, unknown> = {};
+
   #subscription: ConfirmedCableSubscription | null = null;
+
+  /**
+   * Re-parses the identifier parameters when the declaration changes.
+   *
+   * A malformed declaration falls back to no parameters, so the identifier keeps
+   * naming the channel instead of the subscription never being created at all.
+   */
+  paramsValueChanged(): void {
+    this.#params = parseSubscriptionParams(this.paramsValue);
+  }
 
   override connect(): void {
     // Rejection is transient server state: a Turbo cache snapshot must not
@@ -82,7 +101,7 @@ export class LiveCounterController extends Controller<HTMLElement> {
     this.element.removeAttribute("data-live-counter-rejected");
     if (this.channelValue) {
       this.#subscription = createConfirmedSubscription(
-        { channel: this.channelValue, ...this.paramsValue },
+        { channel: this.channelValue, ...this.#params },
         {
           connected: () => this.#syncTriggers(),
           // A drop closes the send window (the shared subscription tracks it)

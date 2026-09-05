@@ -67,9 +67,16 @@ describe("PointerDragController", () => {
         ) as PointerDragController | null)
       : null;
 
+  /** Dispatches a pointerdown and reports whether the controller consumed it. */
   const pointerDown = (x: number, y: number, pointerId = 1) =>
     handle().dispatchEvent(
-      new PointerEvent("pointerdown", { clientX: x, clientY: y, pointerId, bubbles: true }),
+      new PointerEvent("pointerdown", {
+        clientX: x,
+        clientY: y,
+        pointerId,
+        bubbles: true,
+        cancelable: true,
+      }),
     );
   const pointerMove = (x: number, y: number, pointerId = 1) =>
     handle().dispatchEvent(
@@ -77,8 +84,18 @@ describe("PointerDragController", () => {
     );
   const pointerUp = (pointerId = 1) =>
     handle().dispatchEvent(new PointerEvent("pointerup", { pointerId, bubbles: true }));
-  const key = (k: string) =>
-    handle().dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+  /**
+   * Focuses the handle, then dispatches a keydown on it and reports whether the
+   * controller consumed it. Pressing at an element that never held focus skips
+   * every path that reads `document.activeElement` and leaves the result of a
+   * focus move unassertable.
+   */
+  const key = (k: string) => {
+    handle().focus();
+    return handle().dispatchEvent(
+      new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }),
+    );
+  };
 
   describe("pointer lifecycle", () => {
     it("does not start until the movement passes the threshold", async () => {
@@ -461,7 +478,9 @@ describe("PointerDragController", () => {
       // place outranks reclaiming the controller-owned tab stop.
       expect(handle().getAttribute("tabindex")).toBe("0");
       expect(document.activeElement).toBe(handle());
-      expect(handle().hasAttribute("data-pointer-drag-tabindex")).toBe(false);
+      // The loan stays recorded: the value is still ours and only the focus kept
+      // us from returning it, so a later teardown can still give it back.
+      expect(handle().hasAttribute("data-pointer-drag-tabindex")).toBe(true);
     });
 
     it("leaves a tabindex another owner rewrote (e.g. roving) in place", async () => {
@@ -531,6 +550,7 @@ describe("PointerDragController", () => {
 
       key("ArrowRight");
       expect(events.move).toHaveLength(1); // session still live
+      expect(events.cancel).toHaveLength(0); // and the move never ended it
       key(" ");
       expect(events.end).toHaveLength(1);
     });
@@ -713,7 +733,8 @@ describe("PointerDragController", () => {
     const followFixture = `
       <ul>
         <li data-controller="stimeo--pointer-drag"
-            data-stimeo--pointer-drag-follow-value="true">
+            data-stimeo--pointer-drag-follow-value="true"
+            data-action="demo:reset->stimeo--pointer-drag#reset">
           <span>Card A</span>
           <button type="button" data-stimeo--pointer-drag-target="handle"
                   aria-label="Reorder Card A">⠿</button>
@@ -765,6 +786,70 @@ describe("PointerDragController", () => {
       expect(translate()).toBe("0px 10px");
       key("Escape");
       expect(translate()).toBe("10px 10px");
+    });
+
+    it("returns to the origin when reset() runs, and drags accumulate from there", async () => {
+      await mount(followFixture);
+      pointerDown(100, 100);
+      pointerMove(140, 120);
+      pointerUp();
+      expect(translate()).toBe("40px 20px");
+
+      root().dispatchEvent(new CustomEvent("demo:reset")); // wired by data-action
+      expect(translate()).toBe(""); // the property is removed at the origin
+
+      // The committed base went with it: the next drag starts from zero rather
+      // than adding onto the offset reset() just cleared.
+      pointerDown(200, 200, 2);
+      pointerMove(205, 210, 2);
+      expect(translate()).toBe("5px 10px");
+      pointerUp(2);
+      expect(translate()).toBe("5px 10px");
+    });
+
+    it("cancels an in-flight pointer drag when reset() runs", async () => {
+      const events = await mount(followFixture);
+      pointerDown(100, 100);
+      pointerMove(140, 120);
+      expect(translate()).toBe("40px 20px");
+
+      root().dispatchEvent(new CustomEvent("demo:reset"));
+      // The live session ends the way every other cancel path ends it, carrying
+      // the pointer type — a consumer tracking sessions must not be left hanging.
+      expect(events.cancel).toEqual([{ pointerType: "mouse" }]);
+      expect(translate()).toBe("");
+      // The session is over: further pointer movement must not resurrect it.
+      pointerMove(180, 160);
+      expect(translate()).toBe("");
+    });
+
+    it("cancels a keyboard grab when reset() runs, and stays silent when idle", async () => {
+      const events = await mount(followFixture);
+      key(" ");
+      key("ArrowRight");
+      expect(root().getAttribute("data-grabbed")).toBe("true");
+
+      root().dispatchEvent(new CustomEvent("demo:reset"));
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+      expect(root().hasAttribute("data-grabbed")).toBe(false);
+      expect(translate()).toBe("");
+
+      // Resetting with nothing in flight cancels nothing: there is no session to
+      // report the end of.
+      root().dispatchEvent(new CustomEvent("demo:reset"));
+      expect(events.cancel).toHaveLength(1);
+    });
+
+    it("keeps a below-threshold press out of the cancel report when reset() runs", async () => {
+      const events = await mount(followFixture);
+      pointerDown(100, 100);
+      pointerMove(101, 100); // under the 3px threshold: no drag started yet
+      expect(events.start).toHaveLength(0);
+
+      root().dispatchEvent(new CustomEvent("demo:reset"));
+      // Nothing was ever announced as started, so nothing is announced cancelled.
+      expect(events.cancel).toHaveLength(0);
+      expect(translate()).toBe("");
     });
 
     it("keeps the locked axis untouched", async () => {
@@ -832,6 +917,406 @@ describe("PointerDragController", () => {
       pointerUp();
       expect(root().getAttribute("style")).toBeNull();
     });
+  });
+
+  it("ignores Space / Enter / arrows raised during an IME composition", async () => {
+    // A press that steers a conversion belongs to the composition, not to the drag.
+    const events = await mount(defaultFixture);
+    const composing = (k: string) =>
+      handle().dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: k,
+          bubbles: true,
+          cancelable: true,
+          isComposing: true,
+        }),
+      );
+
+    composing(" ");
+    composing("Enter");
+    expect(events.start).toHaveLength(0);
+
+    key(" "); // a real grab, so the arrow branch is reachable
+    expect(events.start).toHaveLength(1);
+    composing("ArrowRight");
+    expect(events.move).toHaveLength(0);
+  });
+
+  it("cancels a keyboard grab when the handle leaves the element", async () => {
+    const events = await mount(defaultFixture);
+    key(" ");
+    expect(events.start).toHaveLength(1);
+
+    handle().remove();
+    await delay(20);
+    expect(events.cancel).toHaveLength(1);
+    expect(root().hasAttribute("data-grabbed")).toBe(false);
+  });
+
+  it("cancels a pointer drag when the handle leaves the element", async () => {
+    const events = await mount(defaultFixture);
+    pointerDown(0, 0);
+    pointerMove(30, 30);
+    expect(events.start).toHaveLength(1);
+
+    handle().remove();
+    await delay(20);
+    expect(events.cancel).toEqual([{ pointerType: "mouse" }]);
+    expect(root().hasAttribute("data-dragging")).toBe(false);
+  });
+
+  it("keeps the tabindex loan across an in-page move of a focused handle", async () => {
+    await mount(`
+      <ul>
+        <li id="src" data-controller="stimeo--pointer-drag">
+          <span id="h" data-stimeo--pointer-drag-target="handle">handle</span>
+        </li>
+        <li id="dst"></li>
+      </ul>`);
+    const h = document.getElementById("h") as HTMLElement;
+    expect(h.getAttribute("tabindex")).toBe("0");
+    expect(h.hasAttribute("data-pointer-drag-tabindex")).toBe(true);
+    h.focus();
+
+    const li = document.getElementById("src") as HTMLElement;
+    (document.querySelector("ul") as HTMLElement).appendChild(li); // in-page move
+    h.focus(); // the composer re-focuses synchronously, as sortable does
+    await delay(20);
+    // The loan must survive the move, or the borrowed tabindex is never returned.
+    expect(h.hasAttribute("data-pointer-drag-tabindex")).toBe(true);
+  });
+
+  it("returns an in-flight follow offset before a dead-tree teardown", async () => {
+    await mount(`
+      <ul>
+        <li data-controller="stimeo--pointer-drag"
+            data-stimeo--pointer-drag-follow-value="true">
+          <button type="button" data-stimeo--pointer-drag-target="handle"
+                  aria-label="Reorder">⠿</button>
+        </li>
+      </ul>`);
+    pointerDown(0, 0);
+    pointerMove(50, 0);
+    const li = root();
+    expect(li.style.getPropertyValue("translate")).toBe("50px 0px");
+
+    li.remove(); // the tree dies mid-drag
+    await delay(20);
+    // Nothing was committed, so the element must not carry the in-flight offset
+    // into a later reuse (connect() would read it back as a committed base).
+    expect(li.style.getPropertyValue("translate")).toBe("");
+  });
+
+  it("hands the handle contract over when the handle set changes at runtime", async () => {
+    await mount(`<ul><li data-controller="stimeo--pointer-drag">Card A</li></ul>`);
+    const li = root();
+    expect(li.getAttribute("tabindex")).toBe("0");
+    expect(li.style.touchAction).toBe("none");
+
+    const added = document.createElement("button");
+    added.type = "button";
+    added.setAttribute("data-stimeo--pointer-drag-target", "handle");
+    li.appendChild(added);
+    await delay(20);
+    // The element is no longer the handle: it gives the contract back.
+    expect(li.hasAttribute("tabindex")).toBe(false);
+    expect(li.style.touchAction).toBe("");
+
+    added.remove();
+    await delay(20);
+    // And takes it back when it becomes the handle again.
+    expect(li.getAttribute("tabindex")).toBe("0");
+    expect(li.style.touchAction).toBe("none");
+  });
+
+  it("returns the handle contract when the identifier token is removed", async () => {
+    // A morph strips `data-controller` before the teardown runs, and the targets
+    // stop resolving with it — so the handles are unreachable from `#handles()`
+    // by the time anything sweeps them.
+    await mount(`
+      <ul>
+        <li data-controller="stimeo--pointer-drag">
+          <span data-stimeo--pointer-drag-target="handle" role="button"
+                aria-label="Reorder">⠿</span>
+        </li>
+      </ul>`);
+    const h = handle();
+    expect(h.getAttribute("tabindex")).toBe("0");
+    expect(h.style.touchAction).toBe("none");
+
+    root().removeAttribute("data-controller");
+    await delay(20);
+    expect(h.hasAttribute("tabindex")).toBe(false);
+    expect(h.hasAttribute("data-pointer-drag-tabindex")).toBe(false);
+    expect(h.style.touchAction).toBe("");
+    expect(h.hasAttribute("data-pointer-drag-touch-action")).toBe(false);
+  });
+
+  it("returns the handle contract when an element stops being a handle", async () => {
+    // The element stays put and the controller lives on, so nothing else will
+    // ever sweep it: the loan has to come back here or never.
+    await mount(`
+      <ul>
+        <li data-controller="stimeo--pointer-drag">
+          <span id="ex" data-stimeo--pointer-drag-target="handle" role="button"
+                aria-label="Reorder">⠿</span>
+        </li>
+      </ul>`);
+    const ex = document.getElementById("ex") as HTMLElement;
+    expect(ex.getAttribute("tabindex")).toBe("0");
+
+    ex.removeAttribute("data-stimeo--pointer-drag-target");
+    await delay(20);
+    expect(ex.hasAttribute("tabindex")).toBe(false);
+    expect(ex.hasAttribute("data-pointer-drag-tabindex")).toBe(false);
+    expect(ex.style.touchAction).toBe("");
+    expect(ex.hasAttribute("data-pointer-drag-touch-action")).toBe(false);
+  });
+
+  it("keeps a consumer's touch-action across an in-page move mid-session", async () => {
+    const events = await mount(defaultFixture);
+    const h = handle();
+    key(" ");
+    expect(events.start).toHaveLength(1);
+    h.style.touchAction = "manipulation"; // the consumer takes the property over
+
+    const li = root();
+    (document.querySelector("ul") as HTMLElement).appendChild(li); // in-page move
+    h.focus(); // the composer re-focuses synchronously, as sortable does
+    await delay(20);
+    expect(li.getAttribute("data-grabbed")).toBe("true"); // the session survived
+    expect(h.style.touchAction).toBe("manipulation");
+  });
+
+  it("keeps a consumer's touch-action across a move when the element is the handle", async () => {
+    // Without a handle target the reconnect re-derives from `connect()` itself,
+    // and the axis default is replayed ahead of it with no previous value.
+    const events = await mount(`<ul><li data-controller="stimeo--pointer-drag">Card A</li></ul>`);
+    const li = root();
+    key(" ");
+    expect(events.start).toHaveLength(1);
+    li.style.touchAction = "manipulation";
+
+    (document.querySelector("ul") as HTMLElement).appendChild(li);
+    li.focus();
+    await delay(20);
+    expect(li.getAttribute("data-grabbed")).toBe("true");
+    expect(li.style.touchAction).toBe("manipulation");
+  });
+
+  it("leaves an authored touch-action alone when the axis changes at runtime", async () => {
+    // `none` is also what the default axis lends, so only the ownership marker
+    // separates an authored value from a borrowed one here.
+    await mount(`
+      <ul>
+        <li data-controller="stimeo--pointer-drag">
+          <button type="button" style="touch-action: none;"
+                  data-stimeo--pointer-drag-target="handle" aria-label="Reorder">⠿</button>
+        </li>
+      </ul>`);
+    const h = handle();
+    expect(h.hasAttribute("data-pointer-drag-touch-action")).toBe(false);
+
+    root().setAttribute("data-stimeo--pointer-drag-axis-value", "x");
+    await delay(20);
+    expect(h.style.touchAction).toBe("none");
+  });
+
+  it("re-derives nothing from the axis default a reconnect replays", async () => {
+    // The replayed default carries no previous axis, so it cannot tell a value
+    // this controller lent from one the consumer wrote — even a value the
+    // controller could have lent under some other axis.
+    const events = await mount(`
+      <ul>
+        <li data-controller="stimeo--pointer-drag" data-stimeo--pointer-drag-axis-value="y">
+          Card A
+        </li>
+      </ul>`);
+    const li = root();
+    expect(li.style.touchAction).toBe("pan-x");
+    key(" ");
+    expect(events.start).toHaveLength(1);
+    li.style.touchAction = "none"; // the consumer takes the property over
+
+    (document.querySelector("ul") as HTMLElement).appendChild(li); // in-page move
+    li.focus();
+    await delay(20);
+    expect(li.getAttribute("data-grabbed")).toBe("true"); // the session survived
+    expect(li.style.touchAction).toBe("none");
+  });
+
+  it("never takes back a touch-action the consumer rewrote after marking", async () => {
+    await mount(defaultFixture);
+    const h = handle();
+    expect(h.style.touchAction).toBe("none");
+    h.style.touchAction = "manipulation"; // the consumer takes the property over
+
+    root().setAttribute("data-stimeo--pointer-drag-axis-value", "x");
+    await delay(20);
+    expect(h.style.touchAction).toBe("manipulation");
+
+    root().remove(); // teardown
+    await delay(20);
+    expect(h.style.touchAction).toBe("manipulation");
+  });
+
+  it("leaves Space and the arrows to a native control inside the handle", async () => {
+    const events = await mount(`
+      <ul>
+        <li data-controller="stimeo--pointer-drag">
+          <div data-stimeo--pointer-drag-target="handle">
+            <input id="field" type="text" aria-label="Rename" />
+          </div>
+        </li>
+      </ul>`);
+    const field = document.getElementById("field") as HTMLElement;
+    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    field.dispatchEvent(space);
+    expect(space.defaultPrevented).toBe(false);
+    expect(events.start).toHaveLength(0);
+  });
+
+  it("consumes the presses it acts on and restores the focus it suppressed", async () => {
+    // The suppressed default of pointerdown would have focused the handle; the
+    // keyboard path (Escape, grab, arrows) only stays reachable if it is restored.
+    await mount(defaultFixture);
+    expect(pointerDown(0, 0)).toBe(false);
+    expect(document.activeElement).toBe(handle());
+    expect(key("Escape")).toBe(true); // below the threshold there is nothing to cancel
+    pointerMove(30, 30);
+    expect(key("Escape")).toBe(false); // and now it cancels the live drag
+
+    expect(key(" ")).toBe(false); // grab
+    expect(key("ArrowRight")).toBe(false); // an allowed-axis move
+    expect(key("Enter")).toBe(false); // drop
+  });
+
+  it("consumes a locked-axis arrow without emitting a move", async () => {
+    // The consumption is the point: an unconsumed arrow scrolls the page mid-grab.
+    const events = await mount(`
+      <ul>
+        <li data-controller="stimeo--pointer-drag" data-stimeo--pointer-drag-axis-value="x">
+          <button type="button" data-stimeo--pointer-drag-target="handle"
+                  aria-label="Reorder">⠿</button>
+        </li>
+      </ul>`);
+    key(" ");
+    expect(key("ArrowDown")).toBe(false);
+    expect(events.move).toHaveLength(0);
+  });
+
+  it("reports the pointer type a drag was started with", async () => {
+    const events = await mount(defaultFixture);
+    handle().dispatchEvent(
+      new PointerEvent("pointerdown", {
+        clientX: 0,
+        clientY: 0,
+        pointerId: 1,
+        pointerType: "touch",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    pointerMove(30, 30);
+    expect(events.start?.[0]?.pointerType).toBe("touch");
+    expect(events.move?.[0]?.pointerType).toBe("touch");
+  });
+
+  it("ignores pointer events belonging to another pointer", async () => {
+    const events = await mount(defaultFixture);
+    pointerDown(0, 0, 1);
+    pointerMove(50, 50, 2); // a second finger's move is not this session's
+    expect(events.start).toHaveLength(0);
+    pointerMove(50, 50, 1);
+    expect(events.start).toHaveLength(1);
+
+    pointerUp(2); // nor is its release
+    expect(events.end).toHaveLength(0);
+    handle().dispatchEvent(new PointerEvent("pointercancel", { pointerId: 2, bubbles: true }));
+    expect(events.cancel).toHaveLength(0);
+    pointerUp(1);
+    expect(events.end).toHaveLength(1);
+  });
+
+  it("ignores keys raised outside every handle", async () => {
+    const events = await mount(defaultFixture);
+    root().dispatchEvent(
+      new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }),
+    );
+    expect(events.start).toHaveLength(0);
+  });
+
+  it("leaves a non-arrow key alone while grabbed", async () => {
+    const events = await mount(defaultFixture);
+    key(" ");
+    expect(key("a")).toBe(true); // not ours: no preventDefault, no move
+    expect(events.move).toHaveLength(0);
+  });
+
+  it("cancels a pointer drag with its own pointer type when disabled mid-drag", async () => {
+    const events = await mount(defaultFixture);
+    pointerDown(0, 0);
+    pointerMove(30, 30);
+    root().setAttribute("data-stimeo--pointer-drag-disabled-value", "true");
+    await delay(20);
+    expect(events.cancel).toEqual([{ pointerType: "mouse" }]);
+  });
+
+  it("derives pan-y from axis=x and gives it back on teardown", async () => {
+    await mount(`
+      <ul>
+        <li data-controller="stimeo--pointer-drag" data-stimeo--pointer-drag-axis-value="x">
+          <button type="button" data-stimeo--pointer-drag-target="handle"
+                  aria-label="Reorder">⠿</button>
+        </li>
+      </ul>`);
+    const h = handle();
+    expect(h.style.touchAction).toBe("pan-y");
+    root().remove();
+    await delay(20);
+    expect(h.style.touchAction).toBe("");
+  });
+
+  it("never touches an authored translate without the follow opt-in", async () => {
+    await mount(defaultFixture);
+    root().style.setProperty("translate", "7px 7px"); // the consumer's own offset
+    pointerDown(0, 0);
+    pointerMove(40, 0);
+    expect(root().style.getPropertyValue("translate")).toBe("7px 7px");
+    const li = root();
+    li.remove();
+    await delay(20);
+    expect(li.style.getPropertyValue("translate")).toBe("7px 7px");
+  });
+
+  it("leaves the element bare when the controller goes but the handle stays", async () => {
+    // The target callbacks also fire during teardown, with the handle still
+    // inside: taking the handle contract back there would bake a nameless tab
+    // stop onto the container on every morph.
+    await mount(defaultFixture);
+    const li = root();
+    li.removeAttribute("data-controller");
+    await delay(20);
+    expect(li.hasAttribute("tabindex")).toBe(false);
+    expect(li.style.touchAction).toBe("");
+  });
+
+  it("keeps a live grab when disabled is re-declared as false", async () => {
+    const events = await mount(defaultFixture);
+    key(" ");
+    expect(events.start).toHaveLength(1);
+    root().setAttribute("data-stimeo--pointer-drag-disabled-value", "false");
+    await delay(20);
+    expect(root().getAttribute("data-grabbed")).toBe("true");
+    key(" ");
+    expect(events.end).toHaveLength(1);
+  });
+
+  it("stays silent when a handle leaves with no session in flight", async () => {
+    const events = await mount(defaultFixture);
+    handle().remove();
+    await delay(20);
+    expect(events.cancel).toHaveLength(0);
   });
 
   it("has no machine-detectable a11y violations", async () => {

@@ -29,6 +29,8 @@ describe("PresenceController", () => {
   let application: Application;
   let createdWith: Record<string, unknown> | string | null = null;
   let mixin: CableSubscriptionMixin | null = null;
+  /** Every mixin the double was asked to create, in order (one per wire subscription). */
+  let mixins: CableSubscriptionMixin[] = [];
   const performMock = vi.fn();
   const unsubscribeMock = vi.fn();
 
@@ -36,6 +38,7 @@ describe("PresenceController", () => {
     vi.useFakeTimers();
     createdWith = null;
     mixin = null;
+    mixins = [];
     performMock.mockClear();
     unsubscribeMock.mockClear();
     setCableConsumer({
@@ -43,6 +46,7 @@ describe("PresenceController", () => {
         create(channel, subscriptionMixin) {
           createdWith = channel;
           mixin = subscriptionMixin;
+          mixins.push(subscriptionMixin);
           return { perform: performMock, unsubscribe: unsubscribeMock };
         },
       },
@@ -114,6 +118,22 @@ describe("PresenceController", () => {
       expect(performMock).not.toHaveBeenCalled(); // perform before confirm is dropped
       confirm();
       expect(performMock).toHaveBeenCalledWith("appear", { id: "alice", name: "Alice" });
+    });
+
+    it("shares one confirmed subscription between two widgets for the same room", async () => {
+      await mount(fixture + fixture);
+      // The server confirms an identifier once and ignores a repeated subscribe for it.
+      expect(mixins).toHaveLength(1);
+      mixins[0]?.connected?.();
+      expect(performMock).toHaveBeenCalledWith("appear", { id: "alice", name: "Alice" });
+      mixins[0]?.received?.({ id: "bob", name: "Bob" });
+      const names = [...document.querySelectorAll('[data-stimeo--presence-target="list"]')].map(
+        (each) =>
+          Array.from(each.querySelectorAll("[data-presence-id]")).map((el) =>
+            (el.textContent ?? "").trim(),
+          ),
+      );
+      expect(names).toEqual([["Bob"], ["Bob"]]);
     });
 
     it("heartbeats on the configured interval", async () => {

@@ -1,6 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { SafeInterval, SafeTimeout } from "../utils/safe_timeout";
-import { type ConfirmedCableSubscription, createConfirmedSubscription } from "./consumer";
+import {
+  type ConfirmedCableSubscription,
+  createConfirmedSubscription,
+  parseSubscriptionParams,
+} from "./consumer";
 
 /** A peer currently present (another client in the same room). */
 interface Peer {
@@ -30,7 +34,7 @@ const BEACON_THROTTLE_MS = 2000;
  *
  * Roster convergence: a late joiner would otherwise see peers only as their
  * next heartbeats arrive, so on hearing a beacon from an *unknown* peer, each
- * client re-announces itself (throttled to {@link BEACON_THROTTLE_MS}) — the
+ * client re-announces itself (at most one such answer every 2s) — the
  * roster converges in one round-trip instead of one heartbeat period.
  *
  * Markup contract (identifier: `stimeo--presence`):
@@ -51,6 +55,9 @@ const BEACON_THROTTLE_MS = 2000;
  *     def appear(data) = ActionCable.server.broadcast("presence:#{params[:room]}",
  *       { id: data["id"], name: data["name"], leaving: data["leaving"] })
  *   end
+ *
+ * `join` dispatches `{ id, name }`; `leave` dispatches `{ id }`; `change` dispatches
+ * `{ users }`.
  *
  * @remarks
  * Behavior only — the dot/stack look is the consumer's CSS, keyed off the
@@ -82,7 +89,7 @@ export class PresenceController extends Controller<HTMLElement> {
   static override targets = ["count", "list", "template"];
   static override values = {
     channel: { type: String, default: "" },
-    params: { type: Object, default: {} },
+    params: { type: String, default: "" },
     id: { type: String, default: "" },
     name: { type: String, default: "" },
     heartbeat: { type: Number, default: 15_000 },
@@ -97,11 +104,14 @@ export class PresenceController extends Controller<HTMLElement> {
   declare readonly hasTemplateTarget: boolean;
   declare readonly templateTarget: HTMLTemplateElement;
   declare channelValue: string;
-  declare paramsValue: Record<string, unknown>;
+  declare paramsValue: string;
   declare idValue: string;
   declare nameValue: string;
   declare heartbeatValue: number;
   declare timeoutValue: number;
+
+  /** Identifier parameters parsed once from their declaration, never in the hot path. */
+  #params: Record<string, unknown> = {};
 
   #subscription: ConfirmedCableSubscription | null = null;
   /** Present peers keyed by id (insertion order = join order). */
@@ -112,6 +122,16 @@ export class PresenceController extends Controller<HTMLElement> {
   #lastBeaconAt = 0;
   /** Pending trailing-edge convergence beacon (at most one queued). */
   #pendingBeacon: number | null = null;
+
+  /**
+   * Re-parses the identifier parameters when the declaration changes.
+   *
+   * A malformed declaration falls back to no parameters, so the identifier keeps
+   * naming the channel instead of the subscription never being created at all.
+   */
+  paramsValueChanged(): void {
+    this.#params = parseSubscriptionParams(this.paramsValue);
+  }
 
   override connect(): void {
     // Presence is transient: drop whatever a Turbo cache snapshot preserved
@@ -127,7 +147,7 @@ export class PresenceController extends Controller<HTMLElement> {
 
     if (!this.channelValue) return;
     this.#subscription = createConfirmedSubscription(
-      { channel: this.channelValue, ...this.paramsValue },
+      { channel: this.channelValue, ...this.#params },
       {
         // The first beacon must wait for the confirmed subscription — a
         // perform() before that is silently dropped by Action Cable. Fires
