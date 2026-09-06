@@ -16,10 +16,14 @@ describe("SmartStickyHeaderController", () => {
   let application: Application;
   let frames: FrameRequestCallback[] = [];
   let scrollY = 0;
+  // The container's position is driven separately from the window's, so a read
+  // that goes to the wrong source is visible instead of coincidentally equal.
+  let containerY = 0;
 
   beforeEach(() => {
     frames = [];
     scrollY = 0;
+    containerY = 0;
     vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => frames.push(cb));
     vi.stubGlobal("cancelAnimationFrame", () => {
       frames = [];
@@ -38,13 +42,42 @@ describe("SmartStickyHeaderController", () => {
     await tick();
   };
 
+  /** Runs whatever frames are pending, the way a browser would service them. */
+  const flush = () => {
+    const pending = frames;
+    frames = [];
+    for (const cb of pending) cb(0);
+  };
+
   /** Scrolls to `y` and flushes the rAF-throttled measure. */
   const scrollTo = (y: number) => {
     scrollY = y;
     window.dispatchEvent(new Event("scroll"));
-    const pending = frames;
-    frames = [];
-    for (const cb of pending) cb(0);
+    flush();
+  };
+
+  /** Mounts a header whose scroll source is a container, and returns that container. */
+  const mountInContainer = async (attrs = "") => {
+    document.body.innerHTML = `
+      <div id="frame">
+        <header data-controller="stimeo--smart-sticky-header"
+                data-stimeo--smart-sticky-header-container-selector-value="#frame" ${attrs}>
+          <nav aria-label="Site"><a href="#top">Home</a></nav>
+        </header>
+      </div>`;
+    const frame = document.querySelector("#frame") as HTMLElement;
+    Object.defineProperty(frame, "scrollTop", { configurable: true, get: () => containerY });
+    application = Application.start();
+    application.register("stimeo--smart-sticky-header", SmartStickyHeaderController);
+    await tick();
+    return frame;
+  };
+
+  /** Scrolls the container to `y` and flushes the rAF-throttled measure. */
+  const scrollContainerTo = (frame: HTMLElement, y: number) => {
+    containerY = y;
+    frame.dispatchEvent(new Event("scroll"));
+    flush();
   };
 
   afterEach(async () => {
@@ -86,12 +119,36 @@ describe("SmartStickyHeaderController", () => {
     expect(hidden()).toBe("false");
   });
 
+  it("reveals at the offset boundary itself", async () => {
+    await mount();
+    scrollTo(80); // exactly the offset: still the zone that never hides
+    expect(hidden()).toBe("false");
+  });
+
   it("ignores jitter below the tolerance", async () => {
     await mount();
     scrollTo(400);
     expect(hidden()).toBe("true");
     scrollTo(398); // up 2px < default tolerance 4: still hidden
     expect(hidden()).toBe("true");
+  });
+
+  it("acts on a movement of exactly the tolerance", async () => {
+    await mount();
+    scrollTo(400);
+    expect(hidden()).toBe("true");
+    scrollTo(396); // up exactly 4px: the guard ignores movement *below* tolerance
+    expect(hidden()).toBe("false");
+  });
+
+  it("reveals inside the offset zone even when the move that re-enters it is jitter", async () => {
+    await mount();
+    scrollTo(82); // just past the offset, hidden
+    expect(hidden()).toBe("true");
+    scrollTo(80); // 2px up (< tolerance) but back inside the offset zone
+    // A header stranded off-screen here cannot be scrolled back into view: the
+    // zone decides before the jitter guard can swallow the move.
+    expect(hidden()).toBe("false");
   });
 
   it("reveals when focus enters the header (keyboard reachability)", async () => {
@@ -125,29 +182,75 @@ describe("SmartStickyHeaderController", () => {
     expect(states).toEqual([true, false]);
   });
 
-  it("tracks a scroll container via containerSelector", async () => {
-    document.body.innerHTML = `
-      <div id="frame">
-        <header data-controller="stimeo--smart-sticky-header"
-                data-stimeo--smart-sticky-header-container-selector-value="#frame">
-          <nav aria-label="Site"><a href="#top">Home</a></nav>
-        </header>
-      </div>`;
-    const frame = document.querySelector("#frame") as HTMLElement;
-    Object.defineProperty(frame, "scrollTop", {
-      configurable: true,
-      get: () => scrollY, // reuse the driver variable as the frame's position
+  it("stays silent while connecting, on a first connect and on a reconnect", async () => {
+    const states: boolean[] = [];
+    // Listening from before the mount: the reflection connect() performs is the
+    // current state, not a change, so it announces nothing either time.
+    document.addEventListener("stimeo--smart-sticky-header:change", (event) => {
+      states.push((event as CustomEvent<{ hidden: boolean }>).detail.hidden);
     });
-    application = Application.start();
-    application.register("stimeo--smart-sticky-header", SmartStickyHeaderController);
-    await tick();
+    await mount();
+    expect(states).toEqual([]);
 
+    controller()?.disconnect();
+    controller()?.connect();
+    expect(states).toEqual([]);
+  });
+
+  it("resumes from the scroll position it connects at", async () => {
+    scrollY = 500;
+    await mount();
+    scrollTo(498); // 2px up from where it connected: jitter, not a scroll-down
+    expect(hidden()).toBe("false");
+  });
+
+  it("coalesces a burst of scrolls into a single measure", async () => {
+    await mount();
     scrollY = 200;
-    frame.dispatchEvent(new Event("scroll"));
-    const pending = frames;
-    frames = [];
-    for (const cb of pending) cb(0);
+    window.dispatchEvent(new Event("scroll"));
+    scrollY = 300;
+    window.dispatchEvent(new Event("scroll"));
+    scrollY = 400;
+    window.dispatchEvent(new Event("scroll"));
+    expect(frames).toHaveLength(1); // one frame for the whole burst
+    flush();
     expect(hidden()).toBe("true");
+  });
+
+  it("tracks a scroll container via containerSelector", async () => {
+    const frame = await mountInContainer();
+    scrollContainerTo(frame, 200);
+    expect(hidden()).toBe("true");
+  });
+
+  it("reads the container's position, not the window's", async () => {
+    const frame = await mountInContainer();
+    scrollY = 0; // the window never moves
+    scrollContainerTo(frame, 400);
+    expect(hidden()).toBe("true");
+  });
+
+  it("falls back to the window when containerSelector cannot be parsed", async () => {
+    await mount('data-stimeo--smart-sticky-header-container-selector-value="#:::not-a-selector"');
+    expect(hidden()).toBe("false"); // the element is alive, not killed by the declaration
+    scrollTo(400);
+    expect(hidden()).toBe("true");
+  });
+
+  it("re-renders when offset changes at runtime", async () => {
+    await mount('data-stimeo--smart-sticky-header-offset-value="200"');
+    scrollTo(300);
+    expect(hidden()).toBe("true");
+
+    header().setAttribute("data-stimeo--smart-sticky-header-offset-value", "400");
+    await tick(); // no scroll: the new offset alone must re-decide
+    expect(hidden()).toBe("false");
+  });
+
+  it("reads a non-numeric offset as the default", async () => {
+    await mount('data-stimeo--smart-sticky-header-offset-value="abc"');
+    scrollTo(50); // inside the default 80px zone: NaN must not defeat the guarantee
+    expect(hidden()).toBe("false");
   });
 
   it("resets a stale hidden hook from a Turbo cache snapshot", async () => {
@@ -160,6 +263,24 @@ describe("SmartStickyHeaderController", () => {
     controller()?.disconnect();
     scrollTo(400);
     expect(hidden()).toBe("false"); // unchanged from connect
+  });
+
+  it("releases the focusin listener on disconnect", async () => {
+    await mount();
+    scrollTo(400);
+    expect(hidden()).toBe("true");
+    controller()?.disconnect();
+    header().dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    expect(hidden()).toBe("true"); // no reveal from a listener that should be gone
+  });
+
+  it("drops a pending frame on disconnect", async () => {
+    await mount();
+    scrollY = 400;
+    window.dispatchEvent(new Event("scroll")); // a frame is now pending
+    controller()?.disconnect();
+    flush(); // the cancelled frame must not be waiting to run
+    expect(hidden()).toBe("false");
   });
 
   it("has no machine-detectable a11y violations", async () => {

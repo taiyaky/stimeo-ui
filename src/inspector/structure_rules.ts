@@ -219,7 +219,7 @@ export const structureRules: StructureRules = {
   // stay optional too (either one alone works).
   "stimeo--pagination": {},
   "stimeo--password-reveal": { requiredTargets: ["input", "toggle"] },
-  // `label` is optional (the polite live-region readout); the input + meter are core.
+  // `label` is optional (a plain visible readout); the input + meter are core.
   "stimeo--password-strength": { requiredTargets: ["input", "meter"] },
   // No required targets: `field` is optional (defaults to the form's named controls).
   "stimeo--persist": {},
@@ -272,8 +272,8 @@ export const structureRules: StructureRules = {
   "stimeo--slider": { requiredTargets: ["track", "thumb"] },
   // No required targets: the controller element is the header itself.
   "stimeo--smart-sticky-header": {},
-  // `list` and `status` are optional (element fallback / silent mode); the items are
-  // what a reorderable list genuinely cannot exist without.
+  // `list` is optional (the controller element is the fallback container); the
+  // items are what a reorderable list genuinely cannot exist without.
   "stimeo--sortable": { requiredTargets: ["item"] },
   // No required targets: indicator, region, and message are independently optional.
   "stimeo--spinner": {},

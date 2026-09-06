@@ -46,11 +46,12 @@ describe("LiveCounterController", () => {
              data-stimeo--live-counter-id-value="alice"`,
     confirm = true,
     buttonAttrs = "",
+    displayed = "128",
   } = {}) => {
     document.body.innerHTML = `
       <main>
         <div data-controller="stimeo--live-counter" ${attrs}>
-          <span data-stimeo--live-counter-target="value">128</span>
+          <span data-stimeo--live-counter-target="value">${displayed}</span>
           <button type="button" aria-label="Like" ${buttonAttrs}
                   data-action="stimeo--live-counter#increment">♥</button>
         </div>
@@ -84,6 +85,24 @@ describe("LiveCounterController", () => {
           "stimeo--live-counter",
         ) as LiveCounterController | null)
       : null;
+  it("reads a formatted server-rendered count as the number it displays", async () => {
+    await mount({ displayed: "1,200 likes" });
+    (document.querySelector("button") as HTMLButtonElement).click();
+    expect(value().textContent).toBe("1201");
+  });
+
+  it("reads a hyphen in the display as prose, not as a sign", async () => {
+    await mount({ displayed: "Sign-ups: 1,200" });
+    (document.querySelector("button") as HTMLButtonElement).click();
+    expect(value().textContent).toBe("1201"); // never counts up from -1200
+  });
+
+  it("counts a display holding no number as zero", async () => {
+    await mount({ displayed: "No likes yet" });
+    (document.querySelector("button") as HTMLButtonElement).click();
+    expect(value().textContent).toBe("1");
+  });
+
   it("increments optimistically and performs on the channel", async () => {
     await mount();
     (document.querySelector("button") as HTMLButtonElement).click();

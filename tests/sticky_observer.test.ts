@@ -156,6 +156,24 @@ describe("StickyObserverController", () => {
     });
   });
 
+  it("observes the viewport when rootSelector cannot be parsed", async () => {
+    // A typo in the root selector must degrade to viewport observation. Leaving
+    // the controller inert would publish no `data-stuck` at all, so the sticky
+    // element's CSS would never see either state.
+    await start(`
+      <div data-controller="stimeo--sticky-observer"
+           data-stimeo--sticky-observer-root-selector-value="#:::not-a-selector">
+        <div data-stimeo--sticky-observer-target="sentinel" aria-hidden="true"></div>
+        <header data-stimeo--sticky-observer-target="element">Site heading</header>
+      </div>`);
+
+    expect(currentObserver().observed).toEqual([sentinel()]);
+    expect(currentObserver().options?.root ?? null).toBeNull();
+
+    currentObserver().callback([entry({ isIntersecting: false, bottom: -1 })]);
+    expect(element().getAttribute("data-stuck")).toBe("true");
+  });
+
   it("marks stuck only after the sentinel passes the root's top edge", async () => {
     await start();
 

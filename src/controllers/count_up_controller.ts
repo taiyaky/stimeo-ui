@@ -1,5 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
+import { authoredInteger } from "../utils/authored_integer";
 import { prefersReducedMotion } from "../utils/reduced_motion";
+
+/** The animation length used when `duration` falls outside its domain. */
+const DEFAULT_DURATION = 1200;
 
 /**
  * Headless **count-up**: animates a number from `from` up to the value already
@@ -19,24 +23,26 @@ import { prefersReducedMotion } from "../utils/reduced_motion";
  * With `once` (default) later starts are ignored (`data-count-up-done` records
  * a finished run across Turbo cache restores).
  *
+ * Only the text node holding the number is animated, so sibling markup — a unit
+ * in a `<small>`, a label in a `<b>` — is left where the author put it.
+ *
  * `end` dispatches `{ value }`.
  *
  * @remarks
- * Behavior only — no formatting is imposed: the authored text is parsed for
- * its integer value (separators are ignored) and restored verbatim at the end;
- * intermediate frames render plain integers. Accessibility: when the user
- * prefers reduced motion the animation is skipped entirely (the value just
- * stays final — WCAG 2.3.3). The element is not a live region, so the ticking
- * intermediate numbers are never actively announced; during the run the
- * authored value is additionally kept in `aria-label` (best-effort — generic
- * roles may ignore it) and that lingering label doubles as the
- * interrupted-run marker `connect()` restores from after a Turbo cache
- * snapshot taken mid-animation. The animation frame is canceled on
+ * Behavior only — no formatting is imposed: the authored text is read for the
+ * integer it displays and restored verbatim at the end; intermediate frames
+ * render plain integers. Accessibility: when the user prefers reduced motion the
+ * animation is skipped entirely (the value just stays final — WCAG 2.3.3).
+ * During a run the ticking number is wrapped in a `role="img"` element named
+ * with the authored text, which is where a name is allowed to live — the host
+ * keeps whatever semantics it had, so a `<dd>` stays a definition. That wrapper
+ * doubles as the interrupted-run record `connect()` restores from after a Turbo
+ * cache snapshot taken mid-animation. The animation frame is canceled on
  * `disconnect()` (Turbo navigation included) and the authored text restored.
  */
 export class CountUpController extends Controller<HTMLElement> {
   static override values = {
-    duration: { type: Number, default: 1200 },
+    duration: { type: Number, default: DEFAULT_DURATION },
     from: { type: Number, default: 0 },
     once: { type: Boolean, default: true },
   };
@@ -48,20 +54,29 @@ export class CountUpController extends Controller<HTMLElement> {
   declare onceValue: boolean;
 
   #frame: number | null = null;
-  /** The authored final text, restored verbatim when the run settles. */
-  #finalText = "";
+
+  /** The animation length, with a declaration outside its domain read as the default. */
+  get #duration(): number {
+    return Number.isFinite(this.durationValue) && this.durationValue > 0
+      ? this.durationValue
+      : DEFAULT_DURATION;
+  }
+
+  /** The starting value, with a declaration that is not a finite number read as zero. */
+  get #from(): number {
+    return Number.isFinite(this.fromValue) ? this.fromValue : 0;
+  }
 
   override connect(): void {
     // Turbo snapshots the page BEFORE the body swap, so a cached page can hold
     // a mid-animation frame (disconnect()'s settle runs too late for it). The
-    // OWN-label marker (never a bare aria-label — that may be authored) flags
-    // the interrupted run: the label it owns still holds the authored text.
-    if (this.element.hasAttribute("data-count-up-label")) {
-      this.element.textContent =
-        this.element.getAttribute("aria-label") ?? this.element.textContent;
-      this.#restoreLabel();
-      this.element.setAttribute("data-count-up-done", "true");
-    }
+    // wrapper this controller owns flags the interrupted run and carries the
+    // authored text in the name it published.
+    const ticker = this.#ownedTicker();
+    if (ticker === null) return;
+    const authored = ticker.getAttribute("aria-label");
+    this.#unwrap(ticker, authored);
+    if (authored !== null) this.element.setAttribute("data-count-up-done", "true");
   }
 
   override disconnect(): void {
@@ -78,9 +93,10 @@ export class CountUpController extends Controller<HTMLElement> {
     if (this.#frame !== null) return;
     if (this.onceValue && this.element.hasAttribute("data-count-up-done")) return;
 
-    this.#finalText = this.element.textContent ?? "";
-    const target = Number.parseInt(this.#finalText.replace(/[^0-9-]/g, ""), 10);
-    if (Number.isNaN(target)) return;
+    const node = this.#numericNode();
+    if (node === null) return;
+    const authored = node.data;
+    const target = authoredInteger(authored) as number;
 
     // Reduced motion: no ticking, just the final value (WCAG 2.3.3).
     if (prefersReducedMotion()) {
@@ -89,22 +105,17 @@ export class CountUpController extends Controller<HTMLElement> {
       return;
     }
 
-    // AT keeps the real value while the visible text ticks. An authored
-    // aria-label is parked (save-restore, never clobbered) and the override is
-    // marker-owned so connect()/settle() only ever touch what this set.
-    const authored = this.element.getAttribute("aria-label");
-    if (authored !== null) {
-      this.element.setAttribute("data-count-up-original-label", authored);
-    }
-    this.element.setAttribute("data-count-up-label", "true");
-    this.element.setAttribute("aria-label", this.#finalText);
+    // A name may not live on every host — a `<span>` prohibits one, and a role
+    // that permits naming would cost a `<dd>` its own semantics — so the ticking
+    // number gets a wrapper that permits naming, and the name carries the
+    // authored text AT should hear instead of the ticks.
+    const ticker = this.#wrap(node, authored);
+    const from = this.#from;
     const started = performance.now();
     const step = (now: number): void => {
-      const t = Math.min((now - started) / this.durationValue, 1);
+      const t = Math.min((now - started) / this.#duration, 1);
       const eased = 1 - (1 - t) ** 3; // ease-out cubic
-      this.element.textContent = String(
-        Math.round(this.fromValue + (target - this.fromValue) * eased),
-      );
+      ticker.textContent = String(Math.round(from + (target - from) * eased));
       if (t < 1) {
         this.#frame = requestAnimationFrame(step);
       } else {
@@ -115,25 +126,43 @@ export class CountUpController extends Controller<HTMLElement> {
     this.#frame = requestAnimationFrame(step);
   }
 
+  /** The first text node that displays a number, or null when the host has none. */
+  #numericNode(): Text | null {
+    const walker = document.createTreeWalker(this.element, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode() as Text | null;
+    while (node !== null && authoredInteger(node.data) === null) {
+      node = walker.nextNode() as Text | null;
+    }
+    return node;
+  }
+
+  /** The wrapper this controller published, if one outlived its run. */
+  #ownedTicker(): HTMLElement | null {
+    return this.element.querySelector<HTMLElement>("[data-count-up-label]");
+  }
+
+  /** Publishes the ticking number inside a named wrapper, replacing `node`. */
+  #wrap(node: Text, authored: string): HTMLElement {
+    const ticker = document.createElement("span");
+    ticker.setAttribute("data-count-up-label", "true");
+    ticker.setAttribute("role", "img");
+    ticker.setAttribute("aria-label", authored);
+    node.replaceWith(ticker);
+    ticker.append(node);
+    return ticker;
+  }
+
+  /** Puts `text` back where the wrapper stood, leaving the rest of the host alone. */
+  #unwrap(ticker: HTMLElement, text: string | null): void {
+    ticker.replaceWith(document.createTextNode(text ?? ticker.textContent ?? ""));
+  }
+
   /** Ends the run: cancels the frame and restores the authored presentation. */
   #settle(): void {
     if (this.#frame !== null) cancelAnimationFrame(this.#frame);
     this.#frame = null;
-    this.element.textContent = this.#finalText;
-    this.#restoreLabel();
+    const ticker = this.#ownedTicker();
+    if (ticker !== null) this.#unwrap(ticker, ticker.getAttribute("aria-label"));
     this.element.setAttribute("data-count-up-done", "true");
-  }
-
-  /** Releases the marker-owned aria-label, restoring any parked authored value. */
-  #restoreLabel(): void {
-    if (!this.element.hasAttribute("data-count-up-label")) return;
-    const original = this.element.getAttribute("data-count-up-original-label");
-    if (original !== null) {
-      this.element.setAttribute("aria-label", original);
-      this.element.removeAttribute("data-count-up-original-label");
-    } else {
-      this.element.removeAttribute("aria-label");
-    }
-    this.element.removeAttribute("data-count-up-label");
   }
 }

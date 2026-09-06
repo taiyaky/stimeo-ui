@@ -1191,40 +1191,25 @@ describe("checkSource", () => {
     });
 
     describe("alternative groups (or)", () => {
+      // No shipped rule uses an `or` group: sortable and typing-indicator reach
+      // assistive tech through the page's shared announcer, so a status slot
+      // beside them is plain visible markup. The engine's group handling is
+      // pinned by the synthetic manifest below; these two only hold the ruleset
+      // to that.
       const sortable = (status: string) => `
-        <ul data-controller="stimeo--sortable">
-          <li data-stimeo--sortable-target="item">A</li>
+        <div data-controller="stimeo--sortable">
+          <ul>
+            <li data-stimeo--sortable-target="item">A</li>
+          </ul>
           ${status}
-        </ul>`;
+        </div>`;
 
-      it("accepts either spelling of a live status region", () => {
-        expect(
-          codes(sortable(`<span role="status" data-stimeo--sortable-target="status"></span>`)),
-        ).toEqual([]);
-        expect(
-          codes(sortable(`<span aria-live="polite" data-stimeo--sortable-target="status"></span>`)),
-        ).toEqual([]);
+      it("asks nothing of a status region beside a sortable", () => {
+        expect(codes(sortable(""))).toEqual([]);
+        expect(codes(sortable(`<span>Grabbed A</span>`))).toEqual([]);
+        expect(codes(sortable(`<span role="status">Grabbed A</span>`))).toEqual([]);
       });
 
-      it("flags a status region with neither spelling, naming all alternatives", () => {
-        const d = checkSource(
-          sortable(`<span data-stimeo--sortable-target="status"></span>`),
-          manifest,
-        ).find((x) => x.code === "missing-aria");
-        expect(d?.message).toContain("role or aria-live");
-      });
-
-      it("flags a wrong value even when the other group is satisfied", () => {
-        // aria-live="off" silences the region regardless of the valid role.
-        const source = sortable(
-          `<span role="status" aria-live="off" data-stimeo--sortable-target="status"></span>`,
-        );
-        expect(codes(source)).toContain("invalid-aria-value");
-      });
-
-      // The opt-in cable controller reaches assistive tech through the page's shared
-      // announcer, so its status target is a plain visible slot with no live-region
-      // requirement of its own.
       const typing = (status: string) => `
         <div data-controller="stimeo--typing-indicator">
           <textarea aria-label="Message"></textarea>
@@ -1574,7 +1559,6 @@ describe("checkSource", () => {
                       data-stimeo--roving-target="item">A</button>
             </li>
           </ul>
-          <span role="status" data-stimeo--sortable-target="status"></span>
         </div>`;
 
       it("flags a vertical list whose roving leaves orientation on its horizontal default", () => {

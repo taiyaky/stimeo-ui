@@ -20,34 +20,50 @@ import { delay, tick } from "./helpers/timing";
 type Entry = {
   isIntersecting: boolean;
   intersectionRatio: number;
-  boundingClientRect: { bottom: number; width: number; height: number };
+  boundingClientRect: { top: number; bottom: number; width: number; height: number };
   rootBounds: { top: number } | null;
 };
 
-/** Builds a visible-entry / hidden-entry with sensible geometry defaults. */
+/**
+ * Entry factories, each named for a shape a real observer actually delivers —
+ * the geometry and `isIntersecting` are kept consistent with the ratio so a
+ * test cannot assert on a state the platform never produces.
+ */
 const visible = (ratio = 1): Entry => ({
   isIntersecting: true,
   intersectionRatio: ratio,
-  boundingClientRect: { bottom: 400, width: 200, height: 100 },
+  boundingClientRect: { top: 300, bottom: 400, width: 200, height: 100 },
   rootBounds: { top: 0 },
 });
 const hiddenAfter = (): Entry => ({
   isIntersecting: false,
   intersectionRatio: 0,
-  boundingClientRect: { bottom: 900, width: 200, height: 100 },
+  boundingClientRect: { top: 800, bottom: 900, width: 200, height: 100 },
   rootBounds: { top: 0 },
 });
 const hiddenBefore = (): Entry => ({
   isIntersecting: false,
   intersectionRatio: 0,
-  boundingClientRect: { bottom: -50, width: 200, height: 100 },
+  boundingClientRect: { top: -150, bottom: -50, width: 200, height: 100 },
+  rootBounds: { top: 0 },
+});
+/**
+ * Mid-departure across the root's start edge: the element still overlaps the
+ * root (`isIntersecting` stays true) while its top is already above the edge,
+ * so only part of it remains visible. This is the shape a non-zero `threshold`
+ * sees at the moment visibility drops below its line.
+ */
+const leavingViaStart = (ratio = 0.25): Entry => ({
+  isIntersecting: true,
+  intersectionRatio: ratio,
+  boundingClientRect: { top: -150, bottom: 50, width: 200, height: 200 },
   rootBounds: { top: 0 },
 });
 /** An unrendered element: no layout box, reported at the origin. */
 const unrendered = (): Entry => ({
   isIntersecting: false,
   intersectionRatio: 0,
-  boundingClientRect: { bottom: 0, width: 0, height: 0 },
+  boundingClientRect: { top: 0, bottom: 0, width: 0, height: 0 },
   rootBounds: { top: 0 },
 });
 
@@ -147,6 +163,39 @@ describe("IntersectionController", () => {
       expect(observerOptions?.threshold).toEqual([0, 0.25, 0.5, 0.75, 1]);
     });
 
+    it("always observes the 0 line alongside a non-zero threshold", async () => {
+      // The observer notifies at its configured lines only. With 0.5 alone the
+      // last callback arrives while the element is still partly visible, so the
+      // element going fully away is never reported and the state hooks freeze
+      // mid-departure. Observing 0 as well keeps the departure's end line.
+      await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-threshold-value="0.5"></div>`);
+      expect(observerOptions?.threshold).toEqual([0, 0.5]);
+    });
+
+    it("merges the threshold line into the ratioSteps list", async () => {
+      await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-threshold-value="0.3"
+             data-stimeo--intersection-ratio-steps-value="4"></div>`);
+      expect(observerOptions?.threshold).toEqual([0, 0.25, 0.3, 0.5, 0.75, 1]);
+    });
+
+    it("observes the viewport when rootSelector cannot be parsed", async () => {
+      // A typo in a data attribute must degrade to viewport observation, not
+      // leave the element unobserved with no state hooks at all.
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-root-selector-value="#:::not-a-selector"></div>`);
+      expect(observeMock).toHaveBeenCalledWith(root());
+      expect(observerOptions?.root ?? null).toBeNull();
+
+      observerCallback?.([visible()]);
+      await tick();
+      expect(events.enter).toHaveLength(1);
+    });
+
     it("uses the effective default threshold after configured options fall back", async () => {
       rejectedRootMargin = "invalid";
       vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -230,7 +279,7 @@ describe("IntersectionController", () => {
       const events = await mount(`
         <div data-controller="stimeo--intersection" aria-hidden="true"
              data-stimeo--intersection-threshold-value="2"></div>`);
-      expect(observerOptions?.threshold).toEqual([1]);
+      expect(observerOptions?.threshold).toEqual([0, 1]);
 
       observerCallback?.([visible(1)]);
       await tick();
@@ -248,6 +297,61 @@ describe("IntersectionController", () => {
       await tick();
       expect(events.enter).toEqual([{ ratio: 0.995 }]);
       expect(root().getAttribute("data-intersecting")).toBe("true");
+    });
+
+    it("reports a leave across the start edge as before, not after", async () => {
+      // With a non-zero threshold the element stops counting as visible while it
+      // still overlaps the root, so the exit callback carries a rect that spans
+      // the edge. The leave direction is decided by which edge the element is
+      // crossing, not by whether it has already cleared the root entirely.
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-threshold-value="0.5"></div>`);
+      observerCallback?.([visible(1)]);
+      observerCallback?.([leavingViaStart(0.25)]);
+      await tick();
+      expect(events.exit).toEqual([{ ratio: 0.25, position: "before" }]);
+      // Still overlapping, so the full-crossing hook stays false.
+      expect(root().getAttribute("data-passed")).toBe("false");
+    });
+
+    it("trusts the platform verdict when it reports no intersection", async () => {
+      // At the outgoing crossing the observer can report the threshold's own
+      // ratio with `isIntersecting` already false; the ratio alone would then
+      // keep the element "visible" after it stopped intersecting.
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-threshold-value="0.5"></div>`);
+      observerCallback?.([visible(1)]);
+      observerCallback?.([{ ...hiddenAfter(), intersectionRatio: 0.6 }]);
+      await tick();
+      expect(events.exit).toEqual([{ ratio: 0.6, position: "after" }]);
+      expect(root().getAttribute("data-intersecting")).toBe("false");
+    });
+
+    it("gives an element with no layout box no leave direction", async () => {
+      // An unrendered element is reported with an empty rect at the document
+      // origin, which sits above a scroll container's start edge without the
+      // element having moved anywhere. It carries no position, so the leave
+      // reads as the neutral "still ahead" rather than "scrolled past".
+      const events = await mount(defaultFixture);
+      observerCallback?.([visible()]);
+      observerCallback?.([{ ...unrendered(), rootBounds: { top: 100 } }]);
+      await tick();
+      expect(events.exit).toEqual([{ ratio: 0, position: "after" }]);
+    });
+
+    it("keeps publishing the ratio after the element left", async () => {
+      // Consumer CSS reads the custom property unconditionally, so it has to be
+      // driven back down to 0 on the way out, not frozen at the last visible value.
+      await mount(defaultFixture);
+      observerCallback?.([visible(0.8)]);
+      await tick();
+      expect(root().style.getPropertyValue("--stimeo--intersection-ratio")).toBe("0.8");
+
+      observerCallback?.([hiddenAfter()]);
+      await tick();
+      expect(root().style.getPropertyValue("--stimeo--intersection-ratio")).toBe("0");
     });
 
     it("processes every entry in a batched callback (fast scroll enter→exit)", async () => {
@@ -324,6 +428,36 @@ describe("IntersectionController", () => {
       expect(root().getAttribute("data-intersecting")).toBe("true"); // final state kept
     });
 
+    it("ignores the rest of the batch that carried the one-shot enter", async () => {
+      // Stopping the watcher mid-batch must also abandon the entries queued
+      // behind it: replaying them would undo the final state the one-shot left.
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-once-value="true"></div>`);
+      observerCallback?.([visible(), hiddenAfter()]);
+      await tick();
+      expect(events.enter).toHaveLength(1);
+      expect(events.exit).toHaveLength(0);
+      expect(root().getAttribute("data-intersecting")).toBe("true");
+    });
+
+    it("keeps the one-shot marker when the enter handler re-arms", async () => {
+      // The infinite-scroll reflex is `enter -> append -> refresh()`. Under
+      // `once` the shot is already spent when the handler runs, so re-arming
+      // must not clear the marker a later reconnect reads back — otherwise the
+      // element is observed again and the one-shot fires a second time.
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-once-value="true"></div>`);
+      root().addEventListener("stimeo--intersection:enter", () => controller()?.refresh());
+      observerCallback?.([visible()]);
+      await tick();
+      expect(events.enter).toHaveLength(1);
+      expect(root().getAttribute("data-intersecting")).toBe("true");
+      expect(unobserveMock).not.toHaveBeenCalled();
+      expect(observeMock).toHaveBeenCalledOnce();
+    });
+
     it("does not re-observe an element whose enter already fired (cache restore)", async () => {
       await mount(`
         <div data-controller="stimeo--intersection" aria-hidden="true"
@@ -349,6 +483,19 @@ describe("IntersectionController", () => {
       expect(events.enter).toHaveLength(2);
     });
 
+    it("clears the recorded passed state as well", async () => {
+      const events = await mount(defaultFixture);
+      observerCallback?.([hiddenBefore()]);
+      await tick();
+      expect(events.passed).toEqual([{ passed: true }]);
+
+      controller()?.refresh();
+      expect(root().hasAttribute("data-passed")).toBe(false);
+      observerCallback?.([hiddenBefore()]); // observe() re-delivers the current state
+      await tick();
+      expect(events.passed).toEqual([{ passed: true }, { passed: true }]);
+    });
+
     it("is a no-op once the observer is gone (once already fired)", async () => {
       const events = await mount(`
         <div data-controller="stimeo--intersection" aria-hidden="true"
@@ -372,6 +519,41 @@ describe("IntersectionController", () => {
       await tick();
       expect(events.enter).toHaveLength(0);
       expect(events.change).toHaveLength(1); // ratio consumers still get updates
+    });
+
+    it("does not re-fire passed when reconnecting against a recorded state", async () => {
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-intersecting="false" data-passed="true"></div>`);
+      observerCallback?.([hiddenBefore()]); // still past the edge after the restore
+      await tick();
+      expect(events.passed).toHaveLength(0);
+      expect(root().getAttribute("data-passed")).toBe("true");
+    });
+
+    it("re-observes when threshold is morphed at runtime", async () => {
+      // Turbo 8 morphing rewrites the attribute in place without a reconnect, so
+      // a threshold frozen at connect would stay wrong for the page's lifetime.
+      await mount(defaultFixture);
+      expect(observerOptions?.threshold).toEqual([0]);
+
+      root().setAttribute("data-stimeo--intersection-threshold-value", "0.5");
+      await tick();
+      expect(observerOptions?.threshold).toEqual([0, 0.5]);
+      expect(observeMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not re-observe a morphed threshold after the one-shot fired", async () => {
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-once-value="true"></div>`);
+      observerCallback?.([visible()]);
+      await tick();
+      expect(events.enter).toHaveLength(1);
+
+      root().setAttribute("data-stimeo--intersection-threshold-value", "0.5");
+      await tick();
+      expect(observeMock).toHaveBeenCalledOnce();
     });
 
     it("disconnects the observer and ignores late callbacks after teardown", async () => {

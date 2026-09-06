@@ -35,6 +35,7 @@ export const ANNOUNCING_CONTROLLERS: readonly string[] = [
   "stimeo--password-strength",
   "stimeo--progress",
   "stimeo--skeleton",
+  "stimeo--sortable",
   "stimeo--spinner",
   "stimeo--submit-once",
   "stimeo--tags-input",

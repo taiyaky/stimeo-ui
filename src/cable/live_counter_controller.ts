@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { authoredInteger } from "../utils/authored_integer";
 import {
   type ConfirmedCableSubscription,
   createConfirmedSubscription,
@@ -216,10 +217,9 @@ export class LiveCounterController extends Controller<HTMLElement> {
 
   /** The current count, parsed from the DOM (the single source of truth). */
   get #current(): number {
-    // Strip separators/suffixes ("1,200 likes") like count-up, so a formatted
-    // server-rendered value doesn't collapse to its first digit group.
-    const parsed = Number.parseInt((this.#display.textContent ?? "").replace(/[^0-9-]/g, ""), 10);
-    return Number.isNaN(parsed) ? 0 : parsed;
+    // A formatted server-rendered value ("1,200 likes") reads as the number it
+    // displays; a display holding no number at all counts as zero.
+    return authoredInteger(this.#display.textContent ?? "") ?? 0;
   }
 
   #write(count: number): void {

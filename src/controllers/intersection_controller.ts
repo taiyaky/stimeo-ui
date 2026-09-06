@@ -27,9 +27,10 @@ const RATIO_EPSILON = 0.01;
  *        data-action="stimeo--intersection:enter->feed#loadNextPage"></div>
  *
  * The controller observes its own element. `enter` fires when the element
- * becomes visible (intersection ratio reaches `threshold`), `exit` when it
- * leaves (detail carries `position`: `"before"` = scrolled past the root's
- * start edge, `"after"` = still ahead), `change` on every observed update
+ * becomes visible (intersection ratio reaches `threshold`; detail `{ ratio }`),
+ * `exit` when it leaves (detail `{ ratio, position }`, where `position` is the
+ * edge it left across — `"before"` = upward past the root's start edge,
+ * `"after"` = downward, still ahead), `change` on every observed update
  * (detail `{ intersecting, ratio }` — set `ratioSteps` for fine-grained ratio
  * reporting), and `passed` when the element fully crosses the root's start edge
  * in either direction (detail `{ passed }` — the sticky/progress line). The
@@ -42,10 +43,12 @@ const RATIO_EPSILON = 0.01;
  * idempotent: the previous state is read back from `data-intersecting`/
  * `data-passed`, so a Turbo cache restore does not re-fire `enter` for an
  * element that was already visible (and with `once`, an element whose enter
- * already fired is not observed again). Without `IntersectionObserver` (very
- * old browsers) the controller stays inert — consumers keep whatever no-JS
- * fallback their markup provides. The observer is disconnected on
- * `disconnect()` (Turbo navigation included).
+ * already fired is not observed again). `threshold` is re-read when Turbo morphs
+ * the attribute in place, and a `rootSelector` that does not parse observes the
+ * viewport rather than leaving the element unobserved. Without
+ * `IntersectionObserver` (very old browsers) the controller stays inert —
+ * consumers keep whatever no-JS fallback their markup provides. The observer is
+ * disconnected on `disconnect()` (Turbo navigation included).
  */
 export class IntersectionController extends Controller<HTMLElement> {
   static override values = {
@@ -114,6 +117,28 @@ export class IntersectionController extends Controller<HTMLElement> {
     // A cache restore may bring back an element whose one-shot enter already
     // fired; honor it instead of re-observing (mirrors `data-lazy-loaded`).
     if (this.onceValue && this.element.getAttribute("data-intersecting") === "true") return;
+    this.#observe();
+  }
+
+  override disconnect(): void {
+    this.#watcher.stop();
+  }
+
+  /**
+   * Re-reads the visibility line and rebuilds the observer. Turbo 8 morphing
+   * rewrites the attribute in place without a reconnect, and the line is what
+   * the intersection callback compares every ratio against, so a value frozen at
+   * connect time would decide `data-intersecting` wrongly for the rest of the
+   * page's life. Nothing to rebuild before the first `connect()`; after a spent
+   * one-shot the watcher is deliberately stopped, and re-observing would deliver
+   * the current state and fire `enter` a second time.
+   */
+  thresholdValueChanged(): void {
+    if (this.#watcher.active) this.#observe();
+  }
+
+  /** (Re)installs the observer from the current Values. */
+  #observe(): void {
     this.#effectiveThreshold = this.#clampedThreshold();
     this.#watcher.start(this.element, {
       rootSelector: this.rootSelectorValue,
@@ -121,10 +146,6 @@ export class IntersectionController extends Controller<HTMLElement> {
       threshold: this.#thresholds(),
     });
     if (this.#watcher.usingPlatformDefaults) this.#effectiveThreshold = 0;
-  }
-
-  override disconnect(): void {
-    this.#watcher.stop();
   }
 
   /**
@@ -159,15 +180,35 @@ export class IntersectionController extends Controller<HTMLElement> {
     this.element.setAttribute("data-intersecting", intersecting ? "true" : "false");
 
     if (intersecting && previous !== "true") {
-      this.dispatch("enter", { detail: { ratio } });
-      // One-shot mode: the enter fired; stop observing and leave the hooks in
-      // their final state (`data-intersecting="true"` marks it for reconnects).
+      // One-shot mode: the shot is spent at this transition, so stop observing
+      // before the event. A handler that re-arms (the `enter` -> append ->
+      // `refresh()` reflex) then finds an inactive watcher and leaves the hooks
+      // in their final state — `data-intersecting="true"` marks it for reconnects.
       if (this.onceValue) this.#watcher.stop();
+      this.dispatch("enter", { detail: { ratio } });
     } else if (!intersecting && previous === "true") {
       this.dispatch("exit", {
-        detail: { ratio, position: isBeforeRootStart(entry) ? "before" : "after" },
+        detail: { ratio, position: this.#leftViaStartEdge(entry) ? "before" : "after" },
       });
     }
+  }
+
+  /**
+   * Which edge the element left across, for the `exit` detail. A non-zero
+   * `threshold` withdraws visibility while the element still overlaps the root,
+   * so the leaving rect can straddle the start edge — the direction is the
+   * element's own top against that edge, not whether it has cleared the root
+   * entirely (that is what `passed` reports). An element with no layout box
+   * (`display: none`, a collapsed `<details>`) is reported with an empty rect
+   * that carries no position at all, so it is deliberately neither direction
+   * and takes the "still ahead" reading.
+   */
+  #leftViaStartEdge(entry: IntersectionObserverEntry): boolean {
+    const rect = entry.boundingClientRect;
+    if (rect.width === 0 && rect.height === 0) return false;
+    // rootBounds is null for a cross-origin/removed root; fall back to the
+    // viewport origin.
+    return rect.top < (entry.rootBounds?.top ?? 0);
   }
 
   /**
@@ -191,9 +232,14 @@ export class IntersectionController extends Controller<HTMLElement> {
   /**
    * Observer thresholds: the `threshold` line itself, plus `ratioSteps` evenly
    * spaced steps when fine-grained `change` ratios are wanted (progress bars).
+   *
+   * 0 is always observed. An observer notifies only at the lines it was given,
+   * so a non-zero `threshold` on its own delivers its last callback while the
+   * element is still partly visible: the element leaving for good would never be
+   * reported, freezing the ratio and `data-passed` mid-departure.
    */
   #thresholds(): number[] {
-    const thresholds = new Set<number>([this.#clampedThreshold()]);
+    const thresholds = new Set<number>([0, this.#clampedThreshold()]);
     if (this.ratioStepsValue > 0) {
       // i counts up to ratioSteps, so i/ratioSteps is inherently 0..1.
       for (let i = 0; i <= this.ratioStepsValue; i += 1) {

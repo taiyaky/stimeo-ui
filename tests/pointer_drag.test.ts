@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PointerDragController } from "../src/controllers/pointer_drag_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { press } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay, flushMicrotasks, tick } from "./helpers/timing";
@@ -350,6 +351,34 @@ describe("PointerDragController", () => {
 
       key("ArrowRight"); // a bare arrow still moves
       expect(events.move).toHaveLength(1);
+    });
+
+    it("consumes Home and End while grabbed so nothing else can take focus", async () => {
+      // The grab lives on the focused handle: every key that reaches it while
+      // grabbed is answered here, including the two this primitive does not act
+      // on. A composition partner (a roving group's Home/End jump) would
+      // otherwise move focus away, and the arrows and Escape that end the grab
+      // are delivered to whatever holds focus — the grab would be unreachable.
+      const events = await mount(defaultFixture);
+      press(handle(), " ");
+      expect(events.start).toHaveLength(1);
+
+      for (const jump of ["Home", "End"]) {
+        const event = press(handle(), jump);
+        expect(event.defaultPrevented).toBe(true);
+      }
+      expect(events.move).toHaveLength(0); // consumed, but nothing moves
+      expect(handle().getAttribute("data-grabbed")).toBe("true");
+
+      const cancelled = press(handle(), "Escape");
+      expect(cancelled.defaultPrevented).toBe(true);
+      expect(events.cancel).toHaveLength(1);
+    });
+
+    it("leaves Home and End alone when nothing is grabbed", async () => {
+      await mount(defaultFixture);
+      const event = press(handle(), "End");
+      expect(event.defaultPrevented).toBe(false);
     });
 
     it("grabs and drops with Enter too", async () => {

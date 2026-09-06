@@ -3,7 +3,8 @@
  * controllers (`intersection`, `scrollspy`, `sticky-observer`, `lazy-frame`).
  *
  * It centralizes the `IntersectionObserver` support guard, root resolution from
- * a selector, observer creation/teardown, the **active guard** (the browser may
+ * a selector (degrading to the viewport rather than failing), observer
+ * creation/teardown, the **active guard** (the browser may
  * flush a final queued callback batch right after `disconnect()`, and a
  * detached controller must not mutate possibly-cached DOM), and the
  * unobserve→observe **re-arm** that re-delivers the current state even when the
@@ -37,13 +38,32 @@ export function isBeforeRootStart(entry: IntersectionObserverEntry): boolean {
   return rect.bottom <= rootTop;
 }
 
+/**
+ * Resolves an observation root from a selector. Every reading of "no root" ends
+ * at the same place — absent, matching nothing, or not parsing at all (a typo in
+ * a data attribute) — so the observation falls back to the viewport instead of
+ * leaving the caller inert with no state hooks published at all.
+ */
+function queryRoot(selector: string | undefined): Element | null {
+  if (!selector) return null;
+  try {
+    return document.querySelector(selector);
+  } catch {
+    // Unparsable selector: fall through to the viewport below.
+  }
+  return null;
+}
+
 export interface IntersectionWatchOptions {
   /**
    * The observation root. Pass an element (or `null` for the viewport) when
    * the caller already resolved it; omit to resolve from `rootSelector`.
    */
   root?: Element | null;
-  /** Selector for the observation root; empty/omitted = viewport. */
+  /**
+   * Selector for the observation root; empty/omitted = viewport. A selector
+   * that matches nothing or does not parse also means the viewport.
+   */
   rootSelector?: string;
   rootMargin?: string;
   threshold?: number | number[];
@@ -74,7 +94,10 @@ export class IntersectionWatcher {
    * the watcher inert — without `IntersectionObserver` support (very old
    * browsers; the caller's no-JS fallback stays in charge) or with no targets.
    * If initial construction with the configured options fails, the watcher
-   * warns and retries once with the same root and platform defaults.
+   * warns and retries once with the same root and platform defaults. A
+   * `rootSelector` that does not parse resolves to the viewport (see
+   * {@link IntersectionWatchOptions.rootSelector}), so a typo never fails the
+   * call.
    *
    * @throws The fallback constructor error if both construction attempts fail,
    *   or whatever the platform throws from `observe()`. The exception is passed
@@ -88,12 +111,7 @@ export class IntersectionWatcher {
     const list = Array.isArray(targets) ? (targets as readonly Element[]) : [targets as Element];
     if (list.length === 0) return false;
 
-    const root =
-      "root" in options
-        ? (options.root ?? null)
-        : options.rootSelector
-          ? document.querySelector(options.rootSelector)
-          : null;
+    const root = "root" in options ? (options.root ?? null) : queryRoot(options.rootSelector);
 
     let observer: IntersectionObserver | null = null;
     try {

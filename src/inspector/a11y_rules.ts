@@ -957,17 +957,4 @@ export const a11yRules: A11yRules = {
         "Name each separator target via aria-label or aria-labelledby — this file has more than one focusable separator.",
     },
   ],
-  // Live-region contracts (`or` groups): the announcement channel can be
-  // spelled as a live role OR a bare aria-live region — either satisfies the
-  // requirement, while a present-and-wrong value on either side (e.g.
-  // aria-live="off") is still an error.
-  "stimeo--sortable": [
-    {
-      target: "status",
-      attrs: ["role"],
-      values: ["status", "alert"],
-      or: [{ attrs: ["aria-live"], values: ["polite", "assertive"] }],
-      suggestion: 'Add role="status" (or aria-live="polite") to the status target.',
-    },
-  ],
 };

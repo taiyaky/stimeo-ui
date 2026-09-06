@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.12.0] - 2026-09-06
+
+Minor release with no new components. Six existing ones are reworked — count-up,
+intersection, lazy-frame, reading-progress, smart-sticky-header, and sortable —
+and the number reading count-up gained reaches live-counter too. Most of them
+changed a contract, so read Removed and Changed before upgrading. The Inspector
+manifest stays on schema v12.
+
+### Removed
+
+- sortable: the `status` target, its `data-grabbed` / `data-moved` /
+  `data-dropped` / `data-canceled` templates, and the English fallback wording.
+  Seat a `stimeo--announcer` on the page and set `announceGrabbedText` /
+  `announceMovedText` / `announceDroppedText` / `announceCanceledText`
+  (`{name}` / `{position}` / `{total}`); an unset one announces nothing.
+  `stimeo check` stops asking for the live region and warns when no announcer
+  is seated.
+
+### Changed
+
+- count-up: only the text node holding the number is animated, and while it
+  ticks it is wrapped in a `role="img"` element named with the authored text —
+  the host's own `aria-label` and `role` are never touched, and sibling markup
+  stays where it was.
+- count-up and live-counter read a formatted number by one rule: the first
+  numeric token, group separators dropped, the fraction truncated, and a hyphen
+  a sign only where it opens the token — `"Sign-ups: 1,200"` reads 1200, not
+  -1200.
+- intersection: `0` is always among the observed lines, so a non-zero
+  `threshold` also reports the element leaving for good (one more `change`;
+  `data-passed` and the ratio property follow the departure to its end), and an
+  exit across the start edge reports `position: "before"` while the element
+  still overlaps the root.
+- lazy-frame: a re-fetch needs a genuine re-entry — the frame is seen inside the
+  observed area, leaves it, and comes back; where a connection or a
+  focus-started load first finds it is the baseline. A frame with `once` off is
+  armed again after a cache restore, and `load` names the URL that was fetched.
+- reading-progress: an article with no layout box is not measured, the
+  article's own box is watched so late-settling content re-measures, and the
+  connect frame is the baseline — a restored scroll position does not fire
+  `complete`. Both faces of the custom property are leased: the element's copy
+  is returned on `disconnect()` too, an authored `:root` declaration comes back,
+  and a later writer is left alone.
+- smart-sticky-header: `change` fires on transitions only (connecting is
+  silent), and the `offset` zone is decided ahead of the jitter guard.
+- sortable: insertion is relative to the neighbouring item — the `list`-less
+  markup works and the last slot is after the last item — and a drag signal from
+  a pointer-drag nested inside an item no longer moves the card. The pickup slot
+  is remembered as neighbours, so rows inserted or removed mid-drag shift neither
+  the restore nor `from`; only laid-out siblings take part in pointer following;
+  and a session whose item leaves the item set ends instead of refusing every
+  later grab. pointer-drag consumes `Home` / `End` while grabbed.
+- A declaration that cannot be read falls back to its default: count-up's
+  `duration` / `from`, smart-sticky-header's `offset`, and a `rootSelector` /
+  `containerSelector` that does not parse (intersection, sticky-observer,
+  smart-sticky-header) observes the viewport or the window. Runtime changes to
+  intersection's `threshold`, lazy-frame's `url` / `rootMargin`, and
+  smart-sticky-header's `offset` are followed.
+
+### Fixed
+
+- lazy-frame: focus moving inside a loaded frame no longer re-fetches it, the
+  first intersection after a focus-started load is not a re-entry, and an empty
+  `url` is never written to `src`.
+- intersection: with `once`, a handler calling `refresh()` from `enter` no longer
+  clears the one-shot marker, so a cache restore does not fire `enter` again.
+- reading-progress: hiding a half-read article no longer publishes `1` and
+  `complete`.
+
 ## [0.11.0] - 2026-09-05
 
 Minor release with no new components. Eight existing ones are reworked — the three
@@ -930,6 +999,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.12.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.12.0
 [0.11.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.11.0
 [0.10.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.10.0
 [0.9.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.9.0

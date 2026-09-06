@@ -144,6 +144,22 @@ describe("IntersectionWatcher", () => {
     expect(watcher.usingPlatformDefaults).toBe(false);
   });
 
+  it("observes the viewport when the selector matches nothing or cannot be parsed", () => {
+    // A root selector is authored in a data attribute, so a typo is the normal
+    // failure. Both readings of "no root" mean the viewport: leaving the caller
+    // inert would take its state hooks down with it.
+    const records = installObserver();
+    const target = document.createElement("div");
+    const watcher = new IntersectionWatcher(() => {});
+
+    expect(watcher.start(target, { rootSelector: "#absent" })).toBe(true);
+    expect(records[0]?.options?.root).toBeNull();
+
+    expect(watcher.start(target, { rootSelector: "#:::not-a-selector" })).toBe(true);
+    expect(records[1]?.options?.root).toBeNull();
+    expect(watcher.active).toBe(true);
+  });
+
   it("honors an explicit viewport root instead of resolving rootSelector", () => {
     const records = installObserver();
     document.body.innerHTML = `<div id="root"></div>`;

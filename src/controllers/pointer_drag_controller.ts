@@ -388,6 +388,15 @@ export class PointerDragController extends Controller<HTMLElement> {
     }
 
     if (!this.#keyboard) return;
+    // While grabbed, the handle owns the keyboard. `Home` / `End` move nothing
+    // here, but a composition partner acts on them (a roving group jumps focus
+    // to the ends), and focus leaving the handle strands the grab: the arrows
+    // and Escape that end it are all delivered to whatever holds focus. So they
+    // are consumed here and do nothing, the same reason every arrow is consumed.
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      return;
+    }
     const step = this.#keyboardDelta(event.key);
     if (!step) return;
     // Consume every arrow while grabbed (even on a locked axis) so the page
