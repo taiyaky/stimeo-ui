@@ -21,11 +21,13 @@ so read Changed before upgrading. The Inspector manifest stays on schema v12.
   A delta carrying your own `id` is applied unless an optimistic add of the same
   size is still outstanding. Runtime changes to `channel` / `params`
   re-subscribe.
-- presence: a leave notice is sent by the last element claiming that `id` rather
-  than by every element, a `channel` key in `params` no longer overrides the
-  declared `channel`, `heartbeat` / `timeout` fall back to their defaults unless
-  finite, positive and at most 2147483647 — typing-indicator's `timeout` takes
-  the same bound — and `template` clones only its root element.
+- presence: on `disconnect()` a leave notice is sent by the last element claiming
+  that `id` rather than by every element; `pagehide` still sends from each one,
+  because the whole page is going away. A `channel` key in `params` no longer
+  overrides the declared `channel`, `heartbeat` / `timeout` fall back to their
+  defaults unless finite, positive and within the browser timer ceiling
+  (2147483647 ms) — typing-indicator's `timeout` takes the same bound — and
+  `template` clones only its root element.
 - optimistic: `turbo:submit-end` is matched to the submission it names instead of
   to any ending that reaches the element, so a submission whose ending never
   arrives no longer strands the element. The `data-optimistic-toggled` marker
