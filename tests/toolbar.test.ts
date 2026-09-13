@@ -26,7 +26,7 @@ interface ToolbarOptions {
   extras?: readonly string[];
   /** Control labels — also fixes how many controls the toolbar has. */
   labels?: readonly string[];
-  /** Wire the legacy per-control `data-action` (delegation is always on). */
+  /** Wire the optional per-control `data-action` (delegation is always on). */
   action?: boolean;
   /** Accessible name; distinct names keep two toolbars readable in one document. */
   label?: string;
@@ -183,8 +183,8 @@ describe("ToolbarController", () => {
   });
 
   it("navigates without any per-control data-action", async () => {
-    // Keydown is delegated on the container, so markup that omits the legacy
-    // data-action is fully navigable.
+    // Keydown is delegated on the container, so markup that omits the optional
+    // per-control data-action is fully navigable.
     await start({ action: false });
     key(0, "ArrowRight");
     expect(document.activeElement).toBe(controls()[1]);

@@ -37,7 +37,7 @@ export function inheritsFieldsetDisabled(control: HTMLElement): boolean {
  *
  * **`aria-disabled` is not disqualifying.** It is the attribute an author uses
  * for a control that must stay *discoverable*, and the roving contract keeps
- * such items reachable. Only the three conditions that make the platform refuse
+ * such items reachable. Only the four conditions that make the platform refuse
  * focus are checked: `hidden` / `inert` (an ancestor's counts),
  * `input[type="hidden"]`, the native `disabled` property, and `disabled`
  * inherited from an ancestor `fieldset`. CSS-only invisibility is handled by

@@ -26,6 +26,39 @@ import {
   type ValueConstraint,
 } from "./types";
 
+/** Whether `node` sits somewhere under `ancestor` (not counting itself). */
+function isInside(node: ElementNode, ancestor: ElementNode): boolean {
+  for (let current = node.parent; current; current = current.parent) {
+    if (current === ancestor) return true;
+  }
+  return false;
+}
+
+/** Whether one element has the tag — and, when named, the attribute — a selector asks for. */
+function matchesHost(node: ElementNode, selector: HostSelector): boolean {
+  if (node.tag !== selector.tag) return false;
+  if (!selector.attr) return true;
+  const attr = node.attrs.find((candidate) => candidate.name === selector.attr);
+  return attr !== undefined && (selector.values ?? []).includes(attr.value.trim().toLowerCase());
+}
+
+/**
+ * The nearest ancestor of `node` matching any selector, or a falsy result when
+ * none can be named: `null` where the chain holds no match, `undefined` where a
+ * generated ancestor sits in the way and has no tag to compare. Both leave the
+ * host unknown, which callers treat the same way.
+ */
+function nearestHost(
+  node: ElementNode,
+  selectors: readonly HostSelector[],
+): ElementNode | null | undefined {
+  for (let current = node.parent; current; current = current.parent) {
+    if (current.origin !== "markup" || current.opaque) return undefined;
+    if (selectors.some((selector) => matchesHost(current, selector))) return current;
+  }
+  return null;
+}
+
 /**
  * The core Inspector engine: checks a single HTML/ERB source string against the
  * manifest and returns diagnostics. It is **input-path agnostic** — the same
@@ -65,7 +98,8 @@ import {
  * @remarks
  * Scope is resolved within a single source string. A controller and its targets
  * split across separate Rails partials cannot be correlated, so stage-2 checks
- * assume self-contained markup (Stimeo's recommended demo/partial structure).
+ * assume self-contained markup: one controller and the targets it owns in the
+ * same template.
  * Server-rendered **fragments** — markup a controller fetches and appends at
  * runtime (Turbo Streams, incrementally loaded list pages) — are the
  * legitimate exception:
@@ -77,39 +111,6 @@ import {
  * @param manifest - The bundled controller manifest to check against.
  * @returns Diagnostics sorted by line then column.
  */
-/** Whether `node` sits somewhere under `ancestor` (not counting itself). */
-function isInside(node: ElementNode, ancestor: ElementNode): boolean {
-  for (let current = node.parent; current; current = current.parent) {
-    if (current === ancestor) return true;
-  }
-  return false;
-}
-
-/** Whether one element has the tag — and, when named, the attribute — a selector asks for. */
-function matchesHost(node: ElementNode, selector: HostSelector): boolean {
-  if (node.tag !== selector.tag) return false;
-  if (!selector.attr) return true;
-  const attr = node.attrs.find((candidate) => candidate.name === selector.attr);
-  return attr !== undefined && (selector.values ?? []).includes(attr.value.trim().toLowerCase());
-}
-
-/**
- * The nearest ancestor of `node` matching any selector, or a falsy result when
- * none can be named: `null` where the chain holds no match, `undefined` where a
- * generated ancestor sits in the way and has no tag to compare. Both leave the
- * host unknown, which callers treat the same way.
- */
-function nearestHost(
-  node: ElementNode,
-  selectors: readonly HostSelector[],
-): ElementNode | null | undefined {
-  for (let current = node.parent; current; current = current.parent) {
-    if (current.origin !== "markup" || current.opaque) return undefined;
-    if (selectors.some((selector) => matchesHost(current, selector))) return current;
-  }
-  return null;
-}
-
 export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const tree = parseHtml(neutralizeErb(source), erbElements(source));

@@ -46,7 +46,7 @@ type Level = (typeof LEVELS)[number];
  * message. The controller never moves focus — announcements must not steal it
  * (WCAG 2.2 4.1.3). Listeners and clear timers are torn down on `disconnect()`
  * (Turbo included), and any generated regions are removed — from the cached
- * snapshot too, via {@link BeforeCacheReset}, because `connect()` cannot reuse a
+ * snapshot too, via `BeforeCacheReset`, because `connect()` cannot reuse a
  * restored region (it carries no target attribute) and would pair another one
  * with it on every visit.
  *

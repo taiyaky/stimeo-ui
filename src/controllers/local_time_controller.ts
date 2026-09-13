@@ -41,7 +41,7 @@ function toStyle(value: string): DateTimeStyle | undefined {
  * Render inputs are followed at runtime: a morph that swaps a Value or the
  * `datetime` attribute on the live element — which keeps the element, so
  * `connect()` never runs again — repaints through one coalesced pass
- * ({@link MicrotaskCoalescer}) rather than leaving a stale reading on screen.
+ * (`MicrotaskCoalescer`) rather than leaving a stale reading on screen.
  */
 export class LocalTimeController extends Controller<HTMLElement> {
   static override values = {

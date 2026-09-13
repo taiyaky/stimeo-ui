@@ -10,11 +10,12 @@
  * unobserve→observe **re-arm** that re-delivers the current state even when the
  * target never leaves the viewport.
  *
- * Like {@link RovingTabindex} and `FocusTrap`, this is a policy-free internal
+ * Like `RovingTabindex` and `FocusTrap`, this is a policy-free internal
  * util: what an intersection *means* (a spied link, a stuck header, a lazy
  * load) stays in each controller. The public `stimeo--intersection` controller
  * is its thin declarative face.
  */
+
 /**
  * Whether `entry`'s target sits entirely before the root's **start (top)** edge —
  * the "scrolled past the top" half of a non-intersecting entry, as opposed to

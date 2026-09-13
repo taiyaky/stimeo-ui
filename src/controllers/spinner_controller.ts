@@ -47,9 +47,9 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *
  * @remarks
  * Behavior only — the visual spinner is the consumer's, alongside the text and
- * `aria-hidden="true"`. Both timers are owned by {@link SafeTimeout}, kept across
- * an in-page move and dropped on a real detach via {@link DetachGate}, while the
- * loading state a cached page would freeze is rewound by {@link BeforeCacheReset}.
+ * `aria-hidden="true"`. Both timers are owned by `SafeTimeout`, kept across
+ * an in-page move and dropped on a real detach via `DetachGate`, while the
+ * loading state a cached page would freeze is rewound by `BeforeCacheReset`.
  */
 export class SpinnerController extends Controller<HTMLElement> {
   static override targets = ["indicator", "region", "message"];

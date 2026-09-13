@@ -51,7 +51,7 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *   closes the menu and restores focus to the region. `aria-disabled` activation
  *   is blocked before consumer click handlers run.
  * - `Escape` closes and restores focus to the region. While open the menu is a
- *   layer on the shared {@link EscapeLayer} stack; it claims a press only while
+ *   layer on the shared `EscapeLayer` stack; it claims a press only while
  *   focus is inside the controller or fell to the body, so one keypress closes
  *   exactly one layer. `Tab` lets the browser move focus first, then closes on
  *   the next task. An outside click or context-menu invocation closes without

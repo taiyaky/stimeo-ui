@@ -50,7 +50,8 @@ const DEFAULT_TARGET = "html";
  * on the root. It applies `data-theme` (the *resolved* light/dark) and a matching
  * `color-scheme` to the `target` element (`<html>` by default), keeps the radiogroup
  * `aria-checked` + roving tabindex (APG radio) or the single button's `aria-pressed`
- * in sync, and never moves focus. The `prefers-color-scheme` listener is attached on
+ * in sync. Arrow/Home/End move focus across the radiogroup as the APG radio pattern
+ * requires; applying a theme never moves focus. The `prefers-color-scheme` listener is attached on
  * `connect()` and removed on `disconnect()` (Turbo included). FOUC avoidance for the
  * very first paint is an inline `<head>` snippet, not this controller.
  *
@@ -62,7 +63,7 @@ const DEFAULT_TARGET = "html";
  * and none at all when the resolved mode matches no option, where the first one
  * keeps the Tab stop.
  *
- * The radiogroup stays one Tab stop through {@link RovingTabindex}, re-derived
+ * The radiogroup stays one Tab stop through `RovingTabindex`, re-derived
  * whenever an option enters or leaves, so a set rendered after connect or swapped
  * by a Turbo morph carries the same single stop as any other.
  */

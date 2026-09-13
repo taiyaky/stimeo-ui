@@ -32,7 +32,7 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  * - On open, focus moves to the first focusable element inside the panel (or the
  *   panel itself if it has none).
  * - `Escape` closes and restores focus to the trigger. While open the panel is a
- *   layer on the shared {@link EscapeLayer} stack; it claims a press only while
+ *   layer on the shared `EscapeLayer` stack; it claims a press only while
  *   focus is inside the controller or fell to the body (a click on non-focusable
  *   panel content), so a press aimed at another layer is never consumed here,
  *   and one keypress closes exactly one layer.

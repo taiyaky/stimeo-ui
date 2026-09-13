@@ -39,7 +39,7 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  * @remarks
  * Behavior only. The combobox concerns (filtering, virtual focus, selection) live
  * here; the modal lifecycle — focus trap, scroll lock, background `inert`, focus
- * restore, and teardown reversal — is delegated to the shared {@link FocusTrap}
+ * restore, and teardown reversal — is delegated to the shared `FocusTrap`
  * primitive (also used by dialog / alert-dialog / drawer). `Escape` closes and
  * `Tab`/`Shift+Tab` cycle focus regardless of which element inside the dialog holds
  * focus (input, close button, …), because the trap listens at the document level.
@@ -114,7 +114,7 @@ export class CommandPaletteController extends Controller<HTMLElement> {
    * re-deriving from the declarative `open` Value (which would slam a user-opened
    * palette shut). The `open` Value only seeds the initial state of a genuinely
    * fresh render. We normalize to a clean closed baseline first so {@link open}
-   * runs its full setup — the {@link FocusTrap} is a fresh instance after a
+   * runs its full setup — the `FocusTrap` is a fresh instance after a
    * reconnect and must be re-activated.
    */
   override connect(): void {
@@ -249,7 +249,7 @@ export class CommandPaletteController extends Controller<HTMLElement> {
 
   /**
    * Combobox navigation keys (arrows / Home / End / Enter), bound to the input.
-   * `Tab` (focus trap) and `Escape` (close) are owned by the {@link FocusTrap} at
+   * `Tab` (focus trap) and `Escape` (close) are owned by the shared `FocusTrap` at
    * the document level, so they work no matter which element inside the dialog has
    * focus — not only the input.
    */

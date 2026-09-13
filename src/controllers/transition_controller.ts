@@ -33,7 +33,7 @@ const tokensOf = (value: string): string[] => value.split(/\s+/).filter(Boolean)
  * @remarks
  * Behavior only — the animation itself is the consumer's CSS; this controls *when* the
  * stage classes are applied. Completion is owned by the shared
- * {@link TransitionCompletion}: every declared transition property must settle
+ * `TransitionCompletion`: every declared transition property must settle
  * (`transitionend` / `transitioncancel`, pseudo-element events excluded) with a
  * `max(duration + delay) + 50ms` bounded fallback, and a computed 0ms transition
  * settles synchronously at the staging frame. A positive `timeout` Value replaces the

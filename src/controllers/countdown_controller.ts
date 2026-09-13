@@ -41,7 +41,7 @@ const SECOND_MS = 1000;
  * than from the fraction behind it, so the first tick after a resume steps by one
  * unit like every other. The run state lives in `data-state` and the markup is its
  * source of truth — `autostart` only decides the state of a timer whose markup does
- * not carry one. The interval is owned by {@link SafeInterval} and torn down on
+ * not carry one. The interval is owned by `SafeInterval` and torn down on
  * `disconnect()` (Turbo navigation included); nothing else needs carrying across,
  * because every reading is re-derived from `deadline` and the wall clock.
  */

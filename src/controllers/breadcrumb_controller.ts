@@ -44,7 +44,7 @@ const OVERFLOW_EPSILON = 1;
  * placed between the leading and trailing items that must always stay visible.
  *
  * Behavior provided:
- * - Detects overflow via {@link LayoutObserver} (element + viewport resize) and a
+ * - Detects overflow via a shared layout observer (element + viewport resize) and a
  *   `MutationObserver` on the list (content edits, Turbo Stream / morph item
  *   swaps); the public `update` action re-measures on demand.
  * - While overflowing and not expanded, hides the `collapsible` items and shows

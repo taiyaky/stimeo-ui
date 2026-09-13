@@ -39,7 +39,7 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  *   when the pointer crosses into it. Matching focus actions on the card cancel
  *   the trigger's pending close while focus is inside, then schedule close once
  *   focus leaves the whole controller.
- * - **Dismissible**: while open, the card joins the shared {@link EscapeLayer}
+ * - **Dismissible**: while open, the card joins the shared `EscapeLayer`
  *   stack, so `Escape` closes it regardless of where focus sits (card, trigger,
  *   or elsewhere). The resolver ignores an Escape already consumed by an inner
  *   handler and lets the most recently shown layer own the press, so one

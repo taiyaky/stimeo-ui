@@ -11,7 +11,7 @@ type SubmitControl = HTMLButtonElement | HTMLInputElement;
 /** Why an active submission returned to idle. */
 type CompletionReason = "canceled" | "manual" | "timeout" | "turbo";
 
-/** A text/value write that cannot be represented by an {@link AttributeLease}. */
+/** A text/value write that cannot be represented by an `AttributeLease`. */
 type LabelWrite =
   | {
       readonly channel: "text";
@@ -98,9 +98,9 @@ const BUTTON_BUSY_LABEL = "data-submit-once-busy-label";
  * Behavior only: the consumer owns every visual, label, and announcement
  * string. `announceText` / `announceReadyText` are empty by default and speak
  * through the page's shared `stimeo--announcer` only on real state transitions.
- * Attribute writes use {@link AttributeLease}, so a consumer mutation made
- * while busy wins over restoration. {@link DetachGate} preserves an in-flight
- * session across an in-page move, while {@link BeforeCacheReset} rewinds the
+ * Attribute writes use `AttributeLease`, so a consumer mutation made
+ * while busy wins over restoration. `DetachGate` preserves an in-flight
+ * session across an in-page move, while `BeforeCacheReset` rewinds the
  * snapshot before Turbo caches it. Cache/detach rewinds are silent and never
  * move focus.
  */

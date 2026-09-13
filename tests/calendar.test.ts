@@ -742,6 +742,7 @@ describe("CalendarController off-contract input", () => {
   afterEach(async () => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
+    document.documentElement.lang = "";
     await delay(50);
   });
 
@@ -826,6 +827,76 @@ describe("CalendarController off-contract input", () => {
     expect(days().filter((cell) => cell.getAttribute("tabindex") === "0")).toHaveLength(1);
     expect(days().every((cell) => cell.hasAttribute("aria-selected"))).toBe(true);
     expect(days()[5]?.getAttribute("data-date")).toBe("2026-05-01");
+  });
+
+  it("keeps painting and labelling in English when the document language tag is malformed", async () => {
+    // `<html lang>` is written by the host page, and a server-side locale such
+    // as `en_US` is not a language tag `Intl` accepts. The label is formatted
+    // before the cells are painted, so a formatter that throws would leave the
+    // grid without dates and without a tab stop.
+    document.documentElement.lang = "en_US";
+    await mount("2026-05");
+
+    expect(errors).toEqual([]);
+    expect(document.getElementById("cal-label")?.textContent).toBe("May 2026");
+    expect(days().filter((cell) => cell.hasAttribute("data-date"))).toHaveLength(42);
+    expect(days().filter((cell) => cell.getAttribute("tabindex") === "0")).toHaveLength(1);
+
+    // Every repaint formats the label again from the same `lang`, so month
+    // navigation keeps working rather than only the first paint — and the
+    // announcement at the end of the paint is reached, so a listener that
+    // refetches inventory still hears the move.
+    const months: string[] = [];
+    document.getElementById("cal")?.addEventListener("stimeo--calendar:monthchange", (event) => {
+      months.push((event as CustomEvent<{ month: string }>).detail.month);
+    });
+    controller().next();
+    await delay(50);
+
+    expect(errors).toEqual([]);
+    expect(document.getElementById("cal-label")?.textContent).toBe("June 2026");
+    expect(days().filter((cell) => cell.hasAttribute("data-date"))).toHaveLength(42);
+    expect(days().filter((cell) => cell.getAttribute("tabindex") === "0")).toHaveLength(1);
+    expect(months).toEqual(["2026-06"]);
+  });
+
+  it("reports a formatter failure that is not a locale problem instead of masking it", async () => {
+    // Only a rejected language tag is absorbed. Any other failure of the
+    // formatter is a programming fault and has to surface. Stimulus reports an
+    // action's exception through `handleError`, so the repaint is driven by a
+    // key move inside the shown month, which repaints synchronously.
+    await mount("2026-05");
+    const NativeDateTimeFormat = Intl.DateTimeFormat;
+    const ThrowingDateTimeFormat = new Proxy(NativeDateTimeFormat, {
+      construct(target, argumentsList, newTarget) {
+        if (argumentsList[0] === "type-error") throw new TypeError("formatter failed");
+        return Reflect.construct(target, argumentsList, newTarget);
+      },
+    });
+    Object.defineProperty(Intl, "DateTimeFormat", {
+      configurable: true,
+      writable: true,
+      value: ThrowingDateTimeFormat,
+    });
+    document.documentElement.lang = "type-error";
+    const label = document.getElementById("cal-label")?.textContent;
+
+    try {
+      const cell = days().find((el) => el.dataset.date === "2026-05-14") as HTMLElement;
+      cell.focus();
+      cell.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    } finally {
+      Object.defineProperty(Intl, "DateTimeFormat", {
+        configurable: true,
+        writable: true,
+        value: NativeDateTimeFormat,
+      });
+    }
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(TypeError);
+    expect(errors[0]?.message).toBe("formatter failed");
+    expect(document.getElementById("cal-label")?.textContent).toBe(label);
   });
 });
 

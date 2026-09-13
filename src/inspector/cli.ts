@@ -199,7 +199,7 @@ Usage:
                                      Check HTML/ERB files (or directories) for
                                      unknown or misused stimeo--* controllers,
                                      targets, values and action methods.
-  stimeo catalog [--json]           Print the official controller catalog
+  stimeo catalog [--json]           Print the controller catalog
                                      (identifiers, targets, values, actions,
                                      events).
   stimeo mcp                        Run a Model Context Protocol server over

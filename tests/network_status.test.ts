@@ -384,7 +384,7 @@ describe("NetworkStatusController", () => {
   });
 
   it("leaves the banner's own markup untouched", async () => {
-    // Nothing rewrites the banner any more: children and spacing are the consumer's.
+    // The banner's children and spacing are the consumer's; nothing here rewrites them.
     await startWith(
       `<div role="alert" hidden data-stimeo--network-status-target="offline">Offline. <button type="button" id="retry">Retry</button></div>`,
     );

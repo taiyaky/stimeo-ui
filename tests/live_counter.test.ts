@@ -22,19 +22,23 @@ describe("LiveCounterController", () => {
   let mixin: CableSubscriptionMixin | null = null;
   /** Every mixin the double was asked to create, in order (one per wire subscription). */
   let mixins: CableSubscriptionMixin[] = [];
+  /** Every channel descriptor the double was asked to subscribe with, in order. */
+  let descriptors: Array<string | Record<string, unknown>> = [];
   const performMock = vi.fn();
   const unsubscribeMock = vi.fn();
 
   beforeEach(() => {
     mixin = null;
     mixins = [];
+    descriptors = [];
     performMock.mockClear();
     unsubscribeMock.mockClear();
     setCableConsumer({
       subscriptions: {
-        create(_channel, subscriptionMixin) {
+        create(channel, subscriptionMixin) {
           mixin = subscriptionMixin;
           mixins.push(subscriptionMixin);
+          descriptors.push(channel);
           return { perform: performMock, unsubscribe: unsubscribeMock };
         },
       },
@@ -78,6 +82,7 @@ describe("LiveCounterController", () => {
     document.querySelector<HTMLElement>(
       "[data-stimeo--live-counter-target='value']",
     ) as HTMLElement;
+  const trigger = () => document.querySelector("button") as HTMLButtonElement;
   const controller = () =>
     root()
       ? (application?.getControllerForElementAndIdentifier(
@@ -187,12 +192,15 @@ describe("LiveCounterController", () => {
     expect(value().textContent).toBe("200");
   });
 
-  it("applies a foreign delta but dedupes the own echo", async () => {
+  it("applies a foreign delta, and the echo of its own outstanding guess", async () => {
     await mount();
     mixin?.received?.({ delta: 1, by: "bob" });
     expect(value().textContent).toBe("129");
-    mixin?.received?.({ delta: 1, by: "alice" }); // own echo: already applied
-    expect(value().textContent).toBe("129");
+
+    (document.querySelector("button") as HTMLButtonElement).click();
+    expect(value().textContent).toBe("130"); // the guess
+    mixin?.received?.({ delta: 1, by: "alice" }); // its echo: already applied
+    expect(value().textContent).toBe("130");
   });
 
   it("dispatches change with the new count", async () => {
@@ -322,6 +330,410 @@ describe("LiveCounterController", () => {
       controller()?.triggerTargetConnected(afterConfirm);
       expect(afterConfirm.hasAttribute("disabled")).toBe(false);
     });
+  });
+
+  // --- Only whole numbers ever reach the display ----------------------------
+
+  it("ignores a broadcast whose count is not a whole number", async () => {
+    await mount();
+    for (const count of [Number.NaN, Number.POSITIVE_INFINITY, 1.5, 1e21]) {
+      mixin?.received?.({ count });
+    }
+    expect(value().textContent).toBe("128");
+  });
+
+  it("ignores a delta that is not a whole number, silently", async () => {
+    await mount();
+    const counts: number[] = [];
+    root().addEventListener("stimeo--live-counter:change", (event) => {
+      counts.push((event as CustomEvent<{ count: number }>).detail.count);
+    });
+    mixin?.received?.({ delta: Number.NaN, by: "bob" });
+    mixin?.received?.({ delta: 0.5, by: "bob" });
+    expect(value().textContent).toBe("128");
+    expect(counts).toEqual([]);
+  });
+
+  it("falls back to a whole step for a fractional delta param", async () => {
+    await mount({ buttonAttrs: 'data-stimeo--live-counter-delta-param="0.5"' });
+    (document.querySelector("button") as HTMLButtonElement).click();
+    // Screen and server move by the same amount, and the display stays whole.
+    expect(value().textContent).toBe("129");
+    expect(performMock).toHaveBeenCalledWith("increment", { id: "alice", delta: 1 });
+  });
+
+  // --- The send gate follows the declaration, not the subscription object ----
+
+  it("subscribes when a channel arrives at runtime, and keeps the gate shut until it confirms", async () => {
+    await mount({
+      attrs: 'data-stimeo--live-counter-id-value="alice"',
+      buttonAttrs: 'data-stimeo--live-counter-target="trigger"',
+    });
+    expect(descriptors).toHaveLength(0);
+
+    root().setAttribute("data-stimeo--live-counter-channel-value", "LikesChannel");
+    await tick();
+    expect(descriptors).toEqual([{ channel: "LikesChannel" }]);
+    expect(trigger().hasAttribute("disabled")).toBe(true);
+
+    trigger().click();
+    expect(value().textContent).toBe("128"); // not bumped: the server cannot hear it yet
+    expect(performMock).not.toHaveBeenCalled();
+
+    mixin?.connected?.();
+    trigger().click();
+    expect(value().textContent).toBe("129");
+  });
+
+  it("keeps the gate shut when the subscription cannot be created", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {}); // the diagnostic is the point
+    setCableConsumer({
+      subscriptions: {
+        create() {
+          throw new Error("no consumer");
+        },
+      },
+    });
+    document.body.innerHTML = `
+      <main>
+        <div data-controller="stimeo--live-counter"
+             data-stimeo--live-counter-channel-value="LikesChannel"
+             data-stimeo--live-counter-id-value="alice">
+          <span data-stimeo--live-counter-target="value">128</span>
+          <button type="button" aria-label="Like" data-stimeo--live-counter-target="trigger"
+                  data-action="stimeo--live-counter#increment">♥</button>
+        </div>
+      </main>`;
+    application = Application.start();
+    application.register("stimeo--live-counter", LiveCounterController);
+    await tick();
+
+    expect(trigger().hasAttribute("disabled")).toBe(true);
+    trigger().click();
+    expect(value().textContent).toBe("128");
+    expect(performMock).not.toHaveBeenCalled();
+  });
+
+  // --- What the gate borrows, it returns ------------------------------------
+
+  it("returns the disabled it applied when the controller goes away", async () => {
+    await mount({ confirm: false, buttonAttrs: 'data-stimeo--live-counter-target="trigger"' });
+    expect(trigger().hasAttribute("disabled")).toBe(true);
+
+    controller()?.disconnect();
+    expect(trigger().hasAttribute("disabled")).toBe(false);
+    expect(trigger().hasAttribute("data-live-counter-disabled")).toBe(false);
+  });
+
+  it("leaves an authored disabled alone when the controller goes away", async () => {
+    await mount({
+      confirm: false,
+      buttonAttrs: 'disabled data-stimeo--live-counter-target="trigger"',
+    });
+    controller()?.disconnect();
+    expect(trigger().hasAttribute("disabled")).toBe(true); // never ours to lift
+  });
+
+  it("returns the disabled when a trigger stops being a target", async () => {
+    await mount({ confirm: false, buttonAttrs: 'data-stimeo--live-counter-target="trigger"' });
+    expect(trigger().hasAttribute("disabled")).toBe(true);
+
+    trigger().removeAttribute("data-stimeo--live-counter-target");
+    await tick();
+    expect(trigger().hasAttribute("disabled")).toBe(false);
+  });
+
+  it("gives back a deferred disable when the controller goes away", async () => {
+    await mount({ buttonAttrs: 'data-stimeo--live-counter-target="trigger"' });
+    trigger().focus();
+    mixin?.disconnected?.(); // the gate shuts while the trigger holds focus
+    expect(trigger().hasAttribute("disabled")).toBe(false); // held back
+
+    controller()?.disconnect();
+    trigger().blur();
+    expect(trigger().hasAttribute("disabled")).toBe(false); // the deferral went with it
+  });
+
+  it("gives back a deferred disable when the trigger stops being a target", async () => {
+    await mount({ buttonAttrs: 'data-stimeo--live-counter-target="trigger"' });
+    trigger().focus();
+    mixin?.disconnected?.();
+
+    trigger().removeAttribute("data-stimeo--live-counter-target");
+    await tick();
+    trigger().blur();
+    expect(trigger().hasAttribute("disabled")).toBe(false);
+  });
+
+  it("waits for a focused trigger to blur before disabling it", async () => {
+    await mount({ buttonAttrs: 'data-stimeo--live-counter-target="trigger"' });
+    trigger().focus();
+    expect(document.activeElement).toBe(trigger());
+
+    mixin?.disconnected?.(); // the connection drops while the trigger holds focus
+    expect(trigger().hasAttribute("disabled")).toBe(false); // focus is not taken away
+    expect(document.activeElement).toBe(trigger());
+
+    trigger().blur();
+    expect(trigger().hasAttribute("disabled")).toBe(true);
+  });
+
+  // --- The echo belongs to the send that caused it ---------------------------
+
+  it("lets a sibling counter catch up on the echo of its neighbour's increment", async () => {
+    document.body.innerHTML = `
+      <main>
+        <div id="a" data-controller="stimeo--live-counter"
+             data-stimeo--live-counter-channel-value="LikesChannel"
+             data-stimeo--live-counter-id-value="alice">
+          <span data-stimeo--live-counter-target="value">128</span>
+          <button type="button" aria-label="Like" data-action="stimeo--live-counter#increment">♥</button>
+        </div>
+        <div id="b" data-controller="stimeo--live-counter"
+             data-stimeo--live-counter-channel-value="LikesChannel"
+             data-stimeo--live-counter-id-value="alice">
+          <span data-stimeo--live-counter-target="value">128</span>
+        </div>
+      </main>`;
+    application = Application.start();
+    application.register("stimeo--live-counter", LiveCounterController);
+    await tick();
+    for (const m of mixins) m.connected?.();
+
+    (document.querySelector("#a button") as HTMLButtonElement).click();
+    const texts = () =>
+      [...document.querySelectorAll("[data-stimeo--live-counter-target=value]")].map(
+        (n) => n.textContent,
+      );
+    expect(texts()).toEqual(["129", "128"]); // only the clicked one guessed
+
+    for (const m of mixins) m.received?.({ delta: 1, by: "alice" });
+    expect(texts()).toEqual(["129", "129"]); // the other one catches up on the echo
+  });
+
+  it("applies an own-id delta when nothing optimistic is outstanding", async () => {
+    await mount();
+    mixin?.received?.({ delta: 1, by: "alice" }); // e.g. this user's other tab
+    expect(value().textContent).toBe("129");
+  });
+
+  it("drops an outstanding guess when the server states the count", async () => {
+    await mount();
+    (document.querySelector("button") as HTMLButtonElement).click();
+    expect(value().textContent).toBe("129");
+
+    mixin?.received?.({ count: 129 }); // server truth settles the guess
+    mixin?.received?.({ delta: 1, by: "alice" }); // a later echo is nobody's guess
+    expect(value().textContent).toBe("130");
+  });
+
+  it("does not apply the echo of its own subtracting step twice", async () => {
+    await mount({ buttonAttrs: 'data-stimeo--live-counter-delta-param="-1"' });
+    trigger().click();
+    expect(value().textContent).toBe("127"); // the guess
+    expect(performMock).toHaveBeenCalledWith("increment", { id: "alice", delta: -1 });
+
+    mixin?.received?.({ delta: -1, by: "alice" }); // its echo
+    expect(value().textContent).toBe("127");
+  });
+
+  it("applies an own-id delta that no guess of that size is waiting for", async () => {
+    await mount();
+    trigger().click(); // guessed +1
+    mixin?.received?.({ delta: -1, by: "alice" }); // this user's other tab took one away
+    expect(value().textContent).toBe("128");
+
+    mixin?.received?.({ delta: 1, by: "alice" }); // now the echo of the guess
+    expect(value().textContent).toBe("128"); // and the server agrees: 128 + 1 - 1
+  });
+
+  it("applies a foreign delta even while a guess of that size is outstanding", async () => {
+    await mount();
+    trigger().click(); // guessed +1
+    mixin?.received?.({ delta: 1, by: "bob" }); // someone else's, not an echo of ours
+    expect(value().textContent).toBe("130");
+
+    mixin?.received?.({ delta: 1, by: "alice" }); // now the echo of the guess
+    expect(value().textContent).toBe("130"); // and the server agrees: 128 + 1 + 1
+  });
+
+  it("converges counters sharing an id that step by different amounts", async () => {
+    document.body.innerHTML = `
+      <main>
+        <div id="a" data-controller="stimeo--live-counter"
+             data-stimeo--live-counter-channel-value="LikesChannel"
+             data-stimeo--live-counter-id-value="alice">
+          <span data-stimeo--live-counter-target="value">128</span>
+          <button type="button" aria-label="Like" data-action="stimeo--live-counter#increment">♥</button>
+        </div>
+        <div id="b" data-controller="stimeo--live-counter"
+             data-stimeo--live-counter-channel-value="LikesChannel"
+             data-stimeo--live-counter-id-value="alice">
+          <span data-stimeo--live-counter-target="value">128</span>
+          <button type="button" aria-label="Like x2" data-stimeo--live-counter-delta-param="2"
+                  data-action="stimeo--live-counter#increment">♥♥</button>
+        </div>
+      </main>`;
+    application = Application.start();
+    application.register("stimeo--live-counter", LiveCounterController);
+    await tick();
+    for (const m of mixins) m.connected?.();
+
+    (document.querySelector("#a button") as HTMLButtonElement).click();
+    (document.querySelector("#b button") as HTMLButtonElement).click();
+    const texts = () =>
+      [...document.querySelectorAll("[data-stimeo--live-counter-target=value]")].map(
+        (n) => n.textContent,
+      );
+    expect(texts()).toEqual(["129", "130"]); // each one guessed its own step
+
+    // The server took both and relays them; each echo cancels the guess of its size.
+    for (const m of mixins) m.received?.({ delta: 2, by: "alice" });
+    for (const m of mixins) m.received?.({ delta: 1, by: "alice" });
+    expect(texts()).toEqual(["131", "131"]); // 128 + 2 + 1, on both
+  });
+
+  // --- The identifier follows the declaration -------------------------------
+
+  it("re-subscribes when the params change at runtime", async () => {
+    await mount({
+      attrs: `data-stimeo--live-counter-channel-value="LikesChannel"
+              data-stimeo--live-counter-params-value='{"post":1}'
+              data-stimeo--live-counter-id-value="alice"`,
+    });
+    expect(descriptors).toEqual([{ channel: "LikesChannel", post: 1 }]);
+
+    root().setAttribute("data-stimeo--live-counter-params-value", '{"post":2}');
+    await tick();
+    expect(descriptors).toEqual([
+      { channel: "LikesChannel", post: 1 },
+      { channel: "LikesChannel", post: 2 },
+    ]);
+    expect(unsubscribeMock).toHaveBeenCalled();
+  });
+
+  it("re-subscribes when the channel changes at runtime", async () => {
+    await mount();
+    root().setAttribute("data-stimeo--live-counter-channel-value", "OtherChannel");
+    await tick();
+    expect(descriptors).toEqual([{ channel: "LikesChannel" }, { channel: "OtherChannel" }]);
+  });
+
+  it("drops an outstanding guess with the identifier it belonged to", async () => {
+    await mount();
+    trigger().click(); // guessed +1 on the old identifier
+    root().setAttribute("data-stimeo--live-counter-channel-value", "OtherChannel");
+    await tick();
+    mixins[1]?.connected?.();
+
+    mixins[1]?.received?.({ delta: 1, by: "alice" }); // on the new identifier, nobody's guess
+    expect(value().textContent).toBe("130");
+  });
+
+  it("clears a rejected hook when the identifier changes", async () => {
+    await mount({ confirm: false });
+    mixin?.rejected?.();
+    expect(root().getAttribute("data-live-counter-rejected")).toBe("true");
+
+    root().setAttribute("data-stimeo--live-counter-channel-value", "OtherChannel");
+    await tick();
+    expect(root().hasAttribute("data-live-counter-rejected")).toBe(false);
+  });
+
+  it("keeps the declared channel when the params name one too", async () => {
+    await mount({
+      attrs: `data-stimeo--live-counter-channel-value="LikesChannel"
+              data-stimeo--live-counter-params-value='{"channel":"Other","post":7}'`,
+    });
+    expect(descriptors).toEqual([{ channel: "LikesChannel", post: 7 }]);
+  });
+
+  // --- Reading the display ---------------------------------------------------
+
+  it("falls back to a delta of one for a param that is not a number", async () => {
+    await mount({ buttonAttrs: 'data-stimeo--live-counter-delta-param="abc"' });
+    (document.querySelector("button") as HTMLButtonElement).click();
+    expect(performMock).toHaveBeenCalledWith("increment", { id: "alice", delta: 1 });
+  });
+
+  it("counts on the element itself when there is no value target", async () => {
+    document.body.innerHTML = `
+      <main>
+        <div data-controller="stimeo--live-counter"
+             data-stimeo--live-counter-channel-value="LikesChannel"
+             data-stimeo--live-counter-id-value="alice">128</div>
+      </main>`;
+    application = Application.start();
+    application.register("stimeo--live-counter", LiveCounterController);
+    await tick();
+    mixin?.connected?.();
+    mixin?.received?.({ count: 300 });
+    expect(root().textContent).toBe("300");
+  });
+
+  it("counts a display holding no number as zero", async () => {
+    await mount({ displayed: "many" });
+    (document.querySelector("button") as HTMLButtonElement).click();
+    expect(value().textContent).toBe("1");
+  });
+
+  // --- Opt-in announcement ---------------------------------------------------
+
+  /** Collects everything handed to the page's shared announcer while `run` executes. */
+  const announcements = async (run: () => void) => {
+    const spoken: string[] = [];
+    const onAnnounce = (event: Event) => {
+      spoken.push((event as CustomEvent<{ message: string }>).detail.message);
+    };
+    window.addEventListener("stimeo--announcer:announce", onAnnounce);
+    // Driven off a mocked clock: the debounce window is a contract, not a delay
+    // the suite should sit through, and a real one is only ever "long enough".
+    vi.useFakeTimers();
+    run();
+    await vi.advanceTimersByTimeAsync(260); // past the debounce
+    vi.useRealTimers();
+    window.removeEventListener("stimeo--announcer:announce", onAnnounce);
+    return spoken;
+  };
+
+  /** A counter that opted into announcements. */
+  const announcing = `data-stimeo--live-counter-channel-value="LikesChannel"
+              data-stimeo--live-counter-id-value="alice"
+              data-stimeo--live-counter-announce-text-value="{count} likes"`;
+
+  it("announces a reconciled count when the consumer asked for it", async () => {
+    await mount({ attrs: announcing });
+    const spoken = await announcements(() => {
+      mixin?.received?.({ count: 200 });
+      mixin?.received?.({ count: 201 });
+    });
+    expect(spoken).toEqual(["201 likes"]); // one announcement for the burst
+  });
+
+  it("says nothing without an announcement template", async () => {
+    await mount();
+    const spoken = await announcements(() => {
+      mixin?.received?.({ count: 200 });
+    });
+    expect(spoken).toEqual([]);
+  });
+
+  it("says nothing for an optimistic bump, which the server has yet to confirm", async () => {
+    await mount({ attrs: announcing });
+    const spoken = await announcements(() => {
+      trigger().click();
+    });
+    expect(spoken).toEqual([]); // reading a guess out would only be corrected later
+    expect(value().textContent).toBe("129");
+  });
+
+  it("drops a pending announcement on disconnect", async () => {
+    await mount({ attrs: announcing });
+    const spoken = await announcements(() => {
+      mixin?.received?.({ count: 200 });
+      controller()?.disconnect();
+    });
+    expect(spoken).toEqual([]);
   });
 
   it("has no machine-detectable a11y violations", async () => {

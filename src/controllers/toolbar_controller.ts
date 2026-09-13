@@ -32,7 +32,7 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  * its own controller — the toolbar only owns navigation.
  *
  * @remarks
- * Behavior only. The roving mechanics are delegated to {@link RovingTabindex};
+ * Behavior only. The roving mechanics are delegated to a shared roving-tabindex helper;
  * orientation and wrap policy stay here per the APG (they differ per widget).
  * ARIA (`role="toolbar"`, the accessible name, and `aria-orientation="vertical"`
  * when the axis is vertical) is the author's, exactly as with `role`.

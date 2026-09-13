@@ -12,7 +12,7 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  * Headless **roving tabindex**: makes a set of `item`s a single Tab stop and
  * moves focus between them with the arrow keys — the APG roving-tabindex
  * technique, surfaced as a standalone controller. It is the policy layer over the
- * shared {@link RovingTabindex} util (the same split `stimeo--focus` makes over its trap),
+ * shared `RovingTabindex` util (the same split `stimeo--focus` makes over its trap),
  * giving the orientation / wrap / Home-End the util deliberately leaves out. No
  * dedicated APG pattern; it is the keyboard primitive Toolbar / Menu / Radio Group
  * and friends build on. Core (zero dependencies).

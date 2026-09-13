@@ -85,8 +85,8 @@ describe("TreeViewController", () => {
    * Removes `element` (with any nested items) and drives the Stimulus target
    * callbacks by hand, in the DOM order Stimulus reports them. happy-dom fires
    * the MutationObserver those callbacks ride on unreliably: an item inserted
-   * into a live tree never reaches `itemTargetConnected`, so the real wiring is
-   * asserted in a real browser instead, exactly as the runtime-addition case is.
+   * into a live tree never reaches `itemTargetConnected`, so the callbacks are
+   * invoked directly here.
    */
   const removeItem = (...elements: HTMLElement[]) => {
     const owner = elements[0]?.closest<HTMLElement>("[role='tree']") as HTMLElement;

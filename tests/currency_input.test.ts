@@ -603,7 +603,7 @@ describe("CurrencyInputController", () => {
     expect(display().value).toBe("1,234");
     expect(display().selectionStart).toBe(3); // no jump past the rejection
     display().setSelectionRange(2, 2);
-    press("."); // first decimal mark is accepted: "1,.234" → "1.234"? no — scan: 1 then dot…
+    press("."); // the first decimal mark is accepted: "1,.234" scans as 1, dot, 234
     expect(field().value).toBe("1.234");
   });
 

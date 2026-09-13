@@ -31,7 +31,7 @@ interface FontEventSource {
  * Re-measure triggers: `connect()`; `input` and `change` on the element
  * (`change` covers programmatic writers that announce the write with a bubbling
  * event, the convention Stimeo's own field-writing controllers follow); element
- * size reports via the shared {@link LayoutObserver} — width changes
+ * size reports via the shared `LayoutObserver` — width changes
  * (re-wrapping) and the applied inline height being stripped (a Turbo morph
  * syncing attributes); font loading settling on `document.fonts`; runtime
  * `minRows` / `maxRows` changes; and the explicit `resize` action. A silent

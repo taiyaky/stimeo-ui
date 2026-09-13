@@ -11,7 +11,7 @@
  * resources/read → stimeo_example → prompts/list → prompts/get) plus the
  * `mcp --help` escape hatch, and fails CI on any deviation.
  *
- * The script is dependency-free (Bun + `node:` APIs), like `audit.ts`.
+ * The script is dependency-free (Bun + `node:` APIs).
  *
  * Usage: `bun scripts/mcp_smoke.ts`  (requires a prior `bun run build`;
  * exit code 1 on any failure).

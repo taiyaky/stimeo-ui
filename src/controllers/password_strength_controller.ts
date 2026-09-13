@@ -82,7 +82,8 @@ const MIN_LEVELS = 2;
  *
  * @remarks
  * Behavior only — the meter/bar look is the consumer's, keyed off the data hooks.
- * `data-strength` is one of the fixed {@link STRENGTH_BANDS} (not the localizable
+ * `data-strength` is one of the fixed bands `weak` / `fair` / `good` / `strong`
+ * (not the localizable
  * `levels` text), so consumers can style by it regardless of locale; the visible
  * label receives the matching `levels` entry. Every visible and non-text output
  * updates on the keystroke that caused it, so the readout never trails the meter.

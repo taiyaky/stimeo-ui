@@ -463,7 +463,7 @@ describe("checkSource", () => {
       expect(codeList).toContain("missing-required-target");
     });
 
-    // A feature that is opt-in but incomplete without its whole set (schema v8).
+    // A feature that is opt-in but incomplete without its whole set.
     // Every other check passes and the page loads — the feature just silently does
     // nothing — so a static rule is the only layer that can say anything.
     describe("conditional targets", () => {
@@ -685,6 +685,27 @@ describe("checkSource", () => {
                 <span data-stimeo--submit-once-target="idle">Send</span>
                 <span data-stimeo--submit-once-target="busy" hidden>Sending</span>
               <% end %>
+            </form>`),
+        ).not.toContain("missing-conditional-target");
+      });
+
+      it("leaves a pair alone when a helper block sits between a half and its button", () => {
+        // The walk up to the submit control stops at a helper-generated ancestor:
+        // what that helper emits is not in the template, so whether the half ends
+        // up inside the button above it cannot be read here. Pairing the two
+        // halves by the buttons that happen to be literal would report a split
+        // that may not exist.
+        expect(
+          codes(`
+            <form data-controller="stimeo--submit-once">
+              <button type="submit">
+                <%= tag.span data: { wrapper: true } do %>
+                  <span data-stimeo--submit-once-target="idle">Send</span>
+                <% end %>
+              </button>
+              <button type="submit">
+                <span data-stimeo--submit-once-target="busy" hidden>Sending</span>
+              </button>
             </form>`),
         ).not.toContain("missing-conditional-target");
       });
@@ -1941,10 +1962,10 @@ describe("checkSource", () => {
     });
 
     // ARIA levels its accessible-name requirements — required, recommended, and
-    // conditional on the rest of the page. v7 mirrors those levels instead of
-    // flattening them into one severity, so the check says "broken" only where
-    // ARIA does.
-    describe("accessible-name requirement levels (schema v7)", () => {
+    // conditional on the rest of the page. The rules mirror those levels rather
+    // than collapsing them into one severity, so the check says "broken" only
+    // where ARIA does.
+    describe("accessible-name requirement levels", () => {
       const missingAria = (source: string): Diagnostic[] =>
         checkSource(source, manifest).filter((d) => d.code === "missing-aria");
 
@@ -2743,8 +2764,8 @@ describe("checkSource", () => {
       });
     });
 
-    describe("what stays untouched", () => {
-      it("leaves literal markup reporting exactly what it did before", () => {
+    describe("literal HTML spelling", () => {
+      it("reports a typo'd target as both a missing requirement and an unknown target", () => {
         const source = `<div data-controller="stimeo--form-field">
           <textarea data-stimeo--form-field-target="controlTYPO"></textarea>
         </div>`;

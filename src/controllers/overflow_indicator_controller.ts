@@ -28,7 +28,7 @@ const DIRECTION_BUTTON_SELECTOR = "[data-stimeo--overflow-indicator-direction-pa
  *   </div>
  *
  * The viewport's scroll position and size are watched (via the wired `scroll`
- * action, plus {@link LayoutObserver} for viewport/content resize, a
+ * action, plus `LayoutObserver` for viewport/content resize, a
  * {@link MutationObserver}, and descendant load events). Optional page buttons
  * scroll one logical viewport page at a time (including RTL) and have their
  * disabled state synced to the matching direction's remaining room.

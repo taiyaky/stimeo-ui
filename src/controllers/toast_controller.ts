@@ -59,7 +59,7 @@ export class ToastController extends Controller<HTMLElement> {
 
   /**
    * Registry for every auto-dismiss and transition-finalize timer the controller
-   * schedules. {@link SafeTimeout} owns *registration and teardown only*; the
+   * schedules. `SafeTimeout` owns *registration and teardown only*; the
    * pause/resume remaining-time accounting stays in `#activeTimeouts` so the
    * per-widget WCAG 2.2.1 semantics are not flattened into the helper.
    */

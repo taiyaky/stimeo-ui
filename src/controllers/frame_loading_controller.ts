@@ -35,9 +35,9 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * double-submits, and focus inside the frame is explicitly blurred then restored
  * (when `restoreFocus`) so it is testable without relying on emergent `inert`
  * focus behavior. Listeners are torn down on `disconnect()` (Turbo navigation
- * included) along with the {@link MinDurationFloor} holding the finish back, kept
- * across an in-page move by {@link DetachGate}. A detach that keeps the element
- * returns the frame to its idle form, as does {@link BeforeCacheReset} for the
+ * included) along with the `MinDurationFloor` holding the finish back, kept
+ * across an in-page move by `DetachGate`. A detach that keeps the element
+ * returns the frame to its idle form, as does `BeforeCacheReset` for the
  * snapshot a cached page freezes; a frame render that swaps the targets mid-load
  * re-arms them.
  */

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  monthLabelFormatter,
   parseISODateString,
   parseISOMonthString,
   toISODateString,
@@ -7,9 +8,11 @@ import {
 } from "../../src/utils/dates";
 
 /**
- * Unit tests for the shared local-time date helpers used by the calendar-family
- * controllers. The focus is the round-trip contract and the rejection of
- * calendar-invalid strings (so a rolled-over `Date` never leaks downstream).
+ * Unit tests for the shared date helpers used by the calendar-family
+ * controllers. The focus is the round-trip contract of the local-time
+ * conversions and the rejection of calendar-invalid strings (so a rolled-over
+ * `Date` never leaks downstream); the month label formatter has its own block
+ * at the end of the file.
  */
 describe("dates util", () => {
   it("round-trips a valid date through ISO and back", () => {
@@ -50,5 +53,52 @@ describe("dates util", () => {
     // destructure of a null match would throw instead of returning null.
     expect(parseISOMonthString("not-a-month")).toBeNull();
     expect(parseISOMonthString("2026-6")).toBeNull();
+  });
+});
+
+/**
+ * The month label is the one piece of locale-dependent text the calendar-family
+ * controllers write themselves, from a `<html lang>` the host page authored. A
+ * tag `Intl` rejects must not stop the grid paint that follows the label, while
+ * any other failure of the formatter has to stay visible.
+ */
+describe("monthLabelFormatter", () => {
+  const may = new Date(2026, 4, 1);
+
+  it("formats the long month name and the numeric year in the given locale", () => {
+    expect(monthLabelFormatter("en").format(may)).toBe("May 2026");
+    expect(monthLabelFormatter("ja").format(may)).toBe("2026年5月");
+  });
+
+  it("falls back to English when the tag is not a well-formed language tag", () => {
+    // `en_US` is what a server-side locale setting looks like when it is written
+    // into `<html lang>` unchanged; `Intl` rejects it with a RangeError.
+    for (const tag of ["en_US", "x-", "en-US-invalid!"]) {
+      expect(monthLabelFormatter(tag).format(may)).toBe("May 2026");
+    }
+  });
+
+  it("rethrows a failure that is not a locale problem", () => {
+    const NativeDateTimeFormat = Intl.DateTimeFormat;
+    const ThrowingDateTimeFormat = new Proxy(NativeDateTimeFormat, {
+      construct(target, argumentsList, newTarget) {
+        if (argumentsList[0] === "type-error") throw new TypeError("formatter failed");
+        return Reflect.construct(target, argumentsList, newTarget);
+      },
+    });
+    Object.defineProperty(Intl, "DateTimeFormat", {
+      configurable: true,
+      writable: true,
+      value: ThrowingDateTimeFormat,
+    });
+    try {
+      expect(() => monthLabelFormatter("type-error")).toThrow(TypeError);
+    } finally {
+      Object.defineProperty(Intl, "DateTimeFormat", {
+        configurable: true,
+        writable: true,
+        value: NativeDateTimeFormat,
+      });
+    }
   });
 });

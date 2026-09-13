@@ -32,7 +32,7 @@ type Placement = "left" | "right" | "top" | "bottom";
  * @remarks
  * Behavior only. The modal lifecycle (focus trap, scroll lock, background
  * `inert`, focus restore, teardown reversal) is delegated to the shared
- * {@link FocusTrap}. Placement, slide direction, distance, and easing are all the
+ * `FocusTrap`. Placement, slide direction, distance, and easing are all the
  * consumer's CSS — `data-placement` is merely a flag.
  *
  * Behavior provided:
@@ -81,7 +81,7 @@ export class DrawerController extends Controller<HTMLElement> {
    * rather than being re-derived from the declarative `open` Value (which would
    * close a user-opened drawer). The `open` Value only seeds a genuinely fresh
    * render. We normalize to a clean closed baseline first so {@link open} runs its
-   * full reveal + trap activation — the {@link FocusTrap} is inactive after a
+   * full reveal + trap activation — the `FocusTrap` is inactive after a
    * disconnect and must be re-activated.
    */
   override connect(): void {
@@ -239,7 +239,7 @@ export class DrawerController extends Controller<HTMLElement> {
    * Runs once the close transition has finished: applies `hidden` to the panel
    * and overlay, then reverts the modal side effects (scroll lock, background
    * `inert`, keydown listener) and restores focus to the opener. Deferring the
-   * {@link FocusTrap} teardown to here — rather than at {@link close} time — keeps
+   * `FocusTrap` teardown to here — rather than at {@link close} time — keeps
    * the background unreachable and focus trapped for the whole exit animation.
    */
   #applyHidden(panel: HTMLElement): void {

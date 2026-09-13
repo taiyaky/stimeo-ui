@@ -29,7 +29,7 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * is open at a time, and the panel content is a plain set of links (not a
  * `role="menu"`). Focus is **not** trapped — `Tab` moves through the links
  * naturally. `Escape` closes the open panel and returns focus to its trigger.
- * While a panel is open the nav is a layer on the shared {@link EscapeLayer}
+ * While a panel is open the nav is a layer on the shared `EscapeLayer`
  * stack; it claims a press only while focus is inside the nav or fell to the
  * body (a click on non-focusable panel content), so one keypress closes exactly
  * one layer. An outside click, or focus leaving the nav for a known external

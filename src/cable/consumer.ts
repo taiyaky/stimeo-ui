@@ -138,7 +138,7 @@ const sharedSubscriptions = new WeakMap<CableConsumer, Map<string, SharedSubscri
  * The identifier Action Cable derives for a channel descriptor: the JSON of the
  * params object, a bare channel name standing for `{ channel }`.
  */
-function identifierOf(channel: string | Record<string, unknown>): string {
+export function identifierOf(channel: string | Record<string, unknown>): string {
   return JSON.stringify(typeof channel === "string" ? { channel } : channel);
 }
 

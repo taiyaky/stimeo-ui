@@ -1,6 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
-import { SafeTimeout } from "../utils/safe_timeout";
+import { MAX_TIMER_DELAY_MS, SafeTimeout } from "../utils/safe_timeout";
 import {
   type ConfirmedCableSubscription,
   createConfirmedSubscription,
@@ -217,14 +217,18 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
   }
 
   /**
-   * The silence after which a typer is dropped, in ms: a finite, non-negative number.
-   * Anything else names no delay — `setTimeout` reads `NaN`, a negative value and
-   * `Infinity` alike as "now", so the typer would vanish in the same task it appeared
-   * and the indicator could never be seen. Such a declaration falls back to the default.
+   * The silence after which a typer is dropped, in ms: a finite, non-negative number
+   * a timer can hold. Anything else names no delay — `setTimeout` reads `NaN`, a
+   * negative value and `Infinity` alike as "now", and a value past
+   * {@link MAX_TIMER_DELAY_MS} overflows to the same place — so the typer would
+   * vanish in the same task it appeared and the indicator could never be seen. Such
+   * a declaration falls back to the default.
    */
   get #timeout(): number {
     const declared = this.timeoutValue;
-    return Number.isFinite(declared) && declared >= 0 ? declared : DEFAULT_TIMEOUT;
+    return Number.isFinite(declared) && declared >= 0 && declared <= MAX_TIMER_DELAY_MS
+      ? declared
+      : DEFAULT_TIMEOUT;
   }
 
   /**

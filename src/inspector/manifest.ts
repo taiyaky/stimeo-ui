@@ -35,7 +35,7 @@ interface ReflectableController {
 }
 
 /**
- * Builds the Inspector manifest by reflecting over the official controllers.
+ * Builds the Inspector manifest by reflecting over the registered controllers.
  *
  * Reflected data (`targets`, `values`, `actions`, `events`) is read from each
  * class's `static targets` / `static values` / `static actions` /

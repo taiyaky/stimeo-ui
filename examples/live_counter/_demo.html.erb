@@ -5,18 +5,25 @@
     absolute { count }, so every subscribed tab converges — open a second tab
     and click in either. The trigger target keeps the button disabled while an
     increment would be dropped (before the subscription confirms, during an
-    outage, after a rejection). The client id is randomized per render purely
-    for the demo (a real app passes current_user.id). The room comes from the
+    outage, after a rejection). The client id is randomized per render, which
+    identifies this tab rather than this user — a real app passes any per-client
+    string (SecureRandom.uuid). Sharing one id across tabs still converges, since
+    an echo only cancels one guess of its own size, but a per-tab id keeps every
+    echo paired with the tab that guessed it. It is printed below so two tabs
+    side by side can be told apart; an app has no reason to show it. The room comes from the
     channel's allowlisted constant so the subscription params and the
     server-rendered initial value below can never drift (a real app passes its
     record id, e.g. post.id). %>
 <% room = LikesChannel::ROOM %>
+<% tab = SecureRandom.hex(4) %>
 <div class="live-counter-demo"
      data-controller="stimeo--live-counter"
      data-stimeo--live-counter-channel-value="LikesChannel"
      data-stimeo--live-counter-params-value='{"room":"<%= room %>"}'
-     data-stimeo--live-counter-id-value="<%= SecureRandom.hex(4) %>">
+     data-stimeo--live-counter-id-value="<%= tab %>">
   <p class="live-counter-demo__hint"><%= t("components.live_counter.demo.hint") %></p>
+  <p class="live-counter-demo__you"><%=
+    t("components.live_counter.demo.this_tab", token: tab) %></p>
   <div class="live-counter-demo__row">
     <button type="button" class="demo-trigger live-counter-demo__button"
             data-stimeo--live-counter-target="trigger"

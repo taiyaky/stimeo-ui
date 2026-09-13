@@ -43,13 +43,13 @@ const UNITS: readonly TimeScale[] = [
  * Behavior only. The machine-readable `datetime` attribute is left untouched
  * while only the visible text updates, and the element is intentionally **not**
  * a live region (silent updates, no announcement interruptions). The polling
- * timer is owned by {@link SafeTimeout} and torn down on `disconnect()` (Turbo
+ * timer is owned by `SafeTimeout` and torn down on `disconnect()` (Turbo
  * navigation included).
  *
  * Render inputs are followed at runtime: a morph that swaps `locale`, `threshold`,
  * or `tickInterval` on the live element repaints through one coalesced pass
- * ({@link MicrotaskCoalescer}) rather than leaving the reading frozen. The authored
- * absolute text goes back on the element via {@link BeforeCacheReset} before Turbo
+ * (`MicrotaskCoalescer`) rather than leaving the reading frozen. The authored
+ * absolute text goes back on the element via `BeforeCacheReset` before Turbo
  * caches the page — a snapshot taken mid-render would carry the relative form
  * alone, and that is a form `connect()` must not adopt as the fallback.
  */

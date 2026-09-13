@@ -77,7 +77,7 @@ interface Hsla {
  * keeps the announced wording i18n-neutral; without a template the text is English.
  *
  * A drag belongs to the pointer that started it: only a primary button opens one,
- * and {@link OwnedPointerSession} filters movement and termination by that
+ * and `OwnedPointerSession` filters movement and termination by that
  * `pointerId`, so a second finger neither steers nor cuts the gesture. Its
  * listeners are released on drag end, when the slider leaves, and on `disconnect()`
  * (Turbo navigation included).

@@ -463,8 +463,7 @@ describe("AnnouncerController", () => {
     announce({ message: "Profile saved" });
     await tick();
     const spoken = await captureSpeech({ container: polite(), steps: 1 });
-    // Freeze the whole ordered array: the polite region must announce exactly the
-    // message text (no spurious role/name leaking in).
+    // The polite region must announce the message text.
     expect(spoken).toContain("Profile saved");
   });
 

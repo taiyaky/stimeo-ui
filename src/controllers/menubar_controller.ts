@@ -45,7 +45,7 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  * the arrow keys then move within the menu, and pressing `ArrowLeft`/`ArrowRight`
  * while a menu is open jumps to the adjacent top menu. `Escape` closes and
  * returns focus to the owning top item — while a menu is open the menubar is a
- * layer on the shared {@link EscapeLayer} stack, claiming a press only while
+ * layer on the shared `EscapeLayer` stack, claiming a press only while
  * focus is inside the controller or fell to the body, so one keypress closes
  * exactly one layer. `Tab` and an outside click close.
  *
@@ -59,7 +59,7 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  * consumer's CSS, and dynamic placement is delegated to the opt-in
  * `stimeo-ui/positioning` module (never imported here, keeping the core
  * zero-dependency). Roving mechanics across the top items are delegated to
- * {@link RovingTabindex}.
+ * `RovingTabindex`.
  *
  * Focus-restoration contract: closing via `Escape` or an item activation returns
  * focus to the owning top item; `Tab` and an outside click deliberately do **not**

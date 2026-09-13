@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import {
+  monthLabelFormatter,
   parseISODateString,
   parseISOMonthString,
   toISODateString,
@@ -44,7 +45,8 @@ const OWNED_DISABLED = "data-stimeo--calendar-owns-disabled";
  *   </div>
  *
  * Implements the WAI-ARIA APG **Date Picker Dialog** grid navigation pattern:
- * - Local-aware month/year labels using native `Intl.DateTimeFormat`.
+ * - Locale-aware month/year labels using native `Intl.DateTimeFormat`, read from
+ *   `<html lang>`; a malformed language tag falls back to English so the grid still paints.
  * - Roving tabindex focus tracking (exactly one focusable day at any time).
  * - Full grid keyboard controls (arrows, PageUp/Down, Home/End, Shift+PageUp/Down).
  * - Automatic month wrapping and date clamping for missing dates (e.g. leap years, 31st to 30th).
@@ -280,8 +282,7 @@ export class CalendarController extends Controller<HTMLElement> {
     // Update label with localized month/year
     if (this.hasLabelTarget) {
       const lang = document.documentElement.lang || "en";
-      const formatter = new Intl.DateTimeFormat(lang, { month: "long", year: "numeric" });
-      this.labelTarget.textContent = formatter.format(monthStart);
+      this.labelTarget.textContent = monthLabelFormatter(lang).format(monthStart);
     }
 
     const days = this.#calculateGridDays(year, month);

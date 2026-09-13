@@ -3,7 +3,7 @@ import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { FocusTrap } from "../utils/focus_trap";
 
 /**
- * Headless **focus scope**: exposes the shared {@link FocusTrap} as a standalone,
+ * Headless **focus scope**: exposes the shared `FocusTrap` primitive as a standalone,
  * declarative focus boundary — `Tab` cycling, initial focus, and restore-on-release —
  * for any region, without building a full modal. No dedicated APG pattern; it is the
  * primitive the overlay patterns use, surfaced for direct use.
@@ -29,7 +29,7 @@ import { FocusTrap } from "../utils/focus_trap";
  *
  * @remarks
  * Behavior only — it does not open/close or render an overlay (pair with Dialog) and
- * does not move DOM (pair with Portal). It reuses the shared {@link FocusTrap}, so it never
+ * does not move DOM (pair with Portal). It reuses the shared `FocusTrap`, so it never
  * scroll-locks the page (unlike the modal overlays) and tracks live focusable children
  * (dynamic additions are picked up on the next `Tab`). The opener is recorded on
  * activate and refocused on release if still present. Everything is torn down on

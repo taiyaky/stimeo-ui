@@ -26,8 +26,8 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *
  * @remarks
  * Behavior only — skeleton shapes/animation are the consumer's. The
- * min-duration wait is held by {@link MinDurationFloor} on a {@link SafeTimeout},
- * kept across an in-page move and dropped on a real detach via {@link DetachGate}.
+ * min-duration wait is held by `MinDurationFloor` on a `SafeTimeout`,
+ * kept across an in-page move and dropped on a real detach via `DetachGate`.
  */
 export class SkeletonController extends Controller<HTMLElement> {
   static override targets = ["placeholder", "content"];

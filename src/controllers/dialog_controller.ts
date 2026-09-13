@@ -26,7 +26,7 @@ import { FocusTrap } from "../utils/focus_trap";
  * its content) also closes it.
  *
  * The modal lifecycle — focus trap, scroll lock, background `inert`, focus
- * restore, and teardown reversal — is delegated to the shared {@link FocusTrap}
+ * restore, and teardown reversal — is delegated to the shared `FocusTrap`
  * primitive (also used by alert-dialog and drawer). This controller only owns
  * *when* to open/close and the dialog-specific backdrop click.
  */

@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import {
+  monthLabelFormatter,
   parseISODateString,
   parseISOMonthString,
   toISODateString,
@@ -387,7 +388,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
 
     if (this.hasMonthLabelTarget) {
       const lang = document.documentElement.lang || "en";
-      const formatter = monthFormatter(lang);
+      const formatter = monthLabelFormatter(lang);
       this.monthLabelTarget.textContent = formatter.format(new Date(year, month - 1, 1));
     }
 
@@ -587,17 +588,6 @@ function normalizeISO(value: string): string {
 /** Orders a complete range while preserving either valid lone endpoint. */
 function orderRange(start: string, end: string): [string, string] {
   return start && end && end < start ? [end, start] : [start, end];
-}
-
-/** Creates the month formatter, falling back when the document locale is malformed. */
-function monthFormatter(locale: string): Intl.DateTimeFormat {
-  const options: Intl.DateTimeFormatOptions = { month: "long", year: "numeric" };
-  try {
-    return new Intl.DateTimeFormat(locale, options);
-  } catch (error) {
-    if (!(error instanceof RangeError)) throw error;
-    return new Intl.DateTimeFormat("en", options);
-  }
 }
 
 /** Computes a preset range relative to today, or null for an unknown name. */

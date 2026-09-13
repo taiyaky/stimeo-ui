@@ -55,7 +55,7 @@ const TRANSIENT_STATES = new Set(["copied", "error"]);
  * `copied` and `error` are transient: the timer that clears them belongs to one
  * connection, so a fresh `connect()` that finds either — a restored snapshot, an
  * in-page move — returns to `idle`, and the state is rewound before Turbo caches
- * the page ({@link BeforeCacheReset}). The rewind is silent: it discards nothing a
+ * the page (`BeforeCacheReset`). The rewind is silent: it discards nothing a
  * reconnect does not derive again.
  */
 export class ClipboardController extends Controller<HTMLElement> {

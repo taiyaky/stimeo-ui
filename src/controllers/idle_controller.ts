@@ -34,7 +34,7 @@ const DEFAULT_ACTIVITY_EVENTS = [
  *
  * @remarks
  * Behavior only — it renders no warning UI (pair with Dialog/Confirm) and never
- * touches the server session. Timers are owned by {@link SafeTimeout} and the
+ * touches the server session. Timers are owned by `SafeTimeout` and the
  * listeners are removed on `disconnect()` (Turbo navigation included). Place one on
  * the root element. Every visit reconnects the controller and re-arms the timeout
  * from that moment — `data-turbo-permanent` keeps the element, not the elapsed count.

@@ -50,7 +50,7 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *   jump to the first/last item, `Tab` lets the browser move focus first and
  *   then closes on the next task, and activating an enabled item closes the menu.
  * - `Escape` closes and returns focus to the trigger. While open the menu is a
- *   layer on the shared {@link EscapeLayer} stack; it claims a press only while
+ *   layer on the shared `EscapeLayer` stack; it claims a press only while
  *   focus is inside the controller or fell to the body, so one keypress closes
  *   exactly one layer and a newer layer (e.g. a tooltip shown over an item) is
  *   dismissed first.

@@ -54,7 +54,7 @@ function usableNumber(value: number, fallback: number): number {
  * positioning styles. Use only for independent cards whose visual order carries no
  * meaning.
  *
- * Re-layout runs on connect, on resize ({@link LayoutObserver}), on item
+ * Re-layout runs on connect, on resize (`LayoutObserver`), on item
  * add/remove ({@link MutationObserver}), on an item joining or leaving the target
  * set, when a declared number changes, and when a descendant resource loads.
  * Everything but the first pass is folded into one microtask, so a burst of

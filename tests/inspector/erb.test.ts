@@ -46,7 +46,7 @@ describe("erbRanges", () => {
 /**
  * Tests for the elements recovered from Rails helper calls. The contract is
  * narrow on purpose: only an output tag naming a `data:` option becomes an
- * element, so a template without one parses exactly as it always did.
+ * element, so a template without one is parsed as plain markup.
  */
 describe("erbElements", () => {
   it("recovers a helper's data: hash as attributes", () => {

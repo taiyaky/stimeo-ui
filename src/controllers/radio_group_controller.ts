@@ -55,7 +55,7 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  *
  * @remarks
  * Behavior only — selection is exposed through `aria-checked`, the single Tab
- * stop through roving `tabindex` ({@link RovingTabindex}); the consumer styles
+ * stop through roving `tabindex` (`RovingTabindex`); the consumer styles
  * those attributes. Selection follows focus for enabled radios.
  *
  * A supported radio is either `<button type="button">` or a non-interactive

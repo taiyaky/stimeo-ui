@@ -430,11 +430,11 @@ describe("TypingIndicatorController", () => {
       },
     );
 
-    it.each(["abc", "-1", "Infinity"])(
+    it.each(["abc", "-1", "Infinity", "1e12"])(
       "falls back to the default silence when timeout is %s",
       async (declared) => {
-        // Every one of these reaches setTimeout as "now", so the typer would vanish in
-        // the task it appeared in.
+        // Every one of these reaches setTimeout as "now" — a value past the 32-bit
+        // bound overflows to 1ms — so the typer would vanish in the task it appeared in.
         await mount(declaring(`data-stimeo--typing-indicator-timeout-value="${declared}"`));
         receive("Bob");
         await vi.advanceTimersByTimeAsync(1);

@@ -61,7 +61,8 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  * - A child container is resolved by `role="group"`, not by the target: the
  *   `group` target is what `stimeo check`'s accessibility rule anchors on, which
  *   is why the contract still declares it.
- * - Nested interactive controls ({@link NESTED_INTERACTIVE}) and IME composition
+ * - Nested interactive controls (natively interactive elements such as `button`,
+ *   `input`, `select`, `textarea`, `label`, `a[href]`, `summary`) and IME composition
  *   keys are left alone; a click on a child `group`'s own box (its indentation
  *   band) selects nothing rather than the parent row.
  * - A key a descendant already consumed (`event.defaultPrevented`) is yielded,
@@ -69,7 +70,7 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  *
  * Consumer contract — the item host:
  * - **Host `role="treeitem"` on a non-interactive element** (`li`, `div`), never
- *   on {@link NESTED_INTERACTIVE}. APG's *Navigation Treeview* does host it on a
+ *   on a natively interactive element. APG's *Navigation Treeview* does host it on a
  *   link, but that variant activates on `Enter`, which this pattern has already
  *   spent on selection; a link host is therefore out of contract and would need
  *   `Enter` / click / `select` redefined first.
@@ -85,7 +86,7 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  * - When the edit or action ends, focus the `treeitem` itself. The roving
  *   position never moved, so that alone restores the keyboard path.
  * - The tree consumes none of the control's events, by two mechanisms:
- *   {@link NESTED_INTERACTIVE} names controls by *element shape*, the
+ *   the nested-interactive selector names controls by *element shape*, the
  *   `defaultPrevented` yield covers widgets no selector can name.
  * `select` dispatches `{ item: HTMLElement }`.
  * `toggle` dispatches `{ item: HTMLElement, expanded: boolean }`.

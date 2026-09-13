@@ -35,7 +35,7 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  *   pointer from trigger into the tooltip cancels the pending hide, so it stays up.
  * - **Persistent across input modalities**: focus and pointer presence are tracked
  *   separately, so leaving one does not hide while the other still requires the hint.
- * - **Dismissible**: while shown, the tooltip joins the shared {@link EscapeLayer}
+ * - **Dismissible**: while shown, the tooltip joins the shared `EscapeLayer`
  *   stack, so `Escape` dismisses it even when a hover (not focus) triggered it and
  *   focus is elsewhere. The resolver ignores an Escape already consumed by an
  *   inner handler and lets the most recently shown layer own the press, so one

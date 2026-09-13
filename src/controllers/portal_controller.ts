@@ -37,7 +37,7 @@ const portalState = new WeakMap<
  * @remarks
  * Behavior only — no positioning (pair with `stimeo-ui/positioning`) and no focus
  * trapping (pair with `stimeo--focus` or the overlay). Moving a Stimulus element within
- * the same document re-fires connect/disconnect; {@link DetachGate} reads that pair as an
+ * the same document re-fires connect/disconnect; `DetachGate` reads that pair as an
  * in-page move rather than a detach, which is what keeps the move safe. For Turbo
  * compatibility prefer the `content`-target form: the controller then stays on the
  * in-place source, so its `disconnect()` fires when the original container is replaced
@@ -45,7 +45,7 @@ const portalState = new WeakMap<
  * move is idempotent (guarded by the element-keyed bookkeeping) and reversed on
  * `disconnect()` (Turbo
  * navigation included). The "in-page move vs real detach" split on `disconnect()` is
- * {@link DetachGate}; in the `content` form the source element may even leave a
+ * `DetachGate`; in the `content` form the source element may even leave a
  * scoped application's observed root and the content is still restored, while the
  * no-`content` form teleporting itself out of the observed root is fire-and-forget
  * by design (see `disconnect()`).

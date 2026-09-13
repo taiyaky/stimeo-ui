@@ -130,7 +130,7 @@ describe("RatingController", () => {
     expect(field().value).toBe("3");
   });
 
-  it("ignores obsolete data-rating-value attributes in favor of DOM order", async () => {
+  it("ignores a data-rating-value attribute in favor of DOM order", async () => {
     await start();
     symbols()[0]?.setAttribute("data-rating-value", "30");
     symbols()[1]?.setAttribute("data-rating-value", "10");

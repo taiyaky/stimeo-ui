@@ -12,7 +12,7 @@ interface TurboLike {
 /**
  * Headless **confirm bridge** — replaces the native `window.confirm()` Turbo uses
  * for `data-turbo-confirm` with an accessible **Alert Dialog** (WAI-ARIA APG Alert
- * Dialog pattern). Reuses the shared {@link FocusTrap}; the consumer only writes the
+ * Dialog pattern). Reuses the shared `FocusTrap`; the consumer only writes the
  * dialog markup and "what to do on confirm".
  *
  * Markup contract (identifier: `stimeo--confirm`):
@@ -38,7 +38,7 @@ interface TurboLike {
  *
  * @remarks
  * Behavior only — the dialog's a11y (focus trap, restore, roles) is delegated to
- * the shared {@link FocusTrap}; this controller adds the Turbo bridge and the
+ * the shared `FocusTrap`; this controller adds the Turbo bridge and the
  * confirm/cancel resolution. On `connect()` it swaps `Turbo.config.forms.confirm`
  * for a Promise-returning method and restores the original on `disconnect()` (Turbo
  * navigation included), so registration never leaks or stacks. Escape cancels

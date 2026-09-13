@@ -1,8 +1,9 @@
 /**
- * Local-time date helpers shared by the calendar-family controllers
- * (`calendar`, `date-range-picker`).
+ * Date helpers shared by the calendar-family controllers
+ * (`calendar`, `date-range-picker`): conversions between `Date` and bare ISO
+ * strings, and the formatter for the month label a grid displays.
  *
- * All conversions are intentionally **local time** (not UTC): the grid a user
+ * The conversions are intentionally **local time** (not UTC): the grid a user
  * sees is built from `Date` components in their own timezone, so round-tripping
  * through ISO strings must use the same frame to avoid off-by-one-day drift near
  * midnight. Strings are bare `YYYY-MM-DD` / `YYYY-MM` with no time or zone.
@@ -55,4 +56,24 @@ export function parseISOMonthString(monthStr: string): { year: number; month: nu
 /** Formats a {@link Date} as the local-time `YYYY-MM` string of its month. */
 export function toISOMonthString(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+/**
+ * Creates the formatter for a month label such as `May 2026`: the long month
+ * name and the numeric year in `locale`.
+ *
+ * `locale` comes from `<html lang>`, which the host page writes. A tag `Intl`
+ * rejects (a `RangeError`, e.g. `en_US`) is replaced by `"en"`, so a malformed
+ * `lang` still yields a label and the grid paint that follows it is never
+ * skipped. Any other failure of the constructor is a programming fault and
+ * propagates.
+ */
+export function monthLabelFormatter(locale: string): Intl.DateTimeFormat {
+  const options: Intl.DateTimeFormatOptions = { month: "long", year: "numeric" };
+  try {
+    return new Intl.DateTimeFormat(locale, options);
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return new Intl.DateTimeFormat("en", options);
+  }
 }

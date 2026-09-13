@@ -62,7 +62,7 @@ function nextSortDirection(current: string): SortDirection {
  *
  * Consumer contract — controls nested inside a cell or header:
  * - APG's grid hosts working controls in its cells, so a keystroke or click that
- *   reached one — {@link INTERACTIVE_HOST_SELECTOR}, an editable host, or any
+ *   reached one — a nested button, link or form control, an editable host, or any
  *   widget that already called `preventDefault()` — is left to it entirely: no
  *   move, no sort, no selection. The one control that hands the event on is a
  *   sortable header's own `<button>`, whose activation is what the click carries.

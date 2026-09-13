@@ -31,7 +31,7 @@ type Mode = "inline" | "overlay";
  * No dedicated APG pattern: the base is **Disclosure** (the trigger's
  * `aria-expanded` controls the panel's expanded state) and, *below* the
  * `breakpoint`, it borrows the **Dialog (Modal)** focus behavior via the shared
- * {@link FocusTrap} (the same trap used by dialog / alert-dialog / drawer).
+ * `FocusTrap` (the same trap used by dialog / alert-dialog / drawer).
  *
  * Above the breakpoint it is an **inline**, non-modal element that toggles
  * `expanded`↔`collapsed` (a rail), persisting that preference in `localStorage`.

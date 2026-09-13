@@ -24,7 +24,7 @@ import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
  * - The trigger is associated with the menu through `aria-controls`.
  * - Click the trigger to toggle the menu (`aria-expanded` + `hidden` reflect state).
  * - `Escape` closes the menu and returns focus to the trigger. While open the
- *   menu is a layer on the shared {@link EscapeLayer} stack; it claims a press
+ *   menu is a layer on the shared `EscapeLayer` stack; it claims a press
  *   only while focus is inside the controller or fell to the body (a click on
  *   non-focusable menu content), so a press aimed at another layer never closes
  *   the menu or steals focus, and one keypress closes exactly one layer.

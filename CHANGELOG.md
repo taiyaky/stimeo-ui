@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.13.0] - 2026-09-13
+
+Minor release with no new components. The three server-bound components are
+reworked — live-counter, presence, and optimistic — and each changed a contract,
+so read Changed before upgrading. The Inspector manifest stays on schema v12.
+
+### Changed
+
+- live-counter: a broadcast whose `count` or `delta` is not an integer is
+  ignored, a `delta` param that is not an integer falls back to `1`, and a
+  declared `channel` keeps the gate closed until the subscription is confirmed.
+  A delta carrying your own `id` is applied unless an optimistic add of the same
+  size is still outstanding. Runtime changes to `channel` / `params`
+  re-subscribe.
+- presence: a leave notice is sent by the last element claiming that `id` rather
+  than by every element, a `channel` key in `params` no longer overrides the
+  declared `channel`, `heartbeat` / `timeout` fall back to their defaults unless
+  finite, positive and at most 2147483647 — typing-indicator's `timeout` takes
+  the same bound — and `template` clones only its root element.
+- optimistic: `turbo:submit-end` is matched to the submission it names instead of
+  to any ending that reaches the element, so a submission whose ending never
+  arrives no longer strands the element. The `data-optimistic-toggled` marker
+  carries the authored value to restore instead of `"true"`, `aria-busy` gets the
+  same record (`data-optimistic-busy`), and a rollback writes those records back
+  rather than inverting the current value — `hidden="until-found"` no longer
+  degrades to a bare `hidden`, and an element registered for both `show` and
+  `hide` returns to its authored state.
+
+### Fixed
+
+- calendar: a malformed `<html lang>` (an `en_US`-style tag that `Intl` rejects)
+  no longer stops the month grid from painting. The month label falls back to
+  English while the 42 cells, the single tab stop, and the `monthchange` /
+  `select` conditions stay as they were; any other failure of the label
+  formatter still propagates.
+
 ## [0.12.0] - 2026-09-06
 
 Minor release with no new components. Six existing ones are reworked — count-up,
@@ -999,6 +1035,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.13.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.13.0
 [0.12.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.12.0
 [0.11.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.11.0
 [0.10.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.10.0

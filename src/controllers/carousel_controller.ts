@@ -125,7 +125,7 @@ export class CarouselController extends Controller<HTMLElement> {
 
   /**
    * Whether `connect()` has run. Scheduling is already inert outside that window
-   * ({@link MicrotaskCoalescer}), so this gates the Value callbacks Stimulus
+   * (`MicrotaskCoalescer`), so this gates the Value callbacks Stimulus
    * delivers ahead of `connect()`.
    */
   #connected = false;

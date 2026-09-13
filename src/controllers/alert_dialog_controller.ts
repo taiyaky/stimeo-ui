@@ -32,7 +32,7 @@ type CancelReason = "user" | "escape";
  * @remarks
  * Behavior only. The modal lifecycle (focus trap, scroll lock, background
  * `inert`, focus restore, teardown reversal) is delegated to the shared
- * {@link FocusTrap}. The only closing affordances are the confirm/cancel actions
+ * `FocusTrap`. The only closing affordances are the confirm/cancel actions
  * and `Escape` (which cancels) — there is intentionally no backdrop close.
  *
  * Behavior provided:
