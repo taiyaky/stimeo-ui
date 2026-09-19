@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { validSelector } from "../utils/declared_value";
 import { DetachGate } from "../utils/detach_gate";
 
 /**
@@ -82,17 +83,7 @@ export class PortalController extends Controller<HTMLElement> {
    * instead, which reads as a mistake and can be traced back to the declaration.
    */
   toValueChanged(): void {
-    const selector = this.toValue;
-    if (selector.length > 0) {
-      try {
-        this.element.matches(selector);
-        this.#toSelector = selector;
-        return;
-      } catch {
-        // Unparsable selector: fall through to the default below.
-      }
-    }
-    this.#toSelector = "body";
+    this.#toSelector = validSelector(this.element, this.toValue, "body");
   }
 
   override connect(): void {

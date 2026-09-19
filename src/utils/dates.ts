@@ -9,6 +9,8 @@
  * midnight. Strings are bare `YYYY-MM-DD` / `YYYY-MM` with no time or zone.
  */
 
+import { intlFormatter } from "./intl_format";
+
 /** Formats a {@link Date} as a local-time `YYYY-MM-DD` string. */
 export function toISODateString(date: Date): string {
   const year = date.getFullYear();
@@ -58,6 +60,9 @@ export function toISOMonthString(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
+/** The long month name and the numeric year, e.g. `May 2026`. */
+const MONTH_LABEL_OPTIONS: Intl.DateTimeFormatOptions = { month: "long", year: "numeric" };
+
 /**
  * Creates the formatter for a month label such as `May 2026`: the long month
  * name and the numeric year in `locale`.
@@ -69,11 +74,5 @@ export function toISOMonthString(date: Date): string {
  * propagates.
  */
 export function monthLabelFormatter(locale: string): Intl.DateTimeFormat {
-  const options: Intl.DateTimeFormatOptions = { month: "long", year: "numeric" };
-  try {
-    return new Intl.DateTimeFormat(locale, options);
-  } catch (error) {
-    if (!(error instanceof RangeError)) throw error;
-    return new Intl.DateTimeFormat("en", options);
-  }
+  return intlFormatter(Intl.DateTimeFormat, locale, MONTH_LABEL_OPTIONS, "en");
 }

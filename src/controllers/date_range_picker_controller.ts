@@ -25,9 +25,9 @@ const GRID_SIZE = 42;
  *        data-stimeo--date-range-picker-min-value="2026-01-01"
  *        data-stimeo--date-range-picker-max-value="2026-12-31"
  *        data-stimeo--date-range-picker-disabled-dates-value='["2026-06-15"]'>
- *     <button data-action="stimeo--date-range-picker#prev">Prev</button>
+ *     <button data-action="click->stimeo--date-range-picker#prev">Prev</button>
  *     <span data-stimeo--date-range-picker-target="monthLabel" aria-live="polite"></span>
- *     <button data-action="stimeo--date-range-picker#next">Next</button>
+ *     <button data-action="click->stimeo--date-range-picker#next">Next</button>
  *     <div role="grid" data-stimeo--date-range-picker-target="grid">
  *       <!-- exactly 42 cell targets (7 days × 6 rows) -->
  *       <button role="gridcell" tabindex="-1"
@@ -37,7 +37,7 @@ const GRID_SIZE = 42;
  *                            focus->stimeo--date-range-picker#previewTo
  *                            keydown->stimeo--date-range-picker#onKeydown"></button>
  *     </div>
- *     <button data-range="last7" data-action="stimeo--date-range-picker#applyPreset">…</button>
+ *     <button data-range="last7" data-action="click->stimeo--date-range-picker#applyPreset">…</button>
  *     <span role="status" aria-live="polite" data-stimeo--date-range-picker-target="status"></span>
  *     <input type="hidden" data-stimeo--date-range-picker-target="startField" />
  *     <input type="hidden" data-stimeo--date-range-picker-target="endField" />

@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { validSelector } from "../utils/declared_value";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /** Detail shapes for the ActiveStorage `direct-upload:*` events. */
@@ -167,17 +168,7 @@ export class DirectUploadController extends Controller<HTMLElement> {
 
   /** Validates `scope` once so the per-event path never parses or throws. */
   scopeValueChanged(): void {
-    const selector = this.scopeValue;
-    if (selector.length > 0) {
-      try {
-        this.element.matches(selector);
-        this.#scopeSelector = selector;
-        return;
-      } catch {
-        // Unparsable selector: fall through to the default below.
-      }
-    }
-    this.#scopeSelector = "";
+    this.#scopeSelector = validSelector(this.element, this.scopeValue, "");
   }
 
   /** Updates a row's progress and the aggregate, emitting `progress`. */

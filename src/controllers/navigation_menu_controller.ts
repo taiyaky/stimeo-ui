@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
+import { ownerIndex } from "../utils/event_owner";
 import { isRtl } from "../utils/logical_scroll";
 import { SafeTimeout } from "../utils/safe_timeout";
 
@@ -364,7 +365,7 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    */
   readonly #onPointerLeave = (event: Event): void => {
     const next = event instanceof MouseEvent ? event.relatedTarget : null;
-    if (next instanceof Node && this.#hoverElements.some((el) => el.contains(next))) return;
+    if (ownerIndex(this.#hoverElements, next) !== -1) return;
     this.#hoveredTrigger = null;
     this.#hoverTimers.clearAll();
     this.#hoverTimers.set(() => this.#closeFromHover(), this.hoverDelayValue);
@@ -445,7 +446,7 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    */
   get #hoverElements(): HTMLElement[] {
     const areas = this.hoverAreaTargets;
-    const covered = (element: HTMLElement): boolean => areas.some((area) => area.contains(element));
+    const covered = (element: HTMLElement): boolean => ownerIndex(areas, element) !== -1;
     return [
       ...areas,
       ...this.triggerTargets.filter((trigger) => !covered(trigger)),

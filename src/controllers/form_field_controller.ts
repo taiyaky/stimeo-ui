@@ -3,6 +3,7 @@ import { announce } from "../utils/announce";
 import { ensureId } from "../utils/aria_ids";
 import { AttributeLease } from "../utils/attribute_lease";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { ownerIndex } from "../utils/event_owner";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
 /** Stimulus action params understood by {@link FormFieldController.setError}. */
@@ -343,7 +344,7 @@ export class FormFieldController extends Controller<HTMLElement> {
       );
     }
 
-    return this.errorTargets.some((error) => error === target || error.contains(target));
+    return ownerIndex(this.errorTargets, target) !== -1;
   }
   /** Returns borrowed control ARIA before Turbo snapshots the page. */
   #rewindForCache(): void {

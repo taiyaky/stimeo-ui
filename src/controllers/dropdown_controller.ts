@@ -8,7 +8,7 @@ import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
  * Markup contract (identifier: `stimeo--dropdown`):
  *   <div data-controller="stimeo--dropdown">
  *     <button data-stimeo--dropdown-target="trigger"
- *             data-action="stimeo--dropdown#toggle">Menu</button>
+ *             data-action="click->stimeo--dropdown#toggle">Menu</button>
  *     <div data-stimeo--dropdown-target="menu">...</div>
  *   </div>
  *

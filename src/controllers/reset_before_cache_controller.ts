@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { validSelector } from "../utils/declared_value";
 
 /** Field types whose state is authored markup rather than something a user changed. */
 const STATELESS_INPUT_TYPES = new Set(["hidden", "submit", "reset", "button", "image"]);
@@ -97,17 +98,7 @@ export class ResetBeforeCacheController extends Controller<HTMLElement> {
    * silently taking the sweep down.
    */
   scopeValueChanged(): void {
-    const selector = this.scopeValue;
-    if (selector.length > 0) {
-      try {
-        this.element.matches(selector);
-        this.#scopeSelector = selector;
-        return;
-      } catch {
-        // Unparsable selector: fall through to the default below.
-      }
-    }
-    this.#scopeSelector = "";
+    this.#scopeSelector = validSelector(this.element, this.scopeValue, "");
   }
 
   override connect(): void {

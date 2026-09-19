@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { hasModifierChord, isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
+import { validSelector } from "../utils/declared_value";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
 import { readLocalStorage, writeLocalStorage } from "../utils/safe_storage";
 
@@ -179,17 +180,7 @@ export class ThemeController extends Controller<HTMLElement> {
 
   /** Validates the `target` declaration once, so the render path never parses. */
   targetValueChanged(): void {
-    const selector = this.targetValue;
-    if (selector.length > 0) {
-      try {
-        this.element.matches(selector);
-        this.#targetSelector = selector;
-        return;
-      } catch {
-        // Unparsable selector: fall through to the default below.
-      }
-    }
-    this.#targetSelector = DEFAULT_TARGET;
+    this.#targetSelector = validSelector(this.element, this.targetValue, DEFAULT_TARGET);
   }
 
   /** Re-derives the single Tab stop and ARIA for an option set that changed. */
@@ -205,9 +196,8 @@ export class ThemeController extends Controller<HTMLElement> {
   /**
    * Selects the mode the activated option declares.
    *
-   * Read through {@link ThemeController.#optionMode}, the same lane that decides
-   * which option is checked, so the two can never disagree about what an option
-   * declares.
+   * Read through the same lane that decides which option is checked, so the two
+   * can never disagree about what an option declares.
    */
   set(event: Event): void {
     const option = event.currentTarget;

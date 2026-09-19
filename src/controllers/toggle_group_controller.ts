@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
+import { ownerOf } from "../utils/event_owner";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { isInteractiveHost } from "../utils/interactive_host";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
@@ -362,10 +363,9 @@ export class ToggleGroupController extends Controller<HTMLElement> {
   }
 
   /** Finds this group's item containing an event target, excluding nested groups. */
-  #itemForEventTarget(target: EventTarget | null): HTMLElement | undefined {
-    if (!this.#ownsEventTarget(target)) return undefined;
-    const node = target as Element;
-    return this.itemTargets.find((item) => item === node || item.contains(node));
+  #itemForEventTarget(target: EventTarget | null): HTMLElement | null {
+    if (!this.#ownsEventTarget(target)) return null;
+    return ownerOf(this.itemTargets, target);
   }
 
   /** Whether the closest Toggle Group scope around a target is this instance. */

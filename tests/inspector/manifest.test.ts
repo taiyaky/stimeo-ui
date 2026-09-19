@@ -358,6 +358,19 @@ describe("buildManifest", () => {
     }
   });
 
+  it("keeps every String entry of valueConstraints readable by an engine that only knows allowedValues", () => {
+    // An engine built before a field existed still reads `valueConstraints` and
+    // calls `allowedValues.includes` on every String entry. A contract that
+    // cannot answer that call belongs in a field such an engine skips entirely,
+    // not in this one — otherwise the manifest is accepted and then crashes.
+    for (const controller of Object.values(manifest.controllers)) {
+      for (const constraint of controller.valueConstraints) {
+        if (constraint.type !== "string") continue;
+        expect(Array.isArray(constraint.allowedValues)).toBe(true);
+      }
+    }
+  });
+
   it("merges cross-Value relationships and keeps both sides on declared Values", () => {
     expect(manifest.controllers["stimeo--range-slider"]?.valueRelations).toEqual([
       {

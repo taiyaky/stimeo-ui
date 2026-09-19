@@ -9,7 +9,7 @@ import { isReservedArrowChord } from "../utils/arrow_step";
  *     <h3>
  *       <button id="trigger-1"
  *               data-stimeo--accordion-target="trigger"
- *               data-action="stimeo--accordion#toggle
+ *               data-action="click->stimeo--accordion#toggle
  *                            keydown->stimeo--accordion#onKeydown"
  *               aria-expanded="false" aria-controls="panel-1">Section 1</button>
  *     </h3>

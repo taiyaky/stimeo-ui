@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { intlFormatter } from "../utils/intl_format";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
 /** A date/time style keyword accepted by `Intl` `dateStyle` / `timeStyle`. */
@@ -35,8 +36,9 @@ function toStyle(value: string): DateTimeStyle | undefined {
  * assistive tech and crawlers keep the canonical value while only the display
  * text — and an optional `title` — change. Formatting is a pure function of
  * `datetime` with no module-scope state or timers, so a Turbo Drive cache restore
- * re-runs `connect()` and stays consistent. A parse or `Intl` error leaves the
- * authored absolute text in place rather than throwing.
+ * re-runs `connect()` and stays consistent. A `datetime` that does not parse, and
+ * a locale or time zone `Intl` rejects, leave the authored absolute text in place;
+ * any other failure surfaces rather than being absorbed.
  *
  * Render inputs are followed at runtime: a morph that swaps a Value or the
  * `datetime` attribute on the live element — which keeps the element, so
@@ -178,8 +180,9 @@ export class LocalTimeController extends Controller<HTMLElement> {
   /**
    * Formats `date` with `Intl.DateTimeFormat`, including each style only when it
    * is a valid keyword (so a consumer can show date-only or time-only by clearing
-   * the other). Returns `null` when neither style is usable or `Intl` throws, so
-   * the caller can leave the authored text untouched.
+   * the other). Returns `null` when neither style is usable or the declaration
+   * names a locale or time zone `Intl` rejects, so the caller can leave the
+   * authored text untouched.
    */
   #applyFormat(date: Date, dateStyle: string, timeStyle: string): string | null {
     // `toStyle` yields `undefined` for an empty/invalid keyword; assigning it is
@@ -191,13 +194,11 @@ export class LocalTimeController extends Controller<HTMLElement> {
     if (options.dateStyle === undefined && options.timeStyle === undefined) return null;
     if (this.timeZoneValue.length > 0) options.timeZone = this.timeZoneValue;
 
-    try {
-      return new Intl.DateTimeFormat(this.#locale, options).format(date);
-    } catch {
-      // An invalid locale / timeZone (or unsupported style) must not break the
-      // page; the authored absolute text remains as the graceful fallback.
-      return null;
-    }
+    // An invalid locale or timeZone must not break the page: the authored
+    // absolute text remains as the graceful fallback. `date` is already known to
+    // be a real instant (`#parse` rejects the rest), so formatting it cannot fail.
+    const formatter = intlFormatter(Intl.DateTimeFormat, this.#locale, options);
+    return formatter === null ? null : formatter.format(date);
   }
 
   /** Locale precedence: the value, then the nearest `lang` up the ancestor chain. */

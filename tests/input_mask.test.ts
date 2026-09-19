@@ -449,6 +449,46 @@ describe("InputMaskController", () => {
     expect(input().value).toBe("123-4567");
   });
 
+  it("keeps a default token when the declaration overrides it with a broken source", async () => {
+    await start(`
+      <input id="i" type="text" data-controller="stimeo--input-mask"
+             data-stimeo--input-mask-pattern-value="999-9999"
+             data-stimeo--input-mask-tokens-value='{"9":"[0-9"}'
+             data-action="input->stimeo--input-mask#format">
+      <input id="hidden" type="hidden" data-stimeo--input-mask-unmask>`);
+    // The override declares nothing usable, so "9" keeps the token it had. The
+    // alternative — dropping the key with its default — turns every "9" in the
+    // pattern into a literal and leaves a field no digit can fill.
+    type("1234567");
+
+    expect(input().value).toBe("123-4567");
+    expect(hidden().value).toBe("1234567");
+  });
+
+  it("keeps the other default tokens when one of them is overridden with a broken source", async () => {
+    await start(`
+      <input id="i" type="text" data-controller="stimeo--input-mask"
+             data-stimeo--input-mask-pattern-value="aa-99"
+             data-stimeo--input-mask-tokens-value='{"a":"[A-Z"}'
+             data-action="input->stimeo--input-mask#format">`);
+    // "a" falls back to its default (letters), and "9" was never declared.
+    type("ab12");
+
+    expect(input().value).toBe("ab-12");
+  });
+
+  it("applies a declared override that does compile over the default", async () => {
+    await start(`
+      <input id="i" type="text" data-controller="stimeo--input-mask"
+             data-stimeo--input-mask-pattern-value="99"
+             data-stimeo--input-mask-tokens-value='{"9":"[0-4]"}'
+             data-action="input->stimeo--input-mask#format">`);
+    // The narrower source replaces the default outright rather than widening it.
+    type("1590");
+
+    expect(input().value).toBe("10");
+  });
+
   it("skips a token whose regex cannot compile", async () => {
     await start(`
       <input id="i" type="text" data-controller="stimeo--input-mask"

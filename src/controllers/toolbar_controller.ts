@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { CompositionTracker } from "../utils/composition_tracker";
+import { ownerIndex } from "../utils/event_owner";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { isRtl } from "../utils/logical_scroll";
 import { RovingTabindex, type RovingWrap, rovingMove } from "../utils/roving_tabindex";
@@ -269,9 +270,7 @@ export class ToolbarController extends Controller<HTMLElement> {
 
   /** Index in `controlTargets` of the control owning `target` (it or a descendant). */
   #indexOf(target: EventTarget | null): number {
-    const node = target as Node | null;
-    if (!node) return -1;
-    return this.controlTargets.findIndex((control) => control === node || control.contains(node));
+    return ownerIndex(this.controlTargets, target);
   }
 
   /** Controls eligible for the roving tab stop (excludes native disabled / hidden). */

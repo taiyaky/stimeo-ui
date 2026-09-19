@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { halfWidthChar } from "../utils/half_width";
+import { intlFormatter } from "../utils/intl_format";
 
 /** The number-shaped pieces of an in-progress entry, in typing order. */
 interface EntryParts {
@@ -377,13 +378,8 @@ export class CurrencyInputController extends Controller<HTMLElement> {
    * formatters from the validated set.
    */
   #revalidate(): void {
-    this.#locale = "en-US";
-    try {
-      new Intl.NumberFormat(this.localeValue);
-      this.#locale = this.localeValue;
-    } catch {
-      // Fall through to the default locale.
-    }
+    const declaredLocale = intlFormatter(Intl.NumberFormat, this.localeValue, {});
+    this.#locale = declaredLocale === null ? "en-US" : this.localeValue;
 
     const precision = this.precisionValue;
     this.#precision =
@@ -391,28 +387,42 @@ export class CurrencyInputController extends Controller<HTMLElement> {
 
     this.#currency = "";
     if (this.currencyValue !== "") {
-      try {
-        new Intl.NumberFormat(this.#locale, { style: "currency", currency: this.currencyValue });
-        this.#currency = this.currencyValue;
-      } catch {
-        // Fall through to the plain-number accessible text.
-      }
+      const declaredCurrency = intlFormatter(Intl.NumberFormat, this.#locale, {
+        style: "currency",
+        currency: this.currencyValue,
+      });
+      // An unknown code falls through to the plain-number accessible text.
+      if (declaredCurrency !== null) this.#currency = this.currencyValue;
     }
 
-    this.#grouping = new Intl.NumberFormat(this.#locale, {
-      useGrouping: true,
-      maximumFractionDigits: 0,
-    });
-    this.#fixed = new Intl.NumberFormat(this.#locale, {
-      useGrouping: true,
-      minimumFractionDigits: this.#precision,
-      maximumFractionDigits: this.#precision,
-    });
+    this.#grouping = intlFormatter(
+      Intl.NumberFormat,
+      this.#locale,
+      { useGrouping: true, maximumFractionDigits: 0 },
+      this.#locale,
+    );
+    this.#fixed = intlFormatter(
+      Intl.NumberFormat,
+      this.#locale,
+      {
+        useGrouping: true,
+        minimumFractionDigits: this.#precision,
+        maximumFractionDigits: this.#precision,
+      },
+      this.#locale,
+    );
     this.#accessible = this.#currency
-      ? new Intl.NumberFormat(this.#locale, { style: "currency", currency: this.#currency })
+      ? intlFormatter(
+          Intl.NumberFormat,
+          this.#locale,
+          { style: "currency", currency: this.#currency },
+          this.#locale,
+        )
       : this.#fixed;
 
-    const parts = new Intl.NumberFormat(this.#locale).formatToParts(11111.1);
+    const parts = intlFormatter(Intl.NumberFormat, this.#locale, {}, this.#locale).formatToParts(
+      11111.1,
+    );
     this.#group = parts.find((p) => p.type === "group")?.value ?? ",";
     this.#decimal = parts.find((p) => p.type === "decimal")?.value ?? ".";
 
@@ -420,7 +430,12 @@ export class CurrencyInputController extends Controller<HTMLElement> {
     // format with their own digits; mapping them back keeps the controller's
     // own output re-parseable to the same value.
     this.#digits.clear();
-    const digitFormatter = new Intl.NumberFormat(this.#locale, { useGrouping: false });
+    const digitFormatter = intlFormatter(
+      Intl.NumberFormat,
+      this.#locale,
+      { useGrouping: false },
+      this.#locale,
+    );
     for (let i = 0; i <= 9; i++) {
       const digit = digitFormatter.format(i);
       if (digit !== String(i)) this.#digits.set(digit, String(i));

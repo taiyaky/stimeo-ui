@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { CompositionTracker } from "../utils/composition_tracker";
+import { compileRegExp, parseJsonObject } from "../utils/declared_value";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { halfWidthChar } from "../utils/half_width";
 
@@ -99,32 +100,33 @@ export function applyMask(
 
 /**
  * The token map a `tokens` declaration selects: the defaults with the declared
- * single-char regex sources merged over. A declaration that is not a JSON object
- * of string sources falls back to the defaults, and an individual source that is
- * not a valid regex is skipped, so a broken declaration keeps the field working
- * instead of taking the mask (and every later keystroke) down with it.
+ * single-char regex sources compiled over them.
+ *
+ * A declaration that is not a JSON object of string sources declares no tokens,
+ * leaving the defaults. A source that is not a valid regex is answered per key:
+ * a key that has a default keeps that default, and a key that has none is left
+ * out so the character stays a literal. Either way the rest of the mask, and the
+ * field, keep working instead of going down with the broken source.
  */
 function compileTokens(declaration: string): Map<string, RegExp> {
   const map = new Map<string, RegExp>();
-  for (const [key, source] of Object.entries({ ...DEFAULT_TOKENS, ...parseTokens(declaration) })) {
-    try {
-      map.set(key, new RegExp(`^(?:${source})$`));
-    } catch {
-      /* skip an invalid token regex rather than breaking the whole mask */
-    }
+  for (const [key, source] of Object.entries(DEFAULT_TOKENS)) {
+    const compiled = compileRegExp(source, "exact");
+    if (compiled) map.set(key, compiled);
+  }
+  for (const [key, source] of Object.entries(parseTokens(declaration))) {
+    const compiled = compileRegExp(source, "exact");
+    // A broken source declares nothing: the default this key may already carry
+    // is what it falls back to, and a key without one holds no token at all.
+    if (compiled) map.set(key, compiled);
   }
   return map;
 }
 
 /** The `{ token: source }` pairs a declaration holds; anything else reads as none. */
 function parseTokens(declaration: string): Record<string, string> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(declaration);
-  } catch {
-    return {};
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const parsed = parseJsonObject(declaration);
+  if (parsed === null) return {};
 
   const tokens: Record<string, string> = {};
   for (const [key, source] of Object.entries(parsed)) {
@@ -193,8 +195,9 @@ function tokenCharOffset(tokenFlags: readonly boolean[], n: number): number {
  * `stimeo--input-mask:reconcile` when the controller itself decides that value —
  * a server-rendered or restored value normalized on connection, or a re-format
  * after `pattern` / `tokens` / `unmaskToHidden` changed. A malformed `tokens`
- * declaration falls back to the default tokens: it is parsed once in
- * `tokensValueChanged`, and the hot path only ever sees the validated map. A field
+ * declaration falls back to the default tokens, and a single broken source falls
+ * back to that key's default: it is parsed once in `tokensValueChanged`, and the
+ * hot path only ever sees the validated map. A field
  * the user cannot edit (`readonly`, `disabled`, or inside a disabled `<fieldset>`)
  * keeps the value the page authored — the sink and the state hooks still follow it,
  * but the field itself is never rewritten. The composition listener is released on

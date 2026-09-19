@@ -14,7 +14,7 @@ const MAX_DELAY = 2 ** 31 - 1;
  *            data-stimeo--password-reveal-target="input">
  *     <button type="button" aria-pressed="false" aria-label="Show password"
  *             data-stimeo--password-reveal-target="toggle"
- *             data-action="stimeo--password-reveal#toggle"></button>
+ *             data-action="click->stimeo--password-reveal#toggle"></button>
  *   </div>
  *
  * No dedicated APG pattern; this follows the toggle **Button** practice. The

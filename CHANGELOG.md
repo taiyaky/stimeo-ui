@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.14.0] - 2026-09-19
+
+Minor release with no new components. input-mask changes what a broken `tokens`
+source falls back to, and currency-input, local-time, and relative-time narrow
+which failures they absorb, so read Changed before upgrading. The Inspector
+manifest stays on schema v12.
+
+### Added
+
+- Inspector: `missing-action-event` (error) — a `data-action` that omits the
+  event on an element with no default one binds nothing, while the markup still
+  reads as wired. The elements that have a default are `<a>`, `<button>`,
+  `<details>`, `<form>`, `<input>`, `<select>`, and `<textarea>`.
+- Inspector: `valueSyntaxConstraints` reports a `stimeo--otp` `pattern` that is
+  not a regular expression, and a `stimeo--input-mask` `tokens` that is not a
+  JSON object of them, before the page runs.
+
+### Changed
+
+- input-mask: a `tokens` source that does not compile leaves that key on its
+  default (`9`, `a`, `*`) instead of dropping the key, and a source that
+  compiles only against the anchors the controller adds — `0)|(1` — is refused.
+- currency-input, local-time, and relative-time absorb only what a declaration
+  can get wrong: a locale, time zone, currency code, or digit count `Intl`
+  rejects. Any other failure surfaces.
+- Inspector: a `data-action` that omits the event resolves to the one Stimulus
+  binds for that element, so a shorthand on a `<form>` reports
+  `missing-action-completion` where it passed in silence.
+- The markup examples in the published types name the event
+  (`click->stimeo--dialog#open`).
+
 ## [0.13.0] - 2026-09-13
 
 Minor release with no new components. The three server-bound components are
@@ -1037,6 +1068,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.14.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.14.0
 [0.13.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.13.0
 [0.12.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.12.0
 [0.11.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.11.0

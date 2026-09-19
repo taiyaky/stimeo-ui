@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { DetachGate } from "../utils/detach_gate";
+import { ownerOf } from "../utils/event_owner";
 
 /**
  * Elements whose own default action owns a key press. The browser never signals
@@ -574,9 +575,7 @@ export class PointerDragController extends Controller<HTMLElement> {
 
   /** Resolves the handle owning an event target (the handle or a descendant). */
   #handleFor(target: EventTarget | null): HTMLElement | null {
-    const node = target as Node | null;
-    if (!node) return null;
-    return this.#handles().find((handle) => handle === node || handle.contains(node)) ?? null;
+    return ownerOf(this.#handles(), target);
   }
 
   #pointerTypeOf(event: PointerEvent): DragPointerType {

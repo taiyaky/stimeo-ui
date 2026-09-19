@@ -16,6 +16,8 @@
  * is its thin declarative face.
  */
 
+import { parseDeclared } from "./declared_value";
+
 /**
  * Whether `entry`'s target sits entirely before the root's **start (top)** edge —
  * the "scrolled past the top" half of a non-intersecting entry, as opposed to
@@ -47,12 +49,7 @@ export function isBeforeRootStart(entry: IntersectionObserverEntry): boolean {
  */
 function queryRoot(selector: string | undefined): Element | null {
   if (!selector) return null;
-  try {
-    return document.querySelector(selector);
-  } catch {
-    // Unparsable selector: fall through to the viewport below.
-  }
-  return null;
+  return parseDeclared(selector, (raw) => document.querySelector(raw), null);
 }
 
 export interface IntersectionWatchOptions {

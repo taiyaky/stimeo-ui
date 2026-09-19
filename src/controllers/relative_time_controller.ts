@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { intlFormatter } from "../utils/intl_format";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { SafeTimeout } from "../utils/safe_timeout";
 
@@ -23,6 +24,9 @@ const UNITS: readonly TimeScale[] = [
   { limit: 31_557_600, unit: "month", ms: 2_629_800_000 },
   YEAR_SCALE,
 ];
+
+/** The relative phrasing every pass asks for ("yesterday", not "1 day ago"). */
+const RELATIVE_OPTIONS: Intl.RelativeTimeFormatOptions = { numeric: "auto" };
 
 /**
  * Headless relative-time behavior: renders an absolute timestamp as "3 minutes
@@ -195,13 +199,9 @@ export class RelativeTimeController extends Controller<HTMLElement> {
    * when the runtime rejects that locale.
    */
   get #formatter(): Intl.RelativeTimeFormat | null {
-    try {
-      return new Intl.RelativeTimeFormat(this.#locale, { numeric: "auto" });
-    } catch {
-      // A malformed locale must not break the page: the authored absolute text stays
-      // as the graceful fallback, and a corrected value renders on the next pass.
-      return null;
-    }
+    // A malformed locale must not break the page: the authored absolute text stays
+    // as the graceful fallback, and a corrected value renders on the next pass.
+    return intlFormatter(Intl.RelativeTimeFormat, this.#locale, RELATIVE_OPTIONS);
   }
 
   /** Locale precedence: the value, then the nearest `lang` up the ancestor chain. */

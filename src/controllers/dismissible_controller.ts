@@ -15,7 +15,7 @@ import {
  *     <div data-stimeo--dismissible-target="root" role="status">
  *       <p>Saved.</p>
  *       <button type="button" aria-label="Close"
- *               data-action="stimeo--dismissible#dismiss">×</button>
+ *               data-action="click->stimeo--dismissible#dismiss">×</button>
  *     </div>
  *   </div>
  *

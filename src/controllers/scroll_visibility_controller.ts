@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { BlurDeferral } from "../utils/blur_deferral";
+import { validSelector } from "../utils/declared_value";
 import { prefersReducedMotion } from "../utils/reduced_motion";
 import { TabindexLoan } from "../utils/tabindex_loan";
 
@@ -18,7 +19,7 @@ const DEFAULT_OFFSET = 400;
  *        data-stimeo--scroll-visibility-mode-value="offset">
  *     <button type="button" hidden
  *             data-stimeo--scroll-visibility-target="element"
- *             data-action="stimeo--scroll-visibility#toTop">Back to top</button>
+ *             data-action="click->stimeo--scroll-visibility#toTop">Back to top</button>
  *   </div>
  *
  * In `offset` mode the element is shown once the scroll source is scrolled past
@@ -176,12 +177,12 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
 
   /** Validates `root` once so connect never parses a selector that throws. */
   rootValueChanged(): void {
-    this.#rootSelector = this.#validSelector(this.rootValue);
+    this.#rootSelector = validSelector(this.element, this.rootValue, "");
   }
 
   /** Validates `focusSelector` once so `toTop` never parses a selector that throws. */
   focusSelectorValueChanged(): void {
-    this.#focusSelector = this.#validSelector(this.focusSelectorValue);
+    this.#focusSelector = validSelector(this.element, this.focusSelectorValue, "");
   }
 
   /** Scrolls the source to the top and, optionally, moves focus to a safe target. */
@@ -265,19 +266,6 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
     const focused = document.activeElement;
     if (focused instanceof HTMLElement && this.elementTarget.contains(focused)) return focused;
     return null;
-  }
-
-  /** Returns `declared` when it parses as a selector, and `""` when it does not. */
-  #validSelector(declared: string): string {
-    if (declared.length > 0) {
-      try {
-        this.element.matches(declared);
-        return declared;
-      } catch {
-        // Unparsable selector: fall through to the default below.
-      }
-    }
-    return "";
   }
 
   #scrollY(): number {

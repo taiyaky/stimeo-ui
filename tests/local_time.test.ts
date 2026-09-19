@@ -315,9 +315,24 @@ describe("LocalTimeController", () => {
     ]);
   });
 
-  it("leaves the authored text when datetime is invalid", async () => {
-    await start('data-stimeo--local-time-time-zone-value="UTC"', "fallback text", "not-a-date");
+  it("leaves the authored text when datetime is invalid, without reporting an error", async () => {
+    // A `datetime` the parser rejects never reaches the formatter, so the pass
+    // ends quietly. Asserting on the text alone cannot tell that apart from a
+    // formatter that threw and was reported: Stimulus absorbs a handler's
+    // exception through `handleError`, and either way nothing is written.
+    document.body.innerHTML =
+      '<time data-controller="stimeo--local-time" datetime="not-a-date" ' +
+      'data-stimeo--local-time-time-zone-value="UTC">fallback text</time>';
+    application = Application.start();
+    application.register("stimeo--local-time", LocalTimeController);
+    const errors: unknown[] = [];
+    application.handleError = (error) => {
+      errors.push(error);
+    };
+    await tick();
+
     expect(el().textContent).toBe("fallback text");
+    expect(errors).toEqual([]);
   });
 
   it("leaves the authored text when datetime is missing", async () => {

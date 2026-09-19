@@ -22,7 +22,7 @@ const OBSERVED_ANCESTOR_ATTRIBUTES = ["contenteditable"];
  *
  * Markup contract (identifier: `stimeo--switch`):
  *   <button type="button" data-controller="stimeo--switch"
- *           data-action="stimeo--switch#toggle keydown->stimeo--switch#onKeydown"
+ *           data-action="click->stimeo--switch#toggle keydown->stimeo--switch#onKeydown"
  *           role="switch" aria-checked="false">…</button>
  *
  * Implements the WAI-ARIA APG **Switch** pattern. The controller element is the

@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
+import { ownerIndex } from "../utils/event_owner";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { TabindexLoan } from "../utils/tabindex_loan";
 
@@ -139,8 +140,7 @@ export class ResizableController extends Controller<HTMLElement> {
     if (this.hasPrimaryTarget) panes.push(this.primaryTarget);
     if (this.hasSecondaryTarget) panes.push(this.secondaryTarget);
 
-    const target = event.target as Node | null;
-    const current = panes.findIndex((pane) => target instanceof Node && pane.contains(target));
+    const current = ownerIndex(panes, event.target);
     // With no panes the modulo is NaN and the read is undefined, which is the
     // same "nowhere to go" this guard answers for a cycle that has ends.
     const next = panes[(current + 1) % panes.length];

@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { ownerOf } from "../utils/event_owner";
 import { canTakeFocus } from "../utils/focus_candidate";
 import { LayoutObserver } from "../utils/layout_observer";
 import { SafeTimeout } from "../utils/safe_timeout";
@@ -534,7 +535,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
 
   /** The managed item that is, or contains, `el` — focus rescue works on either. */
   #ownerOf(el: HTMLElement): HTMLElement | null {
-    return this.#items.find((item) => item === el || item.contains(el)) ?? null;
+    return ownerOf(this.#items, el);
   }
 
   /** Whether the item takes up room in the bar; an authored `hidden` one does not. */

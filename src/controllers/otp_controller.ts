@@ -4,20 +4,19 @@ import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { CompositionTracker } from "../utils/composition_tracker";
+import { compileRegExp } from "../utils/declared_value";
 import { toHalfWidth } from "../utils/half_width";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
 /** Single-character pattern used when a `pattern` declaration cannot compile. */
 const DEFAULT_PATTERN = "[0-9]";
 
-/** Compiles one anchored single-character matcher, or `null` for a broken source. */
-function compilePattern(source: string): RegExp | null {
-  try {
-    return new RegExp(`^${source}$`);
-  } catch {
-    return null;
-  }
-}
+/**
+ * {@link DEFAULT_PATTERN} compiled, in the same whole-input form
+ * `compileRegExp(…, "exact")` produces. A literal character class always
+ * compiles, so the fallback is a value rather than another parse.
+ */
+const DEFAULT_MATCHER = new RegExp(`^(?:${DEFAULT_PATTERN})$`);
 
 /** Whether a press carries a modifier, which makes it the document's to handle. */
 function hasModifier(event: KeyboardEvent): boolean {
@@ -117,7 +116,7 @@ export class OtpController extends Controller<HTMLElement> {
   declare patternValue: string;
 
   /** Validated matcher; the hot path never compiles a raw declaration. */
-  #pattern = new RegExp(`^${DEFAULT_PATTERN}$`);
+  #pattern = DEFAULT_MATCHER;
   /** Source of {@link #pattern}, reported in `invalid` so consumers can word it. */
   #patternSource = DEFAULT_PATTERN;
   /** Public state carried by the last dispatch; keeps a no-op sync silent. */
@@ -204,9 +203,9 @@ export class OtpController extends Controller<HTMLElement> {
    * the new pattern no longer accepts, so the combined value stays interpretable.
    */
   patternValueChanged(): void {
-    const compiled = compilePattern(this.patternValue);
+    const compiled = compileRegExp(this.patternValue, "exact");
     this.#patternSource = compiled ? this.patternValue : DEFAULT_PATTERN;
-    this.#pattern = compiled ?? new RegExp(`^${DEFAULT_PATTERN}$`);
+    this.#pattern = compiled ?? DEFAULT_MATCHER;
     if (!this.#connected) return;
 
     let dropped = false;

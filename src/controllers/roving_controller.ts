@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
+import { ownerIndex } from "../utils/event_owner";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { isRtl } from "../utils/logical_scroll";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
@@ -169,9 +170,7 @@ export class RovingController extends Controller<HTMLElement> {
 
   /** Resolves the item index owning an event target (the item or a descendant). */
   #indexOf(target: EventTarget | null): number {
-    const node = target as Node | null;
-    if (!node) return -1;
-    return this.itemTargets.findIndex((item) => item === node || item.contains(node));
+    return ownerIndex(this.itemTargets, target);
   }
 
   /** Makes `index` the tab stop (optionally focusing it), emitting `change` once. */

@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { validSelector } from "../utils/declared_value";
 
 /** The depth that never hides, used when `offset` is not a finite number. */
 const DEFAULT_OFFSET = 80;
@@ -87,7 +88,7 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
 
   /** Validates `containerSelector` once so connect never parses a selector that throws. */
   containerSelectorValueChanged(): void {
-    this.#containerSelector = this.#validSelector(this.containerSelectorValue);
+    this.#containerSelector = validSelector(this.element, this.containerSelectorValue, "");
   }
 
   /** Re-decides when application code (or a Turbo morph) changes `offset` at runtime. */
@@ -122,19 +123,6 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
       if (container) return container;
     }
     return window;
-  }
-
-  /** Returns `declared` when it parses as a selector, and `""` when it does not. */
-  #validSelector(declared: string): string {
-    if (declared.length > 0) {
-      try {
-        this.element.matches(declared);
-        return declared;
-      } catch {
-        // Unparsable selector: fall through to the default below.
-      }
-    }
-    return "";
   }
 
   get #scrollY(): number {

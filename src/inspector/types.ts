@@ -30,6 +30,13 @@ export interface ControllerManifest {
    * strictly positive step, so those contracts stay explicit and reviewable.
    */
   readonly valueConstraints: readonly ValueConstraint[];
+  /**
+   * Grammar contracts on String Values whose accepted set cannot be enumerated
+   * (stage 1). Optional on the wire: a manifest written before the field existed
+   * omits it, and an engine written before it skips it, so either side pairs
+   * with the other. See {@link StringSyntaxConstraint}.
+   */
+  readonly valueSyntaxConstraints?: readonly StringSyntaxConstraint[];
   /** Statically decidable relationships between literal Stimulus Values. */
   readonly valueRelations: readonly ValueRelation[];
   /**
@@ -763,6 +770,37 @@ export interface StringValueConstraint {
   readonly suggestion: string;
 }
 
+/**
+ * A String Value whose text is only readable by handing it to a parser, so the
+ * contract is a grammar rather than a set of literals.
+ *
+ * The controller parses the same text at runtime and falls back to the Value's
+ * default when it does not read, so a violation is a silently degraded element
+ * rather than a crash — which is exactly what a static check is for. Selectors
+ * are deliberately absent: the Inspector parses HTML itself and has no DOM to
+ * ask, so it cannot tell a malformed selector from one that simply matches
+ * nothing.
+ *
+ * These live in their own manifest field rather than alongside
+ * {@link StringValueConstraint}: an engine that predates them reads every String
+ * entry of `valueConstraints` through `allowedValues`, so a grammar contract
+ * placed there would be accepted by the shape check and then fail on the first
+ * document that declares the Value. A field such an engine never looks at is
+ * skipped instead.
+ */
+export interface StringSyntaxConstraint {
+  /** Value name (camelCase, as declared in `static values`). */
+  readonly value: string;
+  /** Decoder family. */
+  readonly type: "string";
+  /** Grammar the whole literal has to satisfy. */
+  readonly syntax: "regexp" | "json-object";
+  /** For `json-object`, the grammar every property value has to satisfy. */
+  readonly entries?: "regexp";
+  /** Human-readable fix suggestion shown by the CLI (stage 4). */
+  readonly suggestion: string;
+}
+
 /** A statically checkable semantic contract on one declared Stimulus Value. */
 export type ValueConstraint = NumericValueConstraint | StringValueConstraint;
 
@@ -802,6 +840,11 @@ export type StructureRules = Readonly<
 
 /** Hand-written literal Value constraints, merged into the manifest. */
 export type ValueConstraintRules = Readonly<Record<string, readonly ValueConstraint[]>>;
+
+/** Hand-written String grammar contracts, merged into the manifest. */
+export type ValueSyntaxConstraintRules = Readonly<
+  Record<string, readonly StringSyntaxConstraint[]>
+>;
 
 /** Hand-written relationships between literal Values, merged into the manifest. */
 export type ValueRelationRules = Readonly<Record<string, readonly ValueRelation[]>>;
@@ -853,6 +896,7 @@ export const DIAGNOSTIC_CODES = [
   "missing-conditional-target",
   "missing-required-action",
   "missing-action-completion",
+  "missing-action-event",
   "missing-aria",
   "invalid-aria-value",
   "keyboard-inaccessible",

@@ -84,6 +84,75 @@ describe("checkSource", () => {
       expect(codeList).not.toContain("unknown-value");
     });
 
+    describe("omitted action events", () => {
+      it("resolves the host's default so an event-conditioned rule still fires", () => {
+        // Stimulus binds this to `submit` because the host is a form; a reader
+        // that left the event empty would not match the rule's event types and
+        // would pass the markup in silence.
+        expect(
+          codes(
+            `<form data-controller="stimeo--submit-once"
+                   data-action="stimeo--submit-once#start"></form>`,
+          ),
+        ).toContain("missing-action-completion");
+      });
+
+      it("reports an omitted event on an element that has no default", () => {
+        const diagnostic = checkSource(
+          `<div data-controller="stimeo--menu">
+             <button id="t" aria-haspopup="menu" data-stimeo--menu-target="trigger"
+                     data-action="click->stimeo--menu#toggle">M</button>
+             <ul role="menu" aria-labelledby="t" data-stimeo--menu-target="menu" hidden>
+               <li role="none" data-action="stimeo--menu#activate">
+                 <button role="menuitem" data-stimeo--menu-target="item">E</button>
+               </li>
+             </ul>
+           </div>`,
+          manifest,
+        ).find((candidate) => candidate.code === "missing-action-event");
+
+        expect(diagnostic).toMatchObject({ severity: "error" });
+        expect(diagnostic?.message).toContain("li");
+      });
+
+      it("stays silent when the host carries a default", () => {
+        expect(
+          codes(`<div data-controller="stimeo--dialog">
+                   <button data-stimeo--dialog-target="trigger"
+                           data-action="stimeo--dialog#open">Open</button>
+                   <div data-stimeo--dialog-target="dialog" role="dialog" aria-modal="true"
+                        aria-label="D" hidden></div>
+                 </div>`),
+        ).not.toContain("missing-action-event");
+      });
+
+      it("stays silent on a helper-rendered host, whose tag it cannot read", () => {
+        // The tag comes from the helper, not the template, so which default
+        // applies is unknowable — and the same effective markup written as HTML
+        // is accepted, so reporting here would make the two spellings disagree.
+        expect(
+          codes(`<div data-controller="stimeo--dialog">
+                   <%= button_tag "Open", type: "button",
+                         data: { stimeo__dialog_target: "trigger",
+                                 action: "stimeo--dialog#open" } %>
+                   <div data-stimeo--dialog-target="dialog" role="dialog" aria-modal="true"
+                        aria-label="D" hidden></div>
+                 </div>`),
+        ).not.toContain("missing-action-event");
+      });
+
+      it("stays silent on a generated descriptor rather than guessing", () => {
+        // The event half is generated, so the descriptor still parses and the
+        // controller and method read as known — only the guard on the attribute
+        // keeps the reader from calling a binding it cannot see inert.
+        expect(
+          codes(`<div data-controller="stimeo--menu">
+                   <li data-action="<%= evt %>->stimeo--menu#activate"></li>
+                 </div>`),
+        ).not.toContain("missing-action-event");
+      });
+    });
+
     describe("literal Value constraints", () => {
       it.each([
         ["max", "max"],
@@ -100,6 +169,120 @@ describe("checkSource", () => {
             suggestion: `Set ${value} to a non-negative integer.`,
           });
         }
+      });
+
+      it("rejects an OTP pattern that does not compile", () => {
+        const diagnostic = checkSource(
+          '<div data-stimeo--otp-pattern-value="[0-9"></div>',
+          manifest,
+        ).find((candidate) => candidate.code === "invalid-value");
+
+        expect(diagnostic).toMatchObject({ severity: "error" });
+        expect(diagnostic?.message).toContain("a valid regular expression");
+      });
+
+      it("accepts an OTP pattern that compiles", () => {
+        expect(codes('<div data-stimeo--otp-pattern-value="[0-9a-f]"></div>')).not.toContain(
+          "invalid-value",
+        );
+      });
+
+      it.each([
+        ['{"9":"[0-9"}', "a source that does not compile"],
+        ["{broken", "text that is not JSON"],
+        ["null", "JSON that is not an object"],
+        ['{"9":1}', "a value that is not a string"],
+      ])("rejects an Input Mask tokens declaration holding %s", (authored) => {
+        const diagnostic = checkSource(
+          `<div data-stimeo--input-mask-tokens-value='${authored}'></div>`,
+          manifest,
+        ).find((candidate) => candidate.code === "invalid-value");
+
+        expect(diagnostic).toMatchObject({ severity: "error" });
+        expect(diagnostic?.message).toContain("valid regular expressions");
+      });
+
+      it("checks a manifest that predates the syntax field instead of failing on it", () => {
+        // An engine ships ahead of the library it checks, so it has to read a
+        // manifest whose controllers carry no `valueSyntaxConstraints` at all.
+        const controllers = Object.fromEntries(
+          Object.entries(manifest.controllers).map(([id, controller]) => {
+            const { valueSyntaxConstraints: _omitted, ...rest } = controller;
+            return [id, rest];
+          }),
+        );
+        const older: Manifest = { ...manifest, controllers };
+
+        expect(() =>
+          checkSource('<div data-stimeo--otp-pattern-value="[0-9"></div>', older),
+        ).not.toThrow();
+        expect(
+          checkSource('<div data-stimeo--otp-pattern-value="[0-9"></div>', older).map(
+            (candidate) => candidate.code,
+          ),
+        ).not.toContain("invalid-value");
+      });
+
+      it("accepts an empty tokens declaration, which is the Value's documented default", () => {
+        // An empty literal declares nothing, and the runtime reads it as the
+        // default token map — reporting it would flag the default itself.
+        expect(codes('<div data-stimeo--input-mask-tokens-value=""></div>')).not.toContain(
+          "invalid-value",
+        );
+      });
+
+      it("accepts an Input Mask tokens declaration whose sources all compile", () => {
+        expect(
+          codes(`<div data-stimeo--input-mask-tokens-value='{"H":"[0-9A-Fa-f]"}'></div>`),
+        ).not.toContain("invalid-value");
+      });
+
+      it("stays silent on a generated tokens declaration rather than guessing", () => {
+        // The literal is not knowable until the template renders, and the runtime
+        // carries its own fallback for whatever arrives.
+        expect(
+          codes('<div data-stimeo--input-mask-tokens-value="<%= mask_tokens %>"></div>'),
+        ).not.toContain("invalid-value");
+      });
+
+      it("words a plain JSON-object contract without the regex refinement", () => {
+        // No shipped controller declares `json-object` on its own yet, so the
+        // base contract — an object whose values are strings — is pinned against
+        // a manifest built for it.
+        const host = manifest.controllers["stimeo--input-mask"] as NonNullable<
+          (typeof manifest.controllers)[string]
+        >;
+        const plain: Manifest = {
+          ...manifest,
+          controllers: {
+            ...manifest.controllers,
+            "stimeo--input-mask": {
+              ...host,
+              valueSyntaxConstraints: [
+                {
+                  value: "tokens",
+                  type: "string",
+                  syntax: "json-object",
+                  suggestion: "Declare tokens as a JSON object of strings.",
+                },
+              ],
+            },
+          },
+        };
+
+        const diagnostic = checkSource(
+          `<div data-stimeo--input-mask-tokens-value='{"9":1}'></div>`,
+          plain,
+        ).find((candidate) => candidate.code === "invalid-value");
+        expect(diagnostic?.message).toContain("a JSON object of strings");
+
+        // The refinement is what rejects a source that does not compile, so
+        // without it the same declaration passes.
+        expect(
+          checkSource(`<div data-stimeo--input-mask-tokens-value='{"9":"[0-9"}'></div>`, plain).map(
+            (candidate) => candidate.code,
+          ),
+        ).not.toContain("invalid-value");
       });
 
       it("accepts zero and positive Character Counter counts", () => {

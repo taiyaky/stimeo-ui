@@ -10,7 +10,7 @@ import { isRtl } from "../utils/logical_scroll";
  *     <div role="tablist" aria-label="…" data-stimeo--tabs-target="list">
  *       <button role="tab" id="tab-1" aria-controls="panel-1"
  *               data-stimeo--tabs-target="tab"
- *               data-action="stimeo--tabs#select
+ *               data-action="click->stimeo--tabs#select
  *                            keydown->stimeo--tabs#onKeydown">Tab 1</button>
  *       <!-- more tabs -->
  *     </div>

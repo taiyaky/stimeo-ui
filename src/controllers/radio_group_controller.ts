@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
+import { ownerOf } from "../utils/event_owner";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { isInteractiveHost } from "../utils/interactive_host";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
@@ -469,10 +470,9 @@ export class RadioGroupController extends Controller<HTMLElement> {
   }
 
   /** Finds this group's radio containing an event target, excluding nested groups. */
-  #radioForEventTarget(target: EventTarget | null): HTMLElement | undefined {
-    if (!this.#ownsEventTarget(target)) return undefined;
-    const node = target as Element;
-    return this.radioTargets.find((radio) => radio === node || radio.contains(node));
+  #radioForEventTarget(target: EventTarget | null): HTMLElement | null {
+    if (!this.#ownsEventTarget(target)) return null;
+    return ownerOf(this.radioTargets, target);
   }
 
   /** Whether the closest Radio Group scope around a target is this instance. */

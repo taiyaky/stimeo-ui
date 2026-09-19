@@ -97,14 +97,54 @@ export interface ActionDescriptor {
   readonly eventType: string;
 }
 
+/** The element a descriptor is written on, as far as the event default needs it. */
+export interface DescriptorHost {
+  /** Lowercased tag name. */
+  readonly tag: string;
+  /** The `type` attribute, for the `<input>` split. */
+  readonly inputType?: string;
+}
+
+/**
+ * The event Stimulus binds when a descriptor omits one, by host element.
+ *
+ * Mirrors Stimulus's own table. An element absent from it has no default at
+ * all: Stimulus raises "missing event name" while parsing the token, swallows
+ * it, and binds nothing — so an omitted event there is a binding that silently
+ * never happens.
+ */
+const DEFAULT_EVENT_NAMES: Readonly<Record<string, string>> = {
+  a: "click",
+  button: "click",
+  details: "toggle",
+  form: "submit",
+  input: "input",
+  select: "change",
+  textarea: "input",
+};
+
+/** The event an omitted descriptor resolves to on `host`, or `""` for none. */
+function defaultEventFor(host: DescriptorHost | undefined): string {
+  if (!host) return "";
+  if (host.tag === "input" && host.inputType === "submit") return "click";
+  return DEFAULT_EVENT_NAMES[host.tag] ?? "";
+}
+
 /**
  * Decodes the Stimeo `data-action` descriptors in an attribute value, e.g.
  * `click->stimeo--menu#toggle keydown->stimeo--menu#onItemKeydown` yields one
  * entry per descriptor. Non-`stimeo--` controllers are skipped (their action
  * surface is out of scope). The method name is read up to the first action
  * option (`:prevent`, `:stop`, …), mirroring Stimulus's descriptor grammar.
+ *
+ * A descriptor may omit the event, in which case Stimulus fills it in from the
+ * element. Pass `host` to resolve it the same way; without it the event reads
+ * as `""`, which is what a caller that only wants the identifiers needs.
  */
-export function actionDescriptors(dataActionValue: string): ActionDescriptor[] {
+export function actionDescriptors(
+  dataActionValue: string,
+  host?: DescriptorHost,
+): ActionDescriptor[] {
   const descriptors: ActionDescriptor[] = [];
   for (const descriptor of dataActionValue.split(/\s+/)) {
     const hash = descriptor.indexOf("#");
@@ -117,6 +157,8 @@ export function actionDescriptors(dataActionValue: string): ActionDescriptor[] {
       lhs = lhs.slice(arrow + 2);
       const at = eventType.indexOf("@");
       if (at !== -1) eventType = eventType.slice(0, at);
+    } else {
+      eventType = defaultEventFor(host);
     }
     if (!lhs.startsWith(NAMESPACE_PREFIX)) continue;
     const method = /^[a-zA-Z_$][\w$]*/.exec(descriptor.slice(hash + 1))?.[0] ?? "";

@@ -12,7 +12,7 @@ import { managedAriaRules } from "./managed_aria_rules";
 import { structureRules } from "./structure_rules";
 import { targetDeclarationRules } from "./target_declaration_rules";
 import type { ControllerManifest, Manifest } from "./types";
-import { valueConstraintRules } from "./value_constraint_rules";
+import { valueConstraintRules, valueSyntaxConstraintRules } from "./value_constraint_rules";
 import { valueRelationRules } from "./value_relation_rules";
 
 /**
@@ -82,6 +82,7 @@ export function buildManifest(packageVersion: string): Manifest {
       targets: [...(reflect.targets ?? [])],
       values: Object.keys(reflect.values ?? {}),
       valueConstraints: [...(valueConstraintRules[identifier] ?? [])],
+      valueSyntaxConstraints: [...(valueSyntaxConstraintRules[identifier] ?? [])],
       valueRelations: [...(valueRelationRules[identifier] ?? [])],
       actions: [...(reflect.actions ?? [])],
       events: [...(reflect.events ?? [])],

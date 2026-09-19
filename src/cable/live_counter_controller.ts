@@ -31,7 +31,7 @@ const DISABLED_MARKER = "data-live-counter-disabled";
  *        data-stimeo--live-counter-params-value='{"post":42}'
  *        data-stimeo--live-counter-id-value="<%= SecureRandom.uuid %>">
  *     <span data-stimeo--live-counter-target="value">128</span>
- *     <button type="button" data-action="stimeo--live-counter#increment"
+ *     <button type="button" data-action="click->stimeo--live-counter#increment"
  *             data-stimeo--live-counter-target="trigger">♥</button>
  *   </div>
  *

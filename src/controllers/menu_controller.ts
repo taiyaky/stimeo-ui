@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
+import { ownerOf } from "../utils/event_owner";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -287,8 +288,7 @@ export class MenuController extends Controller<HTMLElement> {
 
   /** The item target that is, or contains, `node`; `null` when it is neither. */
   #itemFrom(node: EventTarget | null): HTMLButtonElement | null {
-    if (!(node instanceof Node)) return null;
-    return this.itemTargets.find((item) => item === node || item.contains(node)) ?? null;
+    return ownerOf(this.itemTargets, node);
   }
 
   /**

@@ -70,7 +70,7 @@ describe("DateRangePickerController", () => {
                : disabledDates
                  ? `data-stimeo--date-range-picker-disabled-dates-value='${JSON.stringify(disabledDates)}'`
                  : ""
-}>
+           }>
         <button type="button" data-action="stimeo--date-range-picker#prev">Prev</button>
         <span id="drp-month" aria-live="polite"
               data-stimeo--date-range-picker-target="monthLabel"></span>

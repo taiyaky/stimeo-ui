@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
+import { ownerOf } from "../utils/event_owner";
 import { isRtl } from "../utils/logical_scroll";
 import { RovingTabindex } from "../utils/roving_tabindex";
 import { SafeTimeout } from "../utils/safe_timeout";
@@ -490,8 +491,7 @@ export class MenubarController extends Controller<HTMLElement> {
    * menu without moving focus.
    */
   #dismissOpenMenu(): void {
-    const active = document.activeElement;
-    const menu = this.menuTargets.find((candidate) => candidate.contains(active));
+    const menu = ownerOf(this.menuTargets, document.activeElement);
     if (menu) {
       const top = this.#topFor(menu);
       this.#closeMenu(top);

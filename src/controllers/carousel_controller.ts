@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { ownerIndex } from "../utils/event_owner";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { prefersReducedMotion } from "../utils/reduced_motion";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
@@ -417,9 +418,7 @@ export class CarouselController extends Controller<HTMLElement> {
 
   /** Position of the picker that is or contains `node`, or `-1` when none does. */
   #pickerIndexFor(node: EventTarget | null): number {
-    return this.pickerTargets.findIndex(
-      (picker) => node instanceof Node && (picker === node || picker.contains(node)),
-    );
+    return ownerIndex(this.pickerTargets, node);
   }
 
   /** Whether a focus transition lands on another control of this same carousel. */
@@ -687,9 +686,7 @@ function hasModifier(event: KeyboardEvent): boolean {
 
 /** Whether `node` is one of `elements` or sits inside one. */
 function hits(elements: readonly HTMLElement[], node: EventTarget | null): boolean {
-  return elements.some(
-    (element) => node instanceof Node && (element === node || element.contains(node)),
-  );
+  return ownerIndex(elements, node) !== -1;
 }
 
 /** Writes an attribute only on a real transition, so an observer sees no self-echo. */

@@ -1,4 +1,4 @@
-import type { ValueConstraint, ValueConstraintRules } from "./types";
+import type { ValueConstraint, ValueConstraintRules, ValueSyntaxConstraintRules } from "./types";
 
 /** Shared public contract for step-based input controls. */
 const POSITIVE_STEP: ValueConstraint = {
@@ -76,4 +76,36 @@ export const valueConstraintRules: ValueConstraintRules = {
   ],
   "stimeo--slider": [POSITIVE_STEP],
   "stimeo--time-picker": [POSITIVE_INTEGER_STEP],
+};
+
+/**
+ * Grammar contracts on the String Values whose accepted set cannot be listed.
+ *
+ * Kept apart from {@link valueConstraintRules} because they reach the manifest
+ * through their own field, which an engine that predates them skips rather than
+ * reading through `allowedValues`.
+ */
+export const valueSyntaxConstraintRules: ValueSyntaxConstraintRules = {
+  "stimeo--input-mask": [
+    {
+      value: "tokens",
+      type: "string",
+      syntax: "json-object",
+      entries: "regexp",
+      suggestion:
+        "Declare tokens as a JSON object of single-character keys to regex sources, " +
+        'e.g. \'{"H":"[0-9A-Fa-f]"}\' — a source that does not compile leaves that key on ' +
+        "its default at runtime, and a key without one stops being a token at all.",
+    },
+  ],
+  "stimeo--otp": [
+    {
+      value: "pattern",
+      type: "string",
+      syntax: "regexp",
+      suggestion:
+        "Set pattern to a regular expression matching one character, e.g. [0-9a-f] — " +
+        "a source that does not compile falls back to [0-9] at runtime.",
+    },
+  ],
 };

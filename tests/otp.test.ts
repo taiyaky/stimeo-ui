@@ -515,6 +515,24 @@ describe("OtpController", () => {
     expect(invalidHandler.mock.calls[0]?.[0]?.detail).toEqual({ pattern: "[0-9]" });
   });
 
+  it("falls back when the declaration only compiles inside the anchors", async () => {
+    // `0)|(1` is not a regular expression on its own, so it declares nothing and
+    // the field keeps the default `[0-9]`.
+    await remount({ pattern: "0)|(1" });
+    const digits = fields();
+    const invalidHandler = listen("invalid");
+
+    type(digits[0] as HTMLInputElement, "2");
+    await tick();
+
+    expect(digits[0]?.value).toBe("2");
+    expect(combined()).toBe("2");
+
+    type(digits[1] as HTMLInputElement, "x");
+    await tick();
+    expect(invalidHandler.mock.calls[0]?.[0]?.detail).toEqual({ pattern: "[0-9]" });
+  });
+
   it("drops digits a changed pattern no longer accepts", async () => {
     await remount({ pattern: "[0-9a-f]" });
     const digits = fields();

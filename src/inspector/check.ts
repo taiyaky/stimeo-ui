@@ -1,3 +1,4 @@
+import { compileRegExp, parseJsonObject } from "../utils/declared_value";
 import { erbElements, erbRanges, neutralizeErb } from "./erb";
 import {
   actionDescriptors,
@@ -12,6 +13,7 @@ import {
   type A11yAlternative,
   type A11yRequirement,
   type ContentCondition,
+  type ControllerManifest,
   DIAGNOSTIC_CODES,
   type Diagnostic,
   type DiagnosticCode,
@@ -22,6 +24,8 @@ import {
   type HostRequirement,
   type HostSelector,
   type Manifest,
+  type StringSyntaxConstraint,
+  type StringValueConstraint,
   type ValueCondition,
   type ValueConstraint,
 } from "./types";
@@ -604,9 +608,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
                 didYouMean(parsed.valueToken, (controller?.values ?? []).map(dasherize)),
               );
             } else if (!isDynamicValue(attr)) {
-              const constraint = controller?.valueConstraints.find(
-                (candidate) => dasherize(candidate.value) === parsed.valueToken,
-              );
+              const constraint = declaredConstraint(controller, parsed.valueToken);
               if (constraint && !valueSatisfiesConstraint(attr.value, constraint)) {
                 // Numeric decoding ignores surrounding whitespace, so the trimmed
                 // literal is what the runtime reads. A String contract compares the
@@ -630,11 +632,36 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
 
       // --- data-action descriptors: controller + method --------------------
       if (attr.name === "data-action") {
-        for (const { identifier, method, eventType } of actionDescriptors(attr.value)) {
+        const host = {
+          tag: node.tag,
+          inputType: node.attrs.find((a) => a.name === "type")?.value,
+        };
+        for (const { identifier, method, eventType } of actionDescriptors(attr.value, host)) {
           const controller = known[identifier];
           if (controller && method.length > 0) {
             const owner = findOwner(node, identifier);
             if (owner) recordAction(owner, identifier, node, method, eventType);
+          }
+          // Stimulus fills the event in from the element, and refuses to bind at
+          // all when the element has none to give. The descriptor reads as wired
+          // either way, so only a checker can tell the author it is inert.
+          // A helper supplies its own tag, so an element decoded from a `data:`
+          // hash cannot say which default applies and is passed over in silence.
+          if (
+            controller &&
+            method.length > 0 &&
+            eventType === "" &&
+            node.origin === "markup" &&
+            !isDynamicValue(attr)
+          ) {
+            report(
+              node,
+              "missing-action-event",
+              "error",
+              `"${identifier}#${method}" omits the event and <${node.tag}> has no default one, so Stimulus never binds it.`,
+              attr,
+              `Name the event: data-action="<event>->${identifier}#${method}".`,
+            );
           }
           if (!controller) {
             const best = nearestName(identifier, knownIdentifiers);
@@ -1301,9 +1328,32 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   return diagnostics;
 }
 
+/**
+ * The contract on one declared Value, from either field.
+ *
+ * `valueSyntaxConstraints` is absent from a manifest written before the field
+ * existed, so it is read defensively: this engine has to keep checking an older
+ * installed manifest, just as an older engine has to keep reading this one.
+ */
+function declaredConstraint(
+  controller: ControllerManifest | undefined,
+  valueToken: string,
+): ValueConstraint | StringSyntaxConstraint | undefined {
+  const matches = (candidate: { value: string }): boolean =>
+    dasherize(candidate.value) === valueToken;
+  const syntax = controller?.valueSyntaxConstraints;
+  return (
+    controller?.valueConstraints.find(matches) ??
+    (Array.isArray(syntax) ? syntax.find(matches) : undefined)
+  );
+}
+
 /** Decodes a literal Value according to its family, then applies its contract. */
-function valueSatisfiesConstraint(raw: string, constraint: ValueConstraint): boolean {
-  if (constraint.type === "string") return constraint.allowedValues.includes(raw);
+function valueSatisfiesConstraint(
+  raw: string,
+  constraint: ValueConstraint | StringSyntaxConstraint,
+): boolean {
+  if (constraint.type === "string") return stringValueSatisfies(raw, constraint);
   const value = decodeNumericValue(raw);
   if (Number.isNaN(value)) return false;
   if (constraint.finite && !Number.isFinite(value)) return false;
@@ -1317,15 +1367,48 @@ function decodeNumericValue(raw: string): number {
   return Number(raw.replace(/_/g, ""));
 }
 
+/**
+ * Applies a String contract, using the same readers the controllers use at
+ * runtime so the static verdict and the runtime fallback cannot drift apart.
+ */
+function stringValueSatisfies(
+  raw: string,
+  constraint: StringValueConstraint | StringSyntaxConstraint,
+): boolean {
+  if (!("syntax" in constraint)) return constraint.allowedValues.includes(raw);
+  if (constraint.syntax === "regexp") return compileRegExp(raw, "exact") !== null;
+  // An empty literal declares nothing, which is what the Value's default already
+  // says; only an attempt that failed is worth reporting.
+  if (raw === "") return true;
+  const parsed = parseJsonObject(raw);
+  if (parsed === null) return false;
+  return Object.values(parsed).every(
+    (source) =>
+      typeof source === "string" &&
+      (constraint.entries !== "regexp" || compileRegExp(source, "exact") !== null),
+  );
+}
+
 /** Human-readable expectation used in the diagnostic message. */
-function describeValueConstraint(constraint: ValueConstraint): string {
-  if (constraint.type === "string") return `one of ${list(constraint.allowedValues)}`;
+function describeValueConstraint(constraint: ValueConstraint | StringSyntaxConstraint): string {
+  if (constraint.type === "string") return describeStringConstraint(constraint);
   const parts = [constraint.finite ? "a finite number" : "a number"];
   if (constraint.greaterThan !== undefined) {
     parts.push(`greater than ${constraint.greaterThan}`);
   }
   if (constraint.integer) parts.push("with no fractional part");
   return parts.join(" ");
+}
+
+/** The half of {@link describeValueConstraint} that words a String contract. */
+function describeStringConstraint(
+  constraint: StringValueConstraint | StringSyntaxConstraint,
+): string {
+  if (!("syntax" in constraint)) return `one of ${list(constraint.allowedValues)}`;
+  if (constraint.syntax === "regexp") return "a valid regular expression";
+  return constraint.entries === "regexp"
+    ? "a JSON object whose values are valid regular expressions"
+    : "a JSON object of strings";
 }
 
 /**

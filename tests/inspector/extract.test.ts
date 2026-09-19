@@ -94,6 +94,43 @@ describe("extract helpers", () => {
     ]);
   });
 
+  it("resolves an omitted event from the host element, as Stimulus does", () => {
+    // Stimulus fills the event in from the element when the descriptor leaves it
+    // out, so a reader that skips that step sees a different binding than the
+    // browser does.
+    const on = (tag: string, inputType?: string) =>
+      actionDescriptors("stimeo--otp#onInput", { tag, inputType })[0]?.eventType;
+
+    expect(on("a")).toBe("click");
+    expect(on("button")).toBe("click");
+    expect(on("form")).toBe("submit");
+    expect(on("details")).toBe("toggle");
+    expect(on("select")).toBe("change");
+    expect(on("textarea")).toBe("input");
+    expect(on("input")).toBe("input");
+    expect(on("input", "submit")).toBe("click");
+    // A `type` that is not `submit` keeps the ordinary input default.
+    expect(on("input", "checkbox")).toBe("input");
+  });
+
+  it("leaves the event empty for an element with no default of its own", () => {
+    // Stimulus refuses to bind these, so the reader must not invent an event.
+    for (const tag of ["li", "div", "span", "td"]) {
+      expect(actionDescriptors("stimeo--menu#activate", { tag })[0]?.eventType).toBe("");
+    }
+  });
+
+  it("keeps an explicit event whatever the host element is", () => {
+    expect(actionDescriptors("keydown->stimeo--menu#activate", { tag: "form" })[0]?.eventType).toBe(
+      "keydown",
+    );
+  });
+
+  it("leaves the event empty when no host element is given", () => {
+    // The identifier-only reader has no element to ask.
+    expect(actionDescriptors("stimeo--otp#onInput")[0]?.eventType).toBe("");
+  });
+
   it("recognizes stimeo data attributes", () => {
     expect(isStimeoDataAttr("data-stimeo--menu-target")).toBe(true);
     expect(isStimeoDataAttr("data-controller")).toBe(false);

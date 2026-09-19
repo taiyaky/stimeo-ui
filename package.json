@@ -1,6 +1,6 @@
 {
   "name": "stimeo-ui",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Headless Stimulus UI framework for Ruby on Rails — behavior-only, accessible components driven by HTML attributes.",
   "type": "module",
   "license": "MIT",
@@ -84,23 +84,21 @@
     }
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.12",
+    "@biomejs/biome": "2.5.14",
     "@floating-ui/dom": "1.8.0",
-    "@rails/actioncable": "8.1.301",
-    "@types/rails__actioncable": "8.0.3",
     "@guidepup/virtual-screen-reader": "0.32.1",
     "@hotwired/stimulus": "3.2.2",
     "@hotwired/turbo": "8.0.23",
-    "@types/node": "24.13.3",
-    "@vitest/coverage-istanbul": "4.1.11",
+    "@rails/actioncable": "8.1.301",
+    "@types/node": "24.13.6",
+    "@types/rails__actioncable": "8.0.3",
+    "@vitest/coverage-istanbul": "5.0.1",
     "axe-core": "4.13.0",
-    "happy-dom": "20.14.0",
+    "happy-dom": "20.14.5",
+    "rollup": "4.63.3",
     "tsup": "8.5.1",
     "typescript": "6.0.3",
-    "vitest": "4.1.11",
+    "vitest": "5.0.1",
     "vitest-axe": "0.1.0"
-  },
-  "overrides": {
-    "rollup": "4.63.1"
   }
 }

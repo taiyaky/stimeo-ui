@@ -7,7 +7,7 @@ import { TransitionCompletion } from "../utils/transition_completion";
  * Markup contract (identifier: `stimeo--collapsible`):
  *   <div data-controller="stimeo--collapsible">
  *     <button data-stimeo--collapsible-target="trigger"
- *             data-action="stimeo--collapsible#toggle"
+ *             data-action="click->stimeo--collapsible#toggle"
  *             aria-expanded="false" aria-controls="more">Show details</button>
  *     <div id="more" data-stimeo--collapsible-target="content"
  *          data-state="closed" hidden>…</div>

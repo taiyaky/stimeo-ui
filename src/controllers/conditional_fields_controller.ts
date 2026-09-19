@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { ownerIndex } from "../utils/event_owner";
 import { canTakeFocus } from "../utils/focus_candidate";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { TabindexLoan } from "../utils/tabindex_loan";
@@ -393,10 +394,7 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
 
   /** Whether an authored mutation target belongs to a trigger, region, or managed control. */
   #elementAffectsState(target: Element, triggers: Trigger[], regions: HTMLElement[]): boolean {
-    return (
-      triggers.some((trigger) => trigger === target || trigger.contains(target)) ||
-      regions.some((region) => region === target || region.contains(target))
-    );
+    return ownerIndex(triggers, target) !== -1 || ownerIndex(regions, target) !== -1;
   }
 
   /** Whether a form owns at least one current trigger, including `form=` associations. */

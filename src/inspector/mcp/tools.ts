@@ -249,6 +249,32 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
         required: ["value", "type", "suggestion"],
       },
     },
+    valueSyntaxConstraints: {
+      type: "array",
+      description:
+        "Grammar contracts on String Values whose accepted set cannot be enumerated. " +
+        "Its own field so an engine that predates it skips these instead of reading " +
+        "them through allowedValues.",
+      items: {
+        type: "object",
+        properties: {
+          value: { type: "string", description: "Camel-case declared Value name." },
+          type: { type: "string", enum: ["string"] },
+          syntax: {
+            type: "string",
+            enum: ["regexp", "json-object"],
+            description: "Grammar the whole literal must satisfy.",
+          },
+          entries: {
+            type: "string",
+            enum: ["regexp"],
+            description: "For a json-object syntax, the grammar every property value must satisfy.",
+          },
+          suggestion: { type: "string" },
+        },
+        required: ["value", "type", "syntax", "suggestion"],
+      },
+    },
     valueRelations: {
       type: "array",
       description: "Statically checkable relationships between authored Stimulus Values.",

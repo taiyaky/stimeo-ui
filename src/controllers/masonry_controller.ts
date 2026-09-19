@@ -138,7 +138,7 @@ export class MasonryController extends Controller<HTMLElement> {
    *
    * The removal is queued rather than immediate because teardown reports every
    * target as disconnected: doing it here would strip the whole grid just before
-   * a Turbo snapshot is taken. {@link MicrotaskCoalescer.cancel} drops the queue
+   * a Turbo snapshot is taken. The coalescer's `cancel` drops the queue
    * with the pass, so only a genuine target change reaches it.
    */
   itemTargetDisconnected(item: HTMLElement): void {

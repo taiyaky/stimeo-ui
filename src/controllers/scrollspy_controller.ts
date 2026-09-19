@@ -57,7 +57,7 @@ const ANCHOR_ATTRIBUTES = ["href", "data-href"];
  * - `link` targets added or removed — Stimulus's target callbacks.
  * - a `link` target's `href` / `data-href` rewritten in place — a Turbo 8 morph
  *   keeps the element *and* its target marker, so no target callback fires;
- *   {@link ANCHOR_ATTRIBUTES} is watched for exactly this case.
+ *   those two attributes are watched for exactly this case.
  * - the reader's scroll position, including inside a stretch where no section
  *   crosses an observation threshold.
  *
@@ -220,7 +220,7 @@ export class ScrollspyController extends Controller<HTMLElement> {
    * only rewrites attributes, so Stimulus fires no target callback: without
    * this, a link re-pointed from `#intro` to `#faq` would keep the controller
    * observing `#intro` for the rest of the page's life. The filter is exactly
-   * {@link ANCHOR_ATTRIBUTES}; guarding on `MutationObserver` keeps the
+   * `href` and `data-href`; guarding on `MutationObserver` keeps the
    * controller usable where the API is absent, matching `IntersectionWatcher`'s
    * own support guard.
    */

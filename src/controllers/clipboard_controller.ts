@@ -22,7 +22,7 @@ const TRANSIENT_STATES = new Set(["copied", "error"]);
  *     <input type="text" value="https://example.com" readonly
  *            data-stimeo--clipboard-target="source">
  *     <button type="button" data-stimeo--clipboard-target="button"
- *             data-action="stimeo--clipboard#copy">Copy</button>
+ *             data-action="click->stimeo--clipboard#copy">Copy</button>
  *     <span data-stimeo--clipboard-target="feedback"></span>
  *   </div>
  *

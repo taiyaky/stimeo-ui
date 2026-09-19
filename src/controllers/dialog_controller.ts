@@ -7,11 +7,11 @@ import { FocusTrap } from "../utils/focus_trap";
  * Markup contract (identifier: `stimeo--dialog`):
  *   <div data-controller="stimeo--dialog">
  *     <button data-stimeo--dialog-target="trigger"
- *             data-action="stimeo--dialog#open">Open</button>
+ *             data-action="click->stimeo--dialog#open">Open</button>
  *     <div data-stimeo--dialog-target="dialog" role="dialog" aria-modal="true"
  *          aria-labelledby="title" hidden>
  *       <h2 id="title">…</h2>
- *       <button data-action="stimeo--dialog#close">Close</button>
+ *       <button data-action="click->stimeo--dialog#close">Close</button>
  *     </div>
  *   </div>
  *

@@ -161,6 +161,23 @@ describe("FormFieldController", () => {
     }
   });
 
+  it("re-derives the wiring when a shown error's text changes and nothing else does", async () => {
+    // A server-rendered pass writes the message straight into the retained error,
+    // then a later one blanks it while leaving the element visible. Content is the
+    // only mutation either time, so the reconciliation has to notice the write
+    // inside the error target itself.
+    error().textContent = "Server error";
+    error().hidden = false;
+    await tick();
+    expect(control().getAttribute("aria-invalid")).toBe("true");
+    expect(control().getAttribute("aria-errormessage")).toBe(error().id);
+
+    error().textContent = "";
+    await tick();
+    expect(control().getAttribute("aria-invalid")).toBe("false");
+    expect(control().hasAttribute("aria-errormessage")).toBe(false);
+  });
+
   it("clears the error and restores valid state", () => {
     controller().setError("Oops");
     controller().clearError();

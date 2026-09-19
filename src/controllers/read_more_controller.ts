@@ -9,7 +9,7 @@ import { LayoutObserver } from "../utils/layout_observer";
  *   <div data-controller="stimeo--read-more">
  *     <p id="bio" data-stimeo--read-more-target="content" data-state="collapsed">…</p>
  *     <button data-stimeo--read-more-target="trigger"
- *             data-action="stimeo--read-more#toggle"
+ *             data-action="click->stimeo--read-more#toggle"
  *             aria-expanded="false" aria-controls="bio" hidden>Read more</button>
  *   </div>
  *
