@@ -810,6 +810,30 @@ describe("DirtyFormController", () => {
     });
   });
 
+  it("releases every form listener on disconnect", async () => {
+    // The release is synchronous, and the assertions stay synchronous with it:
+    // letting the observer flush would reconnect the controller and re-subscribe.
+    await mount('<input name="title" value="a">');
+    const controller = instance();
+    edit("changed");
+    expect(form().hasAttribute("data-dirty")).toBe(true);
+
+    controller.disconnect();
+
+    // A submission the controller no longer follows must not re-baseline it.
+    submitStart();
+    form().dispatchEvent(new Event("formdata"));
+    submit();
+    submitEnd(true);
+    expect(form().getAttribute("data-dirty")).toBe("true");
+
+    // Nor may a later edit write the hook back once the state was cleared.
+    controller.markClean();
+    edit("changed again");
+    field().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+  });
+
   it("has no a11y violations", async () => {
     await mount('<label for="t">Title</label><input id="t" name="title" value="a">');
     await expectNoA11yViolations(form());

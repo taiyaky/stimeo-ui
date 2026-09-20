@@ -132,7 +132,7 @@ export class ReadMoreController extends Controller<HTMLElement> {
     this.#observedContent = next;
     this.#layout.observe(next);
     this.#layout.observeViewport();
-    next.addEventListener("load", this.#update, true);
+    this.#layout.observeDescendantLoads(next);
 
     if (typeof MutationObserver !== "undefined") {
       this.#contentMutationObserver = new MutationObserver(this.#update);
@@ -148,7 +148,7 @@ export class ReadMoreController extends Controller<HTMLElement> {
     this.#deferredHide.releaseAll();
     if (this.#observedContent) {
       this.#layout.unobserve(this.#observedContent);
-      this.#observedContent.removeEventListener("load", this.#update, true);
+      this.#layout.unobserveDescendantLoads();
     }
     this.#observedContent = null;
     this.#contentMutationObserver?.disconnect();

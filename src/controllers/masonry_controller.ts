@@ -58,8 +58,8 @@ function usableNumber(value: number, fallback: number): number {
  * add/remove ({@link MutationObserver}), on an item joining or leaving the target
  * set, when a declared number changes, and when a descendant resource loads.
  * Everything but the first pass is folded into one microtask, so a burst of
- * triggers costs one pass. The observers, the `load` listener and any pending pass
- * are released on `disconnect()` (Turbo navigation included).
+ * triggers costs one pass. The observers and any pending pass are released on
+ * `disconnect()` (Turbo navigation included).
  *
  * Consumer contract:
  * - A declaration that cannot be read as a number (`"240px"`, an infinity) falls
@@ -108,14 +108,6 @@ export class MasonryController extends Controller<HTMLElement> {
   /** Last published column count, so `layout` fires only on real changes. */
   #lastColumns = 0;
 
-  /**
-   * Re-pack when a descendant resource finishes loading. Images/iframes report a
-   * height of 0 until loaded, which would skew the shortest-column packing if the
-   * first pass ran before they settled; `load` does not bubble, so this is bound in
-   * the capture phase to catch every descendant.
-   */
-  readonly #onLoad = (): void => this.#reconcile.schedule();
-
   /** Resolves the declared column width once, falling back when it is unreadable. */
   minColumnWidthValueChanged(): void {
     this.#minColumnWidth = usableNumber(this.minColumnWidthValue, DEFAULT_MIN_COLUMN_WIDTH);
@@ -155,19 +147,18 @@ export class MasonryController extends Controller<HTMLElement> {
       this.#mutationObserver = new MutationObserver(() => this.#reconcile.schedule());
       this.#mutationObserver.observe(this.element, { childList: true, subtree: true });
     }
-    this.element.addEventListener("load", this.#onLoad, true);
+    this.#layout.observeDescendantLoads(this.element);
     this.#relayout();
     this.#reconcile.activate();
   }
 
-  /** Releases both observers and the load listener so nothing fires after detach. */
+  /** Releases every observation so nothing fires after detach. */
   override disconnect(): void {
     this.#reconcile.cancel();
     this.#released.clear();
     this.#layout.disconnect();
     this.#mutationObserver?.disconnect();
     this.#mutationObserver = null;
-    this.element.removeEventListener("load", this.#onLoad, true);
     this.#lastColumns = 0;
   }
 

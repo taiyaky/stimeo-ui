@@ -7,6 +7,7 @@ import {
   toISODateString,
   toISOMonthString,
 } from "../utils/dates";
+import { resolveLocale } from "../utils/locale";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -45,8 +46,10 @@ const OWNED_DISABLED = "data-stimeo--calendar-owns-disabled";
  *   </div>
  *
  * Implements the WAI-ARIA APG **Date Picker Dialog** grid navigation pattern:
- * - Locale-aware month/year labels using native `Intl.DateTimeFormat`, read from
- *   `<html lang>`; a malformed language tag falls back to English so the grid still paints.
+ * - Locale-aware month/year labels using native `Intl.DateTimeFormat`, taken from
+ *   the `locale` Value, else the nearest `lang` up the ancestor chain, else the
+ *   runtime default; a malformed language tag falls back to English so the grid
+ *   still paints.
  * - Roving tabindex focus tracking (exactly one focusable day at any time).
  * - Full grid keyboard controls (arrows, PageUp/Down, Home/End, Shift+PageUp/Down).
  * - Automatic month wrapping and date clamping for missing dates (e.g. leap years, 31st to 30th).
@@ -65,6 +68,7 @@ export class CalendarController extends Controller<HTMLElement> {
     min: { type: String, default: "" },
     max: { type: String, default: "" },
     weekStart: { type: Number, default: 0 }, // 0 = Sunday, 1 = Monday, etc.
+    locale: { type: String, default: "" },
   };
   static actions = ["next", "onKeydown", "prev", "selectByClick"] as const;
   static events = ["monthchange", "select"] as const;
@@ -80,6 +84,7 @@ export class CalendarController extends Controller<HTMLElement> {
   declare minValue: string;
   declare maxValue: string;
   declare weekStartValue: number;
+  declare localeValue: string;
 
   /** The date currently receiving focus in the grid (local time). */
   focusedDate: Date = new Date();
@@ -124,6 +129,18 @@ export class CalendarController extends Controller<HTMLElement> {
   monthValueChanged(): void {
     if (!this.monthValue) return;
     this.#syncFocusedDateWithMonth();
+    this.render();
+  }
+
+  /**
+   * Repaints the label when application code changes `locale` at runtime.
+   *
+   * Stimulus runs this for the initial Value too, before `connect()`. The paint
+   * it triggers is idempotent — the month comes from `month` (or, while that is
+   * still empty, from `focusedDate`), and `monthchange` only reports a move away
+   * from a month already announced, so the first paint never reports one.
+   */
+  localeValueChanged(): void {
     this.render();
   }
 
@@ -281,8 +298,8 @@ export class CalendarController extends Controller<HTMLElement> {
 
     // Update label with localized month/year
     if (this.hasLabelTarget) {
-      const lang = document.documentElement.lang || "en";
-      this.labelTarget.textContent = monthLabelFormatter(lang).format(monthStart);
+      const locale = resolveLocale(this.element, this.localeValue);
+      this.labelTarget.textContent = monthLabelFormatter(locale).format(monthStart);
     }
 
     const days = this.#calculateGridDays(year, month);

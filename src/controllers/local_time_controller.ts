@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { intlFormatter } from "../utils/intl_format";
+import { resolveLocale } from "../utils/locale";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
 /** A date/time style keyword accepted by `Intl` `dateStyle` / `timeStyle`. */
@@ -197,12 +198,11 @@ export class LocalTimeController extends Controller<HTMLElement> {
     // An invalid locale or timeZone must not break the page: the authored
     // absolute text remains as the graceful fallback. `date` is already known to
     // be a real instant (`#parse` rejects the rest), so formatting it cannot fail.
-    const formatter = intlFormatter(Intl.DateTimeFormat, this.#locale, options);
+    const formatter = intlFormatter(
+      Intl.DateTimeFormat,
+      resolveLocale(this.element, this.localeValue),
+      options,
+    );
     return formatter === null ? null : formatter.format(date);
-  }
-
-  /** Locale precedence: the value, then the nearest `lang` up the ancestor chain. */
-  get #locale(): string | undefined {
-    return this.localeValue || this.element.closest("[lang]")?.getAttribute("lang") || undefined;
   }
 }

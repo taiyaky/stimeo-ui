@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { ListenerSet } from "../utils/listener_set";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
 /** Aggregate selection state of a parent/child checkbox group. */
@@ -67,6 +68,7 @@ export class CheckboxController extends Controller<HTMLElement> {
 
   /** Collapses every lifecycle signal from one DOM update into one derived pass. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileFromChildren());
+  readonly #listeners = new ListenerSet();
   /** Aggregate this root last settled on, so a derived repair is reported once. */
   #committedState: CheckboxState | null = null;
   /** Watches authored checked-attribute changes on retained target elements. */
@@ -85,7 +87,7 @@ export class CheckboxController extends Controller<HTMLElement> {
       attributeFilter: ["checked"],
       subtree: true,
     });
-    this.element.addEventListener("turbo:morph-element", this.#onMorph);
+    this.#listeners.add(this.element, "turbo:morph-element", this.#onMorph);
     document.addEventListener("reset", this.#onReset, true);
   }
 
@@ -93,7 +95,7 @@ export class CheckboxController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#reconcile.cancel();
     this.#checkedObserver.disconnect();
-    this.element.removeEventListener("turbo:morph-element", this.#onMorph);
+    this.#listeners.dispose();
     document.removeEventListener("reset", this.#onReset, true);
   }
 

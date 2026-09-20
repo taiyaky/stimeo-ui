@@ -420,19 +420,39 @@ describe("ScrollAreaController", () => {
   });
 
   it("cancels a pending scroll frame on disconnect", async () => {
-    const cancel = vi.spyOn(globalThis, "cancelAnimationFrame");
-    await start(markup());
-    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
-    Object.defineProperty(viewport(), "scrollTop", { configurable: true, value: 300 });
-    viewport().dispatchEvent(new Event("scroll"));
-    const controller = application.getControllerForElementAndIdentifier(
-      root(),
-      "stimeo--scroll-area",
-    );
+    // Frames are held by handle so that a cancel really removes one, as an engine
+    // does: a frame still held after disconnect would write the state hooks back
+    // onto a host the teardown just returned to its authored markup.
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextHandle = 1;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const handle = nextHandle++;
+      frames.set(handle, callback);
+      return handle;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (handle: number) => {
+      frames.delete(handle);
+    });
 
-    controller?.disconnect();
+    try {
+      await start(markup());
+      layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+      Object.defineProperty(viewport(), "scrollTop", { configurable: true, value: 300 });
+      viewport().dispatchEvent(new Event("scroll"));
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--scroll-area",
+      );
+      expect(frames.size).toBe(1);
 
-    expect(cancel).toHaveBeenCalledOnce();
+      controller?.disconnect();
+      for (const callback of [...frames.values()]) callback(0);
+
+      expect(root().hasAttribute("data-scroll")).toBe(false);
+      expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("re-measures when descendant media finishes loading", async () => {

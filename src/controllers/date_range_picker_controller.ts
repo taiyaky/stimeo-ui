@@ -8,6 +8,7 @@ import {
   toISODateString,
   toISOMonthString,
 } from "../utils/dates";
+import { resolveLocale } from "../utils/locale";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { parseStringList } from "../utils/string_list";
@@ -74,6 +75,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     // type: that reader throws out of the value observer before any callback
     // runs, so one malformed attribute would stop the picker from connecting.
     disabledDates: { type: String, default: "" },
+    locale: { type: String, default: "" },
   };
   static actions = ["applyPreset", "next", "onKeydown", "prev", "previewTo", "selectDate"] as const;
   static events = ["change", "monthchange"] as const;
@@ -92,6 +94,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   declare minValue: string;
   declare maxValue: string;
   declare disabledDatesValue: string;
+  declare localeValue: string;
 
   /** The month currently rendered, as `YYYY-MM`. */
   #viewMonth = "";
@@ -153,6 +156,11 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     this.#repaint.cancel();
     this.#beforeCache.deactivate();
     this.#focusTimer.clearAll();
+  }
+
+  /** Repaints the label when application code changes `locale` at runtime. */
+  localeValueChanged(): void {
+    this.#repaint.schedule();
   }
 
   /** Repaints when application code (or a Turbo morph) changes `min` at runtime. */
@@ -387,8 +395,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     if (this.#previewDate && !this.#isSelectable(this.#previewDate)) this.#previewDate = "";
 
     if (this.hasMonthLabelTarget) {
-      const lang = document.documentElement.lang || "en";
-      const formatter = monthLabelFormatter(lang);
+      const formatter = monthLabelFormatter(resolveLocale(this.element, this.localeValue));
       this.monthLabelTarget.textContent = formatter.format(new Date(year, month - 1, 1));
     }
 

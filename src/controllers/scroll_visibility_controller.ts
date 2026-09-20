@@ -1,7 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
 import { BlurDeferral } from "../utils/blur_deferral";
 import { validSelector } from "../utils/declared_value";
+import { FrameCoalescer } from "../utils/frame_coalescer";
 import { prefersReducedMotion } from "../utils/reduced_motion";
+import { resolveScrollSource, scrollOffset } from "../utils/scroll_source";
 import { TabindexLoan } from "../utils/tabindex_loan";
 
 /** Default scroll threshold in px, and what a non-finite declaration falls back to. */
@@ -77,8 +79,8 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
   declare focusSelectorValue: string;
   declare rootValue: string;
 
-  /** Pending rAF id that coalesces scroll bursts into one measurement. */
-  #rafId: number | null = null;
+  /** Coalesces scroll bursts into one measurement per frame. */
+  readonly #frames = new FrameCoalescer();
   /** Previous scroll position, for `direction` mode delta detection. */
   #lastScrollY = 0;
   /** Current visibility, tracked to dispatch `change` only on real transitions. */
@@ -115,17 +117,11 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
     if (this.#connected) this.#evaluate();
   });
 
-  readonly #onScroll = (): void => {
-    if (this.#rafId !== null) return;
-    this.#rafId = requestAnimationFrame(() => {
-      this.#rafId = null;
-      this.#evaluate();
-    });
-  };
+  readonly #onScroll = (): void => this.#frames.schedule(() => this.#evaluate());
 
   override connect(): void {
-    this.#scrollSource = this.#resolveScrollSource();
-    this.#lastScrollY = this.#scrollY();
+    this.#scrollSource = resolveScrollSource(this.#rootSelector);
+    this.#lastScrollY = scrollOffset(this.#scrollSource);
     this.#scrollSource.addEventListener("scroll", this.#onScroll, { passive: true });
     this.#evaluate(false);
     this.#connected = true;
@@ -134,10 +130,7 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#connected = false;
     this.#scrollSource.removeEventListener("scroll", this.#onScroll);
-    if (this.#rafId !== null) {
-      cancelAnimationFrame(this.#rafId);
-      this.#rafId = null;
-    }
+    this.#frames.cancel();
     this.#pendingHide.releaseAll();
     this.#tabindex.returnAll();
     this.#visible = null;
@@ -209,7 +202,7 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #evaluate(notify = true): void {
-    const y = this.#scrollY();
+    const y = scrollOffset(this.#scrollSource);
     let nextVisible: boolean;
     if (this.modeValue === "direction") {
       // Near the very top, always reveal so a hide-on-scroll header is never
@@ -247,14 +240,6 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
   }
 
   /** Resolves the scroll source from `root` (falling back to the window). */
-  #resolveScrollSource(): HTMLElement | Window {
-    if (this.#rootSelector) {
-      const root = document.querySelector<HTMLElement>(this.#rootSelector);
-      if (root) return root;
-    }
-    return window;
-  }
-
   /**
    * The focus owner inside the target, or `null` when focus is elsewhere.
    *
@@ -266,12 +251,5 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
     const focused = document.activeElement;
     if (focused instanceof HTMLElement && this.elementTarget.contains(focused)) return focused;
     return null;
-  }
-
-  #scrollY(): number {
-    if (this.#scrollSource === window) {
-      return window.scrollY ?? window.pageYOffset ?? 0;
-    }
-    return (this.#scrollSource as HTMLElement).scrollTop;
   }
 }

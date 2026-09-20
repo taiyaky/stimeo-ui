@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
+import { KeyedTimers } from "../utils/keyed_timers";
 import { MAX_TIMER_DELAY_MS, SafeInterval, SafeTimeout } from "../utils/safe_timeout";
 import {
   type ConfirmedCableSubscription,
@@ -11,8 +12,6 @@ import {
 /** A peer currently present (another client in the same room). */
 interface Peer {
   name: string;
-  /** Auto-expiry timer id, restarted by every beacon. */
-  timer: number;
 }
 
 /**
@@ -154,6 +153,8 @@ export class PresenceController extends Controller<HTMLElement> {
   #subscription: ConfirmedCableSubscription | null = null;
   /** Present peers keyed by id (insertion order = join order). */
   readonly #peers = new Map<string, Peer>();
+  /** Each peer's auto-expiry timer, restarted by every beacon from that peer. */
+  readonly #expiry = new KeyedTimers<string>();
   readonly #timers = new SafeTimeout();
   readonly #intervals = new SafeInterval();
   /** Epoch ms of the last outgoing beacon, for the convergence throttle. */
@@ -368,9 +369,8 @@ export class PresenceController extends Controller<HTMLElement> {
 
     const name = typeof beacon?.name === "string" ? beacon.name : "";
     const existing = this.#peers.get(id);
-    if (existing !== undefined) this.#timers.clear(existing.timer);
-    const timer = this.#timers.set(() => this.#drop(id), this.#timeout);
-    this.#peers.set(id, { name, timer });
+    this.#expiry.set(id, () => this.#drop(id), this.#timeout);
+    this.#peers.set(id, { name });
 
     if (existing === undefined) {
       this.#appendClone(id, name);
@@ -388,7 +388,7 @@ export class PresenceController extends Controller<HTMLElement> {
   #drop(id: string): void {
     const peer = this.#peers.get(id);
     if (peer === undefined) return;
-    this.#timers.clear(peer.timer);
+    this.#expiry.clear(id);
     this.#peers.delete(id);
     this.#removeClone(id);
     this.#render();
@@ -477,6 +477,7 @@ export class PresenceController extends Controller<HTMLElement> {
   /** Clears the transient roster state (connect reset + disconnect teardown). */
   #reset(): void {
     this.#timers.clearAll();
+    this.#expiry.clearAll();
     this.#pendingBeacon = null;
     this.#announceId = null;
     this.#peers.clear();

@@ -1,10 +1,21 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DateRangePickerController } from "../src/controllers/date_range_picker_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
+
+// The month label is formatted in the resolved locale, so a case that declares
+// no language would otherwise read the runner's. Pin one for the whole file and
+// let the cases that care declare their own.
+beforeEach(() => {
+  document.documentElement.lang = "en";
+});
+
+afterEach(() => {
+  document.documentElement.removeAttribute("lang");
+});
 
 /**
  * Behavioral tests for {@link DateRangePickerController}: two-point range
@@ -48,6 +59,9 @@ describe("DateRangePickerController", () => {
     disabledDatesRaw?: string;
     cellCount?: number;
     includeFields?: boolean;
+    /** Language of an element wrapping the picker, for the resolution cases. */
+    wrapperLang?: string;
+    locale?: string;
   }
 
   const mount = async ({
@@ -59,9 +73,15 @@ describe("DateRangePickerController", () => {
     disabledDatesRaw,
     cellCount = 42,
     includeFields = true,
+    wrapperLang = "",
+    locale = "",
   }: MountOptions = {}) => {
+    const open = wrapperLang === "" ? "" : `<div lang="${wrapperLang}">`;
+    const close = wrapperLang === "" ? "" : "</div>";
     document.body.innerHTML = `
+      ${open}
       <div data-controller="stimeo--date-range-picker"
+           ${locale ? `data-stimeo--date-range-picker-locale-value="${locale}"` : ""}
            ${min ? `data-stimeo--date-range-picker-min-value="${min}"` : ""}
            ${max ? `data-stimeo--date-range-picker-max-value="${max}"` : ""}
            ${
@@ -97,7 +117,8 @@ describe("DateRangePickerController", () => {
                <input type="hidden" value="${end}" data-stimeo--date-range-picker-target="endField" />`
             : ""
         }
-      </div>`;
+      </div>
+      ${close}`;
     application = Application.start();
     application.register("stimeo--date-range-picker", DateRangePickerController);
     await tick();
@@ -145,6 +166,70 @@ describe("DateRangePickerController", () => {
     cell(iso).dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
   const key = (el: HTMLElement, k: string, init: KeyboardEventInit = {}) =>
     el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, ...init }));
+
+  it("labels the month in the language of the nearest ancestor", async () => {
+    // `lang` is inherited, so the language that applies to the grid is the
+    // nearest one above it — not the document element's.
+    await mount({ wrapperLang: "ja" });
+
+    expect(document.getElementById("drp-month")?.textContent).toBe("2026年6月");
+  });
+
+  it("lets a nearer ancestor language win over a farther one", async () => {
+    document.documentElement.lang = "ja";
+    await mount({ wrapperLang: "en" });
+
+    expect(document.getElementById("drp-month")?.textContent).toBe("June 2026");
+  });
+
+  it("asks for the runtime locale, not English, when nothing declares a language", async () => {
+    // The runner's own locale is what an undeclared language resolves to, and it
+    // may well be English — so the case states which locale the formatter is
+    // asked for rather than comparing the rendered label.
+    document.documentElement.removeAttribute("lang");
+    const asked: unknown[] = [];
+    const NativeDateTimeFormat = Intl.DateTimeFormat;
+    const RecordingDateTimeFormat = new Proxy(NativeDateTimeFormat, {
+      construct(target, argumentsList, newTarget) {
+        asked.push(argumentsList[0]);
+        return Reflect.construct(target, argumentsList, newTarget);
+      },
+    });
+    Object.defineProperty(Intl, "DateTimeFormat", {
+      configurable: true,
+      writable: true,
+      value: RecordingDateTimeFormat,
+    });
+
+    try {
+      await mount();
+    } finally {
+      Object.defineProperty(Intl, "DateTimeFormat", {
+        configurable: true,
+        writable: true,
+        value: NativeDateTimeFormat,
+      });
+    }
+
+    expect(asked).toContain(undefined);
+    expect(asked).not.toContain("en");
+  });
+
+  it("lets a declared locale win over every lang in scope", async () => {
+    await mount({ wrapperLang: "en", locale: "ja" });
+
+    expect(document.getElementById("drp-month")?.textContent).toBe("2026年6月");
+  });
+
+  it("repaints the label when the declared locale changes at runtime", async () => {
+    await mount({ wrapperLang: "en" });
+    expect(monthLabel().textContent).toBe("June 2026");
+
+    controller().localeValue = "ja";
+    await tick();
+
+    expect(monthLabel().textContent).toBe("2026年6月");
+  });
 
   it("falls back to English when the document language tag is invalid", async () => {
     document.documentElement.lang = "en_US";

@@ -70,6 +70,14 @@ describe("monthLabelFormatter", () => {
     expect(monthLabelFormatter("ja").format(may)).toBe("2026年5月");
   });
 
+  it("asks the runtime for its own locale when none is resolved", () => {
+    // A component with no declaration and no `lang` in scope formats the way
+    // the viewer's runtime does, which is not the same thing as English.
+    const reference = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" });
+
+    expect(monthLabelFormatter(undefined).format(may)).toBe(reference.format(may));
+  });
+
   it("falls back to English when the tag is not a well-formed language tag", () => {
     // `en_US` is what a server-side locale setting looks like when it is written
     // into `<html lang>` unchanged; `Intl` rejects it with a RangeError.

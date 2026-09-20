@@ -3,6 +3,7 @@ import { announce } from "../utils/announce";
 import { AttributeLease } from "../utils/attribute_lease";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { DetachGate } from "../utils/detach_gate";
+import { ListenerSet } from "../utils/listener_set";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /** Native controls that can submit a form. */
@@ -128,6 +129,7 @@ export class SubmitOnceController extends Controller<HTMLElement> {
 
   readonly #timers = new SafeTimeout();
   readonly #gate = new DetachGate();
+  readonly #listeners = new ListenerSet();
   readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   readonly #sessions = new Map<HTMLFormElement, SubmissionSession>();
 
@@ -160,15 +162,13 @@ export class SubmitOnceController extends Controller<HTMLElement> {
   override connect(): void {
     this.#gate.cancel();
     this.#beforeCache.activate();
-    this.element.addEventListener("submit", this.#onNativeSubmit, true);
-    this.element.addEventListener("turbo:submit-start", this.#onSubmitStart);
-    this.element.addEventListener("turbo:submit-end", this.#onSubmitEnd);
+    this.#listeners.add(this.element, "submit", this.#onNativeSubmit, { capture: true });
+    this.#listeners.add(this.element, "turbo:submit-start", this.#onSubmitStart);
+    this.#listeners.add(this.element, "turbo:submit-end", this.#onSubmitEnd);
   }
 
   override disconnect(): void {
-    this.element.removeEventListener("submit", this.#onNativeSubmit, true);
-    this.element.removeEventListener("turbo:submit-start", this.#onSubmitStart);
-    this.element.removeEventListener("turbo:submit-end", this.#onSubmitEnd);
+    this.#listeners.dispose();
     this.#beforeCache.deactivate();
     this.#gate.disconnected(this, () => this.#teardown());
   }

@@ -216,6 +216,52 @@ describe("ToastController", () => {
     });
   });
 
+  it("leaves an event that resolves to no toast alone", () => {
+    vi.useFakeTimers();
+    triggerShow("Outside pause notification");
+    const toast = item();
+    controller().itemTargetConnected(toast);
+
+    // `pause` / `resume` are declared actions, so a consumer may wire them to a
+    // container: an event from outside any item names no toast to hold.
+    const outside = root();
+    controller().pause(new FocusEvent("focusin", { bubbles: true, relatedTarget: outside }));
+    controller().resume(new FocusEvent("focusout", { bubbles: true, relatedTarget: outside }));
+
+    expect(toast.hasAttribute("data-paused")).toBe(false);
+    vi.advanceTimersByTime(200);
+    expect(list().children.length).toBe(0);
+  });
+
+  it("arms a toast the list already holds when the controller connects", () => {
+    // The target callback that normally arms a toast is delivered through a
+    // MutationObserver, which a DOM-only environment does not reliably fire, so
+    // `connect()` re-scans the list for toasts nothing is counting down yet.
+    vi.useFakeTimers();
+    triggerShow("Restored notification");
+    const toast = item();
+
+    controller().connect();
+    vi.advanceTimersByTime(200);
+
+    expect(toast.isConnected).toBe(false);
+  });
+
+  it("keeps a running deadline when the controller connects again", () => {
+    // Stimulus may run `connect()` for an element it is already driving; the
+    // toasts it is already counting down must not restart from the full duration.
+    vi.useFakeTimers();
+    triggerShow("Reconnect notification");
+    const toast = item();
+    controller().itemTargetConnected(toast);
+    vi.advanceTimersByTime(150);
+
+    controller().connect();
+    vi.advanceTimersByTime(50);
+
+    expect(toast.isConnected).toBe(false);
+  });
+
   it("pauses and resumes through delegated pointer events", () => {
     vi.useFakeTimers();
     triggerShow("Hover pause notification");
@@ -330,18 +376,55 @@ describe("ToastController", () => {
     expect(list().children.length).toBe(0);
   });
 
-  it("dismisses instead of stranding a pause whose remaining time reached zero", () => {
+  it("keeps a toast whose deadline lapsed while it is held, and dismisses it once released", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    const dismissed: string[] = [];
+    root().addEventListener("stimeo--toast:dismiss", (e) =>
+      dismissed.push((e as CustomEvent).detail.reason),
+    );
+    triggerShow("Expired pause notification");
+    const toast = item();
+    controller().itemTargetConnected(toast);
+    // The deadline passed while the timer sat queued (a throttled tab, a long task).
+    vi.setSystemTime(new Date("2026-07-20T00:00:01Z"));
+
+    toast.dispatchEvent(new FocusEvent("focusin", { bubbles: true, relatedTarget: document.body }));
+
+    // Holding is never what takes a toast away.
+    expect(toast.getAttribute("data-paused")).toBe("true");
+    vi.advanceTimersByTime(5000);
+    expect(list().children.length).toBe(1);
+    expect(dismissed).toEqual([]);
+
+    toast.dispatchEvent(
+      new FocusEvent("focusout", { bubbles: true, relatedTarget: document.body }),
+    );
+    expect(toast.hasAttribute("data-paused")).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(list().children.length).toBe(0);
+    expect(dismissed).toEqual(["timeout"]);
+  });
+
+  it("keeps focus inside a toast whose deadline lapsed before focus entered it", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
     triggerShow("Expired pause notification");
     const toast = item();
     controller().itemTargetConnected(toast);
+    const button = dismissButton(toast);
+    if (!button) throw new Error("Dismiss button not found");
+
+    // Same lapsed-deadline window, entered by focus instead of the pointer.
+    // Removing the toast here would take the focused control with it (WCAG 2.2 4.1.3).
     vi.setSystemTime(new Date("2026-07-20T00:00:01Z"));
+    button.focus();
+    button.dispatchEvent(
+      new FocusEvent("focusin", { bubbles: true, relatedTarget: document.body }),
+    );
 
-    toast.dispatchEvent(new FocusEvent("focusin", { bubbles: true, relatedTarget: document.body }));
-
-    expect(list().children.length).toBe(0);
-    expect(toast.hasAttribute("data-paused")).toBe(false);
+    expect(document.activeElement).toBe(button);
+    expect(list().children.length).toBe(1);
   });
 
   it("ignores non-Escape keys and prevents the delegated Escape action", () => {

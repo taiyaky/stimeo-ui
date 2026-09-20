@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { KeyedTimers } from "../utils/keyed_timers";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { SafeTimeout } from "../utils/safe_timeout";
 
@@ -78,8 +79,15 @@ export class AnnouncerController extends Controller<HTMLElement> {
   declare clearAfterValue: number;
   declare dedupeReannounceValue: boolean;
 
-  /** Clear/re-announce timers; one `clearAll()` in disconnect tears them all down. */
+  /** Drain timers, which belong to a politeness level rather than to a region. */
   readonly #timers = new SafeTimeout();
+
+  /**
+   * The one timer a region may have outstanding — its dedupe re-set, then its
+   * auto-clear. A region carries at most one, and the registry releases the
+   * previous one whenever a newer message takes the region over.
+   */
+  readonly #regionTimers = new KeyedTimers<HTMLElement>();
 
   /** Live regions generated to stand in for absent targets, for teardown. */
   readonly #generated = new Map<Level, HTMLElement>();
@@ -105,14 +113,6 @@ export class AnnouncerController extends Controller<HTMLElement> {
 
   /** Rewinds to an announceable initial state for the snapshot; see the remarks. */
   readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
-
-  /**
-   * The one timer a region may have outstanding — its dedupe re-set, then its
-   * auto-clear. Held weakly so a swapped-out target is not retained; a leftover
-   * id is harmless because {@link SafeTimeout.clear} no-ops on an id it does not
-   * own.
-   */
-  readonly #pending = new WeakMap<HTMLElement, number>();
 
   /**
    * Guards against handling the same CustomEvent twice. An event dispatched on
@@ -149,6 +149,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
     this.element.removeEventListener("stimeo--announcer:announce", this.#onAnnounceEvent);
     window.removeEventListener("stimeo--announcer:announce", this.#onAnnounceEvent);
     this.#timers.clearAll();
+    this.#regionTimers.clearAll();
     this.#queues.clear();
     this.#draining.clear();
     this.#removeGenerated();
@@ -301,14 +302,16 @@ export class AnnouncerController extends Controller<HTMLElement> {
 
     const region = this.#regionFor(level);
     if (this.dedupeReannounceValue && region.textContent === message) {
-      this.#cancelPending(region);
+      this.#regionTimers.clear(region);
       region.textContent = "";
       this.#scheduleDrain(level);
       return;
     }
 
     queue.shift();
-    this.#cancelPending(region);
+    // A non-positive `clearAfter` arms nothing below, so the region's pending
+    // timer is released here rather than by the arming that replaces it.
+    this.#regionTimers.clear(region);
     region.textContent = message;
     this.#scheduleClear(region, message);
     if (queue.length > 0) this.#scheduleDrain(level);
@@ -317,36 +320,13 @@ export class AnnouncerController extends Controller<HTMLElement> {
   /** Clears the region after `clearAfter` ms, unless a newer message replaced it. */
   #scheduleClear(region: HTMLElement, message: string): void {
     if (this.clearAfterValue <= 0) return;
-    this.#schedule(
+    this.#regionTimers.set(
       region,
       () => {
         if (region.textContent === message) region.textContent = "";
       },
       this.clearAfterValue,
     );
-  }
-
-  /**
-   * Arms `region`'s single pending timer. Callers reach here with the slot
-   * already free — `#drain` releases it before writing, and a fired timer clears its own
-   * entry below — so this does not cancel again.
-   */
-  #schedule(region: HTMLElement, callback: () => void, delay: number): void {
-    const id = this.#timers.set(() => {
-      // Drop the id as it fires: platform timer ids are recycled, and a stale
-      // one left here could later cancel the *other* region's live timer.
-      this.#pending.delete(region);
-      callback();
-    }, delay);
-    this.#pending.set(region, id);
-  }
-
-  /** Releases `region`'s pending timer, if it has one. */
-  #cancelPending(region: HTMLElement): void {
-    // `SafeTimeout.clear` ignores an id it does not own, so the "no pending
-    // timer" case needs no branch of its own.
-    this.#timers.clear(this.#pending.get(region) ?? -1);
-    this.#pending.delete(region);
   }
 
   /**
@@ -377,6 +357,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
     this.#queues.clear();
     this.#draining.clear();
     this.#timers.clearAll();
+    this.#regionTimers.clearAll();
     for (const level of LEVELS) {
       if (this.#hasTargetFor(level)) {
         const target = level === "assertive" ? this.assertiveTarget : this.politeTarget;

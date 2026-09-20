@@ -7,6 +7,17 @@ import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay, tick } from "./helpers/timing";
 
+// The month label is formatted in the resolved locale, so a case that declares
+// no language would otherwise read the runner's. Pin one for the whole file and
+// let the cases that care declare their own.
+beforeEach(() => {
+  document.documentElement.lang = "en";
+});
+
+afterEach(() => {
+  document.documentElement.removeAttribute("lang");
+});
+
 describe("CalendarController", () => {
   let application: Application;
 
@@ -706,9 +717,13 @@ describe("CalendarController off-contract input", () => {
     return html;
   };
 
-  const mount = async (month: string) => {
+  const mount = async (month: string, wrapperLang = "", locale = "") => {
+    const open = wrapperLang === "" ? "" : `<div lang="${wrapperLang}">`;
+    const close = wrapperLang === "" ? "" : "</div>";
     document.body.innerHTML = `
+      ${open}
       <div id="cal" data-controller="stimeo--calendar"
+           ${locale === "" ? "" : `data-stimeo--calendar-locale-value="${locale}"`}
            data-stimeo--calendar-month-value="${month}">
         <span id="cal-label" data-stimeo--calendar-target="label"></span>
         <table role="grid" aria-labelledby="cal-label">
@@ -716,7 +731,8 @@ describe("CalendarController off-contract input", () => {
                  data-action="keydown->stimeo--calendar#onKeydown
                               click->stimeo--calendar#selectByClick">${cells()}</tbody>
         </table>
-      </div>`;
+      </div>
+      ${close}`;
     application = Application.start();
     application.register("stimeo--calendar", CalendarController);
     errors = [];
@@ -827,6 +843,73 @@ describe("CalendarController off-contract input", () => {
     expect(days().filter((cell) => cell.getAttribute("tabindex") === "0")).toHaveLength(1);
     expect(days().every((cell) => cell.hasAttribute("aria-selected"))).toBe(true);
     expect(days()[5]?.getAttribute("data-date")).toBe("2026-05-01");
+  });
+
+  it("labels the month in the language of the nearest ancestor", async () => {
+    // `lang` is inherited, so the language that applies to the grid is the
+    // nearest one above it — not the document element's.
+    await mount("2026-05", "ja");
+
+    expect(errors).toEqual([]);
+    expect(document.getElementById("cal-label")?.textContent).toBe("2026年5月");
+  });
+
+  it("lets a nearer ancestor language win over a farther one", async () => {
+    document.documentElement.lang = "ja";
+    await mount("2026-05", "en");
+
+    expect(document.getElementById("cal-label")?.textContent).toBe("May 2026");
+  });
+
+  it("asks for the runtime locale, not English, when nothing declares a language", async () => {
+    // The runner's own locale is what an undeclared language resolves to, and it
+    // may well be English — so the case states which locale the formatter is
+    // asked for rather than comparing the rendered label.
+    document.documentElement.removeAttribute("lang");
+    const asked: unknown[] = [];
+    const NativeDateTimeFormat = Intl.DateTimeFormat;
+    const RecordingDateTimeFormat = new Proxy(NativeDateTimeFormat, {
+      construct(target, argumentsList, newTarget) {
+        asked.push(argumentsList[0]);
+        return Reflect.construct(target, argumentsList, newTarget);
+      },
+    });
+    Object.defineProperty(Intl, "DateTimeFormat", {
+      configurable: true,
+      writable: true,
+      value: RecordingDateTimeFormat,
+    });
+
+    try {
+      await mount("2026-05");
+    } finally {
+      Object.defineProperty(Intl, "DateTimeFormat", {
+        configurable: true,
+        writable: true,
+        value: NativeDateTimeFormat,
+      });
+    }
+
+    expect(errors).toEqual([]);
+    expect(asked).toContain(undefined);
+    expect(asked).not.toContain("en");
+  });
+
+  it("lets a declared locale win over every lang in scope", async () => {
+    await mount("2026-05", "en", "ja");
+
+    expect(document.getElementById("cal-label")?.textContent).toBe("2026年5月");
+  });
+
+  it("repaints the label when the declared locale changes at runtime", async () => {
+    await mount("2026-05", "en");
+    expect(document.getElementById("cal-label")?.textContent).toBe("May 2026");
+
+    controller().localeValue = "ja";
+    await delay(50);
+
+    expect(errors).toEqual([]);
+    expect(document.getElementById("cal-label")?.textContent).toBe("2026年5月");
   });
 
   it("keeps painting and labelling in English when the document language tag is malformed", async () => {

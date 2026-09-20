@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { DetachGate } from "../utils/detach_gate";
+import { ListenerSet } from "../utils/listener_set";
 
 /** Records that this controller wrote `hidden`, and the authored value to put back. */
 const HIDDEN_MARKER = "data-optimistic-toggled";
@@ -85,6 +86,7 @@ export class OptimisticController extends Controller<HTMLElement> {
   #pending: unknown = null;
 
   readonly #gate = new DetachGate();
+  readonly #listeners = new ListenerSet();
 
   /** True between `connect()` and `disconnect()`, so a repeat connect rewinds nothing. */
   #connected = false;
@@ -98,14 +100,13 @@ export class OptimisticController extends Controller<HTMLElement> {
     this.#gate.cancel();
     this.#connected = true;
     if (restored && this.element.hasAttribute("data-optimistic")) this.#revert();
-    this.element.addEventListener("turbo:submit-start", this.#onSubmitStart);
-    this.element.addEventListener("turbo:submit-end", this.#onSubmitEnd);
+    this.#listeners.add(this.element, "turbo:submit-start", this.#onSubmitStart);
+    this.#listeners.add(this.element, "turbo:submit-end", this.#onSubmitEnd);
   }
 
   override disconnect(): void {
     this.#connected = false;
-    this.element.removeEventListener("turbo:submit-start", this.#onSubmitStart);
-    this.element.removeEventListener("turbo:submit-end", this.#onSubmitEnd);
+    this.#listeners.dispose();
     // Ownership outlives an in-page move: only a real detach forgets it.
     this.#gate.disconnected(this, () => {
       this.#pending = null;

@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { DetachGate } from "../utils/detach_gate";
+import { ListenerSet } from "../utils/listener_set";
 import { MinDurationFloor } from "../utils/min_duration_floor";
 import { SafeTimeout } from "../utils/safe_timeout";
 
@@ -67,6 +68,7 @@ export class FrameLoadingController extends Controller<HTMLElement> {
   readonly #floor = new MinDurationFloor(this.#timeouts);
   readonly #gate = new DetachGate();
   readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+  readonly #listeners = new ListenerSet();
   #loading = false;
   /**
    * The optional targets this controller revealed, and the content it marked inert.
@@ -100,15 +102,13 @@ export class FrameLoadingController extends Controller<HTMLElement> {
   override connect(): void {
     this.#gate.cancel();
     this.#beforeCache.activate();
-    this.element.addEventListener("turbo:before-fetch-request", this.#onStart);
-    this.element.addEventListener("turbo:frame-load", this.#onEnd);
-    this.element.addEventListener("turbo:fetch-request-error", this.#onEnd);
+    this.#listeners.add(this.element, "turbo:before-fetch-request", this.#onStart);
+    this.#listeners.add(this.element, "turbo:frame-load", this.#onEnd);
+    this.#listeners.add(this.element, "turbo:fetch-request-error", this.#onEnd);
   }
 
   override disconnect(): void {
-    this.element.removeEventListener("turbo:before-fetch-request", this.#onStart);
-    this.element.removeEventListener("turbo:frame-load", this.#onEnd);
-    this.element.removeEventListener("turbo:fetch-request-error", this.#onEnd);
+    this.#listeners.dispose();
     this.#beforeCache.deactivate();
     this.#gate.disconnected(this, () => this.#teardown());
   }

@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { PausableTimers } from "../utils/pausable_timers";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { maxTransitionTotalMs } from "../utils/transition_completion";
 
@@ -30,6 +31,9 @@ const DELEGATED_EVENTS = ["click", "focusin", "focusout", "keydown", "mouseover"
  *
  * Implements WAI-ARIA live region status/alert announcements, limits simultaneous
  * elements, and pauses dismiss timeouts on hover or focus to comply with WCAG 2.2.1.
+ * Pausing never dismisses: a deadline that lapsed while the timer sat queued settles
+ * once the last of hover and focus is released, so the pointer's target and the
+ * focused control stay where they are.
  *
  * `dismiss` dispatches `{ item: HTMLElement, reason: "timeout" | "user" }`.
  *
@@ -57,13 +61,11 @@ export class ToastController extends Controller<HTMLElement> {
   declare durationValue: number;
   declare maxValue: number;
 
-  /**
-   * Registry for every auto-dismiss and transition-finalize timer the controller
-   * schedules. `SafeTimeout` owns *registration and teardown only*; the
-   * pause/resume remaining-time accounting stays in `#activeTimeouts` so the
-   * per-widget WCAG 2.2.1 semantics are not flattened into the helper.
-   */
+  /** Removal timers for the leaving transition; the auto-dismiss ones live below. */
   #timers = new SafeTimeout();
+
+  /** Per-toast auto-dismiss, held open while the toast is hovered or focused. */
+  readonly #dismiss = new PausableTimers<HTMLElement>();
 
   /**
    * Pending one-shot `requestAnimationFrame` handles (the entering→visible flip).
@@ -72,12 +74,6 @@ export class ToastController extends Controller<HTMLElement> {
    */
   #rafHandles = new Map<HTMLElement, number>();
 
-  /** Track active timeouts mapped by each toast element for safe cancellation. */
-  #activeTimeouts = new Map<HTMLElement, { id: number; startedAt: number; remaining: number }>();
-
-  /** Track active pause reasons (hover/focus) per toast for WCAG 2.2.1 pause/resume. */
-  #pauseReasons = new Map<HTMLElement, Set<string>>();
-
   /** The stable list that owns delegated listeners for dynamically added items. */
   #delegatedList: HTMLElement | null = null;
 
@@ -85,23 +81,22 @@ export class ToastController extends Controller<HTMLElement> {
     this.#connectDelegatedEvents();
     this.enforceMaxLimit();
     for (const item of this.itemTargets) {
-      if (!this.#activeTimeouts.has(item) && item.dataset.state !== "leaving") {
+      if (!this.#dismiss.tracks(item) && item.dataset.state !== "leaving") {
         this.#startTimer(item);
       }
     }
   }
 
   override disconnect(): void {
-    // SafeTimeout owns every auto-dismiss + finalize timer; one call tears them
-    // all down so none fires against the detached controller.
+    // Both registries own every timer the controller schedules, so a call each
+    // leaves none to fire against the detached controller.
     this.#disconnectDelegatedEvents();
     this.#timers.clearAll();
+    this.#dismiss.clearAll();
     for (const handle of this.#rafHandles.values()) {
       window.cancelAnimationFrame(handle);
     }
     this.#rafHandles.clear();
-    this.#activeTimeouts.clear();
-    this.#pauseReasons.clear();
   }
 
   /** Rebinds delegated interaction when Turbo replaces the list target in place. */
@@ -118,19 +113,12 @@ export class ToastController extends Controller<HTMLElement> {
     for (const item of this.itemTargets) {
       if (item.dataset.state === "leaving") continue;
 
-      const pauseReasons = this.#pauseReasons.get(item);
-      this.#clearTimer(item);
       if (this.durationValue <= 0) {
+        this.#dismiss.clear(item);
         item.removeAttribute("data-paused");
-      } else if (pauseReasons && pauseReasons.size > 0) {
-        this.#pauseReasons.set(item, pauseReasons);
-        this.#activeTimeouts.set(item, {
-          id: 0,
-          startedAt: 0,
-          remaining: this.durationValue,
-        });
-        item.setAttribute("data-paused", "true");
       } else {
+        // A toast held by hover or focus keeps its hold and banks the new
+        // duration, so the change reaches it without dismissing it.
         this.#startTimer(item);
       }
     }
@@ -162,7 +150,7 @@ export class ToastController extends Controller<HTMLElement> {
 
   /** Clears any active timer when a toast is removed from the DOM. */
   itemTargetDisconnected(element: HTMLElement): void {
-    this.#clearTimer(element);
+    this.#dismiss.clear(element);
     this.#cancelAnimation(element);
   }
 
@@ -252,48 +240,17 @@ export class ToastController extends Controller<HTMLElement> {
    */
   pause(event: Event): void {
     const item = this.#itemFromEvent(event);
-    if (!item || this.durationValue <= 0) return;
-
-    const timeout = this.#activeTimeouts.get(item);
-    if (!timeout) return;
-
-    const reasons = this.#pauseReasonsFor(item);
-    const wasActive = reasons.size > 0;
-    reasons.add(this.#pauseReason(event));
-
-    // Only snapshot the remaining time on the first reason; subsequent reasons
-    // must not recompute elapsed against the already-cleared timer.
-    if (wasActive || timeout.id === 0) return;
-
-    this.#timers.clear(timeout.id);
-    const elapsed = Date.now() - timeout.startedAt;
-    const remaining = Math.max(0, timeout.remaining - elapsed);
-
-    if (remaining <= 0) {
-      this.#removeWithTransition(item, "timeout");
-      return;
+    if (item && this.#dismiss.pause(item, this.#pauseReason(event))) {
+      item.setAttribute("data-paused", "true");
     }
-
-    this.#activeTimeouts.set(item, { id: 0, startedAt: 0, remaining });
-    item.setAttribute("data-paused", "true");
   }
 
   /** Resumes the auto-dismiss timer once both hover and focus have been released. */
   resume(event: Event): void {
     const item = this.#itemFromEvent(event);
-    if (!item || this.durationValue <= 0) return;
-
-    const reasons = this.#pauseReasonsFor(item);
-    reasons.delete(this.#pauseReason(event));
-    // Still paused by the other reason (e.g. mouse left but focus remains).
-    if (reasons.size > 0) return;
-
-    const timeout = this.#activeTimeouts.get(item);
-    if (!timeout) return;
-    if (timeout.id !== 0 || timeout.remaining <= 0) return;
-
-    item.removeAttribute("data-paused");
-    this.#startTimer(item, timeout.remaining);
+    if (item && this.#dismiss.resume(item, this.#pauseReason(event))) {
+      item.removeAttribute("data-paused");
+    }
   }
 
   /** Resolves the toast item element a pause/resume event targets. */
@@ -309,46 +266,27 @@ export class ToastController extends Controller<HTMLElement> {
     return event.type === "focusin" || event.type === "focusout" ? "focus" : "hover";
   }
 
-  /** Lazily creates and returns the active pause-reason set for an item. */
-  #pauseReasonsFor(item: HTMLElement): Set<string> {
-    let reasons = this.#pauseReasons.get(item);
-    if (!reasons) {
-      reasons = new Set<string>();
-      this.#pauseReasons.set(item, reasons);
-    }
-    return reasons;
-  }
-
-  #startTimer(element: HTMLElement, duration = this.durationValue): void {
+  /** Arms a toast's auto-dismiss; a non-positive `duration` means it never expires. */
+  #startTimer(element: HTMLElement): void {
     if (
-      duration <= 0 ||
+      this.durationValue <= 0 ||
       element.dataset.state === "leaving" ||
       element.parentNode !== this.listTarget
     ) {
       return;
     }
 
-    this.#clearTimer(element);
-    const id = this.#timers.set(() => {
-      this.#removeWithTransition(element, "timeout");
-    }, duration);
-
-    this.#activeTimeouts.set(element, { id, startedAt: Date.now(), remaining: duration });
-  }
-
-  #clearTimer(element: HTMLElement): void {
-    const timeout = this.#activeTimeouts.get(element);
-    if (timeout) {
-      if (timeout.id) this.#timers.clear(timeout.id);
-      this.#activeTimeouts.delete(element);
-    }
-    this.#pauseReasons.delete(element);
+    this.#dismiss.set(
+      element,
+      () => this.#removeWithTransition(element, "timeout"),
+      this.durationValue,
+    );
   }
 
   #removeWithTransition(element: HTMLElement, reason: "timeout" | "user"): void {
     if (element.dataset.state === "leaving" || element.parentNode !== this.listTarget) return;
 
-    this.#clearTimer(element);
+    this.#dismiss.clear(element);
     this.#cancelAnimation(element);
     element.setAttribute("data-state", "leaving");
 

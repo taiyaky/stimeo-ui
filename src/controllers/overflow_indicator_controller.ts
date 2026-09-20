@@ -272,7 +272,7 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
     this.#observedViewport = next;
     this.#layout.observe(next);
     this.#layout.observeViewport();
-    next.addEventListener("load", this.#onContentLoad, true);
+    this.#layout.observeDescendantLoads(next);
     this.#syncContentObservation();
 
     if (typeof MutationObserver !== "undefined") {
@@ -313,17 +313,13 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
   #stopObservingViewport(): void {
     this.#mutationObserver?.disconnect();
     this.#mutationObserver = null;
-    this.#observedViewport?.removeEventListener("load", this.#onContentLoad, true);
+    this.#layout.unobserveDescendantLoads();
     if (this.#observedViewport) this.#layout.unobserve(this.#observedViewport);
     for (const content of this.#observedContent) this.#layout.unobserve(content);
     this.#observedContent.clear();
     this.#observedViewport = null;
     this.#layout.unobserveViewport();
   }
-
-  readonly #onContentLoad = (): void => {
-    if (this.#connected) this.update();
-  };
 
   get #threshold(): number {
     const value = this.thresholdValue;

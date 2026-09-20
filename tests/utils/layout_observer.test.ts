@@ -187,6 +187,111 @@ describe("LayoutObserver", () => {
     });
   });
 
+  describe("descendant loads", () => {
+    /** A container holding one image, both attached so events propagate for real. */
+    const container = (id: string): { root: HTMLElement; image: HTMLElement } => {
+      const root = document.createElement("div");
+      root.id = id;
+      const image = document.createElement("img");
+      root.append(image);
+      document.body.append(root);
+      return { root, image };
+    };
+
+    /** `load` does not bubble, which is the whole reason the listener is a capture one. */
+    const fireLoad = (element: HTMLElement): void => {
+      element.dispatchEvent(new Event("load"));
+    };
+
+    it("reports a load from a descendant", () => {
+      const spy = vi.fn();
+      const observer = makeObserver(spy);
+      const { root, image } = container("content");
+
+      observer.observeDescendantLoads(root);
+      fireLoad(image);
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      observer.disconnect();
+    });
+
+    it("ignores a load outside the container", () => {
+      const spy = vi.fn();
+      const observer = makeObserver(spy);
+      const { root } = container("content");
+      const { image: outside } = container("elsewhere");
+
+      observer.observeDescendantLoads(root);
+      fireLoad(outside);
+
+      expect(spy).not.toHaveBeenCalled();
+      observer.disconnect();
+    });
+
+    it("moves the observation, leaving the container it let go inert", () => {
+      // The release lives here because the consumer never names it: pointing at
+      // the new container is the only thing a swapped target has to do.
+      const spy = vi.fn();
+      const observer = makeObserver(spy);
+      const first = container("first");
+      const second = container("second");
+
+      observer.observeDescendantLoads(first.root);
+      observer.observeDescendantLoads(second.root);
+      fireLoad(first.image);
+      expect(spy).not.toHaveBeenCalled();
+
+      fireLoad(second.image);
+      expect(spy).toHaveBeenCalledTimes(1);
+      observer.disconnect();
+    });
+
+    it("reports once when the same container is named again", () => {
+      const spy = vi.fn();
+      const observer = makeObserver(spy);
+      const { root, image } = container("content");
+
+      observer.observeDescendantLoads(root);
+      observer.observeDescendantLoads(root);
+      fireLoad(image);
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      observer.disconnect();
+    });
+
+    it("stops reporting after unobserveDescendantLoads, which is safe to call unarmed", () => {
+      const spy = vi.fn();
+      const observer = makeObserver(spy);
+      const { root, image } = container("content");
+
+      expect(() => observer.unobserveDescendantLoads()).not.toThrow();
+      observer.observeDescendantLoads(root);
+      observer.unobserveDescendantLoads();
+      observer.unobserveDescendantLoads();
+      fireLoad(image);
+
+      expect(spy).not.toHaveBeenCalled();
+      observer.disconnect();
+    });
+
+    it("leaves element and viewport observation alone", () => {
+      const spy = vi.fn();
+      const observer = makeObserver(spy);
+      const element = document.createElement("div");
+      const { root } = container("content");
+      observer.observe(element);
+      observer.observeViewport();
+      observer.observeDescendantLoads(root);
+
+      observer.unobserveDescendantLoads();
+
+      FakeResizeObserver.instances[0]?.trigger(element);
+      window.dispatchEvent(new Event("resize"));
+      expect(spy).toHaveBeenCalledTimes(2);
+      observer.disconnect();
+    });
+  });
+
   describe("combined teardown", () => {
     it("disconnect releases both element and viewport observation", () => {
       const spy = vi.fn();
@@ -209,6 +314,25 @@ describe("LayoutObserver", () => {
 
       observer.disconnect();
       expect(() => observer.disconnect()).not.toThrow();
+    });
+
+    it("disconnect releases descendant loads, and they can be observed again", () => {
+      const spy = vi.fn();
+      const observer = makeObserver(spy);
+      const root = document.createElement("div");
+      const image = document.createElement("img");
+      root.append(image);
+      document.body.append(root);
+      observer.observeDescendantLoads(root);
+
+      observer.disconnect();
+      image.dispatchEvent(new Event("load"));
+      expect(spy).not.toHaveBeenCalled();
+
+      observer.observeDescendantLoads(root);
+      image.dispatchEvent(new Event("load"));
+      expect(spy).toHaveBeenCalledTimes(1);
+      observer.disconnect();
     });
 
     it("can re-observe the viewport after disconnect", () => {

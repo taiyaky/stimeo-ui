@@ -1,6 +1,5 @@
 /**
- * Shared `prefers-reduced-motion` lookup for the motion-aware controllers
- *.
+ * Shared `prefers-reduced-motion` lookup for the motion-aware controllers.
  *
  * This one-liner keeps the media query string and the environment guard
  * single-sourced across them. The preference is intentionally re-read on every

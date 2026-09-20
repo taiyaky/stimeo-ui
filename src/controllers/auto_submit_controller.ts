@@ -1,6 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
+import { announce } from "../utils/announce";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { CompositionTracker } from "../utils/composition_tracker";
+import { ListenerSet } from "../utils/listener_set";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -67,6 +69,8 @@ export class AutoSubmitController extends Controller<HTMLElement> {
   readonly #timers = new SafeTimeout();
   /** Id of the pending debounce timer, so a new keystroke can reset it. */
   #pendingId = 0;
+  /** Listeners that live with the bound form rather than with the connection. */
+  readonly #formListeners = new ListenerSet();
   /** The form the listeners are attached to; target callbacks rebind it. */
   #boundForm: HTMLFormElement | null = null;
   /** Rewinds the transient state hooks just before Turbo snapshots the page. */
@@ -78,9 +82,7 @@ export class AutoSubmitController extends Controller<HTMLElement> {
     const message = this.messageValue;
     this.dispatch("done", { detail: { message: message || undefined } });
     // Bridge the silent result swap to the shared Announcer so SR users hear it.
-    if (this.announceValue && message) {
-      window.dispatchEvent(new CustomEvent("stimeo--announcer:announce", { detail: { message } }));
-    }
+    if (this.announceValue) announce(message);
   };
 
   /** Owns delegated IME lifecycle state and submits confirmed input text. */
@@ -170,12 +172,12 @@ export class AutoSubmitController extends Controller<HTMLElement> {
     if (previous) {
       this.#cancelPending();
       previous.removeAttribute("data-auto-submit-pending");
-      previous.removeEventListener("turbo:submit-end", this.#onSubmitEnd);
+      this.#formListeners.dispose();
       this.#composition.unobserve(previous);
     }
     this.#boundForm = form;
     if (!form) return;
-    form.addEventListener("turbo:submit-end", this.#onSubmitEnd);
+    this.#formListeners.add(form, "turbo:submit-end", this.#onSubmitEnd);
     this.#composition.observe(form);
   }
 

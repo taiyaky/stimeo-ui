@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { ownerIndex } from "../utils/event_owner";
 import { canTakeFocus } from "../utils/focus_candidate";
+import { ListenerSet } from "../utils/listener_set";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { TabindexLoan } from "../utils/tabindex_loan";
 
@@ -96,6 +97,7 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
 
   /** Coalesces one target/morph/mutation batch into one full DOM reconciliation. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileDom());
+  readonly #listeners = new ListenerSet();
   /** Provides the last-resort focus landmark without claiming an authored tabindex. */
   readonly #rootTabindex = new TabindexLoan<HTMLElement>();
   /** Watches retained targets and controls whose declarative or reflected state changed. */
@@ -138,9 +140,9 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
       subtree: true,
     });
     this.#observing = true;
-    this.element.addEventListener("change", this.#onTriggerInput);
-    this.element.addEventListener("input", this.#onTriggerInput);
-    this.element.addEventListener("turbo:morph-element", this.#onMorph);
+    this.#listeners.add(this.element, "change", this.#onTriggerInput);
+    this.#listeners.add(this.element, "input", this.#onTriggerInput);
+    this.#listeners.add(this.element, "turbo:morph-element", this.#onMorph);
     document.addEventListener("reset", this.#onReset, true);
   }
 
@@ -149,9 +151,7 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
     this.#reconcile.cancel();
     this.#observing = false;
     this.#observer.disconnect();
-    this.element.removeEventListener("change", this.#onTriggerInput);
-    this.element.removeEventListener("input", this.#onTriggerInput);
-    this.element.removeEventListener("turbo:morph-element", this.#onMorph);
+    this.#listeners.dispose();
     document.removeEventListener("reset", this.#onReset, true);
     this.#rootTabindex.returnAll();
   }

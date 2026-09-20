@@ -1,10 +1,21 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CurrencyInputController } from "../src/controllers/currency_input_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
+
+// Grouping and decimal marks come from the resolved locale, so a case that
+// declares no language would otherwise read the runner's. Pin one for the whole
+// file and let the cases that care declare their own.
+beforeEach(() => {
+  document.documentElement.lang = "en-US";
+});
+
+afterEach(() => {
+  document.documentElement.removeAttribute("lang");
+});
 
 /**
  * Behavioral tests for {@link CurrencyInputController}: keystroke-level entry
@@ -43,8 +54,11 @@ describe("CurrencyInputController", () => {
   };
 
   /** Mounts without any Value attributes so the declared defaults are exercised. */
-  const mountBare = async () => {
+  const mountBare = async (wrapperLang = "") => {
+    const open = wrapperLang === "" ? "" : `<div lang="${wrapperLang}">`;
+    const close = wrapperLang === "" ? "" : "</div>";
     document.body.innerHTML = `
+      ${open}
       <div data-controller="stimeo--currency-input">
         <label for="amount">Amount</label>
         <input id="amount" type="text" aria-describedby="amount-sr"
@@ -53,7 +67,8 @@ describe("CurrencyInputController", () => {
                             blur->stimeo--currency-input#format" />
         <span id="amount-sr" data-stimeo--currency-input-target="srValue"></span>
         <input type="hidden" data-stimeo--currency-input-target="field" />
-      </div>`;
+      </div>
+      ${close}`;
     application = Application.start();
     application.register("stimeo--currency-input", CurrencyInputController);
     await tick();
@@ -327,6 +342,59 @@ describe("CurrencyInputController", () => {
     expect(srValue().textContent).toBe("1,234.50"); // no currency by default
   });
 
+  it("formats in the language of the nearest ancestor when none is declared", async () => {
+    // `lang` is inherited, so the language that applies to the field is the
+    // nearest one above it. German groups with `.` and marks the decimal with
+    // `,`, so that is what the typist enters and what the display shows.
+    await mountBare("de");
+    typeKeys("1234,5");
+    blur();
+
+    expect(display().value).toBe("1.234,50");
+    expect(field().value).toBe("1234.5");
+  });
+
+  it("reads back its own output in the language of the nearest ancestor", async () => {
+    await mountBare("de");
+    type("1.234,56");
+    blur();
+
+    expect(field().value).toBe("1234.56");
+  });
+
+  it("asks for the runtime locale when nothing declares a language", async () => {
+    // The runner's own locale is what an undeclared language resolves to, and it
+    // may well be en-US — so the case states which locale the formatters are
+    // asked for rather than comparing the rendered text.
+    document.documentElement.removeAttribute("lang");
+    const asked: unknown[] = [];
+    const NativeNumberFormat = Intl.NumberFormat;
+    const RecordingNumberFormat = new Proxy(NativeNumberFormat, {
+      construct(target, argumentsList, newTarget) {
+        asked.push(argumentsList[0]);
+        return Reflect.construct(target, argumentsList, newTarget);
+      },
+    });
+    Object.defineProperty(Intl, "NumberFormat", {
+      configurable: true,
+      writable: true,
+      value: RecordingNumberFormat,
+    });
+
+    try {
+      await mountBare();
+    } finally {
+      Object.defineProperty(Intl, "NumberFormat", {
+        configurable: true,
+        writable: true,
+        value: NativeNumberFormat,
+      });
+    }
+
+    expect(asked).toContain(undefined);
+    expect(asked).not.toContain("en-US");
+  });
+
   it("falls back to the Value defaults on malformed declarations and stays alive", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     document.body.innerHTML = `
@@ -352,6 +420,17 @@ describe("CurrencyInputController", () => {
     expect(srValue().textContent).toBe("1,234.50"); // invalid currency → plain number
     type("1234.56");
     expect(field().value).toBe("1234.56"); // the input path stays alive
+  });
+
+  it("keeps a valid currency when the locale declaration is malformed", async () => {
+    // The locale is validated before the currency is checked against it, so a
+    // tag `Intl` rejects must not make a good currency code look unusable too.
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await mount({ locale: "en_US", currency: "USD", value: "1234.5" });
+
+    expect(error).not.toHaveBeenCalled();
+    expect(display().value).toBe("1,234.50");
+    expect(srValue().textContent).toBe("$1,234.50");
   });
 
   it("re-renders when locale, currency, or precision change at runtime", async () => {

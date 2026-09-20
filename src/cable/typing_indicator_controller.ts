@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
+import { KeyedTimers } from "../utils/keyed_timers";
 import { MAX_TIMER_DELAY_MS, SafeTimeout } from "../utils/safe_timeout";
 import {
   type ConfirmedCableSubscription,
@@ -113,8 +114,10 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
   #params: Record<string, unknown> = {};
 
   #subscription: ConfirmedCableSubscription | null = null;
-  /** Names currently typing (other clients), each with its auto-clear timer id. */
-  readonly #typers = new Map<string, number>();
+  /** Names currently typing (other clients), in the order their first signal arrived. */
+  readonly #typers = new Set<string>();
+  /** Each typer's auto-clear timer, restarted by every further signal from that name. */
+  readonly #expiry = new KeyedTimers<string>();
   readonly #timers = new SafeTimeout();
   /** Epoch ms of the last broadcast, for leading-edge throttling. */
   #lastSentAt = 0;
@@ -177,6 +180,7 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
     this.#subscription?.unsubscribe();
     this.#subscription = null;
     this.#timers.clearAll();
+    this.#expiry.clearAll();
     this.#announceId = null;
     this.#typers.clear();
     this.element.removeAttribute("data-typing");
@@ -206,13 +210,9 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
     const name = (data as { name?: unknown } | null)?.name;
     if (typeof name !== "string" || name === "" || name === this.nameValue) return;
 
-    const existing = this.#typers.get(name);
-    if (existing !== undefined) this.#timers.clear(existing);
-    const added = existing === undefined;
-    this.#typers.set(
-      name,
-      this.#timers.set(() => this.#untrack(name), this.#timeout),
-    );
+    const added = !this.#typers.has(name);
+    this.#typers.add(name);
+    this.#expiry.set(name, () => this.#untrack(name), this.#timeout);
     if (added) this.#render();
   }
 
@@ -285,7 +285,7 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
 
   /** Writes the current typer set onto the hook and the status slot. */
   #paint(): string[] {
-    const names = [...this.#typers.keys()];
+    const names = [...this.#typers];
     this.element.setAttribute("data-typing", names.length > 0 ? "true" : "false");
     if (this.hasStatusTarget) {
       this.statusTarget.textContent = this.#message(names);

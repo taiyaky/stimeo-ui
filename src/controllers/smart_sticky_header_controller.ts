@@ -1,5 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { validSelector } from "../utils/declared_value";
+import { FrameCoalescer } from "../utils/frame_coalescer";
+import { resolveScrollSource, scrollOffset } from "../utils/scroll_source";
 
 /** The depth that never hides, used when `offset` is not a finite number. */
 const DEFAULT_OFFSET = 80;
@@ -53,7 +55,8 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
   declare toleranceValue: number;
 
   #connected = false;
-  #frame: number | null = null;
+  /** Coalesces scroll bursts into one measurement per frame. */
+  readonly #frames = new FrameCoalescer();
   /** The scroll source resolved at connect — disconnect must unbind the SAME node. */
   #scrollerEl: HTMLElement | Window = window;
   /** The validated `containerSelector`, or `""` when the declaration cannot be parsed. */
@@ -72,13 +75,7 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
     return Number.isFinite(this.offsetValue) ? this.offsetValue : DEFAULT_OFFSET;
   }
 
-  readonly #onScroll = (): void => {
-    if (this.#frame !== null) return;
-    this.#frame = requestAnimationFrame(() => {
-      this.#frame = null;
-      this.#measure();
-    });
-  };
+  readonly #onScroll = (): void => this.#frames.schedule(() => this.#measure());
 
   /**
    * Focus inside a hidden header must reveal it (WCAG 2.4.7 / 2.4.11); the
@@ -100,8 +97,8 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
     // The hook is scroll-derived: recompute from the live scroll position
     // instead of trusting a cached snapshot (which may say hidden at y=0).
     this.#hidden = null;
-    this.#scrollerEl = this.#resolveScroller();
-    this.#lastY = this.#scrollY;
+    this.#scrollerEl = resolveScrollSource(this.#containerSelector);
+    this.#lastY = scrollOffset(this.#scrollerEl);
     this.#scrollerEl.addEventListener("scroll", this.#onScroll, { passive: true });
     this.element.addEventListener("focusin", this.#onFocusin);
     this.#apply(false, false);
@@ -112,27 +109,11 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
     this.#connected = false;
     this.#scrollerEl.removeEventListener("scroll", this.#onScroll);
     this.element.removeEventListener("focusin", this.#onFocusin);
-    if (this.#frame !== null) cancelAnimationFrame(this.#frame);
-    this.#frame = null;
-  }
-
-  /** Resolves the scroll source: the `containerSelector` match, else the window. */
-  #resolveScroller(): HTMLElement | Window {
-    if (this.#containerSelector) {
-      const container = document.querySelector<HTMLElement>(this.#containerSelector);
-      if (container) return container;
-    }
-    return window;
-  }
-
-  get #scrollY(): number {
-    const scroller = this.#scrollerEl;
-    // Identity check, not `instanceof Window` — cross-realm/test DOMs fail it.
-    return scroller === window ? window.scrollY : (scroller as HTMLElement).scrollTop;
+    this.#frames.cancel();
   }
 
   #measure(): void {
-    const y = this.#scrollY;
+    const y = scrollOffset(this.#scrollerEl);
     // The offset zone decides before the jitter guard: a move small enough to
     // be jitter can still be the one that re-enters the zone, and a header
     // left hidden there cannot be scrolled back into view.

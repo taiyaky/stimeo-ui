@@ -1,6 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { KeyedTimers } from "../utils/keyed_timers";
 import { prefersReducedMotion } from "../utils/reduced_motion";
-import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
  * The connection whose removal timer currently owns an element's `data-highlight`
@@ -58,14 +58,11 @@ export class HighlightController extends Controller<HTMLElement> {
   declare durationValue: number;
   declare observeValue: boolean;
 
-  readonly #timeouts = new SafeTimeout();
   /**
-   * The removal timer this connection has outstanding for an element. Held weakly so
-   * a row that leaves the DOM is not retained, and dropped wholesale on `disconnect()`
-   * so a cleared id can never be matched against a recycled one. Which connection owns
-   * an element's hook is answered by the shared owner registry above.
+   * The removal timer this connection has outstanding for each element. Which
+   * connection owns an element's hook is answered by the shared owner registry above.
    */
-  #pending = new WeakMap<HTMLElement, number>();
+  readonly #removal = new KeyedTimers<HTMLElement>();
   #observer: MutationObserver | null = null;
 
   override connect(): void {
@@ -91,8 +88,7 @@ export class HighlightController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#observer?.disconnect();
     this.#observer = null;
-    this.#timeouts.clearAll();
-    this.#pending = new WeakMap();
+    this.#removal.clearAll();
   }
 
   /** Drops a hook that arrived with the DOM, along with this connection's claim on it. */
@@ -125,13 +121,15 @@ export class HighlightController extends Controller<HTMLElement> {
     this.#releasePending(el);
     el.setAttribute("data-highlight", "true");
     this.dispatch("start", { target: el, detail: { element: el } });
-    const id = this.#timeouts.set(() => {
-      this.#pending.delete(el);
-      hookOwners.delete(el);
-      el.removeAttribute("data-highlight");
-      this.dispatch("end", { target: el, detail: { element: el } });
-    }, this.durationValue);
-    this.#pending.set(el, id);
+    this.#removal.set(
+      el,
+      () => {
+        hookOwners.delete(el);
+        el.removeAttribute("data-highlight");
+        this.dispatch("end", { target: el, detail: { element: el } });
+      },
+      this.durationValue,
+    );
     hookOwners.set(el, this);
   }
 
@@ -146,12 +144,9 @@ export class HighlightController extends Controller<HTMLElement> {
     this.#cancelPending(el);
   }
 
-  /** Releases `el`'s pending removal timer, if it has one. */
+  /** Releases `el`'s pending removal timer, if it has one, and this connection's claim. */
   #cancelPending(el: HTMLElement): void {
-    // `SafeTimeout.clear` ignores an id it does not own, so the "no pending timer"
-    // case needs no branch of its own.
-    this.#timeouts.clear(this.#pending.get(el) ?? -1);
-    this.#pending.delete(el);
+    this.#removal.clear(el);
     hookOwners.delete(el);
   }
 }

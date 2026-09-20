@@ -4,7 +4,7 @@ import { HighlightController } from "../src/controllers/highlight_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { installRecyclingTimers, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link HighlightController}, driven by a mocked clock: the
@@ -58,54 +58,6 @@ describe("HighlightController", () => {
 
   const root = () => query("[data-controller='stimeo--highlight']");
   const flush = () => vi.advanceTimersByTimeAsync(0);
-
-  /**
-   * Installs `setTimeout` / `clearTimeout` wrappers that hand out recycled timer
-   * handles, the way a browser does — a handle freed by `clearTimeout` or by the
-   * timeout firing is given to the next caller. Vitest's fake timers and happy-dom
-   * both count up forever instead, so a ledger entry left behind for a released
-   * timer can never collide with a live one under the plain fake clock.
-   *
-   * `handed` records the handles in the order they were given out, so a test can
-   * state that the collision it relies on actually happened.
-   */
-  const installRecyclingTimers = () => {
-    const realSet = window.setTimeout;
-    const realClear = window.clearTimeout;
-    const live = new Map<number, number>();
-    const free: number[] = [];
-    const handed: number[] = [];
-    let next = 1;
-
-    window.setTimeout = ((handler: () => void, delay?: number) => {
-      const handle = free.pop() ?? next++;
-      handed.push(handle);
-      const real = (realSet as (h: () => void, d?: number) => number)(() => {
-        live.delete(handle);
-        free.push(handle);
-        handler();
-      }, delay);
-      live.set(handle, real);
-      return handle;
-    }) as unknown as typeof window.setTimeout;
-
-    window.clearTimeout = ((handle?: number) => {
-      if (handle === undefined) return;
-      const real = live.get(handle);
-      if (real === undefined) return;
-      (realClear as (h: number) => void)(real);
-      live.delete(handle);
-      free.push(handle);
-    }) as unknown as typeof window.clearTimeout;
-
-    return {
-      handed,
-      restore: () => {
-        window.setTimeout = realSet;
-        window.clearTimeout = realClear;
-      },
-    };
-  };
 
   it("flags the element on connect and removes it after the default duration", async () => {
     await mount('<li data-controller="stimeo--highlight">New</li>');

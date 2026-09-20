@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { intlFormatter } from "../utils/intl_format";
+import { resolveLocale } from "../utils/locale";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { SafeTimeout } from "../utils/safe_timeout";
 
@@ -201,11 +202,10 @@ export class RelativeTimeController extends Controller<HTMLElement> {
   get #formatter(): Intl.RelativeTimeFormat | null {
     // A malformed locale must not break the page: the authored absolute text stays
     // as the graceful fallback, and a corrected value renders on the next pass.
-    return intlFormatter(Intl.RelativeTimeFormat, this.#locale, RELATIVE_OPTIONS);
-  }
-
-  /** Locale precedence: the value, then the nearest `lang` up the ancestor chain. */
-  get #locale(): string | undefined {
-    return this.localeValue || this.element.closest("[lang]")?.getAttribute("lang") || undefined;
+    return intlFormatter(
+      Intl.RelativeTimeFormat,
+      resolveLocale(this.element, this.localeValue),
+      RELATIVE_OPTIONS,
+    );
   }
 }

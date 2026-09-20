@@ -1,5 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
+import { announce } from "../utils/announce";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { PausableTimers } from "../utils/pausable_timers";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { maxTransitionTotalMs } from "../utils/transition_completion";
 
@@ -11,15 +13,6 @@ const ASSERTIVE_TYPES = new Set(["alert", "error"]);
  * message, and confirms a departed target was one.
  */
 const MESSAGE_SELECTOR = '[data-stimeo--flash-target="message"]';
-
-/** Per-message auto-dismiss timer bookkeeping (id 0 means paused). */
-interface FlashTimer {
-  id: number;
-  startedAt: number;
-  remaining: number;
-  /** Active pause reasons; the timer resumes only once every one is released. */
-  paused: Set<"focus" | "hover">;
-}
 
 /**
  * Headless **Rails flash bridge**: turns server-rendered (and Turbo Stream-inserted)
@@ -80,12 +73,13 @@ export class FlashController extends Controller<HTMLElement> {
   declare pauseOnHoverValue: boolean;
   declare maxValue: number;
 
+  /** Removal timers for the leaving transition; the auto-dismiss ones live below. */
   readonly #timers = new SafeTimeout();
+  /** Per-message auto-dismiss, held open while the message is hovered or focused. */
+  readonly #dismiss = new PausableTimers<HTMLElement>();
   #observer: MutationObserver | null = null;
   /** Whether the controller is between `connect()` and `disconnect()`. */
   #connected = false;
-  /** Auto-dismiss timer state keyed by message element. */
-  readonly #state = new Map<HTMLElement, FlashTimer>();
   /** Messages already processed, in insertion order, to enforce `max` and avoid double work. */
   readonly #order: HTMLElement[] = [];
   /**
@@ -119,8 +113,8 @@ export class FlashController extends Controller<HTMLElement> {
     this.#beforeCache.deactivate();
     this.#stopObserving();
     this.#timers.clearAll();
+    this.#dismiss.clearAll();
     for (const message of this.#order) this.#unbindPause(message);
-    this.#state.clear();
     this.#order.length = 0;
     // The pending finalizes died with the timers above, so a message still marked
     // `leaving` is free to be shown again by the next connect (a snapshot restore).
@@ -266,8 +260,7 @@ export class FlashController extends Controller<HTMLElement> {
    * own role to do the announcing (dynamic inserts). Idempotent per message.
    */
   #process(message: HTMLElement, bridge: boolean): void {
-    if (this.#state.has(message) || this.#order.includes(message)) return;
-    if (this.#leaving.has(message)) return;
+    if (this.#order.includes(message) || this.#leaving.has(message)) return;
 
     const type = message.getAttribute("data-flash-type") ?? "";
     const assertive = ASSERTIVE_TYPES.has(type);
@@ -282,11 +275,7 @@ export class FlashController extends Controller<HTMLElement> {
 
     const text = message.textContent?.trim() ?? "";
     this.dispatch("show", { target: message, detail: { type, message: text } });
-    if (bridge && text) {
-      window.dispatchEvent(
-        new CustomEvent("stimeo--announcer:announce", { detail: { message: text, assertive } }),
-      );
-    }
+    if (bridge) announce(text, { assertive });
 
     this.#startTimer(message);
     this.#enforceMax();
@@ -302,58 +291,29 @@ export class FlashController extends Controller<HTMLElement> {
     }
   }
 
-  #startTimer(message: HTMLElement, duration = this.durationValue): void {
-    if (duration <= 0) return;
-    const existing = this.#state.get(message);
-    if (existing?.id) this.#timers.clear(existing.id);
-    const id = this.#timers.set(() => this.#beginDismiss(message, "timeout"), duration);
-    this.#state.set(message, {
-      id,
-      startedAt: Date.now(),
-      remaining: duration,
-      paused: existing?.paused ?? new Set(),
-    });
+  /** Arms a message's auto-dismiss; a non-positive `duration` means it never expires. */
+  #startTimer(message: HTMLElement): void {
+    if (this.durationValue <= 0) return;
+    this.#dismiss.set(message, () => this.#beginDismiss(message, "timeout"), this.durationValue);
   }
 
   /**
-   * Pauses a message's auto-dismiss, banking the time left (hover/focus, WCAG 2.2.1).
-   * Hover and focus are independent reasons: the remaining time is banked on the
-   * first of them, and {@link FlashController.#resume} waits for the last one.
+   * Holds a message's auto-dismiss open while it is hovered or focused
+   * (WCAG 2.2 2.2.1). Hover and focus are independent reasons, and the registry
+   * banks the time left on the first of them and waits for the last.
    */
   #pause(message: HTMLElement, reason: "focus" | "hover"): void {
-    const timer = this.#state.get(message);
-    if (!timer) return;
-    timer.paused.add(reason);
-    if (timer.id === 0) return;
-
-    this.#timers.clear(timer.id);
-    // The bank has a floor of 1ms, so a deadline already spent when the pause arrives
-    // (the timer sat queued in a throttled tab or behind a long task) settles right
-    // after the last reason is released rather than during the event that paused it.
-    // Pausing therefore never removes a message — which is what keeps the pointer's
-    // target under the pointer and the focused control focused (WCAG 2.2 4.1.3).
-    // Banking zero instead would strand the message: nothing resumes a spent window.
-    const remaining = Math.max(1, timer.remaining - (Date.now() - timer.startedAt));
-    this.#state.set(message, { id: 0, startedAt: 0, remaining, paused: timer.paused });
+    this.#dismiss.pause(message, reason);
   }
 
-  /** Resumes a paused message's auto-dismiss with the banked time. */
+  /** Releases one reason, resuming the banked time once no reason is left. */
   #resume(message: HTMLElement, reason: "focus" | "hover"): void {
-    const timer = this.#state.get(message);
-    if (!timer) return;
-    timer.paused.delete(reason);
-    // Still held by the other reason (the pointer left, focus stayed, or vice versa).
-    if (timer.paused.size > 0) return;
-    // Only resume a genuinely paused timer; a running one keeps its own deadline.
-    if (timer.id !== 0) return;
-    this.#startTimer(message, timer.remaining);
+    this.#dismiss.resume(message, reason);
   }
 
   /** Releases every per-message resource: timer, stacking slot, pause listeners. */
   #forget(message: HTMLElement): void {
-    const timer = this.#state.get(message);
-    if (timer?.id) this.#timers.clear(timer.id);
-    this.#state.delete(message);
+    this.#dismiss.clear(message);
     const index = this.#order.indexOf(message);
     if (index !== -1) this.#order.splice(index, 1);
     this.#unbindPause(message);
@@ -366,7 +326,7 @@ export class FlashController extends Controller<HTMLElement> {
     // must not start a second finalize. Reading the bookkeeping rather than
     // `data-flash-state` also keeps `#enforceMax`'s loop terminating, since the
     // release below is what shrinks `#order`.
-    if (!this.#state.has(message) && !this.#order.includes(message)) return;
+    if (!this.#order.includes(message)) return;
     this.#forget(message);
     this.#leaving.add(message);
 

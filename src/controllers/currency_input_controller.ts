@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { halfWidthChar } from "../utils/half_width";
 import { intlFormatter } from "../utils/intl_format";
+import { resolveLocale } from "../utils/locale";
 
 /** The number-shaped pieces of an in-progress entry, in typing order. */
 interface EntryParts {
@@ -21,6 +22,12 @@ interface Scan {
   /** The finite value, or `null` while no digit has been typed yet. */
   value: number | null;
 }
+
+/**
+ * The locale a declaration falls back to when `Intl` rejects it, so a broken tag
+ * still leaves a field that formats and parses the same way every time.
+ */
+const FALLBACK_LOCALE = "en-US";
 
 /**
  * Headless currency / amount input behavior: groups digits for display while
@@ -66,8 +73,10 @@ interface Scan {
  * the same value in every locale. Events fired mid-IME-composition are
  * ignored; the confirmed text is formatted once on `compositionend`.
  *
- * A malformed `locale`, `currency`, or `precision` declaration falls back to
- * that Value's default instead of throwing: each is validated once in its
+ * With no `locale` declared the field formats in the nearest `lang` up the
+ * ancestor chain, else in the runtime default. A malformed `locale` falls back
+ * to `en-US`, and a malformed `currency` or `precision` to that Value's default,
+ * instead of throwing: each is validated once in its
  * `<name>ValueChanged`, and the hot path only ever sees validated values
  * through cached `Intl.NumberFormat` instances (rebuilt on Value changes, never
  * per keystroke). Late-arriving or swapped `field` / `srValue` / `display`
@@ -82,7 +91,7 @@ interface Scan {
 export class CurrencyInputController extends Controller<HTMLElement> {
   static override targets = ["display", "field", "srValue"];
   static override values = {
-    locale: { type: String, default: "en-US" },
+    locale: { type: String, default: "" },
     currency: { type: String, default: "" },
     precision: { type: Number, default: 2 },
   };
@@ -104,7 +113,7 @@ export class CurrencyInputController extends Controller<HTMLElement> {
   #started = false;
 
   /** Validated mirrors of the Values; the hot path never reads a raw Value. */
-  #locale = "en-US";
+  #locale: string | undefined;
   #currency = "";
   #precision = 2;
 
@@ -378,8 +387,9 @@ export class CurrencyInputController extends Controller<HTMLElement> {
    * formatters from the validated set.
    */
   #revalidate(): void {
-    const declaredLocale = intlFormatter(Intl.NumberFormat, this.localeValue, {});
-    this.#locale = declaredLocale === null ? "en-US" : this.localeValue;
+    const resolved = resolveLocale(this.element, this.localeValue);
+    const usable = intlFormatter(Intl.NumberFormat, resolved, {});
+    this.#locale = usable === null ? FALLBACK_LOCALE : resolved;
 
     const precision = this.precisionValue;
     this.#precision =
@@ -399,7 +409,7 @@ export class CurrencyInputController extends Controller<HTMLElement> {
       Intl.NumberFormat,
       this.#locale,
       { useGrouping: true, maximumFractionDigits: 0 },
-      this.#locale,
+      FALLBACK_LOCALE,
     );
     this.#fixed = intlFormatter(
       Intl.NumberFormat,
@@ -409,18 +419,18 @@ export class CurrencyInputController extends Controller<HTMLElement> {
         minimumFractionDigits: this.#precision,
         maximumFractionDigits: this.#precision,
       },
-      this.#locale,
+      FALLBACK_LOCALE,
     );
     this.#accessible = this.#currency
       ? intlFormatter(
           Intl.NumberFormat,
           this.#locale,
           { style: "currency", currency: this.#currency },
-          this.#locale,
+          FALLBACK_LOCALE,
         )
       : this.#fixed;
 
-    const parts = intlFormatter(Intl.NumberFormat, this.#locale, {}, this.#locale).formatToParts(
+    const parts = intlFormatter(Intl.NumberFormat, this.#locale, {}, FALLBACK_LOCALE).formatToParts(
       11111.1,
     );
     this.#group = parts.find((p) => p.type === "group")?.value ?? ",";
@@ -434,7 +444,7 @@ export class CurrencyInputController extends Controller<HTMLElement> {
       Intl.NumberFormat,
       this.#locale,
       { useGrouping: false },
-      this.#locale,
+      FALLBACK_LOCALE,
     );
     for (let i = 0; i <= 9; i++) {
       const digit = digitFormatter.format(i);

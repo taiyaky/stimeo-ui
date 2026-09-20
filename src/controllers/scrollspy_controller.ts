@@ -1,6 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
+import { validSelector } from "../utils/declared_value";
+import { FrameCoalescer } from "../utils/frame_coalescer";
 import { IntersectionWatcher } from "../utils/intersection_watcher";
 import { prefersReducedMotion } from "../utils/reduced_motion";
+import { resolveScrollContainer, scrollOffset } from "../utils/scroll_source";
 
 /**
  * The attributes a link may anchor its section with, and therefore the only
@@ -125,8 +128,11 @@ export class ScrollspyController extends Controller<HTMLElement> {
    */
   #scrollSource: HTMLElement | Window | null = null;
 
-  /** Pending re-evaluation frame; coalesces a scroll burst into one measurement. */
-  #frame: number | null = null;
+  /** Coalesces a scroll burst into one measurement per frame. */
+  readonly #frames = new FrameCoalescer();
+
+  /** The validated `rootSelector`, or `""` when the declaration cannot be parsed. */
+  #rootSelector = "";
 
   /** Watches the link targets' anchor attributes for an in-place morph rewrite. */
   #anchorObserver: MutationObserver | null = null;
@@ -149,10 +155,7 @@ export class ScrollspyController extends Controller<HTMLElement> {
     this.#anchorObserver?.disconnect();
     this.#anchorObserver = null;
     this.#detachScrollListener();
-    if (this.#frame !== null) {
-      cancelAnimationFrame(this.#frame);
-      this.#frame = null;
-    }
+    this.#frames.cancel();
     this.#intersectionStates.clear();
     this.#activeSectionId = "";
     this.#rootElement = null;
@@ -172,6 +175,7 @@ export class ScrollspyController extends Controller<HTMLElement> {
   }
 
   rootSelectorValueChanged(): void {
+    this.#rootSelector = validSelector(this.element, this.rootSelectorValue, "");
     if (!this.#isConnected) return;
     this.#initializeObserver();
   }
@@ -276,11 +280,12 @@ export class ScrollspyController extends Controller<HTMLElement> {
 
     if (rootElement) {
       const containerRect = rootElement.getBoundingClientRect();
-      const scrollPosition = rootElement.scrollTop + (targetRect.top - containerRect.top) - offset;
+      const scrollPosition =
+        scrollOffset(rootElement) + (targetRect.top - containerRect.top) - offset;
 
       rootElement.scrollTo({ top: scrollPosition, behavior });
     } else {
-      const scrollPosition = window.scrollY + targetRect.top - offset;
+      const scrollPosition = scrollOffset(window) + targetRect.top - offset;
 
       window.scrollTo({ top: scrollPosition, behavior });
     }
@@ -320,19 +325,14 @@ export class ScrollspyController extends Controller<HTMLElement> {
   /**
    * Resolves `rootSelector` to a scrollable element.
    *
-   * @returns The container, or `null` meaning "spy the viewport" when the value
-   * is empty, matches nothing, matches a non-HTML element (an SVG node is not a
-   * scroll container), or is not a valid selector — a typo in a data attribute
-   * must degrade to viewport spying, not leave the controller inert.
+   * @returns The container, or `null` meaning "spy the viewport" when the
+   * declaration is empty, matches nothing, or matches a non-HTML element. A typo
+   * reads as empty: the declaration is validated once when it changes, so a
+   * selector that cannot be parsed degrades to viewport spying rather than
+   * leaving the controller inert.
    */
   #queryRootElement(): HTMLElement | null {
-    if (!this.rootSelectorValue) return null;
-    try {
-      const root = document.querySelector(this.rootSelectorValue);
-      return root instanceof HTMLElement ? root : null;
-    } catch {
-      return null;
-    }
+    return resolveScrollContainer(this.#rootSelector);
   }
 
   /**
@@ -348,13 +348,7 @@ export class ScrollspyController extends Controller<HTMLElement> {
    * end in {@link #evaluateActiveSection} — which measures section rects and the
    * root's top edge at that instant — they converge on the same answer.
    */
-  readonly #onScroll = (): void => {
-    if (this.#frame !== null) return;
-    this.#frame = requestAnimationFrame(() => {
-      this.#frame = null;
-      this.#evaluateActiveSection();
-    });
-  };
+  readonly #onScroll = (): void => this.#frames.schedule(() => this.#evaluateActiveSection());
 
   /**
    * Points the `scroll` listener at whatever the reader actually scrolls: the

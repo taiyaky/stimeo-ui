@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { AttributeLease } from "../utils/attribute_lease";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { hasTabStop } from "../utils/focus_candidate";
+import { FrameCoalescer } from "../utils/frame_coalescer";
 import { LayoutObserver } from "../utils/layout_observer";
 import { logicalScrollMetrics } from "../utils/logical_scroll";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
@@ -80,22 +81,17 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   #observedNameIds = new Set<string>();
   #observedNameSources: Element[] = [];
   #fonts: FontEventSource | null = null;
-  #scrollFrame: number | null = null;
+  /** Coalesces scroll bursts into one position sync per frame. */
+  readonly #frames = new FrameCoalescer();
   #overflowing = false;
   #lastEdge: Edge | null = null;
   readonly #ownedHostMutations = new Map<string, string | null>();
 
-  readonly #onScroll = (): void => {
-    if (this.#scrollFrame !== null) return;
-    this.#scrollFrame = requestAnimationFrame(() => {
-      this.#scrollFrame = null;
-      const viewport = this.#viewport;
-      if (viewport) this.#syncPosition(viewport, this.#overflowing);
-    });
-  };
-
-  readonly #onLoad = (): void => {
-    this.#refresh();
+  readonly #onScroll = (event: Event): void => {
+    // The listener only ever sits on the viewport, and letting that viewport go
+    // cancels the pending frame first, so the frame has a target by construction.
+    const viewport = event.currentTarget as HTMLElement;
+    this.#frames.schedule(() => this.#syncPosition(viewport, this.#overflowing));
   };
 
   readonly #onFontsSettled: EventListener = () => {
@@ -113,7 +109,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#beforeCache.deactivate();
     this.#rebind.cancel();
-    this.#cancelScrollFrame();
+    this.#frames.cancel();
     if (this.#viewport) this.#unbindViewport(this.#viewport);
     this.#layout.disconnect();
     this.#unbindFonts();
@@ -152,7 +148,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     }
 
     next.addEventListener("scroll", this.#onScroll, { passive: true });
-    next.addEventListener("load", this.#onLoad, true);
+    this.#layout.observeDescendantLoads(next);
     this.#layout.observe(next);
     this.#bindContentObserver(next);
     this.#refresh();
@@ -196,9 +192,9 @@ export class ScrollAreaController extends Controller<HTMLElement> {
 
   /** Releases every resource and borrowed attribute owned by one former viewport. */
   #unbindViewport(viewport: HTMLElement): void {
-    this.#cancelScrollFrame();
+    this.#frames.cancel();
     viewport.removeEventListener("scroll", this.#onScroll);
-    viewport.removeEventListener("load", this.#onLoad, true);
+    this.#layout.unobserveDescendantLoads();
     this.#layout.unobserve(viewport);
     this.#content?.disconnect();
     this.#content = null;
@@ -214,7 +210,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   #refresh(): void {
     const viewport = this.#viewport;
     if (!viewport) return;
-    this.#cancelScrollFrame();
+    this.#frames.cancel();
     this.#syncNameSources(viewport);
     this.#overflowing = this.#syncOverflow(viewport);
     this.#syncKeyboardReach(viewport, this.#overflowing);
@@ -465,17 +461,10 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     this.#fonts = null;
   }
 
-  /** Cancels a pending scroll frame. */
-  #cancelScrollFrame(): void {
-    if (this.#scrollFrame === null) return;
-    cancelAnimationFrame(this.#scrollFrame);
-    this.#scrollFrame = null;
-  }
-
   /** Suspends live resources and returns all derived state before snapshotting. */
   #rewindForCache(): void {
     this.#rebind.cancel();
-    this.#cancelScrollFrame();
+    this.#frames.cancel();
     if (this.#viewport) this.#unbindViewport(this.#viewport);
     this.#layout.disconnect();
     this.#unbindFonts();

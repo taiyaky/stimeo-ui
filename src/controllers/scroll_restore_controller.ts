@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { FrameCoalescer } from "../utils/frame_coalescer";
 
 /** Persisted scroll position; fields are present only for the saved axis. */
 interface StoredScroll {
@@ -87,8 +88,8 @@ export class ScrollRestoreController extends Controller<HTMLElement> {
   declare keyValue: string;
   declare axisValue: string;
 
-  /** Pending rAF id that coalesces scroll bursts into one save. */
-  #rafId: number | null = null;
+  /** Coalesces scroll bursts into one save per frame. */
+  readonly #frames = new FrameCoalescer();
   /** Resolved storage key; empty disables persistence (no key and no id). */
   #storageKey = "";
   /** Last offset captured while the element was live; persisted as-is on teardown. */
@@ -119,11 +120,7 @@ export class ScrollRestoreController extends Controller<HTMLElement> {
     // Capture synchronously while the element is still connected and measurable;
     // the rAF only debounces the sessionStorage write, never the read.
     this.#capture();
-    if (this.#rafId !== null) return;
-    this.#rafId = requestAnimationFrame(() => {
-      this.#rafId = null;
-      this.#persist();
-    });
+    this.#frames.schedule(() => this.#persist());
   };
 
   override connect(): void {
@@ -136,7 +133,7 @@ export class ScrollRestoreController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#connected = false;
     this.element.removeEventListener("scroll", this.#onScroll);
-    this.#cancelFrame();
+    this.#frames.cancel();
     // Flush the last captured offset (a throttled burst may have left the final
     // frame unsaved). We do NOT re-read the element here: Turbo detaches the node
     // before disconnect, so its scrollTop is 0 and would overwrite the real value.
@@ -158,7 +155,7 @@ export class ScrollRestoreController extends Controller<HTMLElement> {
     if (!this.#connected) return;
     // The pending frame holds an offset belonging to the previous namespace and
     // axis, so it is dropped rather than written under the new ones.
-    this.#cancelFrame();
+    this.#frames.cancel();
     this.#storageKey = this.#resolveKey();
     this.#echoTop = null;
     this.#echoLeft = null;
@@ -170,14 +167,6 @@ export class ScrollRestoreController extends Controller<HTMLElement> {
     this.#capturedTop = false;
     this.#capturedLeft = false;
     if (this.#storageKey) this.#restore();
-  }
-
-  /** Drops the pending coalesced save, if one is queued. */
-  #cancelFrame(): void {
-    if (this.#rafId !== null) {
-      cancelAnimationFrame(this.#rafId);
-      this.#rafId = null;
-    }
   }
 
   /**

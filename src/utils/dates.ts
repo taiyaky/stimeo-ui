@@ -67,12 +67,12 @@ const MONTH_LABEL_OPTIONS: Intl.DateTimeFormatOptions = { month: "long", year: "
  * Creates the formatter for a month label such as `May 2026`: the long month
  * name and the numeric year in `locale`.
  *
- * `locale` comes from `<html lang>`, which the host page writes. A tag `Intl`
- * rejects (a `RangeError`, e.g. `en_US`) is replaced by `"en"`, so a malformed
- * `lang` still yields a label and the grid paint that follows it is never
- * skipped. Any other failure of the constructor is a programming fault and
- * propagates.
+ * `locale` is the one the caller resolved, and `undefined` asks for the runtime
+ * default. A tag `Intl` rejects (a `RangeError`, e.g. `en_US`) is replaced by
+ * `"en"`, so a malformed declaration still yields a label and the grid paint
+ * that follows it is never skipped. Any other failure of the constructor is a
+ * programming fault and propagates.
  */
-export function monthLabelFormatter(locale: string): Intl.DateTimeFormat {
+export function monthLabelFormatter(locale: string | undefined): Intl.DateTimeFormat {
   return intlFormatter(Intl.DateTimeFormat, locale, MONTH_LABEL_OPTIONS, "en");
 }

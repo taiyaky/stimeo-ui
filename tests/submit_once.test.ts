@@ -758,6 +758,20 @@ describe("SubmitOnceController", () => {
     expect(button.disabled).toBe(false);
   });
 
+  it("releases the capture submit listener on disconnect", async () => {
+    // The listener runs in capture, so its release has to match that flag. The
+    // release is synchronous, and the session it would read is still live on
+    // the next line — a listener left behind would cancel this submit.
+    await mount("", '<button id="send" type="submit">Send</button>');
+    const button = control("#send");
+    turboStart(button);
+    expect(nativeSubmit(button).defaultPrevented).toBe(true);
+
+    controller().disconnect();
+
+    expect(nativeSubmit(button).defaultPrevented).toBe(false);
+  });
+
   it("reports the submission the cache rewind abandoned", async () => {
     await mount("", '<button id="send" type="submit">Send</button>');
     const button = control("#send");

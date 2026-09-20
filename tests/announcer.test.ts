@@ -5,7 +5,7 @@ import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { installRecyclingTimers, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link AnnouncerController}: routing to the polite vs
@@ -310,6 +310,42 @@ describe("AnnouncerController", () => {
     // A disconnected controller must not write to the DOM any more.
     expect(polite().textContent).toBe("Saved");
     vi.useRealTimers();
+  });
+
+  it("keeps the other region's clear timer when a recycled handle meets a released one", async () => {
+    // A platform may give a handle released by `clearTimeout` to the next timer
+    // it creates. A region's pending clear that outlives the timer it named would
+    // then point at whatever now owns that handle — here, the other region's.
+    vi.useFakeTimers();
+    mount(`data-stimeo--announcer-clear-after-value="1000"`);
+    await vi.advanceTimersByTimeAsync(0);
+    const timers = installRecyclingTimers();
+    try {
+      announce({ message: "a" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(polite().textContent).toBe("a");
+
+      // The reconnect releases every handle this connection was holding.
+      controller().disconnect();
+      controller().connect();
+      await vi.advanceTimersByTimeAsync(0);
+
+      announce({ message: "z", assertive: true });
+      await vi.advanceTimersByTimeAsync(0);
+      announce({ message: "b" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(assertive().textContent).toBe("z");
+      expect(polite().textContent).toBe("b");
+      // A released handle really did come back, so the collision above is one.
+      expect(new Set(timers.handed).size).toBeLessThan(timers.handed.length);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(polite().textContent).toBe("");
+      expect(assertive().textContent).toBe("");
+    } finally {
+      timers.restore();
+      vi.useRealTimers();
+    }
   });
 
   it("has both live regions in place before the first announcement", async () => {

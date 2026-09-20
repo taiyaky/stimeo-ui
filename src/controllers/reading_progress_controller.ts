@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { FrameCoalescer } from "../utils/frame_coalescer";
 import { LayoutObserver } from "../utils/layout_observer";
 import { StylePropertyLease } from "../utils/style_property_lease";
 
@@ -57,19 +58,14 @@ export class ReadingProgressController extends Controller<HTMLElement> {
   /** The article's own box and the viewport: either changes the span. */
   readonly #layout = new LayoutObserver(() => this.#onScroll());
   readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
-  #frame: number | null = null;
+  /** Coalesces scroll bursts, and the connect baseline, into one frame. */
+  readonly #frames = new FrameCoalescer();
   /** Last published progress, so `change`/`complete` fire only on movement. */
   #progress = -1;
   /** False until the connect frame has run: `complete` needs real reading. */
   #baselined = false;
 
-  readonly #onScroll = (): void => {
-    if (this.#frame !== null) return;
-    this.#frame = requestAnimationFrame(() => {
-      this.#frame = null;
-      this.#measure();
-    });
-  };
+  readonly #onScroll = (): void => this.#frames.schedule(() => this.#measure());
 
   override connect(): void {
     this.#progress = -1;
@@ -86,8 +82,7 @@ export class ReadingProgressController extends Controller<HTMLElement> {
     // so that jump arrives as a move the reader never made. Everything up to
     // the end of this frame is still the baseline — a restored scroll coalesces
     // into the frame below, and no reader can cross an article inside one.
-    this.#frame = requestAnimationFrame(() => {
-      this.#frame = null;
+    this.#frames.schedule(() => {
       this.#measure();
       this.#baselined = true;
     });
@@ -97,7 +92,7 @@ export class ReadingProgressController extends Controller<HTMLElement> {
     window.removeEventListener("scroll", this.#onScroll, { capture: true });
     this.#layout.disconnect();
     this.#beforeCache.deactivate();
-    this.#cancelFrame();
+    this.#frames.cancel();
     this.#lease.returnAll();
   }
 
@@ -109,14 +104,9 @@ export class ReadingProgressController extends Controller<HTMLElement> {
    * value that has already been handed back.
    */
   #rewindForCache(): void {
-    this.#cancelFrame();
+    this.#frames.cancel();
     this.#lease.returnAll();
     this.#progress = -1;
-  }
-
-  #cancelFrame(): void {
-    if (this.#frame !== null) cancelAnimationFrame(this.#frame);
-    this.#frame = null;
   }
 
   /** Computes and publishes the progress; emits on movement only. */

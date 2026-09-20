@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.15.0] - 2026-09-20
+
+Minor release with no new components. Shared internals were consolidated across
+five refactors; toast and the locale-aware components change behaviour, so read
+Changed before upgrading. The Inspector manifest stays on schema v12.
+
+### Added
+
+- calendar, date-range-picker: a `locale` Value.
+
+### Changed
+
+- toast: a toast whose dismiss deadline has already lapsed is no longer removed
+  the moment a pointer or focus enters it. It stays, marked `data-paused="true"`,
+  and leaves 1ms after the last hold is released — so focus never drops to
+  `<body>` from under the close button it was on.
+- calendar, date-range-picker: the month label resolves its locale as the
+  `locale` Value, then the nearest `lang` (the element itself included), then the
+  runtime default — instead of `<html lang>` with an `"en"` fallback.
+- currency-input: `locale` no longer defaults to `"en-US"` and resolves the same
+  way, so a page under `<html lang="de">` reads and writes `1.234,56`. The hidden
+  value stays in its ASCII normal form, and a declaration `Intl` rejects still
+  falls back to `"en-US"`.
+- auto-submit: the `stimeo--announcer:announce` it bridges carries
+  `assertive: false` and a trimmed `message`; a message of only whitespace is not
+  announced.
+
+### Fixed
+
+- announcer: region timers are released on `disconnect()` and before a Turbo
+  snapshot, so an announcement made after reconnecting can no longer cancel the
+  auto-clear of a different live region.
+
 ## [0.14.0] - 2026-09-19
 
 Minor release with no new components. input-mask changes what a broken `tokens`
@@ -1068,6 +1101,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.15.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.15.0
 [0.14.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.14.0
 [0.13.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.13.0
 [0.12.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.12.0

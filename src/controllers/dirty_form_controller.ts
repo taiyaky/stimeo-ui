@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { ListenerSet } from "../utils/listener_set";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 type VisitDecision =
@@ -162,6 +163,7 @@ export class DirtyFormController extends Controller<HTMLFormElement> {
   #dirty = false;
   #beforeunloadBound = false;
   readonly #timeouts = new SafeTimeout();
+  readonly #listeners = new ListenerSet();
   /** Whether the active submission still represents the form's current values. */
   #submitting = false;
   #submitAttempt: SubmitAttempt | null = null;
@@ -241,12 +243,12 @@ export class DirtyFormController extends Controller<HTMLFormElement> {
     // data-dirty captured in a Turbo cache snapshot mid-edit must not linger
     // (the guard would not fire, but consumer CSS would keep claiming "unsaved").
     this.element.removeAttribute("data-dirty");
-    this.element.addEventListener("input", this.#onFieldChange);
-    this.element.addEventListener("change", this.#onFieldChange);
-    this.element.addEventListener("submit", this.#onSubmit);
-    this.element.addEventListener("formdata", this.#onFormData);
-    this.element.addEventListener("turbo:submit-start", this.#onSubmitStart);
-    this.element.addEventListener("turbo:submit-end", this.#onSubmitEnd);
+    this.#listeners.add(this.element, "input", this.#onFieldChange);
+    this.#listeners.add(this.element, "change", this.#onFieldChange);
+    this.#listeners.add(this.element, "submit", this.#onSubmit);
+    this.#listeners.add(this.element, "formdata", this.#onFormData);
+    this.#listeners.add(this.element, "turbo:submit-start", this.#onSubmitStart);
+    this.#listeners.add(this.element, "turbo:submit-end", this.#onSubmitEnd);
     this.#unregisterVisit = registerVisitParticipant(this.element.ownerDocument, {
       form: this.element,
       evaluate: (event) => this.#evaluateVisit(event),
@@ -254,12 +256,7 @@ export class DirtyFormController extends Controller<HTMLFormElement> {
   }
 
   override disconnect(): void {
-    this.element.removeEventListener("input", this.#onFieldChange);
-    this.element.removeEventListener("change", this.#onFieldChange);
-    this.element.removeEventListener("submit", this.#onSubmit);
-    this.element.removeEventListener("formdata", this.#onFormData);
-    this.element.removeEventListener("turbo:submit-start", this.#onSubmitStart);
-    this.element.removeEventListener("turbo:submit-end", this.#onSubmitEnd);
+    this.#listeners.dispose();
     this.#unregisterVisit?.();
     this.#unregisterVisit = null;
     this.#unbindBeforeUnload();
