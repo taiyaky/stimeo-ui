@@ -8,7 +8,12 @@
   data-controller="stimeo--data-grid"
   role="grid"
   aria-label="<%= t("components.data_grid.demo.label") %>"
-  data-stimeo--data-grid-selection-value="single">
+  data-stimeo--data-grid-selection-value="single"
+  data-stimeo--data-grid-name-value="user_id">
+  <%# The container the selected rows' data-value are generated into as hidden
+      inputs; both the container and the values are optional. A caption keeps the
+      container inside the table's content model. %>
+  <caption class="visually-hidden"><div data-stimeo--data-grid-target="fields"></div></caption>
   <thead>
     <tr role="row">
       <% t("components.data_grid.demo.columns").each do |column| %>
@@ -25,8 +30,12 @@
     </tr>
   </thead>
   <tbody>
-    <% t("components.data_grid.demo.rows").each do |cells| %>
-      <tr role="row" aria-selected="false" data-stimeo--data-grid-target="row">
+    <%# data-value is the record id the selection submits — a number, not copy, so
+        it is derived from the row order rather than localized. A row without one
+        submits nothing. %>
+    <% t("components.data_grid.demo.rows").each_with_index do |cells, row_index| %>
+      <tr role="row" aria-selected="false" data-value="<%= row_index + 1 %>"
+          data-stimeo--data-grid-target="row">
         <% cells.each_with_index do |cell, i| %>
           <td
             role="gridcell"
@@ -46,3 +55,13 @@
   data-selected-template="<%= t("components.data_grid.demo.selected_template") %>"
   data-empty-text="<%= t("components.data_grid.demo.selected_empty") %>"
   aria-live="polite"></p>
+
+<%# Readout: what the component just reported. Purely visual — the component
+    already announces what a screen reader needs, so this line is aria-hidden to
+    keep it from being read twice. The value is a code fragment (API identifiers
+    and values), so only the label is translated. %>
+<p class="demo-readout" aria-hidden="true">
+  <span><%= t("catalog.readout.field") %></span>
+  <span class="demo-readout__value" data-readout
+        data-empty-text="<%= t("catalog.readout.empty") %>">—</span>
+</p>

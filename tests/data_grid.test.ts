@@ -1,10 +1,11 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DataGridController } from "../src/controllers/data_grid_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link DataGridController}: the APG Grid contract —
@@ -76,6 +77,15 @@ describe("DataGridController", () => {
   const cell = (index: number) => at(cells(), index);
   const press = (el: HTMLElement, key: string, init: KeyboardEventInit = {}) =>
     el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, ...init }));
+  /**
+   * Counts, from here on, how often the grid walks its `role="row"` elements. A
+   * reconcile pass rebuilds the cell matrix exactly once, and so does a navigation
+   * keystroke, so without keystrokes the count is the number of passes.
+   */
+  const countWalks = () => {
+    const spy = vi.spyOn(root(), "querySelectorAll");
+    return () => spy.mock.calls.filter(([selector]) => selector === "[role='row']").length;
+  };
 
   it("reverses the horizontal arrows under RTL, leaving row movement alone", async () => {
     // Logical direction. `dir="rtl"` is the authoring contract, but happy-dom
@@ -465,8 +475,9 @@ describe("DataGridController", () => {
       await tick();
       observer.disconnect();
 
-      // One pass from the selection Value callback and one from connect.
-      expect(writes).toHaveLength(rows * 2);
+      // One pass, from connect: the selection Value callback only schedules a
+      // pass, and none is taken before connect.
+      expect(writes).toHaveLength(rows);
       expect(writes.length).toBeLessThan(rows * rows);
       expect(selectedStates()).toEqual(Array(rows).fill("false"));
     });
@@ -709,10 +720,11 @@ describe("DataGridController", () => {
       expect(writes).toHaveLength(2);
     });
 
-    it("rebuilds the row baseline once for a batch of reordered rows", async () => {
+    it("walks the rows once for a batch of reordered rows, rewriting none", async () => {
       // A consumer that sorts by re-appending rows detaches and re-attaches every
       // one of them, so a rebuild per callback would walk the whole grid once per
-      // row — quadratic in the row count on every sort.
+      // row — quadratic in the row count on every sort. The order moves no row's
+      // state, so nothing is written either.
       const size = 6;
       document.body.innerHTML = `
         <table data-controller="stimeo--data-grid" role="grid" aria-label="Users"
@@ -733,13 +745,14 @@ describe("DataGridController", () => {
       await tick();
 
       const body = document.querySelector("tbody") as HTMLElement;
+      const walks = countWalks();
       const writes = await countWrites("aria-selected", () => {
         const ordered = Array.from(body.querySelectorAll<HTMLElement>("tr")).reverse();
         for (const tr of ordered) body.append(tr);
       });
 
-      expect(writes).toHaveLength(size);
-      expect(writes.length).toBeLessThan(size * size);
+      expect(writes).toEqual([]);
+      expect(walks()).toBe(1);
     });
   });
   describe("contract coverage", () => {
@@ -867,6 +880,686 @@ describe("DataGridController", () => {
       press(cell(0), "ArrowLeft"); // "next column" under the grid's direction
 
       expect(document.activeElement).toBe(cell(1));
+    });
+  });
+
+  // --- Hidden form fields ---
+
+  describe("hidden form fields", () => {
+    let commits: ReturnType<typeof captureFieldCommits>;
+
+    const withFields = async (selection = "multiple", extra = "") => {
+      document.body.innerHTML = markup(selection)
+        .replace(
+          `data-stimeo--data-grid-selection-value="${selection}">`,
+          `data-stimeo--data-grid-selection-value="${selection}" ${extra}>
+           <caption><div data-stimeo--data-grid-target="fields"></div></caption>`,
+        )
+        .replace(
+          '<tr role="row" aria-selected="false" data-stimeo--data-grid-target="row">',
+          '<tr role="row" aria-selected="false" data-value="1" data-stimeo--data-grid-target="row">',
+        );
+      application = Application.start();
+      application.register("stimeo--data-grid", DataGridController);
+      await tick();
+    };
+
+    const fields = () =>
+      document.querySelector<HTMLElement>(
+        "[data-stimeo--data-grid-target='fields']",
+      ) as HTMLElement;
+    const submitted = () =>
+      [...fields().querySelectorAll("input")].map((input) => `${input.name}=${input.value}`);
+
+    beforeEach(() => {
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      commits.stop();
+    });
+
+    it("starts empty without reporting a commit", async () => {
+      await withFields();
+
+      expect(submitted()).toEqual([]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("writes and reports once per selection the user made", async () => {
+      await withFields();
+      commits.clear();
+
+      press(cell(0), " ");
+
+      expect(row(0).getAttribute("aria-selected")).toBe("true");
+      expect(submitted()).toEqual(["rows[]=1"]);
+      expect(commits.seen).toEqual([fields()]);
+    });
+
+    it("skips a selected row that carries no value", async () => {
+      await withFields();
+      commits.clear();
+
+      press(cell(2), " ");
+
+      expect(row(1).getAttribute("aria-selected")).toBe("true");
+      expect(submitted()).toEqual([]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("honors the name and form Values", async () => {
+      await withFields(
+        "multiple",
+        'data-stimeo--data-grid-name-value="user_ids[]" data-stimeo--data-grid-form-value="f"',
+      );
+      commits.clear();
+
+      press(cell(0), " ");
+
+      expect(submitted()).toEqual(["user_ids[]=1"]);
+      expect(fields().querySelector("input")?.getAttribute("form")).toBe("f");
+    });
+
+    it("rebuilds the fields when the name or the form changes at runtime", async () => {
+      await withFields();
+      press(cell(0), " ");
+      commits.clear();
+
+      root().setAttribute("data-stimeo--data-grid-name-value", "user_ids[]");
+      await tick();
+      expect(submitted()).toEqual(["user_ids[]=1"]);
+
+      root().setAttribute("data-stimeo--data-grid-form-value", "f");
+      await tick();
+      expect(fields().querySelector("input")?.getAttribute("form")).toBe("f");
+
+      // A declaration is not an edit, so neither change reports one.
+      expect(commits.seen).toEqual([]);
+    });
+  });
+
+  // --- A selection the page moves ---
+
+  describe("a selection the page moves", () => {
+    /** One body row per entry of `selected`, carrying `id="r<n>"` and `data-value="<n>"`. */
+    const bodyRow = (n: number, selected: boolean) => `
+      <tr id="r${n}" role="row" aria-selected="${selected}" data-value="${n}"
+          data-stimeo--data-grid-target="row">
+        <td role="gridcell" tabindex="${n === 1 ? 0 : -1}" data-stimeo--data-grid-target="cell"
+            data-action="keydown->stimeo--data-grid#onKeydown">Row ${n}</td>
+      </tr>`;
+
+    /** The grid markup; `after` is appended to the body rows. */
+    const grid = (selection: string, selected: readonly boolean[], after = "") => `
+      <table data-controller="stimeo--data-grid" role="grid" aria-label="Users"
+             data-stimeo--data-grid-selection-value="${selection}">
+        <caption><div data-stimeo--data-grid-target="fields"></div></caption>
+        <tbody>${selected.map((on, index) => bodyRow(index + 1, on)).join("")}${after}</tbody>
+      </table>`;
+
+    const mount = async (selection: string, selected: readonly boolean[], after = "") => {
+      document.body.innerHTML = grid(selection, selected, after);
+      application = Application.start();
+      application.register("stimeo--data-grid", DataGridController);
+      await tick();
+    };
+
+    /**
+     * A row whose cell holds a listbox: its options `n1` and `n2` carry the
+     * attributes the grid watches, but they are not the grid's rows.
+     */
+    const NESTED_WIDGET_ROW = `
+      <tr id="host" role="row" aria-selected="false" data-value="host"
+          data-stimeo--data-grid-target="row">
+        <td role="gridcell" tabindex="-1" data-stimeo--data-grid-target="cell">
+          <ul role="listbox" aria-label="Nested">
+            <li id="n1" role="option" aria-selected="true">One</li>
+            <li id="n2" role="option" aria-selected="false">Two</li>
+          </ul>
+        </td>
+      </tr>`;
+
+    const byId = (id: string) => document.getElementById(id) as HTMLElement;
+    const body = () => document.querySelector("tbody") as HTMLElement;
+    const submitted = () =>
+      [...document.querySelectorAll<HTMLInputElement>("caption input")].map((input) => input.value);
+    const states = () => rows().map((element) => element.getAttribute("aria-selected"));
+
+    /**
+     * Records what the grid reports, in order: `selectionchange:<values>`,
+     * `reconcile:<values>` (the rows' `data-value`s) and `native` for the
+     * bubbling `change` of the fields container.
+     */
+    const record = (target: HTMLElement = root()) => {
+      const seen: string[] = [];
+      const values = (event: Event) =>
+        ((event as CustomEvent<{ rows: HTMLElement[] }>).detail.rows ?? [])
+          .map((element) => element.dataset.value)
+          .join(",");
+      target.addEventListener("stimeo--data-grid:selectionchange", (event) => {
+        seen.push(`selectionchange:${values(event)}`);
+      });
+      target.addEventListener("stimeo--data-grid:reconcile", (event) => {
+        seen.push(`reconcile:${values(event)}`);
+      });
+      target.addEventListener("change", () => seen.push("native"));
+      return seen;
+    };
+
+    it("reports a selected row the page removes as reconcile and empties its field", async () => {
+      await mount("single", [true, false]);
+      const seen = record();
+
+      byId("r1").remove();
+      await tick();
+
+      expect(submitted()).toEqual([]);
+      expect(seen).toEqual(["reconcile:"]);
+    });
+
+    it("reports a selected row that loses its target token as reconcile", async () => {
+      // A morph can drop only the target token and keep the row; the row then
+      // stops counting, and so does its selection.
+      await mount("single", [true, false]);
+      const seen = record();
+
+      byId("r1").removeAttribute("data-stimeo--data-grid-target");
+      await tick();
+
+      expect(submitted()).toEqual([]);
+      expect(seen).toEqual(["reconcile:"]);
+    });
+
+    it("keeps one selected row after an in-place morph adds a second", async () => {
+      await mount("single", [true, false]);
+      const seen = record();
+
+      byId("r2").setAttribute("aria-selected", "true");
+      await tick();
+
+      // The first selected row in DOM order stays selected, so nothing moved.
+      expect(states()).toEqual(["true", "false"]);
+      expect(submitted()).toEqual(["1"]);
+      expect(seen).toEqual([]);
+    });
+
+    it("lists the rows of a reconcile in DOM order", async () => {
+      await mount("multiple", [false, false, true]);
+      const seen = record();
+
+      byId("r1").setAttribute("aria-selected", "true");
+      await tick();
+
+      expect(seen).toEqual(["reconcile:1,3"]);
+    });
+
+    /** Collects, from here on, the ids of the rows whose `aria-selected` is written. */
+    const rowWrites = () => {
+      const writes: string[] = [];
+      const probe = new MutationObserver((records) => {
+        for (const entry of records) {
+          const element = entry.target as HTMLElement;
+          if (element.getAttribute("role") === "row") writes.push(element.id);
+        }
+      });
+      probe.observe(body(), {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["aria-selected"],
+      });
+      return writes;
+    };
+
+    it("writes only the rows whose state a pass changes", async () => {
+      await mount("single", [true, false, false, false, false, false]);
+      const writes = rowWrites();
+
+      byId("r1").setAttribute("aria-selected", "false");
+      byId("r2").setAttribute("aria-selected", "true");
+      await tick();
+
+      // The two writes are the page's own; the pass settles on row 2 without
+      // rewriting the rows it leaves as they are.
+      expect(submitted()).toEqual(["2"]);
+      expect(writes).toEqual(["r1", "r2"]);
+    });
+
+    it("writes only the rows a user toggle changes", async () => {
+      await mount("single", [true, false, false, false, false, false]);
+      const writes = rowWrites();
+
+      press(byId("r4").querySelector("td") as HTMLElement, " ");
+      await tick();
+
+      // The selection moves from row 1 to row 4, and only those two rows are
+      // written; the rows that stay unselected are not.
+      expect(submitted()).toEqual(["4"]);
+      expect(writes).toEqual(["r1", "r4"]);
+    });
+
+    it("writes aria-multiselectable only when its value changes", async () => {
+      await mount("multiple", [true, false, false]);
+      const seen = record();
+      const writes: string[] = [];
+      const probe = new MutationObserver((records) => {
+        for (const entry of records) writes.push(entry.attributeName ?? "");
+      });
+      probe.observe(root(), { attributes: true, attributeFilter: ["aria-multiselectable"] });
+
+      for (let turn = 0; turn < 3; turn += 1) {
+        byId("r2").setAttribute("aria-selected", turn % 2 ? "false" : "true");
+        await tick();
+      }
+
+      // Three passes ran, and each found the attribute already `true`.
+      expect(seen).toEqual(["reconcile:1,2", "reconcile:1", "reconcile:1,2"]);
+      expect(writes).toEqual([]);
+
+      root().setAttribute("data-stimeo--data-grid-selection-value", "single");
+      await tick();
+      probe.disconnect();
+
+      // Leaving `multiple` removes it: one record.
+      expect(writes).toEqual(["aria-multiselectable"]);
+    });
+
+    it("runs one pass for a page change, not another for its own writes", async () => {
+      await mount("single", [true, false]);
+      const walks = countWalks();
+
+      byId("r2").setAttribute("aria-selected", "true"); // the pass writes it back
+      await tick();
+
+      expect(states()).toEqual(["true", "false"]);
+      expect(walks()).toBe(1);
+    });
+
+    it("leaves a widget nested in a row to itself", async () => {
+      await mount("single", [true, false], NESTED_WIDGET_ROW);
+      const seen = record();
+      const walks = countWalks();
+      const writes = rowWrites();
+
+      for (let turn = 0; turn < 10; turn += 1) {
+        byId("n1").setAttribute("aria-selected", turn % 2 ? "true" : "false");
+        byId("n2").setAttribute("aria-selected", turn % 2 ? "false" : "true");
+        await tick();
+      }
+
+      // The nested options are not the grid's rows: no pass runs, and no row is written.
+      expect(walks()).toBe(0);
+      expect(writes).toEqual([]);
+
+      // A move on one of the grid's own rows is still reconciled.
+      byId("r1").setAttribute("aria-selected", "false");
+      byId("r2").setAttribute("aria-selected", "true");
+      await tick();
+      expect(seen).toEqual(["reconcile:2"]);
+      expect(submitted()).toEqual(["2"]);
+    });
+
+    it("reconciles a row move that shares a batch with a nested widget's write", async () => {
+      await mount("single", [true, false], NESTED_WIDGET_ROW);
+      const seen = record();
+
+      byId("n1").setAttribute("aria-selected", "false");
+      move(1, 2);
+      byId("n2").setAttribute("aria-selected", "true");
+      await tick();
+
+      // The rows' records sit between the nested options' in one batch, and they
+      // still start the pass.
+      expect(submitted()).toEqual(["2"]);
+      expect(seen).toEqual(["reconcile:2"]);
+    });
+
+    it("starts no pass for a nested widget's write in the same task as a toggle", async () => {
+      await mount("multiple", [false, false], NESTED_WIDGET_ROW);
+      const seen = record();
+      const walks = countWalks();
+
+      byId("n1").setAttribute("aria-selected", "false");
+      press(byId("r1").querySelector("td") as HTMLElement, " ");
+      const keystroke = walks();
+      await tick();
+
+      // The toggle takes the nested option's record off the queue before it writes;
+      // the record is about no row, so it owes no pass.
+      expect(walks()).toBe(keystroke);
+      expect(seen).toEqual(["native", "selectionchange:1"]);
+    });
+
+    it("reports an in-place morph that moves the selection as reconcile once", async () => {
+      await mount("single", [true, false]);
+      const seen: HTMLElement[][] = [];
+      root().addEventListener("stimeo--data-grid:reconcile", (event) => {
+        seen.push((event as CustomEvent<{ rows: HTMLElement[] }>).detail.rows);
+      });
+
+      byId("r1").setAttribute("aria-selected", "false");
+      byId("r2").setAttribute("aria-selected", "true");
+      await tick();
+
+      expect(submitted()).toEqual(["2"]);
+      // The detail has the same shape as `selectionchange`: the rows themselves.
+      expect(seen).toEqual([[byId("r2")]]);
+    });
+
+    it("reports the selection a runtime selection mode collapses", async () => {
+      await mount("multiple", [true, true]);
+      const seen = record();
+
+      root().setAttribute("data-stimeo--data-grid-selection-value", "single");
+      await tick();
+      expect(submitted()).toEqual(["1"]);
+
+      root().setAttribute("data-stimeo--data-grid-selection-value", "none");
+      await tick();
+
+      expect(submitted()).toEqual([]);
+      expect(seen).toEqual(["reconcile:1", "reconcile:"]);
+    });
+
+    it("hands a single selection to a selected row that arrives ahead of it", async () => {
+      await mount("single", [false, true]);
+      const seen = record();
+
+      const late = document.createElement("tbody");
+      late.innerHTML = bodyRow(0, true);
+      body().prepend(late.firstElementChild as HTMLElement);
+      await tick();
+
+      expect(states()).toEqual(["true", "false", "false"]);
+      expect(submitted()).toEqual(["0"]);
+      expect(seen).toEqual(["reconcile:0"]);
+    });
+
+    it("follows a morph of a selected row's value", async () => {
+      await mount("single", [true, false]);
+      const seen = record();
+
+      byId("r1").setAttribute("data-value", "10");
+      await tick();
+
+      expect(submitted()).toEqual(["10"]);
+      expect(seen).toEqual(["reconcile:10"]);
+    });
+
+    it("reports nothing when the page leaves the selection where it was", async () => {
+      await mount("multiple", [true, true, false]);
+      const seen = record();
+
+      byId("r3").remove(); // an unselected row leaves
+      body().append(byId("r1")); // a sort moves a selected row, keeping it selected
+      root().setAttribute("data-stimeo--data-grid-name-value", "ids[]");
+      await tick();
+
+      expect(submitted()).toEqual(["2", "1"]);
+      expect(seen).toEqual([]);
+    });
+
+    it("seeds a replaced fields container without reporting", async () => {
+      await mount("single", [true, false]);
+      const seen = record();
+
+      const replacement = document.createElement("div");
+      replacement.setAttribute("data-stimeo--data-grid-target", "fields");
+      (document.querySelector("caption") as HTMLElement).replaceChildren(replacement);
+      await tick();
+
+      expect(submitted()).toEqual(["1"]);
+      expect(seen).toEqual([]);
+    });
+
+    it("reports nothing on connect, whatever the authored selection", async () => {
+      document.body.innerHTML = grid("single", [true, true]);
+      const seen = record();
+      application = Application.start();
+      application.register("stimeo--data-grid", DataGridController);
+      await tick();
+
+      expect(states()).toEqual(["true", "false"]);
+      expect(submitted()).toEqual(["1"]);
+      expect(seen).toEqual([]);
+    });
+
+    it("reports a user toggle as selectionchange alone", async () => {
+      await mount("single", [true, false]);
+      const seen = record();
+
+      press(byId("r2").querySelector("td") as HTMLElement, " ");
+      await tick();
+
+      expect(seen).toEqual(["native", "selectionchange:2"]);
+    });
+
+    it("reports one batch of page changes once, with the settled selection", async () => {
+      await mount("multiple", [true, false, true]);
+      const seen = record();
+
+      byId("r1").setAttribute("aria-selected", "false");
+      byId("r3").remove();
+      byId("r2").setAttribute("aria-selected", "true");
+      root().setAttribute("data-stimeo--data-grid-selection-value", "single");
+      await tick();
+
+      expect(submitted()).toEqual(["2"]);
+      expect(seen).toEqual(["reconcile:2"]);
+    });
+
+    it("reports what a selectionchange subscriber moves right away as reconcile", async () => {
+      await mount("single", [true, false, false]);
+      const seen = record();
+      root().addEventListener(
+        "stimeo--data-grid:selectionchange",
+        () => {
+          byId("r2").setAttribute("aria-selected", "false");
+          byId("r3").setAttribute("aria-selected", "true");
+        },
+        { once: true },
+      );
+
+      press(byId("r2").querySelector("td") as HTMLElement, " ");
+      await tick();
+
+      expect(submitted()).toEqual(["3"]);
+      expect(seen).toEqual(["native", "selectionchange:2", "reconcile:3"]);
+    });
+
+    it("reports a move a reconcile subscriber makes as a second reconcile", async () => {
+      await mount("single", [true, false]);
+      const seen = record();
+      root().addEventListener(
+        "stimeo--data-grid:reconcile",
+        () => {
+          byId("r2").remove();
+        },
+        { once: true },
+      );
+
+      byId("r1").setAttribute("aria-selected", "false");
+      byId("r2").setAttribute("aria-selected", "true");
+      await tick();
+      await tick();
+
+      expect(submitted()).toEqual([]);
+      expect(seen).toEqual(["reconcile:2", "reconcile:"]);
+    });
+
+    /** Moves the selection from row `from` to row `to` the way a morph does, in place. */
+    const move = (from: number, to: number) => {
+      byId(`r${from}`).setAttribute("aria-selected", "false");
+      byId(`r${to}`).setAttribute("aria-selected", "true");
+    };
+
+    /** Rewrites an unselected row's state unchanged: a pass that moves nothing. */
+    const unrelatedPass = (row: number) => {
+      byId(`r${row}`).setAttribute("aria-selected", "false");
+    };
+
+    it("measures page moves against the last reconcile", async () => {
+      await mount("single", [true, false, false]);
+      const seen = record();
+
+      move(1, 2);
+      await tick();
+      unrelatedPass(3);
+      await tick();
+      move(2, 1);
+      await tick();
+
+      expect(submitted()).toEqual(["1"]);
+      expect(seen).toEqual(["reconcile:2", "reconcile:1"]);
+    });
+
+    it("reports and mirrors what a reconcile subscriber moves right away", async () => {
+      await mount("single", [true, false, false]);
+      const seen = record();
+      root().addEventListener("stimeo--data-grid:reconcile", () => move(2, 3), { once: true });
+
+      move(1, 2);
+      await tick();
+
+      // The subscriber's move comes after the report, so the next pass settles it.
+      expect(submitted()).toEqual(["3"]);
+      expect(seen).toEqual(["reconcile:2", "reconcile:3"]);
+    });
+
+    it("measures later passes against a toggle a reconcile subscriber makes", async () => {
+      await mount("single", [true, false, false]);
+      const seen = record();
+      root().addEventListener(
+        "stimeo--data-grid:reconcile",
+        () => press(byId("r3").querySelector("td") as HTMLElement, " "),
+        { once: true },
+      );
+
+      move(1, 2);
+      await tick();
+      unrelatedPass(1);
+      await tick();
+
+      // The report settled row 2 before the subscriber toggled row 3, so row 3 stays settled.
+      expect(submitted()).toEqual(["3"]);
+      expect(seen).toEqual(["reconcile:2", "native", "selectionchange:3"]);
+    });
+
+    it("mirrors the fields before a reconcile subscriber reads them", async () => {
+      await mount("single", [true, false]);
+      const read: string[][] = [];
+      root().addEventListener("stimeo--data-grid:reconcile", () => read.push(submitted()));
+
+      move(1, 2);
+      await tick();
+
+      expect(read).toEqual([["2"]]);
+    });
+
+    it("never takes its own writes for the page's", async () => {
+      await mount("single", [true, false]);
+      const writes: string[] = [];
+      const probe = new MutationObserver((records) => {
+        for (const entry of records) writes.push((entry.target as HTMLElement).id);
+      });
+      probe.observe(root(), {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["aria-selected"],
+      });
+
+      const walks = countWalks();
+      press(byId("r2").querySelector("td") as HTMLElement, " ");
+      const keystroke = walks();
+      await tick();
+      probe.disconnect();
+
+      // The toggle writes the two rows it changes, once each, and its own writes
+      // start no pass.
+      expect(writes).toEqual(["r1", "r2"]);
+      expect(walks()).toBe(keystroke);
+    });
+
+    it("still reconciles what the page wrote in the same task as a user toggle", async () => {
+      await mount("multiple", [false, false]);
+      const seen = record();
+
+      byId("r2").removeAttribute("aria-selected");
+      press(byId("r1").querySelector("td") as HTMLElement, " ");
+      await tick();
+
+      // The toggle rewrites only its own row, so the row the page stripped gets its
+      // explicit value from the pass the page's write still owes.
+      expect(states()).toEqual(["true", "false"]);
+      expect(seen).toEqual(["native", "selectionchange:1"]);
+    });
+
+    it("lets go of the rows when disconnected, so a reconnect starts quiet", async () => {
+      await mount("single", [true, false]);
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--data-grid",
+      ) as DataGridController;
+      const probe = new MutationObserver(() => {});
+      probe.observe(root(), {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["aria-selected"],
+      });
+
+      controller.disconnect();
+      byId("r1").setAttribute("aria-selected", "false");
+      byId("r2").setAttribute("aria-selected", "true");
+      controller.connect();
+      probe.takeRecords();
+      const walks = countWalks();
+      for (let turn = 0; turn < 10; turn += 1) await flushMicrotasks();
+
+      // Nothing watched the rows while disconnected, so no pass runs for those writes.
+      expect(probe.takeRecords()).toEqual([]);
+      expect(walks()).toBe(0);
+      probe.disconnect();
+    });
+
+    it("settles on reconnect whatever the page moved while disconnected", async () => {
+      await mount("single", [true, false]);
+      const seen = record();
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--data-grid",
+      ) as DataGridController;
+
+      controller.disconnect();
+      byId("r1").setAttribute("aria-selected", "false");
+      byId("r2").setAttribute("aria-selected", "true");
+      controller.connect();
+      await tick();
+
+      // Connecting describes the selection it finds; it reports nothing.
+      expect(submitted()).toEqual(["2"]);
+      expect(seen).toEqual([]);
+
+      byId("r2").remove();
+      await tick();
+
+      expect(seen).toEqual(["reconcile:"]);
+    });
+
+    it("stops watching the rows once disconnected", async () => {
+      await mount("single", [true, false]);
+      const seen = record();
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--data-grid",
+      ) as DataGridController;
+
+      controller.disconnect();
+      byId("r2").setAttribute("aria-selected", "true");
+      await tick();
+
+      expect(states()).toEqual(["true", "true"]);
+      expect(submitted()).toEqual(["1"]);
+      expect(seen).toEqual([]);
     });
   });
 });

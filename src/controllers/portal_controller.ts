@@ -33,7 +33,7 @@ const portalState = new WeakMap<
  * `data-portaled`. A `to` the engine cannot read — malformed or empty — falls back to
  * the default; a well-formed selector matching nothing moves nothing.
  *
- * `mount` dispatches `{ target }`; `unmount` dispatches `{}`.
+ * `mount` dispatches `{ destination }`; `unmount` dispatches `{}`.
  *
  * @remarks
  * Behavior only — no positioning (pair with `stimeo-ui/positioning`) and no focus
@@ -111,7 +111,7 @@ export class PortalController extends Controller<HTMLElement> {
       destination.appendChild(node);
     }
     node.setAttribute("data-portaled", "true");
-    this.dispatch("mount", { detail: { target: destination } });
+    this.dispatch("mount", { detail: { destination } });
   }
 
   override disconnect(): void {
@@ -142,7 +142,11 @@ export class PortalController extends Controller<HTMLElement> {
     });
   }
 
-  /** Returns the node to its placeholder (or removes it) and clears the bookkeeping. */
+  /**
+   * Returns the node to its placeholder (or removes it) and clears the bookkeeping.
+   *
+   * @stimeoRuntimeOnly `restore` decides whether this one unmount puts the node back or drops it.
+   */
   #restore(state: { node: HTMLElement; placeholder: Comment }): void {
     portalState.delete(this.element);
     const { node, placeholder } = state;

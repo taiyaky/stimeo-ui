@@ -3,6 +3,7 @@ import { isReservedArrowChord } from "../utils/arrow_step";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { ownerOf } from "../utils/event_owner";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { type StateReason, stateReasonFor } from "../utils/state_reason";
 
 /**
  * Headless, accessible menu button behavior.
@@ -57,6 +58,11 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *   dismissed first.
  * - A click outside the controller closes the menu without moving focus away
  *   from the clicked element.
+ * - Each move of the open state is reported: `stimeo--menu:open` and
+ *   `stimeo--menu:close` dispatch `{ reason: StateReason }`, after the state
+ *   attributes are written. Both are informational, so neither is cancelable. A
+ *   call that leaves the state where it already was, the normalization in
+ *   {@link connect}, and {@link disconnect} are all silent.
  *
  * Roving focus skips `hidden` and natively `disabled` items. An
  * `aria-disabled="true"` item remains discoverable by arrow-key focus, while its
@@ -72,6 +78,7 @@ export class MenuController extends Controller<HTMLElement> {
     "open",
     "toggle",
   ] as const;
+  static events = ["close", "open"] as const;
 
   declare readonly triggerTarget: HTMLButtonElement;
   declare readonly menuTarget: HTMLElement;
@@ -94,17 +101,22 @@ export class MenuController extends Controller<HTMLElement> {
   /** Clicks already turned into an activation, so the two paths run it once. */
   readonly #activated = new WeakSet<Event>();
 
+  /** Whether state moves are reported: set once `connect()` settled the baseline. */
+  #reporting = false;
+
   /** Starts closed and registers activation / outside-click listeners. */
   override connect(): void {
-    this.close();
+    this.#close("api");
     this.element.addEventListener("click", this.#onItemClickCapture, true);
     this.element.addEventListener("click", this.#onDelegatedItemClick);
     this.element.addEventListener("keydown", this.#onDelegatedItemKeydown);
     document.addEventListener("click", this.#onOutsideClick, true);
+    this.#reporting = true;
   }
 
   /** Releases the listeners, stack membership, and any pending Tab-close task. */
   override disconnect(): void {
+    this.#reporting = false;
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
     this.element.removeEventListener("click", this.#onItemClickCapture, true);
@@ -114,36 +126,50 @@ export class MenuController extends Controller<HTMLElement> {
   }
 
   /** Toggles the menu open/closed. Bound via `data-action` (click). */
-  toggle(): void {
+  toggle(event?: Event): void {
     if (this.#isOpen) {
-      this.close();
+      this.close(event);
     } else {
-      this.open();
+      this.open(event);
       this.#focusFirst();
     }
   }
 
   /** Opens the menu and reflects the expanded state on the trigger. */
-  open(): void {
+  open(event?: Event): void {
+    this.#open(stateReasonFor(event));
+  }
+
+  /** Closes the menu and reflects the collapsed state on the trigger. */
+  close(event?: Event): void {
+    this.#close(stateReasonFor(event));
+  }
+
+  /** Opens the menu, reflects the expanded state, and reports a move. */
+  #open(reason: StateReason): void {
     // A reopen must discard a pending Tab close, or the stale task would slam
     // the freshly opened menu shut on the next tick.
     this.#timers.clearAll();
     if (!this.hasMenuTarget) return;
+    const was = this.#isOpen;
     this.#escapeLayer.activate(document, {
-      onDismiss: () => this.#closeAndRestore(),
+      onDismiss: () => this.#closeAndRestore("escape"),
       claims: claimsWhileFocusWithin(this.element),
     });
     this.menuTarget.hidden = false;
     if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "true");
+    if (!was && this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
   }
 
-  /** Closes the menu and reflects the collapsed state on the trigger. */
-  close(): void {
+  /** Closes the menu, reflects the collapsed state, and reports a move. */
+  #close(reason: StateReason): void {
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
     if (!this.hasMenuTarget) return;
+    const was = this.#isOpen;
     this.menuTarget.hidden = true;
     if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "false");
+    if (was && this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
   }
 
   /**
@@ -159,11 +185,11 @@ export class MenuController extends Controller<HTMLElement> {
     if (isReservedArrowChord(event)) return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      this.open();
+      this.open(event);
       this.#focusFirst();
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      this.open();
+      this.open(event);
       this.#focusLast();
     }
   }
@@ -214,7 +240,7 @@ export class MenuController extends Controller<HTMLElement> {
         // this is the one branch both handlers can run: rescheduling the same
         // one-shot close is idempotent.
         this.#timers.clearAll();
-        this.#timers.set(() => this.close(), 0);
+        this.#timers.set(() => this.#close("focus"), 0);
         break;
       default:
         break;
@@ -238,24 +264,24 @@ export class MenuController extends Controller<HTMLElement> {
       if (this.#activated.has(event)) return;
       this.#activated.add(event);
     }
-    this.#closeAndRestore();
+    this.#closeAndRestore("select");
   }
 
   /** Closes and returns focus to the trigger (Escape / item-activation path). */
-  #closeAndRestore(): void {
-    this.close();
+  #closeAndRestore(reason: StateReason): void {
+    this.#close(reason);
     if (this.hasTriggerTarget) this.triggerTarget.focus();
   }
 
   /** Closes the menu when a click lands outside the controller's element. */
   readonly #onOutsideClick = (event: MouseEvent): void => {
-    if (this.#isOpen && !this.element.contains(event.target as Node)) this.close();
+    if (this.#isOpen && !this.element.contains(event.target as Node)) this.#close("outside");
   };
 
   /**
    * Delegated twin of {@link onItemKeydown}, bound on the controller element.
    *
-   * An item that arrives *after* connect — Overflow Menu moves toolbar controls
+   * An item that arrives *after* connect — `stimeo--overflow-menu` moves toolbar controls
    * into this menu at runtime — carries whatever `data-action` its author wrote,
    * and that is exactly the binding a consumer forgets, because the markup that
    * declares the item lives nowhere near the menu. Listening on the container
@@ -314,11 +340,16 @@ export class MenuController extends Controller<HTMLElement> {
 
   /** Moves focus to the first navigable item (no-op if none). */
   #focusFirst(): void {
+    // A subscriber may close the menu from the `open` handler; focusing then puts
+    // the caret on an item nobody can see.
+    if (!this.#isOpen) return;
     this.#navigableItems[0]?.focus();
   }
 
   /** Moves focus to the last navigable item (no-op if none). */
   #focusLast(): void {
+    // See {@link MenuController.#focusFirst}.
+    if (!this.#isOpen) return;
     const items = this.#navigableItems;
     items[items.length - 1]?.focus();
   }

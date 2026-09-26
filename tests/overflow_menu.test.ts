@@ -181,6 +181,26 @@ describe("OverflowMenuController", () => {
     expect(root().getAttribute("data-overflow-count")).toBe("0");
   });
 
+  // Every pass walks all items and un-banks the ones that stay in the bar, so the
+  // restore has to refuse an item it never banked: the saved values it would read
+  // are absent, and writing them back would take the authored ones away.
+  it("leaves the authored attributes of an item that never banked alone", async () => {
+    setup(
+      MARKUP().replace(
+        '<a id="a" href="#" data-priority="1">A</a>',
+        '<a id="a" href="#" data-priority="1" role="link" tabindex="3">A</a>',
+      ),
+    );
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+
+    const a = query("#a");
+    expect(ids(items())).toEqual(["a", "b", "c"]);
+    expect(a.getAttribute("role")).toBe("link");
+    expect(a.getAttribute("tabindex")).toBe("3");
+    expect(bookkeeping(a)).toEqual([]);
+  });
+
   it("banks the lowest-priority item into the menu when items overflow", async () => {
     setup(MARKUP());
     setGeom(250, { a: 100, b: 100, c: 100 }); // budget 200 after the 50px More button
@@ -462,7 +482,7 @@ describe("OverflowMenuController", () => {
   it("emits change only when the overflow count transitions", async () => {
     setup(MARKUP());
     setGeom(1000, { a: 100, b: 100, c: 100 });
-    const events: Array<{ visible: number; hidden: number }> = [];
+    const events: Array<{ overflowCount: number; total: number }> = [];
     root().addEventListener("stimeo--overflow-menu:change", (e) =>
       events.push((e as CustomEvent).detail),
     );
@@ -473,9 +493,9 @@ describe("OverflowMenuController", () => {
     setGeom(1000, { a: 100, b: 100, c: 100 });
     instance().update(); // → back to 0 hidden, which is a transition too
     expect(events).toEqual([
-      { visible: 3, hidden: 0 },
-      { visible: 2, hidden: 1 },
-      { visible: 3, hidden: 0 },
+      { overflowCount: 0, total: 3 },
+      { overflowCount: 1, total: 3 },
+      { overflowCount: 0, total: 3 },
     ]);
   });
 
@@ -1018,7 +1038,7 @@ describe("OverflowMenuController", () => {
     setGeom(250, { a: 100, b: 100, c: 100 }); // B returns, C does not
     instance().update();
 
-    // The user is still arrowing through the menu — closing it here would be the bug.
+    // The user is still arrowing through the menu, so the rebalance leaves it open.
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
     expect(menu().hidden).toBe(false);
     expect(document.activeElement).toBe(c);
@@ -1240,7 +1260,7 @@ describe("OverflowMenuController", () => {
   it("never banks an authored hidden item, and keeps its canonical slot", async () => {
     setup(MARKUP());
     query("#c").hidden = true;
-    const seen: Array<{ visible: number; hidden: number }> = [];
+    const seen: Array<{ overflowCount: number; total: number }> = [];
     document.addEventListener("stimeo--overflow-menu:change", (event) => {
       seen.push((event as CustomEvent).detail);
     });
@@ -1249,9 +1269,10 @@ describe("OverflowMenuController", () => {
 
     expect(ids(menu())).toEqual(["b"]); // B only — C is not banked despite ranking lowest
     expect(ids(items())).toEqual(["a", "c"]);
-    // `visible` is the non-banked count, which is what the bar owns — not a count of
-    // what the user can see (an authored hidden item is in the bar but invisible).
-    expect(seen.at(-1)).toEqual({ visible: 2, hidden: 1 });
+    // `overflowCount` counts only the banked items and `total` counts every item — an
+    // authored hidden item stays in the bar, invisible, so it counts toward `total`
+    // but never toward `overflowCount`.
+    expect(seen.at(-1)).toEqual({ overflowCount: 1, total: 3 });
 
     query("#c").hidden = false;
     setGeom(1000, { a: 100, b: 100, c: 100 });
@@ -1306,6 +1327,349 @@ describe("OverflowMenuController", () => {
     await start();
     expect(trigger().textContent).toBe("More");
   });
+
+  // ---- The label it writes stays its own, and follows `moreLabel` ----
+
+  /** The attribute on the trigger recording the label this controller wrote there. */
+  const OWNS_LABEL = "data-stimeo--overflow-menu-owns-label";
+  const MORE_LABEL = "data-stimeo--overflow-menu-more-label-value";
+
+  it("marks the label it writes into a bare trigger as its own", async () => {
+    setup(MARKUP(""));
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(trigger().textContent).toBe("More");
+    // The marker holds the label itself: the text is this controller's only while
+    // the two still agree.
+    expect(trigger().getAttribute(OWNS_LABEL)).toBe("More");
+  });
+
+  it("writes its label back on the next pass after a morph empties the trigger", async () => {
+    setup(MARKUP(""));
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    // A morph onto the server's bare trigger empties it and drops the marker, while
+    // the element and every Value stay, so connect() does not run again.
+    trigger().textContent = "";
+    trigger().removeAttribute(OWNS_LABEL);
+    window.dispatchEvent(new Event("resize"));
+    vi.advanceTimersByTime(100);
+    expect(trigger().textContent).toBe("More");
+    expect(trigger().getAttribute(OWNS_LABEL)).toBe("More");
+  });
+
+  it("measures the More trigger with the label it writes back", async () => {
+    setup(MARKUP(""));
+    stub(root(), "clientWidth", 240);
+    for (const id of ["a", "b", "c"]) stub(query(`#${id}`), "offsetWidth", 100);
+    // A bare trigger has no width of its own; the label is what gives it one.
+    Object.defineProperty(trigger(), "offsetWidth", {
+      configurable: true,
+      get: () => (trigger().textContent === "" ? 0 : 50),
+    });
+    await start();
+    expect(root().getAttribute("data-overflow-count")).toBe("2");
+
+    trigger().textContent = "";
+    trigger().removeAttribute(OWNS_LABEL);
+    instance().update();
+    // Measured bare, the button would free 50px and let B back into the bar beside it.
+    expect(trigger().textContent).toBe("More");
+    expect(root().getAttribute("data-overflow-count")).toBe("2");
+  });
+
+  it("follows a More label swapped in place onto the label it wrote", async () => {
+    setup(MARKUP(""));
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    root().setAttribute(MORE_LABEL, "Mehr");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(trigger().textContent).toBe("Mehr");
+    expect(trigger().getAttribute(OWNS_LABEL)).toBe("Mehr");
+  });
+
+  it("follows a More label swap without measuring the bar or dispatching change", async () => {
+    setup(MARKUP(""));
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    // Let any pass the connection scheduled run before counting.
+    await vi.advanceTimersByTimeAsync(1000);
+    // Every pass reads the container's width once, so the reads count the passes.
+    let width = 1000;
+    let passes = 0;
+    Object.defineProperty(root(), "clientWidth", {
+      configurable: true,
+      get: () => {
+        passes++;
+        return width;
+      },
+    });
+    const events: unknown[] = [];
+    root().addEventListener("stimeo--overflow-menu:change", (e) =>
+      events.push((e as CustomEvent).detail),
+    );
+
+    root().setAttribute(MORE_LABEL, "Mehr");
+    // Past the debounce as well, so a pass scheduled from the swap would show here.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(trigger().textContent).toBe("Mehr");
+    expect(passes).toBe(0);
+    expect(events).toEqual([]);
+
+    // The same probes see a pass and a transition when one happens.
+    width = 250;
+    instance().update();
+    expect(passes).toBe(1);
+    expect(events).toEqual([{ overflowCount: 1, total: 3 }]);
+  });
+
+  it("leaves an authored label alone when the More label changes", async () => {
+    setup(MARKUP("Actions"));
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    root().setAttribute(MORE_LABEL, "Mehr");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(trigger().textContent).toBe("Actions");
+    expect(trigger().hasAttribute(OWNS_LABEL)).toBe(false);
+  });
+
+  it("leaves a label the consumer rewrote alone when the More label changes", async () => {
+    setup(MARKUP(""));
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    trigger().textContent = "Plus"; // e.g. the page's own locale switch
+    root().setAttribute(MORE_LABEL, "Mehr");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(trigger().textContent).toBe("Plus");
+    instance().update();
+    expect(trigger().textContent).toBe("Plus");
+  });
+
+  it("hands a trigger it labelled back bare when the More label empties", async () => {
+    setup(MARKUP(""));
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    root().setAttribute(MORE_LABEL, "");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(trigger().textContent).toBe("");
+    expect(trigger().hasAttribute(OWNS_LABEL)).toBe(false);
+    // Bare again, so the next label reaches it.
+    root().setAttribute(MORE_LABEL, "Mehr");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(trigger().textContent).toBe("Mehr");
+  });
+
+  it("writes nothing to the trigger when its label is already in place", async () => {
+    setup(MARKUP(""));
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    await start();
+    const observer = new MutationObserver(() => {});
+    observer.observe(trigger(), {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    instance().update(); // identical geometry and label
+    const records = observer.takeRecords();
+    observer.disconnect();
+    expect(records).toEqual([]);
+  });
+
+  it("hands a trigger it labelled back bare before Turbo caches the page", async () => {
+    setup(MARKUP(""));
+    setGeom(50, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(trigger().textContent).toBe("More");
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(trigger().textContent).toBe("");
+    expect(bookkeeping(trigger())).toEqual([]);
+  });
+
+  it("hands a trigger it labelled back bare on disconnect", async () => {
+    setup(MARKUP(""));
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    instance().disconnect();
+    expect(trigger().textContent).toBe("");
+    expect(bookkeeping(trigger())).toEqual([]);
+  });
+
+  it("keeps an authored More label through the rewind", async () => {
+    setup(MARKUP());
+    setGeom(50, { a: 100, b: 100, c: 100 });
+    await start();
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(trigger().textContent).toBe("More");
+  });
+
+  it("stays inert without its items target, even when the More label changes", async () => {
+    setup(`
+      <div id="om" data-controller="stimeo--overflow-menu" role="toolbar" aria-label="Actions">
+        <div data-stimeo--overflow-menu-target="more" hidden>
+          <button id="more-trigger" data-stimeo--menu-target="trigger"></button>
+          <div role="menu" aria-labelledby="more-trigger" data-stimeo--menu-target="menu"></div>
+        </div>
+      </div>`);
+    await start();
+    expect(trigger().textContent).toBe("");
+    root().setAttribute(MORE_LABEL, "Mehr");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(trigger().textContent).toBe("");
+  });
+
+  it("measures the More wrapper itself when the markup has no trigger", async () => {
+    setup(`
+      <div id="om" data-controller="stimeo--overflow-menu" role="toolbar" aria-label="Actions">
+        <div data-stimeo--overflow-menu-target="items">
+          <a id="a" href="#" data-priority="1">A</a>
+          <a id="b" href="#" data-priority="2">B</a>
+          <a id="c" href="#">C</a>
+        </div>
+        <div data-stimeo--overflow-menu-target="more" hidden>
+          <div role="menu" aria-label="More" data-stimeo--menu-target="menu"></div>
+        </div>
+      </div>`);
+    stub(root(), "clientWidth", 240);
+    for (const id of ["a", "b", "c"]) stub(query(`#${id}`), "offsetWidth", 100);
+    stub(more(), "offsetWidth", 50);
+    await start();
+    expect(root().getAttribute("data-overflow-count")).toBe("2");
+    root().setAttribute(MORE_LABEL, "Mehr");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(root().getAttribute("data-overflow-count")).toBe("2");
+  });
+
+  it("marks the label under the identifier it is registered with", async () => {
+    const alias = "nav--overflow";
+    document.body.innerHTML = `
+      <nav id="om" data-controller="${alias}" aria-label="Actions">
+        <div data-${alias}-target="items"><a id="a" href="#">A</a></div>
+        <div data-${alias}-target="more" hidden>
+          <button id="more-trigger" data-stimeo--menu-target="trigger"></button>
+          <div role="menu" aria-labelledby="more-trigger" data-stimeo--menu-target="menu"></div>
+        </div>
+      </nav>`;
+    application = Application.start();
+    application.register(alias, OverflowMenuController);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(trigger().textContent).toBe("More");
+    expect(trigger().getAttribute(`data-${alias}-owns-label`)).toBe("More");
+    expect(trigger().hasAttribute(OWNS_LABEL)).toBe(false);
+  });
+
+  // ---- A trigger the consumer adds to is theirs, even with the label unchanged ----
+
+  /**
+   * What a consumer may add to a trigger this controller labelled, each with the
+   * step that takes it back out. None of them changes the trigger's text, so the
+   * marker still matches it.
+   */
+  const ADDITIONS: ReadonlyArray<
+    readonly [string, (el: HTMLElement) => void, (el: HTMLElement) => void]
+  > = [
+    [
+      "an icon",
+      (el) =>
+        el.insertAdjacentHTML("beforeend", '<svg aria-hidden="true"><circle r="1"></circle></svg>'),
+      (el) => el.querySelector("svg")?.remove(),
+    ],
+    [
+      "an aria-label",
+      (el) => el.setAttribute("aria-label", "More actions"),
+      (el) => el.removeAttribute("aria-label"),
+    ],
+    [
+      "an aria-labelledby",
+      (el) => el.setAttribute("aria-labelledby", "a"),
+      (el) => el.removeAttribute("aria-labelledby"),
+    ],
+  ];
+
+  /**
+   * Starts on a bare trigger, lets the controller label it, applies `add`, and
+   * returns the trigger's outer markup (attributes, marker and children) as it
+   * stands after that.
+   */
+  const labelThenAdd = async (add: (el: HTMLElement) => void): Promise<string> => {
+    setup(MARKUP(""));
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(trigger().textContent).toBe("More");
+    add(trigger());
+    expect(trigger().getAttribute(OWNS_LABEL)).toBe(trigger().textContent);
+    return trigger().outerHTML;
+  };
+
+  it.each(ADDITIONS)(
+    "never rewrites a trigger it labelled once the consumer adds %s",
+    async (_, add) => {
+      const authored = await labelThenAdd(add);
+      root().setAttribute(MORE_LABEL, "Mehr");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(trigger().outerHTML).toBe(authored);
+      // The measurement pass writes the label ahead of measuring it, by the same rule.
+      instance().update();
+      expect(trigger().outerHTML).toBe(authored);
+    },
+  );
+
+  it.each(ADDITIONS)(
+    "never empties a trigger it labelled once the consumer adds %s, when the More label empties",
+    async (_, add) => {
+      const authored = await labelThenAdd(add);
+      root().setAttribute(MORE_LABEL, "");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(trigger().outerHTML).toBe(authored);
+    },
+  );
+
+  it.each(ADDITIONS)(
+    "leaves a trigger it labelled alone before Turbo caches the page once the consumer adds %s",
+    async (_, add) => {
+      const authored = await labelThenAdd(add);
+      document.dispatchEvent(new Event("turbo:before-cache"));
+      // The marker stays where it is: taking it off would write to a trigger that
+      // belongs to the consumer.
+      expect(trigger().outerHTML).toBe(authored);
+    },
+  );
+
+  it.each(ADDITIONS)(
+    "leaves a trigger it labelled alone on disconnect once the consumer adds %s",
+    async (_, add) => {
+      const authored = await labelThenAdd(add);
+      instance().disconnect();
+      expect(trigger().outerHTML).toBe(authored);
+    },
+  );
+
+  it.each(ADDITIONS)(
+    "takes its label back once %s the consumer added is gone again",
+    async (_, add, takeOut) => {
+      setup(MARKUP(""));
+      setGeom(1000, { a: 100, b: 100, c: 100 });
+      await start();
+      // A trigger holding the label alone follows `moreLabel`.
+      root().setAttribute(MORE_LABEL, "Mehr");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(trigger().textContent).toBe("Mehr");
+      add(trigger());
+      root().setAttribute(MORE_LABEL, "Plus");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(trigger().textContent).toBe("Mehr");
+      // With the addition gone the trigger holds the label alone again, so the label
+      // and the rewind reach it.
+      takeOut(trigger());
+      root().setAttribute(MORE_LABEL, "Encore");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(trigger().textContent).toBe("Encore");
+      expect(trigger().getAttribute(OWNS_LABEL)).toBe("Encore");
+      document.dispatchEvent(new Event("turbo:before-cache"));
+      expect(trigger().textContent).toBe("");
+      expect(bookkeeping(trigger())).toEqual([]);
+    },
+  );
 
   // ---- Banked items are operable with no per-element bindings ----
 

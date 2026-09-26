@@ -76,7 +76,12 @@ export class AutoSubmitController extends Controller<HTMLElement> {
   /** Rewinds the transient state hooks just before Turbo snapshots the page. */
   readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
 
-  /** Clears `aria-busy` and emits completion once Turbo finishes the submit. */
+  /**
+   * Clears `aria-busy` and emits completion once Turbo finishes the submit.
+   *
+   * @stimeoRuntimeOnly `message` and `announce` shape the event and the announcement of one
+   *   finished submit; the busy flag it clears does not depend on them.
+   */
   readonly #onSubmitEnd = (): void => {
     this.#boundForm?.removeAttribute("aria-busy");
     const message = this.messageValue;
@@ -129,7 +134,11 @@ export class AutoSubmitController extends Controller<HTMLElement> {
     this.#schedule((event.target as HTMLElement | null) ?? null);
   }
 
-  /** Schedules (and coalesces) the debounced submit for the given trigger. */
+  /**
+   * Schedules (and coalesces) the debounced submit for the given trigger.
+   *
+   * @stimeoRuntimeOnly `debounce` is the delay of the one submit timer this call arms.
+   */
   #schedule(trigger: HTMLElement | null): void {
     const form = this.#boundForm;
     if (!form) return;

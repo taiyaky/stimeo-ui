@@ -4,6 +4,7 @@ import { CollapsibleController } from "../src/controllers/collapsible_controller
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -368,6 +369,18 @@ describe("CollapsibleController", () => {
     expect(content().getAttribute("data-state")).toBe("closed");
   });
 
+  it("reconciles a replacement trigger target with the closed content state", async () => {
+    const oldTrigger = trigger();
+    const replacement = oldTrigger.cloneNode(true) as HTMLButtonElement;
+    replacement.setAttribute("aria-expanded", "true");
+    oldTrigger.replaceWith(replacement);
+    await tick();
+
+    // The content is the truth source, so an authored open state on the incoming
+    // trigger gives way to the closed region it controls.
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("is a safe no-op when the trigger/content targets are absent", async () => {
     await restart(`<div data-controller="stimeo--collapsible"></div>`);
 
@@ -379,5 +392,329 @@ describe("CollapsibleController", () => {
     application.unload("stimeo--collapsible");
     trigger().click();
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  // --- Expanded / collapsed labels ---
+
+  // The trigger may carry a label pair: one label belongs to the expanded state,
+  // the other to the collapsed one. Which side is shown is a pure function of
+  // `aria-expanded`, written unconditionally, so what the author left on the pair
+  // never survives a connection.
+  describe("expanded / collapsed labels", () => {
+    const labeled = `
+      <div data-controller="stimeo--collapsible">
+        <button data-stimeo--collapsible-target="trigger"
+                data-action="stimeo--collapsible#toggle"
+                aria-expanded="false" aria-controls="labeled-body">
+          <span data-stimeo--collapsible-target="collapsedLabel">Show details</span>
+          <span data-stimeo--collapsible-target="expandedLabel" hidden>Hide details</span>
+        </button>
+        <div id="labeled-body" data-stimeo--collapsible-target="content"
+             data-state="closed" hidden>Billing details</div>
+      </div>`;
+
+    const expandedLabel = (root: ParentNode = document) =>
+      query("[data-stimeo--collapsible-target='expandedLabel']", root);
+    const collapsedLabel = (root: ParentNode = document) =>
+      query("[data-stimeo--collapsible-target='collapsedLabel']", root);
+
+    it("settles nothing when a half arrives with no trigger to sit in", async () => {
+      // The pair is resolved against the trigger, so a widget without one has no host
+      // to reflect into. Stimulus settles a target before the controller connects, so
+      // reaching for the absent trigger there throws out of the callback rather than
+      // through the application's own error handler.
+      const markup = `
+        <div data-controller="stimeo--collapsible">
+          <span data-stimeo--collapsible-target="expandedLabel">Hide</span>
+          <span data-stimeo--collapsible-target="collapsedLabel">Show</span>
+          <div data-stimeo--collapsible-target="content" data-state="closed" hidden>Body</div>
+        </div>`;
+
+      await expect(restart(markup)).resolves.toBeUndefined();
+
+      expect(expandedLabel().hidden).toBe(false);
+      expect(collapsedLabel().hidden).toBe(false);
+    });
+
+    it("shows the label that belongs to the state in both directions", async () => {
+      await restart(labeled);
+
+      expect(collapsedLabel().hidden).toBe(false);
+      expect(expandedLabel().hidden).toBe(true);
+
+      trigger().click();
+      expect(expandedLabel().hidden).toBe(false);
+      expect(collapsedLabel().hidden).toBe(true);
+
+      trigger().click();
+      expect(collapsedLabel().hidden).toBe(false);
+      expect(expandedLabel().hidden).toBe(true);
+    });
+
+    it("corrects a pair authored against the state on the first connection", async () => {
+      // Both sides are authored for the collapsed state while the markup reads
+      // expanded; the first reflection settles them without reading them back.
+      await restart(`
+        <div data-controller="stimeo--collapsible">
+          <button data-stimeo--collapsible-target="trigger"
+                  data-action="stimeo--collapsible#toggle"
+                  aria-expanded="true" aria-controls="stale-body">
+            <span data-stimeo--collapsible-target="collapsedLabel">Show details</span>
+            <span data-stimeo--collapsible-target="expandedLabel" hidden>Hide details</span>
+          </button>
+          <div id="stale-body" data-stimeo--collapsible-target="content"
+               data-state="open">Billing details</div>
+        </div>`);
+
+      expect(expandedLabel().hidden).toBe(false);
+      expect(collapsedLabel().hidden).toBe(true);
+    });
+
+    it("leaves a lone label as authored while a complete pair beside it reflects", async () => {
+      // Hiding the only label inside a trigger would leave that trigger nameless,
+      // so a half pair keeps what the author wrote.
+      await restart(`
+        <div id="pair" data-controller="stimeo--collapsible">
+          <button data-stimeo--collapsible-target="trigger"
+                  data-action="stimeo--collapsible#toggle"
+                  aria-expanded="true" aria-controls="pair-body">
+            <span data-stimeo--collapsible-target="collapsedLabel">Show details</span>
+            <span data-stimeo--collapsible-target="expandedLabel" hidden>Hide details</span>
+          </button>
+          <div id="pair-body" data-stimeo--collapsible-target="content"
+               data-state="open">Billing details</div>
+        </div>
+        <div id="half" data-controller="stimeo--collapsible">
+          <button data-stimeo--collapsible-target="trigger"
+                  data-action="stimeo--collapsible#toggle"
+                  aria-expanded="true" aria-controls="half-body">
+            <span data-stimeo--collapsible-target="expandedLabel" hidden>Hide shipping</span>
+          </button>
+          <div id="half-body" data-stimeo--collapsible-target="content"
+               data-state="open">Shipping details</div>
+        </div>`);
+
+      const pair = query("#pair");
+      const half = query("#half");
+      expect(expandedLabel(pair).hidden).toBe(false);
+      expect(collapsedLabel(pair).hidden).toBe(true);
+      expect(expandedLabel(half).hidden).toBe(true);
+
+      // A half the controller wrote would flip with the state, so the round trip
+      // checks both: in the expanded state a written half would be shown instead.
+      const halfTrigger = query<HTMLButtonElement>(
+        "[data-stimeo--collapsible-target='trigger']",
+        half,
+      );
+      halfTrigger.click();
+      expect(halfTrigger.getAttribute("aria-expanded")).toBe("false");
+      expect(expandedLabel(half).hidden).toBe(true);
+
+      halfTrigger.click();
+      expect(halfTrigger.getAttribute("aria-expanded")).toBe("true");
+      expect(expandedLabel(half).hidden).toBe(true);
+    });
+
+    it("syncs the pair of a trigger that replaces the connected one", async () => {
+      await restart(labeled);
+      trigger().click();
+
+      const replacement = trigger().cloneNode(true) as HTMLButtonElement;
+      replacement.setAttribute("aria-expanded", "false");
+      expandedLabel(replacement).hidden = true;
+      collapsedLabel(replacement).hidden = false;
+      trigger().replaceWith(replacement);
+      await tick();
+
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(expandedLabel().hidden).toBe(false);
+      expect(collapsedLabel().hidden).toBe(true);
+    });
+
+    it("settles the pair of a trigger that takes over from the connected one", async () => {
+      // The incoming button already contains the pair when it arrives, so its own
+      // target callbacks have run by the time that button becomes the trigger: the
+      // trigger reconciliation is the only thing left that can settle it against the
+      // content's live state.
+      await restart(`
+        <div data-controller="stimeo--collapsible">
+          <button id="outgoing" data-stimeo--collapsible-target="trigger"
+                  data-action="stimeo--collapsible#toggle"
+                  aria-expanded="true" aria-controls="takeover-body">Hide details</button>
+          <button id="incoming" data-action="stimeo--collapsible#toggle">
+            <span data-stimeo--collapsible-target="collapsedLabel">Show details</span>
+            <span data-stimeo--collapsible-target="expandedLabel" hidden>Hide details</span>
+          </button>
+          <div id="takeover-body" data-stimeo--collapsible-target="content"
+               data-state="open">Billing details</div>
+        </div>`);
+
+      // A pair outside the connected trigger is not the controller's to write.
+      expect(collapsedLabel().hidden).toBe(false);
+      expect(expandedLabel().hidden).toBe(true);
+
+      query("#outgoing").remove();
+      query("#incoming").setAttribute("data-stimeo--collapsible-target", "trigger");
+      await tick();
+
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(expandedLabel().hidden).toBe(false);
+      expect(collapsedLabel().hidden).toBe(true);
+    });
+
+    it("settles the pair of a taking-over trigger that has no content target", async () => {
+      // With no content target the trigger's own `aria-expanded` is the state, and
+      // the pair inside it belongs to that state just the same.
+      await restart(`
+        <div data-controller="stimeo--collapsible">
+          <button id="outgoing" data-stimeo--collapsible-target="trigger"
+                  data-action="stimeo--collapsible#toggle"
+                  aria-expanded="true">Hide details</button>
+          <button id="incoming" data-action="stimeo--collapsible#toggle"
+                  aria-expanded="true">
+            <span data-stimeo--collapsible-target="collapsedLabel">Show details</span>
+            <span data-stimeo--collapsible-target="expandedLabel" hidden>Hide details</span>
+          </button>
+        </div>`);
+
+      query("#outgoing").remove();
+      query("#incoming").setAttribute("data-stimeo--collapsible-target", "trigger");
+      await tick();
+
+      expect(expandedLabel().hidden).toBe(false);
+      expect(collapsedLabel().hidden).toBe(true);
+    });
+
+    it("syncs a pair that arrives inside the trigger after connect", async () => {
+      trigger().click();
+
+      const collapsed = document.createElement("span");
+      collapsed.setAttribute("data-stimeo--collapsible-target", "collapsedLabel");
+      collapsed.textContent = "Show details";
+      const expanded = document.createElement("span");
+      expanded.setAttribute("data-stimeo--collapsible-target", "expandedLabel");
+      expanded.textContent = "Hide details";
+      expanded.hidden = true;
+      trigger().append(collapsed, expanded);
+      await tick();
+
+      expect(expanded.hidden).toBe(false);
+      expect(collapsed.hidden).toBe(true);
+    });
+
+    it("swaps the pair with aria-expanded, ahead of the deferred hidden", async () => {
+      await restart(labeled);
+      const spy = vi.spyOn(window, "getComputedStyle").mockReturnValue({
+        transitionProperty: "height",
+        transitionDuration: "0.2s",
+        transitionDelay: "0s",
+      } as CSSStyleDeclaration);
+      try {
+        trigger().click(); // open
+        expect(expandedLabel().hidden).toBe(false);
+        expect(collapsedLabel().hidden).toBe(true);
+
+        trigger().click(); // close, with the content's hidden waiting on the transition
+        expect(content().hidden).toBe(false);
+        expect(collapsedLabel().hidden).toBe(false);
+        expect(expandedLabel().hidden).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--collapsible");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a trigger click as user, as soon as the state attributes are written", () => {
+      const states: string[] = [];
+      query("[data-controller='stimeo--collapsible']").addEventListener(
+        "stimeo--collapsible:open",
+        () => {
+          states.push(
+            `${trigger().getAttribute("aria-expanded")} ${content().getAttribute("data-state")}`,
+          );
+        },
+      );
+
+      trigger().click();
+
+      expect(capture.names()).toEqual(["open"]);
+      expect(capture.reasons()).toEqual(["user"]);
+      expect(states).toEqual(["true open"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+    });
+
+    it("reports the close before the deferred hidden lands", () => {
+      trigger().click();
+      capture.clear();
+
+      trigger().click();
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(content().getAttribute("data-state")).toBe("closed");
+    });
+
+    it("reports a call with no DOM event as api", () => {
+      controller().toggle();
+
+      expect(capture.reasons()).toEqual(["api"]);
+    });
+
+    it("stays silent while connect establishes an authored-open baseline", async () => {
+      disconnectAndStopApplication(application);
+      document.body.innerHTML = `
+        <div data-controller="stimeo--collapsible">
+          <button data-stimeo--collapsible-target="trigger" aria-expanded="true"
+                  aria-controls="more">Show details</button>
+          <div id="more" data-stimeo--collapsible-target="content" data-state="open"></div>
+        </div>`;
+      const fresh = captureStateEvents("stimeo--collapsible");
+      application = Application.start();
+      application.register("stimeo--collapsible", CollapsibleController);
+      await tick();
+
+      expect(content().getAttribute("data-state")).toBe("open");
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+    });
+
+    it("stays silent while a replacement content target is reconciled", async () => {
+      trigger().click();
+      capture.clear();
+
+      const replacement = document.createElement("div");
+      replacement.id = "more";
+      replacement.setAttribute("data-stimeo--collapsible-target", "content");
+      content().replaceWith(replacement);
+      await tick();
+
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("stays silent through a disconnect and a Turbo-style reconnect", async () => {
+      trigger().click();
+      capture.clear();
+
+      const element = query("[data-controller='stimeo--collapsible']");
+      element.remove();
+      await tick();
+      document.body.append(element);
+      await tick();
+
+      expect(capture.seen).toEqual([]);
+    });
   });
 });

@@ -9,7 +9,7 @@ type SelectionDetail = { count: number; allPages: boolean };
  * Headless **bulk select / batch action bar** (no dedicated APG pattern — a
  * composition of a checkbox group and a toolbar). Mirrors the Gmail/admin UX where
  * checking one or more rows reveals a sticky action bar with the selected count,
- * select-all, and clear. Data Grid owns per-row `aria-selected`; this is the
+ * select-all, and clear. `stimeo--data-grid` owns per-row `aria-selected`; this is the
  * contextual action-bar layer on top.
  *
  * Markup contract (identifier: `stimeo--bulk-select`):
@@ -63,8 +63,8 @@ type SelectionDetail = { count: number; allPages: boolean };
  * the select-all box first when the bar holds it, so the keyboard user keeps a Tab
  * position instead of falling back to the document.
  *
- * A non-finite `totalCount` falls back to the Value's default and is written back
- * to the attribute, so the count never renders as `NaN`.
+ * A non-finite `totalCount` counts as the Value's default `0`, so the count never
+ * renders as `NaN`. The attribute keeps what the page wrote.
  *
  * The delegated listener and the pending repair are both released on `disconnect()`.
  */
@@ -144,12 +144,8 @@ export class BulkSelectController extends Controller<HTMLElement> {
     this.#reconcile.schedule();
   }
 
-  /** Repaints the count for a total that changed at runtime, rejecting non-finite ones. */
+  /** Repaints the count for a total that changed at runtime. */
   totalCountValueChanged(): void {
-    if (!Number.isFinite(this.totalCountValue)) {
-      this.totalCountValue = 0;
-      return;
-    }
     this.#reconcile.schedule();
   }
 
@@ -223,6 +219,12 @@ export class BulkSelectController extends Controller<HTMLElement> {
     announce(fillTemplate(this.announceTextValue, { count: detail.count }));
   }
 
+  /** The declared `totalCount`, or the default `0` in place of a non-finite one. */
+  get #totalCount(): number {
+    const declared = this.totalCountValue;
+    return Number.isFinite(declared) ? declared : 0;
+  }
+
   /**
    * Recomputes the count, the select-all checked/indeterminate state, and the bar
    * visibility from the current DOM. Returns the figures when the emitted count or
@@ -241,7 +243,7 @@ export class BulkSelectController extends Controller<HTMLElement> {
       this.allTarget.indeterminate = checked > 0 && checked < total;
     }
 
-    const count = allPages ? this.totalCountValue : checked;
+    const count = allPages ? this.#totalCount : checked;
     const show = allPages || checked > 0;
 
     if (this.hasBarTarget) {

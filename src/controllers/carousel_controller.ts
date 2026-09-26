@@ -2,11 +2,14 @@ import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { DetachGate } from "../utils/detach_gate";
 import { ownerIndex } from "../utils/event_owner";
+import { ListenerSet } from "../utils/listener_set";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { prefersReducedMotion } from "../utils/reduced_motion";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
 import { SafeInterval } from "../utils/safe_timeout";
+import { StateRegions } from "../utils/state_regions";
 
 /** Advance delay used when `interval` is not a finite positive number. */
 const DEFAULT_INTERVAL = 5000;
@@ -27,7 +30,10 @@ const OBSERVED_ATTRIBUTES = ["aria-selected", "data-state", "hidden"];
  *            data-stimeo--carousel-autoplay-value="false"
  *            data-stimeo--carousel-interval-value="5000"
  *            data-stimeo--carousel-loop-value="true">
- *     <button data-stimeo--carousel-target="playToggle">…</button>
+ *     <button aria-label="Slide autoplay" data-stimeo--carousel-target="playToggle">
+ *       <span aria-hidden="true" data-stimeo--carousel-target="onLabel" hidden>Pause</span>
+ *       <span aria-hidden="true" data-stimeo--carousel-target="offLabel">Play</span>
+ *     </button>
  *     <div data-stimeo--carousel-target="viewport">
  *       <div role="tabpanel" data-stimeo--carousel-target="slide">…</div>
  *       <div role="tabpanel" data-stimeo--carousel-target="slide" hidden inert>…</div>
@@ -60,16 +66,26 @@ const OBSERVED_ATTRIBUTES = ["aria-selected", "data-state", "hidden"];
  * **`autoplay` is the single source of truth for the rotation intent.** The
  * toggle writes back to it, so the state survives a Turbo Drive cache restore
  * without a second, competing signal; `aria-pressed` is a pure output the
- * controller owns. Rotation is suspended — not cancelled — while the pointer
- * rests on the carousel, while focus is inside it, and while the tab is hidden;
- * each suspension lifts on its own (WCAG 2.2.2 is met by the toggle, which is
- * the one control that stops rotation for good). A carousel with nothing left to
- * advance to (one slide, or the last slide of a non-looping set) normalizes
- * `autoplay` to `false` and marks the toggle `aria-disabled`. `prefers-reduced-motion`
- * does the same at connect, leaving an explicit press free to start rotation.
+ * controller owns, as is the `onLabel`/`offLabel` pair a toggle may carry: each
+ * toggle shows the half its rotation state belongs to, and a half with no partner
+ * inside the same toggle keeps the visibility the consumer authored. The toggle's
+ * name comes from `aria-label` and holds in both states, so the pair is a visual
+ * affordance the accessibility tree does not read. Rotation is suspended — not
+ * cancelled — while the pointer rests on the carousel, while focus is inside it,
+ * and while the tab is hidden; each suspension lifts on its own (WCAG 2.2.2 is met
+ * by the toggle, which is the one control that stops rotation for good). A carousel
+ * with nothing left to advance to (one slide, or the last slide of a non-looping
+ * set) shows the intent as off and marks the toggle `aria-disabled`, without
+ * rewriting `autoplay`: once a slide lies ahead again, the intent takes effect
+ * again. `prefers-reduced-motion` holds back the intent `autoplay` declares at
+ * connect the same way, until the user presses the toggle or the page changes
+ * `autoplay`.
  *
- * The interval is cleared on `disconnect()` (Turbo navigation included), and the
- * leased ARIA is returned before Turbo caches the page. Picker arrow keys, `Home`,
+ * The rotation ends when the controller really leaves — a Turbo navigation, a
+ * removed element, `data-controller` dropping it — and a carousel still in the
+ * document hears that end as `pause`. An in-page move reconnects the same
+ * instance and keeps the run: no edge, no restarted interval. The leased ARIA
+ * is returned before Turbo caches the page. Picker arrow keys, `Home`,
  * and `End` move focus only (manual activation); slide changes never steal focus
  * from the control the user operated. A slide change the user drove — including an
  * autoplay tick they started — is reported as `stimeo--carousel:change` with
@@ -78,7 +94,16 @@ const OBSERVED_ATTRIBUTES = ["aria-selected", "data-state", "hidden"];
  * a retained element's state attributes were rewritten in place.
  */
 export class CarouselController extends Controller<HTMLElement> {
-  static override targets = ["slide", "viewport", "prev", "next", "picker", "playToggle"];
+  static override targets = [
+    "slide",
+    "viewport",
+    "prev",
+    "next",
+    "picker",
+    "playToggle",
+    "onLabel",
+    "offLabel",
+  ];
   static override values = {
     autoplay: { type: Boolean, default: false },
     interval: { type: Number, default: DEFAULT_INTERVAL },
@@ -102,6 +127,8 @@ export class CarouselController extends Controller<HTMLElement> {
   declare readonly prevTargets: HTMLElement[];
   declare readonly nextTargets: HTMLElement[];
   declare readonly playToggleTargets: HTMLElement[];
+  declare readonly onLabelTargets: HTMLElement[];
+  declare readonly offLabelTargets: HTMLElement[];
   declare autoplayValue: boolean;
   declare intervalValue: number;
   declare loopValue: boolean;
@@ -115,7 +142,16 @@ export class CarouselController extends Controller<HTMLElement> {
   readonly #ariaLive = new AttributeLease<HTMLElement>("aria-live");
   /** Pairs with {@link CarouselController.#ariaLive}: only the changed slide is read. */
   readonly #ariaAtomic = new AttributeLease<HTMLElement>("aria-atomic");
+  /** The label pair a play toggle may carry, one half per rotation state. */
+  readonly #labels = new StateRegions({
+    whenTrue: () => this.onLabelTargets,
+    whenFalse: () => this.offLabelTargets,
+  });
   readonly #beforeCache = new BeforeCacheReset(() => this.#returnLeases());
+  /** Tells an in-page move, which keeps the rotation, from a real detach. */
+  readonly #gate = new DetachGate();
+  /** The next pointer movement, listened for while a pointer suspension waits on it. */
+  readonly #pointer = new ListenerSet();
   /**
    * Events an authored action binding already took. The delegated listener runs
    * later — it sits on the controller element, above every control — so it can
@@ -136,12 +172,17 @@ export class CarouselController extends Controller<HTMLElement> {
   #activeSlide: HTMLElement | null = null;
   /** Slide count at the last resolved state, so a changed total is reportable. */
   #total = 0;
-  /** Pointer rests on the carousel: a suspension that lifts on `mouseleave`. */
+  /**
+   * Pointer rests on the carousel: a suspension that lifts on `mouseleave`, or on the
+   * pointer movement that confirms a suspension a move or a connect left unconfirmed.
+   */
   #pointerPaused = false;
   /** Focus is inside the carousel: a suspension that lifts when it leaves. */
   #focusPaused = false;
   /** The tab is in the background: a suspension that lifts when it returns. */
   #hiddenPaused = false;
+  /** Reduced motion holds back the intent declared at connect, until a press or a new one. */
+  #motionHold = false;
   /** Id of the live autoplay interval, or null when stopped. */
   #timerId: number | null = null;
   /** Delay the live interval was armed with, so an `interval` change re-arms it. */
@@ -159,17 +200,24 @@ export class CarouselController extends Controller<HTMLElement> {
    * Renders the initial slide, wires the delegated listeners, and starts autoplay
    * when requested.
    *
-   * Every suspension is re-derived from the environment rather than carried, so an
-   * in-page move — which Stimulus delivers to the *same* controller instance as
-   * `disconnect()` then `connect()` — cannot strand the carousel in a suspension
-   * whose lifting event will never arrive. The attribute observer starts after the
-   * first render so the controller's own opening writes are not fed back to it.
+   * Focus, the tab's visibility and the reduced-motion hold are read afresh. The
+   * pointer is not something the document can answer yet: no `mouseleave` reaches a
+   * node that moved, and `:hover` can answer from before the move until the pointer
+   * moves again. So an in-page move — which Stimulus delivers to the *same* controller
+   * instance as `disconnect()` then `connect()` — keeps the pointer suspension it had,
+   * `:hover` reading true adds one, and either waits for the next pointer movement to
+   * be confirmed or lifted. A rotation the move carried is still running, so the edges
+   * are judged against it. The attribute observer starts after the first render so the
+   * controller's own opening writes are not fed back to it.
    */
   override connect(): void {
-    this.#pointerPaused = this.element.matches(":hover");
+    const moved = this.#gate.pending;
+    this.#gate.cancel();
+    this.#pointerPaused = (moved && this.#pointerPaused) || this.element.matches(":hover");
+    if (this.#pointerPaused) this.#awaitPointer();
     this.#focusPaused = this.element.contains(document.activeElement);
     this.#hiddenPaused = document.visibilityState === "hidden";
-    if (this.autoplayValue && prefersReducedMotion()) this.autoplayValue = false;
+    this.#motionHold = prefersReducedMotion();
     this.#index = this.#resolveIndex();
     this.#render({ focus: false });
     this.#total = this.slideTargets.length;
@@ -193,9 +241,15 @@ export class CarouselController extends Controller<HTMLElement> {
     });
   }
 
-  /** Releases every listener and observer, returns the leased ARIA, drops the suspensions. */
+  /**
+   * Releases every listener and observer, returns the leased ARIA, drops the focus
+   * and tab suspensions. The rotation goes through the detach gate: a reconnect in
+   * the same batch — an in-page move — keeps it, and the pointer suspension with it;
+   * anything else ends it.
+   */
   override disconnect(): void {
     this.#connected = false;
+    this.#pointer.dispose();
     this.element.removeEventListener("click", this.#onClick);
     this.element.removeEventListener("keydown", this.#onKeydown);
     this.element.removeEventListener("focusin", this.#onFocusin);
@@ -206,14 +260,12 @@ export class CarouselController extends Controller<HTMLElement> {
     this.#observer?.disconnect();
     this.#observer = null;
     this.#reconcileTargets.cancel();
-    this.#intervals.clearAll();
-    this.#timerId = null;
-    this.#pointerPaused = false;
     this.#focusPaused = false;
     this.#hiddenPaused = false;
     this.#activeSlide = null;
     this.#returnLeases();
     this.#beforeCache.deactivate();
+    this.#gate.disconnected(this, () => this.#endRun());
   }
 
   /**
@@ -245,9 +297,38 @@ export class CarouselController extends Controller<HTMLElement> {
     this.#reconcileTargets.schedule();
   }
 
-  /** Follows a rotation intent the page changed at runtime. */
-  autoplayValueChanged(): void {
+  /**
+   * Publishes the rotation state on a toggle that joins a connected carousel.
+   *
+   * A toggle the markup already carries connects ahead of `connect()`, where the
+   * suspensions and the reduced-motion hold are not settled yet; the opening pass
+   * covers it.
+   */
+  playToggleTargetConnected(): void {
     if (this.#connected) this.#syncTimer();
+  }
+
+  /**
+   * Publishes the rotation state on a label half that joins a connected toggle.
+   *
+   * A half arriving changes the toggle's subtree, not its attributes, so the
+   * attribute observer never sees it; where the arrival completes a pair that was
+   * standing alone, this is what makes that pair whole and reflectable.
+   */
+  onLabelTargetConnected(): void {
+    if (this.#connected) this.#syncTimer();
+  }
+
+  /** Publishes the rotation state on a label half that joins a connected toggle. */
+  offLabelTargetConnected(): void {
+    if (this.#connected) this.#syncTimer();
+  }
+
+  /** Follows a rotation intent the page changed at runtime, lifting the reduced-motion hold. */
+  autoplayValueChanged(): void {
+    if (!this.#connected) return;
+    this.#motionHold = false;
+    this.#syncTimer();
   }
 
   /** Re-arms the live interval at the new delay without reporting a state change. */
@@ -255,11 +336,12 @@ export class CarouselController extends Controller<HTMLElement> {
     if (this.#connected) this.#syncTimer();
   }
 
-  /** Re-publishes the step controls and re-evaluates the non-looping end. */
+  /**
+   * Re-publishes the step controls and re-evaluates the non-looping end through the
+   * reconcile pass, which reports a move only when the position changed.
+   */
   loopValueChanged(): void {
-    if (!this.#connected) return;
-    this.#render({ focus: false });
-    this.#syncTimer();
+    this.#reconcileTargets.schedule();
   }
 
   /** Advances to the next slide. Delegated; `data-action` wiring is optional. */
@@ -285,11 +367,11 @@ export class CarouselController extends Controller<HTMLElement> {
   }
 
   /**
-   * Flips the rotation intent on the user's explicit request.
+   * Flips the rotation intent the toggle shows, on the user's explicit request.
    *
-   * The intent is written back to the `autoplay` Value, which is where every other
-   * path reads it from. A carousel with nothing to advance to has no intent to
-   * flip: the toggle is marked `aria-disabled` and does nothing.
+   * The result is written to the `autoplay` Value, which is where every other path
+   * reads it from. A carousel with nothing to advance to has no intent to flip: the
+   * toggle is marked `aria-disabled` and does nothing.
    */
   togglePlay(event?: Event): void {
     if (event?.defaultPrevented) return;
@@ -306,7 +388,7 @@ export class CarouselController extends Controller<HTMLElement> {
   pause(event?: Event): void {
     this.#markHandled(event);
     if (isFocusEvent(event)) this.#focusPaused = true;
-    else this.#pointerPaused = true;
+    else this.#setPointerPaused(true);
     this.#syncTimer();
   }
 
@@ -322,7 +404,7 @@ export class CarouselController extends Controller<HTMLElement> {
       if (this.#focusStaysInside(event)) return;
       this.#focusPaused = false;
     } else {
-      this.#pointerPaused = false;
+      this.#setPointerPaused(false);
     }
     this.#syncTimer();
   }
@@ -375,16 +457,41 @@ export class CarouselController extends Controller<HTMLElement> {
   /** Pointer entry suspends the rotation. */
   readonly #onMouseenter = (event: MouseEvent): void =>
     this.#delegate(event, () => {
-      this.#pointerPaused = true;
+      this.#setPointerPaused(true);
       this.#syncTimer();
     });
 
   /** Pointer exit lifts the suspension. */
   readonly #onMouseleave = (event: MouseEvent): void =>
     this.#delegate(event, () => {
-      this.#pointerPaused = false;
+      this.#setPointerPaused(false);
       this.#syncTimer();
     });
+
+  /**
+   * Reads `:hover` once the pointer has moved, when the answer is current, and lifts
+   * the pointer suspension if the pointer is not over the carousel. Listens once.
+   */
+  readonly #onPointerMove = (): void => {
+    this.#pointer.dispose();
+    if (this.element.matches(":hover")) return;
+    this.#pointerPaused = false;
+    this.#syncTimer();
+  };
+
+  /** Leaves the pointer suspension to be confirmed or lifted on the next pointer movement. */
+  #awaitPointer(): void {
+    this.#pointer.add(document, "pointermove", this.#onPointerMove, {
+      capture: true,
+      passive: true,
+    });
+  }
+
+  /** Records the pointer suspension; a newer answer ends any wait on the next movement. */
+  #setPointerPaused(paused: boolean): void {
+    this.#pointer.dispose();
+    this.#pointerPaused = paused;
+  }
 
   /**
    * Schedules one reconciliation when a state attribute is rewritten in place —
@@ -427,10 +534,12 @@ export class CarouselController extends Controller<HTMLElement> {
     return next instanceof Node && this.element.contains(next);
   }
 
-  /** Flips the rotation intent, unless there is nothing to rotate to. */
+  /** Flips the rotation intent unless there is nothing to rotate to; lifts the motion hold. */
   #togglePlay(): void {
     if (!this.#canAutoplay()) return;
-    this.autoplayValue = !this.autoplayValue;
+    const next = !this.#intent;
+    this.#motionHold = false;
+    this.autoplayValue = next;
     this.#syncTimer();
   }
 
@@ -499,8 +608,7 @@ export class CarouselController extends Controller<HTMLElement> {
   /**
    * Changes the active slide, updates state hooks, and emits `change` — but only
    * when the index actually changes, so a `next`/`prev` clamped at the end (or an
-   * autoplay tick at a non-looping boundary) re-renders without a spurious event
-   * (matching the "emit on real change" policy of flash/masonry/bulk-select).
+   * autoplay tick at a non-looping boundary) re-renders without a spurious event.
    */
   #select(index: number, { focus }: { focus: boolean }): void {
     const target = this.#clampToSlides(index);
@@ -603,6 +711,11 @@ export class CarouselController extends Controller<HTMLElement> {
     }
   }
 
+  /** The rotation intent in effect: `autoplay`, unless reduced motion holds it back. */
+  get #intent(): boolean {
+    return this.autoplayValue && !this.#motionHold;
+  }
+
   /** Whether autoplay has anywhere left to advance to. */
   #canAutoplay(): boolean {
     const total = this.slideTargets.length;
@@ -620,21 +733,18 @@ export class CarouselController extends Controller<HTMLElement> {
    * Drives the autoplay interval toward the desired state and publishes it.
    *
    * Rotation runs when the intent is on, nothing suspends it, and a slide is left
-   * to advance to. A carousel that has run out normalizes the intent to `false`, so
-   * `aria-pressed` never claims a rotation that cannot happen. Crossing the
-   * run/stop boundary emits `play`/`pause`; re-arming at a new `interval` is the
-   * same state and stays silent.
+   * to advance to. The toggle shows the intent only while a slide is left, so
+   * `aria-pressed` never claims a rotation that cannot happen. This body reads
+   * `autoplay` and never writes it, so the declared intent returns once a slide
+   * lies ahead again. Crossing the run/stop boundary emits `play`/`pause`;
+   * re-arming at a new `interval` is the same state and stays silent.
+   *
+   * @stimeoRenderRoot
    */
   #syncTimer(): void {
     const canAutoplay = this.#canAutoplay();
-    if (this.autoplayValue && !canAutoplay) this.autoplayValue = false;
-
-    const shouldRun =
-      this.autoplayValue &&
-      canAutoplay &&
-      !this.#pointerPaused &&
-      !this.#focusPaused &&
-      !this.#hiddenPaused;
+    const pressed = this.#intent && canAutoplay;
+    const shouldRun = pressed && !this.#pointerPaused && !this.#focusPaused && !this.#hiddenPaused;
     const wasRunning = this.#timerId !== null;
     const interval = this.#interval;
 
@@ -657,13 +767,28 @@ export class CarouselController extends Controller<HTMLElement> {
     }
 
     for (const toggle of this.playToggleTargets) {
-      toggle.setAttribute("aria-pressed", this.autoplayValue ? "true" : "false");
+      toggle.setAttribute("aria-pressed", pressed ? "true" : "false");
       this.#ariaDisabled.write(toggle, canAutoplay ? null : "true");
+      this.#labels.reflect(toggle, pressed);
     }
     if (this.hasViewportTarget) {
       this.#ariaLive.write(this.viewportTarget, shouldRun ? "off" : "polite");
       this.#ariaAtomic.write(this.viewportTarget, "false");
     }
+  }
+
+  /**
+   * Ends the rotation once the controller has really left. A carousel still in
+   * the document hears the end — `pause`, and `data-state="paused"` — so no `play`
+   * it reported is left without one; a detached tree keeps the markup it had.
+   */
+  #endRun(): void {
+    const wasRunning = this.#timerId !== null;
+    this.#intervals.clearAll();
+    this.#timerId = null;
+    if (!wasRunning || !this.element.isConnected) return;
+    setAttributeIfChanged(this.element, "data-state", "paused");
+    this.dispatch("pause");
   }
 
   /** Hands every leased attribute back to the value the consumer authored. */

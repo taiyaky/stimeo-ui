@@ -184,6 +184,41 @@ describe("PointerDragController", () => {
       expect(events.move).toHaveLength(1);
     });
 
+    it("keeps tracking the drag when the handle loses pointer capture", async () => {
+      const events = await mount(defaultFixture);
+      pointerDown(100, 100);
+      pointerMove(110, 100);
+
+      // Capture is delivery, not lifetime: a consumer re-inserting the dragged
+      // element releases it, and the document listeners keep the same finger.
+      handle().dispatchEvent(
+        new PointerEvent("lostpointercapture", { pointerId: 1, bubbles: true }),
+      );
+      pointerMove(130, 100);
+      expect(events.move).toHaveLength(2);
+      expect(events.cancel).toHaveLength(0);
+
+      pointerUp();
+      expect(events.end).toEqual([{ dx: 30, dy: 0, pointerType: "mouse" }]);
+    });
+
+    it("never reports an end from a teardown path", async () => {
+      const events = await mount(defaultFixture);
+      pointerDown(100, 100);
+      pointerMove(110, 100);
+      key("Escape");
+
+      pointerDown(100, 100);
+      pointerMove(110, 100);
+      const instance = controller();
+      if (!instance) throw new Error("controller not connected");
+      instance.disabledValue = true;
+      instance.disabledValueChanged();
+
+      expect(events.cancel).toEqual([{ pointerType: "mouse" }, { pointerType: "mouse" }]);
+      expect(events.end).toHaveLength(0);
+    });
+
     it("keeps the drag alive on an Escape that cancels an IME composition", async () => {
       const events = await mount(defaultFixture);
       pointerDown(100, 100);
@@ -236,6 +271,31 @@ describe("PointerDragController", () => {
 
       pointerUp(1);
       expect(events.end).toEqual([{ dx: 20, dy: 0, pointerType: "mouse" }]);
+    });
+
+    it("arms the drag when the environment refuses pointer capture", async () => {
+      const events = await mount(defaultFixture);
+      handle().setPointerCapture = vi.fn(() => {
+        throw new DOMException("Pointer is no longer active", "NotFoundError");
+      });
+
+      pointerDown(100, 100);
+      pointerMove(110, 100);
+      expect(events.start).toHaveLength(1);
+      expect(root().getAttribute("data-dragging")).toBe("true");
+    });
+
+    it("keeps the keyboard path reachable when pointer capture is refused", async () => {
+      const events = await mount(defaultFixture);
+      handle().setPointerCapture = vi.fn(() => {
+        throw new DOMException("Pointer is no longer active", "NotFoundError");
+      });
+
+      pointerDown(100, 100);
+      pointerUp();
+      key(" ");
+      expect(root().getAttribute("data-grabbed")).toBe("true");
+      expect(events.start).toEqual([{ x: 0, y: 0, pointerType: "keyboard" }]);
     });
 
     it("ignores pointerdown while keyboard-grabbed", async () => {

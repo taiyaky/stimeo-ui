@@ -5,6 +5,7 @@ import { EscapeLayer } from "../src/utils/escape_layer";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -358,6 +359,143 @@ describe("PopoverController", () => {
 
     window.dispatchEvent(new Event("scroll"));
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--popover");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a trigger click as a user open, then a user close", () => {
+      const states: string[] = [];
+      query("[data-controller='stimeo--popover']").addEventListener("stimeo--popover:open", () => {
+        states.push(`${panel().hidden} ${trigger().getAttribute("aria-expanded")}`);
+      });
+
+      trigger().click();
+      trigger().click();
+
+      expect(capture.names()).toEqual(["open", "close"]);
+      expect(capture.reasons()).toEqual(["user", "user"]);
+      expect(states).toEqual(["false true"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+    });
+
+    it("reports a call with no DOM event as api", () => {
+      controller().open();
+      controller().close();
+
+      expect(capture.reasons()).toEqual(["api", "api"]);
+    });
+
+    it("reports an outside click as outside", () => {
+      trigger().click();
+      capture.clear();
+
+      query<HTMLButtonElement>("#outside").click();
+
+      expect(capture.reasons()).toEqual(["outside"]);
+    });
+
+    it("reports Escape as escape", () => {
+      trigger().click();
+      capture.clear();
+
+      query("#field").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+      expect(capture.reasons()).toEqual(["escape"]);
+    });
+
+    it("reports a focusout to an outside destination as focus", () => {
+      trigger().click();
+      capture.clear();
+
+      panel().dispatchEvent(
+        new FocusEvent("focusout", { bubbles: true, relatedTarget: query("#outside") }),
+      );
+
+      expect(capture.reasons()).toEqual(["focus"]);
+    });
+
+    it("reports a dismissing scroll as scroll", async () => {
+      disconnectAndStopApplication(application);
+      await start(defaultPanelInner, true);
+      const fresh = captureStateEvents("stimeo--popover");
+      trigger().click();
+      fresh.clear();
+
+      window.dispatchEvent(new Event("scroll"));
+
+      expect(fresh.reasons()).toEqual(["scroll"]);
+      fresh.stop();
+    });
+
+    it("stays silent for an idempotent call in either direction", () => {
+      controller().close();
+      expect(capture.seen).toEqual([]);
+
+      controller().open();
+      capture.clear();
+      controller().open();
+
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("stays silent while connect normalizes an authored-open panel", async () => {
+      disconnectAndStopApplication(application);
+      document.body.innerHTML = `
+        <div data-controller="stimeo--popover">
+          <button id="trigger" data-stimeo--popover-target="trigger"
+                  aria-expanded="true">Edit profile</button>
+          <div id="pop" data-stimeo--popover-target="panel" role="dialog"></div>
+        </div>`;
+      const fresh = captureStateEvents("stimeo--popover");
+      application = Application.start();
+      application.register("stimeo--popover", PopoverController);
+      await tick();
+
+      expect(panel().hidden).toBe(true);
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+    });
+
+    it("stays silent through a disconnect and a Turbo-style reconnect", async () => {
+      trigger().click();
+      capture.clear();
+
+      const element = query("[data-controller='stimeo--popover']");
+      element.remove();
+      await tick();
+      document.body.append(element);
+      await tick();
+
+      expect(panel().hidden).toBe(true);
+      expect(capture.seen).toEqual([]);
+    });
+  });
+
+  // --- Re-entry from a subscriber ---
+
+  describe("re-entry from a subscriber", () => {
+    it("leaves no focus inside the panel when the open handler closes it again", () => {
+      query("[data-controller='stimeo--popover']").addEventListener("stimeo--popover:open", () =>
+        controller().close(),
+      );
+
+      controller().open();
+
+      expect(panel().hidden).toBe(true);
+      expect(panel().contains(document.activeElement)).toBe(false);
+    });
   });
 });
 

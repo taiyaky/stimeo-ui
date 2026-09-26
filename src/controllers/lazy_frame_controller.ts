@@ -138,7 +138,12 @@ export class LazyFrameController extends Controller<HTMLElement> {
     this.#reload();
   }
 
-  /** Starts the load by writing the held URL to `src`. */
+  /**
+   * Starts the load by writing the held URL to `src`.
+   *
+   * @stimeoRuntimeOnly `url` is the address this one load fetches and `once` decides whether it
+   *   stops the watcher.
+   */
   #load(): void {
     if (!this.urlValue) return;
     this.#loaded = true;
@@ -150,7 +155,11 @@ export class LazyFrameController extends Controller<HTMLElement> {
     if (this.onceValue) this.#watcher.stop();
   }
 
-  /** Re-entry while `once` is off: fetch the held URL again. */
+  /**
+   * Re-entry while `once` is off: fetch the held URL again.
+   *
+   * @stimeoRuntimeOnly `url` is the address this one re-entry reloads.
+   */
   #reload(): void {
     const src = this.element.getAttribute("src");
     if (this.urlValue && this.urlValue !== src) {

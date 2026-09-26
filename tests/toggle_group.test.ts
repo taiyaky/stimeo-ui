@@ -1,15 +1,17 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToggleGroupController } from "../src/controllers/toggle_group_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ToggleGroupController}: pressed-state ownership,
- * single/multiple selection, delegated activation, resilient roving focus, and
- * retained-element reconciliation.
+ * single/multiple selection, delegated activation, resilient roving focus,
+ * retained-element reconciliation, and the `change` / `reconcile` notifications.
  */
 
 const action = `data-action="click->stimeo--toggle-group#toggle
@@ -325,30 +327,39 @@ describe("ToggleGroupController", () => {
     expect(pressed(innerRoot)).toEqual(["false"]);
   });
 
-  it("normalizes missing and invalid pressed tokens without dispatching change", async () => {
+  it("normalizes missing and invalid pressed tokens without dispatching an event", async () => {
     const details: unknown[] = [];
     await start(
       group(`<button type="button" data-value="missing"
           data-stimeo--toggle-group-target="item">Missing</button>
         <button type="button" aria-pressed="mixed" data-value="invalid"
           data-stimeo--toggle-group-target="item">Invalid</button>`),
-      () =>
-        root().addEventListener("stimeo--toggle-group:change", (event) =>
-          details.push((event as CustomEvent).detail),
-        ),
+      () => {
+        for (const type of ["change", "reconcile"]) {
+          root().addEventListener(`stimeo--toggle-group:${type}`, (event) =>
+            details.push((event as CustomEvent).detail),
+          );
+        }
+      },
     );
     expect(pressed()).toEqual(["false", "false"]);
     expect(details).toEqual([]);
   });
 
-  it("normalizes initial, changed-mode, dynamic, and morphed single selection silently", async () => {
+  it("normalizes initial, changed-mode, dynamic, and morphed single selection, reporting each move as reconcile", async () => {
     const details: unknown[] = [];
-    await start(group(`${item("first", "true", 0)}${item("second", "true")}`, "single"), () =>
+    const repairs: unknown[] = [];
+    await start(group(`${item("first", "true", 0)}${item("second", "true")}`, "single"), () => {
       root().addEventListener("stimeo--toggle-group:change", (event) =>
         details.push((event as CustomEvent).detail),
-      ),
-    );
+      );
+      root().addEventListener("stimeo--toggle-group:reconcile", (event) =>
+        repairs.push((event as CustomEvent).detail),
+      );
+    });
     expect(pressed()).toEqual(["true", "false"]);
+    // Connect normalizes first-wins and takes the result as the published set.
+    expect(repairs).toEqual([]);
 
     root().setAttribute("data-stimeo--toggle-group-mode-value", "multiple");
     await tick();
@@ -367,6 +378,12 @@ describe("ToggleGroupController", () => {
     await tick();
     expect(pressed()).toEqual(["false", "false", "true"]);
     expect(details).toEqual([]);
+    expect(repairs).toEqual([
+      { values: ["first", "second"] },
+      { values: ["first"] },
+      { values: ["inserted"] },
+      { values: ["second"] },
+    ]);
   });
 
   it("adds an actionless runtime item without creating a second Tab stop", async () => {
@@ -615,6 +632,29 @@ describe("ToggleGroupController", () => {
     link.removeAttribute("href");
     await tick();
     expect([link.tabIndex, link.getAttribute("aria-pressed")]).toEqual([0, "false"]);
+
+    // The default supplied on reclaim is still the group's to take back.
+    link.href = "/again";
+    await tick();
+    expect(link.getAttribute("aria-pressed")).toBeNull();
+  });
+
+  it("treats a page write of the value it supplied as authored", async () => {
+    await start(
+      group(`<a role="button" tabindex="3" href="/destination" data-value="view"
+        data-stimeo--toggle-group-target="item">View</a>`),
+    );
+    const link = items()[0] as HTMLAnchorElement;
+    link.removeAttribute("href");
+    await tick();
+    expect(link.getAttribute("aria-pressed")).toBe("false");
+
+    // Once the page writes the same token, it is the page's value, not the group's default.
+    link.setAttribute("aria-pressed", "false");
+    await tick();
+    link.href = "/destination";
+    await tick();
+    expect(link.getAttribute("aria-pressed")).toBe("false");
   });
 
   it("preserves an aria-pressed value authored after the controller supplied its default", async () => {
@@ -713,5 +753,569 @@ describe("ToggleGroupController", () => {
   it("has no machine-detectable accessibility violations", async () => {
     await start();
     await expectNoA11yViolations(root());
+  });
+
+  it("declares both public events the Inspector manifest reflects", () => {
+    // `static events` is a pure declaration, so no behavioral test can reach it: the
+    // manifest reads it verbatim, and `stimeo check` rejects a `data-action` wired to
+    // an event the emitting part does not declare.
+    expect(ToggleGroupController.events).toEqual(["change", "reconcile"]);
+  });
+
+  // --- Hidden form fields ---
+
+  describe("hidden form fields", () => {
+    let commits: ReturnType<typeof captureFieldCommits>;
+
+    const withFields = (content?: string, mode?: string, extra = "") =>
+      `<div data-controller="stimeo--toggle-group" role="group" aria-label="Text style"
+        ${mode ? `data-stimeo--toggle-group-mode-value="${mode}"` : ""} ${extra}>
+        <div data-stimeo--toggle-group-target="fields"></div>
+        ${content ?? `${item("bold", "true", 0)}${item("italic")}${item("underline")}`}
+      </div>`;
+
+    const fields = () =>
+      document.querySelector<HTMLElement>(
+        "[data-stimeo--toggle-group-target='fields']",
+      ) as HTMLElement;
+    const submitted = () =>
+      [...fields().querySelectorAll("input")].map((input) => `${input.name}=${input.value}`);
+
+    beforeEach(() => {
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      commits.stop();
+    });
+
+    it("seeds the pressed set under the default name without reporting a commit", async () => {
+      await start(withFields());
+
+      expect(submitted()).toEqual(["values[]=bold"]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("writes and reports once per toggle the user made", async () => {
+      await start(withFields());
+      commits.clear();
+
+      items()[1]?.click();
+
+      expect(submitted()).toEqual(["values[]=bold", "values[]=italic"]);
+      expect(commits.seen).toEqual([fields()]);
+    });
+
+    it("submits at most one value in single mode", async () => {
+      await start(withFields(undefined, "single"));
+      commits.clear();
+
+      items()[1]?.click();
+
+      expect(submitted()).toEqual(["values[]=italic"]);
+      expect(commits.seen).toEqual([fields()]);
+    });
+
+    it("reports an emptied set", async () => {
+      await start(withFields());
+      commits.clear();
+
+      items()[0]?.click();
+
+      expect(submitted()).toEqual([]);
+      expect(commits.seen).toEqual([fields()]);
+    });
+
+    it("honors the name and form Values", async () => {
+      await start(
+        withFields(
+          undefined,
+          undefined,
+          'data-stimeo--toggle-group-name-value="styles[]" data-stimeo--toggle-group-form-value="f"',
+        ),
+      );
+
+      expect(submitted()).toEqual(["styles[]=bold"]);
+      expect(fields().querySelector("input")?.getAttribute("form")).toBe("f");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("rebuilds silently when the name changes at runtime", async () => {
+      await start(withFields());
+      commits.clear();
+
+      root().setAttribute("data-stimeo--toggle-group-name-value", "styles[]");
+      await tick();
+
+      expect(submitted()).toEqual(["styles[]=bold"]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("repoints the inputs silently when the form changes at runtime", async () => {
+      await start(withFields());
+      commits.clear();
+
+      root().setAttribute("data-stimeo--toggle-group-form-value", "filters");
+      await tick();
+
+      expect(fields().querySelector("input")?.getAttribute("form")).toBe("filters");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("leaves an authored container alone until connect has read the pressed set", async () => {
+      const records: number[] = [];
+      let observer: MutationObserver | undefined;
+
+      await start(
+        `<div data-controller="stimeo--toggle-group" role="group" aria-label="Text style">
+          <div data-stimeo--toggle-group-target="fields">
+            <input type="hidden" name="values[]" value="bold" />
+          </div>
+          ${item("bold", "true", 0)}${item("italic")}
+        </div>`,
+        () => {
+          observer = new MutationObserver((list) => records.push(list.length));
+          observer.observe(fields(), { childList: true });
+        },
+      );
+      await tick();
+      observer?.disconnect();
+
+      // Not one mutation: the authored inputs already submit the pressed set, so
+      // nothing needs rewriting. A rebuild means the target callback wrote before
+      // the controller knew which items it manages.
+      expect(records).toEqual([]);
+      expect(submitted()).toEqual(["values[]=bold"]);
+    });
+
+    it("seeds a container inserted after connect without reporting a commit", async () => {
+      await start(withFields());
+      fields().remove();
+      commits.clear();
+
+      const late = document.createElement("div");
+      late.setAttribute("data-stimeo--toggle-group-target", "fields");
+      root().append(late);
+      await tick();
+
+      expect([...late.querySelectorAll("input")].map((input) => input.value)).toEqual(["bold"]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("rebuilds without a native change when a pressed item is removed at runtime", async () => {
+      await start(withFields());
+      commits.clear();
+
+      items()[0]?.remove();
+      await tick();
+
+      expect(submitted()).toEqual([]);
+      expect(commits.seen).toEqual([]);
+    });
+  });
+
+  // --- Page-driven moves ---
+
+  /**
+   * `change` describes one press; a pressed set the page moves — items arriving
+   * or leaving, `mode`, an in-place `aria-pressed` or `data-value` write, a host
+   * the group stands down on — is `reconcile` with the set it settles on, once
+   * per batch and never on connect.
+   */
+  describe("page-driven moves", () => {
+    let events: StateEventCapture;
+    let commits: ReturnType<typeof captureFieldCommits>;
+    const detach: Array<() => void> = [];
+
+    const withFields = (content: string, mode?: string) =>
+      `<div data-controller="stimeo--toggle-group" role="group" aria-label="Text style"
+        ${mode ? `data-stimeo--toggle-group-mode-value="${mode}"` : ""}>
+        <div data-stimeo--toggle-group-target="fields"></div>${content}</div>`;
+
+    const fields = () =>
+      root().querySelector<HTMLElement>(
+        "[data-stimeo--toggle-group-target='fields']",
+      ) as HTMLElement;
+    const submitted = () =>
+      [...fields().querySelectorAll("input")].map((input) => (input as HTMLInputElement).value);
+    const heard = () => events.seen.map(({ name, detail }) => ({ name, detail }));
+
+    /** Adds a document listener this block removes after the test. */
+    const listenOnDocument = (type: string, listener: () => void): void => {
+      document.addEventListener(type, listener);
+      detach.push(() => document.removeEventListener(type, listener));
+    };
+
+    /**
+     * Wraps a listener that must act once. happy-dom removes a `once` listener
+     * only after it returns, so a listener that makes the same event fire again
+     * would be called a second time from inside the first call.
+     */
+    const firstCallOnly = (act: () => void) => {
+      let spent = false;
+      return (): void => {
+        if (spent) return;
+        spent = true;
+        act();
+      };
+    };
+
+    beforeEach(() => {
+      events = captureStateEvents("stimeo--toggle-group", ["change", "reconcile"]);
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      events.stop();
+      commits.stop();
+      for (const off of detach.splice(0)) off();
+    });
+
+    it("reports a pressed item inserted ahead in single mode as reconcile", async () => {
+      await start(withFields(`${item("left", "true", 0)}${item("center")}`, "single"));
+
+      fields().insertAdjacentHTML("afterend", item("justify", "true", null));
+      await tick();
+
+      expect(pressed()).toEqual(["true", "false", "false"]);
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["justify"] } }]);
+      expect(submitted()).toEqual(["justify"]);
+      // The fields follow without the native change a form reads as an edit.
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("reports a pressed item leaving as reconcile", async () => {
+      await start(
+        withFields(`${item("bold", "true", 0)}${item("italic", "true")}${item("underline")}`),
+      );
+
+      items()[0]?.remove();
+      await tick();
+
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["italic"] } }]);
+      expect(submitted()).toEqual(["italic"]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("reports a pressed item that stops being an item as reconcile", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic", "true")}`));
+
+      // Only the target token changes, so the target callback alone sees it.
+      items()[1]?.removeAttribute("data-stimeo--toggle-group-target");
+      await tick();
+
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["bold"] } }]);
+      expect(submitted()).toEqual(["bold"]);
+    });
+
+    it("reports an element that becomes a pressed item as reconcile", async () => {
+      await start(
+        withFields(`${item("bold", "true", 0)}<button type="button" id="late"
+          aria-pressed="true" data-value="italic">Italic</button>`),
+      );
+
+      root().querySelector("#late")?.setAttribute("data-stimeo--toggle-group-target", "item");
+      await tick();
+
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["bold", "italic"] } }]);
+      expect(submitted()).toEqual(["bold", "italic"]);
+    });
+
+    it("reports a mode change that releases pressed items as reconcile", async () => {
+      await start(
+        withFields(
+          `${item("bold", "true", 0)}${item("italic", "true")}${item("underline", "true")}`,
+        ),
+      );
+
+      root().setAttribute("data-stimeo--toggle-group-mode-value", "single");
+      await tick();
+
+      expect(pressed()).toEqual(["true", "false", "false"]);
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["bold"] } }]);
+      expect(submitted()).toEqual(["bold"]);
+    });
+
+    it("reports an in-place press that wins first-wins, and nothing for one that loses", async () => {
+      await start(
+        withFields(
+          `${item("left", "false", 0)}${item("center", "true")}${item("right")}`,
+          "single",
+        ),
+      );
+
+      // Behind the pressed item: first-wins puts it back, so the set did not move.
+      items()[2]?.setAttribute("aria-pressed", "true");
+      await tick();
+      expect(pressed()).toEqual(["false", "true", "false"]);
+      expect(heard()).toEqual([]);
+
+      // Ahead of it: the write wins and the earlier pressed item is released.
+      items()[0]?.setAttribute("aria-pressed", "true");
+      await tick();
+      expect(pressed()).toEqual(["true", "false", "false"]);
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["left"] } }]);
+      expect(submitted()).toEqual(["left"]);
+    });
+
+    it("reports an in-place press in multiple mode as reconcile", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic")}`));
+
+      items()[1]?.setAttribute("aria-pressed", "true");
+      await tick();
+
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["bold", "italic"] } }]);
+      expect(submitted()).toEqual(["bold", "italic"]);
+    });
+
+    it("reports a pressed item whose host the group stands down on as leaving the set", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic", "true")}`));
+
+      items()[1]?.setAttribute("type", "submit");
+      await tick();
+
+      // Authored, so the group leaves the token where it is; it just stops counting it.
+      expect(items()[1]?.getAttribute("aria-pressed")).toBe("true");
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["bold"] } }]);
+      expect(submitted()).toEqual(["bold"]);
+    });
+
+    it("reports a pressed item's new data-value as reconcile", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic")}`));
+
+      items()[0]?.setAttribute("data-value", "strong");
+      await tick();
+
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["strong"] } }]);
+      expect(submitted()).toEqual(["strong"]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("does not report a pass that leaves the pressed set where it was", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic")}${item("underline")}`));
+
+      root().setAttribute("data-stimeo--toggle-group-name-value", "styles[]");
+      root().setAttribute("data-stimeo--toggle-group-form-value", "prefs");
+      await tick();
+      items()[2]?.remove();
+      await tick();
+      items()[1]?.setAttribute("data-value", "emphasis");
+      await tick();
+      (items()[0] as HTMLButtonElement).disabled = true;
+      await tick();
+
+      expect(heard()).toEqual([]);
+      expect(submitted()).toEqual(["bold"]);
+      expect(fields().querySelector("input")?.name).toBe("styles[]");
+    });
+
+    it("reports nothing on connect, or when it connects again to a set moved while away", async () => {
+      await start(withFields(`${item("left", "true", 0)}${item("center", "true")}`, "single"));
+      expect(pressed()).toEqual(["true", "false"]);
+
+      const host = root();
+      const [left, center] = items(host);
+      host.removeAttribute("data-controller");
+      await tick();
+      left?.setAttribute("aria-pressed", "false");
+      center?.setAttribute("aria-pressed", "true");
+      host.setAttribute("data-controller", "stimeo--toggle-group");
+      await tick();
+
+      expect(heard()).toEqual([]);
+      expect(submitted()).toEqual(["center"]);
+      expect(commits.seen).toEqual([]);
+
+      // The set read on connect is the one the next move is measured from.
+      left?.setAttribute("aria-pressed", "true");
+      await tick();
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["left"] } }]);
+    });
+
+    it("reports the user's press as change only", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic")}`));
+
+      items()[1]?.click();
+      await tick();
+
+      expect(heard()).toEqual([
+        { name: "change", detail: { value: "italic", pressed: true, values: ["bold", "italic"] } },
+      ]);
+      expect(commits.seen).toEqual([fields()]);
+    });
+
+    it("reports one batch of page changes once, with the set it settles on", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic", "true")}`));
+
+      items()[0]?.remove();
+      root().insertAdjacentHTML("beforeend", item("strike", "true", null));
+      await tick();
+
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["italic", "strike"] } }]);
+    });
+
+    it("reports nothing for a batch that ends on the set it started from", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic")}`));
+
+      // A re-render that swaps a pressed item for an equal one moves nothing.
+      items()[0]?.insertAdjacentHTML("afterend", item("bold", "true", null));
+      items()[0]?.remove();
+      await tick();
+
+      expect(pressed()).toEqual(["true", "false"]);
+      expect(heard()).toEqual([]);
+    });
+
+    it("keeps a press made inside a reconcile listener a change, and reports nothing after it", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic")}`));
+      // Registered after the capture, so the recording keeps dispatch order.
+      listenOnDocument(
+        "stimeo--toggle-group:reconcile",
+        firstCallOnly(() => items()[0]?.click()),
+      );
+
+      items()[1]?.setAttribute("aria-pressed", "true");
+      await tick();
+      await tick();
+
+      expect(heard()).toEqual([
+        { name: "reconcile", detail: { values: ["bold", "italic"] } },
+        { name: "change", detail: { value: "bold", pressed: false, values: ["italic"] } },
+      ]);
+      expect(submitted()).toEqual(["italic"]);
+      expect(commits.seen).toEqual([fields()]);
+    });
+
+    it("reports a press a reconcile listener writes with a second reconcile", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic")}${item("underline")}`));
+      // The listener writes the attribute the way a page script does, not through a
+      // press, so only observation can bring it to a pass.
+      listenOnDocument(
+        "stimeo--toggle-group:reconcile",
+        firstCallOnly(() => items()[2]?.setAttribute("aria-pressed", "true")),
+      );
+
+      items()[1]?.setAttribute("aria-pressed", "true");
+      await tick();
+      await tick();
+
+      // Observation resumes before the report, so the listener's write is a page
+      // change of its own: the next pass reports it and the fields follow it.
+      expect(heard()).toEqual([
+        { name: "reconcile", detail: { values: ["bold", "italic"] } },
+        { name: "reconcile", detail: { values: ["bold", "italic", "underline"] } },
+      ]);
+      expect(submitted()).toEqual(["bold", "italic", "underline"]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("reports a set a listener moves during the user's press as reconcile", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic")}${item("underline")}`));
+      // The native change comes first; a page script that answers it by pressing
+      // another item has moved the set after the user did.
+      fields().addEventListener(
+        "change",
+        firstCallOnly(() => items()[2]?.setAttribute("aria-pressed", "true")),
+      );
+
+      items()[1]?.click();
+      await tick();
+
+      expect(heard()).toEqual([
+        { name: "change", detail: { value: "italic", pressed: true, values: ["bold", "italic"] } },
+        { name: "reconcile", detail: { values: ["bold", "italic", "underline"] } },
+      ]);
+      expect(submitted()).toEqual(["bold", "italic", "underline"]);
+    });
+
+    it("drops the change of a press a native change listener replaces with its own", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic")}`));
+      fields().addEventListener(
+        "change",
+        firstCallOnly(() => items()[0]?.click()),
+      );
+
+      items()[1]?.click();
+      await tick();
+      await tick();
+
+      // The listener's press is the newer commit and reports itself. The press it
+      // replaced would describe a set that is no longer there, so it reports
+      // nothing further, and no pass reports the listener's press again.
+      expect(heard()).toEqual([
+        { name: "change", detail: { value: "bold", pressed: false, values: ["italic"] } },
+      ]);
+      expect(submitted()).toEqual(["italic"]);
+    });
+
+    it("still reports a press whose native change listener only reads the fields", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic")}`));
+      const read: string[][] = [];
+      fields().addEventListener("change", () => read.push(submitted()));
+
+      items()[1]?.click();
+      await tick();
+
+      expect(read).toEqual([["bold", "italic"]]);
+      expect(heard()).toEqual([
+        { name: "change", detail: { value: "italic", pressed: true, values: ["bold", "italic"] } },
+      ]);
+    });
+
+    it("keeps both changes when a change listener presses again after the first went out", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic")}`));
+      // Registered after the capture, so the recording keeps dispatch order.
+      listenOnDocument(
+        "stimeo--toggle-group:change",
+        firstCallOnly(() => items()[0]?.click()),
+      );
+
+      items()[1]?.click();
+      await tick();
+
+      // Each change went out while the set it describes was the set on the page.
+      expect(heard()).toEqual([
+        { name: "change", detail: { value: "italic", pressed: true, values: ["bold", "italic"] } },
+        { name: "change", detail: { value: "bold", pressed: false, values: ["italic"] } },
+      ]);
+      expect(submitted()).toEqual(["italic"]);
+    });
+
+    it("drops a pass queued before disconnect", async () => {
+      await start(withFields(`${item("bold", "true", 0)}${item("italic", "true")}`));
+
+      controller().modeValueChanged();
+      root().setAttribute("data-stimeo--toggle-group-mode-value", "single");
+      controller().disconnect();
+      await tick();
+
+      expect(pressed()).toEqual(["true", "true"]);
+      expect(heard()).toEqual([]);
+    });
+
+    it("treats a pressed state the page writes before a queued pass runs as authored", async () => {
+      await start(
+        withFields(`<button type="button" data-value="view"
+          data-stimeo--toggle-group-target="item">View</button>`),
+      );
+      const view = items()[0] as HTMLButtonElement;
+      expect(view.getAttribute("aria-pressed")).toBe("false");
+
+      // A pass is already queued when the page writes the attribute, so the pass
+      // meets the page's record before the observer delivers it.
+      controller().nameValueChanged();
+      view.setAttribute("aria-pressed", "true");
+      await tick();
+      expect(heard()).toEqual([{ name: "reconcile", detail: { values: ["view"] } }]);
+
+      // A host the group stands down on gives back only what the group supplied.
+      view.setAttribute("type", "submit");
+      await tick();
+      expect(view.getAttribute("aria-pressed")).toBe("true");
+      expect(heard()).toEqual([
+        { name: "reconcile", detail: { values: ["view"] } },
+        { name: "reconcile", detail: { values: [] } },
+      ]);
+    });
   });
 });

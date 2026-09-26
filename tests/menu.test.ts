@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MenuController } from "../src/controllers/menu_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -329,6 +330,168 @@ describe("MenuController", () => {
     trigger().click(); // toggle → close
     expect(menu().hidden).toBe(true);
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
+  });
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    const controller = () => {
+      const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--menu");
+      if (!(instance instanceof MenuController)) throw new Error("menu controller not found");
+      return instance;
+    };
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--menu");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a trigger click as a user open, then a user close", () => {
+      trigger().click();
+      trigger().click();
+
+      expect(capture.names()).toEqual(["open", "close"]);
+      expect(capture.reasons()).toEqual(["user", "user"]);
+    });
+
+    it("dispatches after the state attributes are written, bubbling and not cancelable", () => {
+      const states: string[] = [];
+      root().addEventListener("stimeo--menu:open", () => {
+        states.push(`${menu().hidden} ${trigger().getAttribute("aria-expanded")}`);
+      });
+
+      trigger().click();
+
+      expect(states).toEqual(["false true"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+    });
+
+    it("reports an arrow-key open as user", () => {
+      trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+
+      expect(capture.reasons()).toEqual(["user"]);
+    });
+
+    it("reports a call with no DOM event as api", () => {
+      controller().open();
+      controller().close();
+
+      expect(capture.reasons()).toEqual(["api", "api"]);
+    });
+
+    it("reports activating an item as select", () => {
+      trigger().click();
+      capture.clear();
+
+      items()[1]?.click();
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["select"]);
+    });
+
+    it("reports an outside click as outside", () => {
+      trigger().click();
+      capture.clear();
+
+      (document.getElementById("outside") as HTMLElement).click();
+
+      expect(capture.reasons()).toEqual(["outside"]);
+    });
+
+    it("reports Escape as escape", () => {
+      trigger().click();
+      capture.clear();
+
+      items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+      expect(capture.reasons()).toEqual(["escape"]);
+    });
+
+    it("reports the deferred Tab close as focus", async () => {
+      trigger().click();
+      capture.clear();
+
+      items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+      expect(capture.seen).toEqual([]);
+      await tick();
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["focus"]);
+    });
+
+    it("stays silent for an idempotent call in either direction", () => {
+      controller().close();
+      expect(capture.seen).toEqual([]);
+
+      controller().open();
+      capture.clear();
+      controller().open();
+
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("stays silent while connect normalizes an authored-open menu", async () => {
+      disconnectAndStopApplication(application);
+      document.body.innerHTML = `
+        <div data-controller="stimeo--menu">
+          <button id="menu-trigger" data-stimeo--menu-target="trigger"
+                  aria-haspopup="menu" aria-expanded="true" aria-controls="menu">Actions</button>
+          <ul id="menu" role="menu" data-stimeo--menu-target="menu"></ul>
+        </div>`;
+      const fresh = captureStateEvents("stimeo--menu");
+      application = Application.start();
+      application.register("stimeo--menu", MenuController);
+      await tick();
+
+      expect(menu().hidden).toBe(true);
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+    });
+
+    it("stays silent through a disconnect and a Turbo-style reconnect", async () => {
+      trigger().click();
+      capture.clear();
+
+      const element = root();
+      element.remove();
+      await tick();
+      document.body.append(element);
+      await tick();
+
+      expect(menu().hidden).toBe(true);
+      expect(capture.seen).toEqual([]);
+    });
+  });
+
+  // --- Re-entry from a subscriber ---
+
+  describe("re-entry from a subscriber", () => {
+    it("leaves no focus inside the menu when the open handler closes it again", () => {
+      const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--menu");
+      if (!(instance instanceof MenuController)) throw new Error("menu controller not found");
+      root().addEventListener("stimeo--menu:open", () => instance.close());
+
+      trigger().click();
+
+      expect(menu().hidden).toBe(true);
+      expect(menu().contains(document.activeElement)).toBe(false);
+    });
+
+    it("leaves no focus on the last item when ArrowUp opens and the handler closes", () => {
+      const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--menu");
+      if (!(instance instanceof MenuController)) throw new Error("menu controller not found");
+      root().addEventListener("stimeo--menu:open", () => instance.close());
+
+      trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+
+      expect(menu().hidden).toBe(true);
+      expect(menu().contains(document.activeElement)).toBe(false);
+    });
   });
 });
 

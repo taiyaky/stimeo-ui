@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { commitField, writeField } from "../utils/field_mirror";
 import { isRtl } from "../utils/logical_scroll";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { RovingTabindex } from "../utils/roving_tabindex";
@@ -30,7 +31,11 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * the last is N. Unlike a generic radio group, arrows deliberately clamp rather
  * than wrap because the values have an ordered lower and upper bound.
  *
- * `change` and `reconcile` dispatch `{ value: number }`.
+ * `change` and `reconcile` dispatch `{ value: number }`. A rating the user set
+ * also emits a native bubbling `change` from the hidden `field`, the way a form
+ * control does, so `stimeo--auto-submit` and form-level validation hear it; a
+ * repaint driven by the `value` Value, by a replacement field, or by the
+ * controller's own normalization refreshes the mirror silently.
  *
  * @remarks
  * Behavior only — consumers style `[aria-checked]` and `data-rating-hover`. In
@@ -39,9 +44,16 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * a symbol when that mode begins lands on the root and returns to the Tab stop
  * when it ends, so it is never left on a node outside the accessibility tree.
  *
+ * The `value` Value is the page's request. The rating shown is that request
+ * normalized to the live scale, and normalizing never writes the Value back: a
+ * value clamped by a shorter scale or by `clearable` comes back once the scale
+ * or `clearable` allows it again. A value the user sets is written into it.
+ *
  * `stimeo--rating:change` is reserved for a user operation that changes the
- * committed value. A DOM or configuration reconciliation that clamps the value
- * emits `stimeo--rating:reconcile` instead. Initial reflection emits neither.
+ * committed value. Once connected, any other move of the rating shown — a
+ * `value` written by application code or a morph, a symbol added or removed, a
+ * `clearable` change — emits `stimeo--rating:reconcile` once per batch, measured
+ * from the rating last shown. Initial reflection emits neither.
  */
 export class RatingController extends Controller<HTMLElement> {
   static override targets = ["symbol", "field"];
@@ -70,11 +82,15 @@ export class RatingController extends Controller<HTMLElement> {
   #connected = false;
   #rescuedFocus = false;
 
+  /** The rating shown last, which the next move is measured from. */
+  #shown = 0;
+
   /** Reflects declarative state without announcing an initial user change. */
   override connect(): void {
     this.#repaint.activate();
     this.#beforeCache.activate();
-    this.#apply(this.#normalize(this.valueValue), { focus: false });
+    this.#shown = this.#normalize(this.valueValue);
+    this.#apply(this.#shown, { focus: false });
     this.#connected = true;
   }
 
@@ -196,31 +212,39 @@ export class RatingController extends Controller<HTMLElement> {
   }
 
   /**
-   * Repaints one settled target/Value mutation batch and reports only a value
-   * this controller had to normalize.
+   * Repaints one settled target/Value mutation batch and reports a rating shown
+   * that moved from the one shown before it.
    *
    * @stimeoRenderRoot
    */
   #reconcileScale(): void {
-    const requested = this.valueValue;
-    const value = this.#normalize(requested);
+    const value = this.#normalize(this.valueValue);
+    const previous = this.#shown;
+    // Settled before the report, so a listener that moves the rating on is
+    // measured from the value it was just told about.
+    this.#shown = value;
     this.#apply(value, { focus: false });
-    if (!Object.is(value, requested)) {
-      this.dispatch("reconcile", { detail: { value } });
-    }
+    if (value !== previous) this.dispatch("reconcile", { detail: { value } });
   }
 
-  /** Applies one user operation and emits only when its committed value changes. */
+  /**
+   * Applies one user operation and emits only when the rating shown changes.
+   *
+   * The user's value is written into `value` before anything reports it, so a
+   * listener of the field's native `change` already reads it there, and the pass
+   * that the write starts finds nothing left to report.
+   */
   #commit(raw: number, { focus }: { focus: boolean }): void {
-    const previous = this.#normalize(this.valueValue);
+    const previous = this.#shown;
     const value = this.#normalize(raw);
-    this.#apply(value, { focus });
+    if (!Object.is(this.valueValue, value)) this.valueValue = value;
+    this.#shown = value;
+    this.#apply(value, { focus, notify: true });
     if (value !== previous) this.dispatch("change", { detail: { value } });
   }
 
-  /** Synchronizes value, ARIA, roving focus, form state, and the visual fill hook. */
-  #apply(value: number, { focus }: { focus: boolean }): void {
-    if (!Object.is(this.valueValue, value)) this.valueValue = value;
+  /** Synchronizes ARIA, roving focus, form state, and the visual fill hook. */
+  #apply(value: number, { focus, notify = false }: { focus: boolean; notify?: boolean }): void {
     this.symbolTargets.forEach((symbol, index) => {
       symbol.setAttribute("aria-checked", value > 0 && index + 1 === value ? "true" : "false");
     });
@@ -232,8 +256,14 @@ export class RatingController extends Controller<HTMLElement> {
       this.#roving.setActive(value > 0 ? value - 1 : 0, { focus: focus || returning });
     }
 
-    if (this.hasFieldTarget) this.fieldTarget.value = String(value);
+    this.#mirrorField(value, notify);
     this.#setFillRange(value);
+  }
+
+  /** Mirrors `value` into the optional form field, reporting only a user's move. */
+  #mirrorField(value: number, notify: boolean): void {
+    if (!this.hasFieldTarget) return;
+    if (writeField(this.fieldTarget, String(value)) && notify) commitField(this.fieldTarget);
   }
 
   /** Marks the first `range` symbols with the consumer-owned fill hook. */

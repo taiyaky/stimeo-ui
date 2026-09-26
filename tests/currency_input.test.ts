@@ -24,8 +24,8 @@ afterEach(() => {
  * on blur, locale-aware parsing that round-trips the controller's own output,
  * full-width normalization, IME composition holds, Value validation fallbacks,
  * runtime Value changes, formatter caching, the display ↔ hidden-field ↔
- * screen-reader-span sync (including late targets), and the `change` event
- * with its `null` clear transition.
+ * screen-reader-span sync (including late targets), the `change` event with its
+ * `null` clear transition, and `reconcile` for a value the page moved.
  */
 
 describe("CurrencyInputController", () => {
@@ -115,6 +115,23 @@ describe("CurrencyInputController", () => {
     for (const ch of text) press(ch);
   };
   const blur = () => display().dispatchEvent(new Event("blur", { bubbles: true }));
+
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--currency-input",
+    ) as CurrencyInputController;
+
+  /** Records every `change` and `reconcile`, in dispatch order. */
+  const record = () => {
+    const events: Array<{ type: string; detail: { value: number | null; formatted: string } }> = [];
+    for (const type of ["change", "reconcile"]) {
+      root().addEventListener(`stimeo--currency-input:${type}`, (event) => {
+        events.push({ type, detail: (event as CustomEvent).detail });
+      });
+    }
+    return events;
+  };
 
   it("groups digits as the user types and keeps the field unformatted", async () => {
     await mount();
@@ -232,6 +249,369 @@ describe("CurrencyInputController", () => {
     expect(field().value).toBe("1234");
   });
 
+  it("holds a declaration change while the display is composing, and applies it after the commit", async () => {
+    await mount();
+    display().focus();
+    const events = record();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    display().value = "1234ｋ";
+    display().dispatchEvent(new Event("input", { bubbles: true }));
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    // Stimulus delivers its own callback too; both land mid-composition.
+    await tick();
+
+    // The uncommitted text belongs to the IME, so the page's change waits for it.
+    expect(display().value).toBe("1234ｋ");
+    expect(events).toEqual([]);
+
+    display().value = "１２３４５";
+    display().dispatchEvent(new Event("compositionend", { bubbles: true }));
+
+    // The commit is read with the separators the user was typing against, then
+    // shown in the new locale; only the user's commit is an edit.
+    expect(display().value).toBe("12.345");
+    expect(field().value).toBe("12345");
+    expect(events).toEqual([{ type: "change", detail: { value: 12345, formatted: "12,345" } }]);
+  });
+
+  it("applies a held declaration change once the composing display leaves", async () => {
+    await mount();
+    display().focus();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    const leaving = display();
+    leaving.remove();
+    controller().displayTargetDisconnected(leaving);
+
+    const arriving = document.createElement("input");
+    arriving.type = "text";
+    arriving.value = "1234";
+    arriving.setAttribute("data-stimeo--currency-input-target", "display");
+    root().prepend(arriving);
+    controller().displayTargetConnected(arriving);
+
+    expect(arriving.value).toBe("1.234,00");
+  });
+
+  it("keeps the committed value when the locale changes while the controller is away", async () => {
+    await mount({ value: "1234.56" });
+    const instance = controller();
+    const events = record();
+    instance.disconnect();
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    instance.localeValueChanged();
+    instance.connect();
+    await tick();
+
+    // Its own en-US text is not read back with de-DE separators.
+    expect(display().value).toBe("1.234,56");
+    expect(field().value).toBe("1234.56");
+    expect(events).toEqual([]);
+  });
+
+  it("reports a precision change made while away as reconcile once it moves the value", async () => {
+    await mount({ value: "1234.56" });
+    const instance = controller();
+    const events = record();
+    instance.disconnect();
+    root().setAttribute("data-stimeo--currency-input-precision-value", "0");
+    instance.precisionValueChanged();
+    instance.connect();
+    await tick();
+
+    expect(display().value).toBe("1,235");
+    expect(field().value).toBe("1235");
+    expect(events).toEqual([{ type: "reconcile", detail: { value: 1235, formatted: "1,235" } }]);
+  });
+
+  it("keeps a typed decimal entry across a detach and a locale change", async () => {
+    await mount();
+    typeKeys("1.5");
+    const instance = controller();
+    instance.disconnect();
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    instance.localeValueChanged();
+    instance.connect();
+    await tick();
+
+    expect(display().value).toBe("1,50");
+    expect(field().value).toBe("1.5");
+  });
+
+  it("reads text the page wrote while the controller was away with the declared locale", async () => {
+    await mount({ value: "1234.56" });
+    const instance = controller();
+    const events = record();
+    instance.disconnect();
+    display().value = "9.876,5";
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    instance.localeValueChanged();
+    instance.connect();
+    await tick();
+
+    // The text is the page's, written for the locale it declares.
+    expect(display().value).toBe("9.876,50");
+    expect(field().value).toBe("9876.5");
+    expect(events).toEqual([]);
+  });
+
+  /** Starts a composition on the focused display and holds a de-DE locale change. */
+  const holdLocaleChange = async () => {
+    display().focus();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    await tick();
+  };
+
+  /** Replaces the display with one the page wrote in de-DE. */
+  const swapInGermanDisplay = () => {
+    const leaving = display();
+    const arriving = document.createElement("input");
+    arriving.type = "text";
+    arriving.value = "9.876,5";
+    arriving.setAttribute("data-stimeo--currency-input-target", "display");
+    leaving.replaceWith(arriving);
+    return { leaving, arriving };
+  };
+
+  it("reads a display swapped in during a held locale change with the new separators", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    await holdLocaleChange();
+    const { leaving, arriving } = swapInGermanDisplay();
+    controller().displayTargetDisconnected(leaving);
+    controller().displayTargetConnected(arriving);
+    await tick();
+
+    expect(arriving.value).toBe("9.876,50");
+    expect(field().value).toBe("9876.5");
+    expect(events).toEqual([
+      { type: "reconcile", detail: { value: 9876.5, formatted: "9.876,50" } },
+    ]);
+  });
+
+  it("reads the swapped-in display with the new separators when it arrives before the old one leaves", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    await holdLocaleChange();
+    const { leaving, arriving } = swapInGermanDisplay();
+    controller().displayTargetConnected(arriving);
+    controller().displayTargetDisconnected(leaving);
+    await tick();
+
+    expect(arriving.value).toBe("9.876,50");
+    expect(field().value).toBe("9876.5");
+    expect(events).toEqual([
+      { type: "reconcile", detail: { value: 9876.5, formatted: "9.876,50" } },
+    ]);
+  });
+
+  it("reads a display swapped in after a locale change with no composition running", async () => {
+    await mount({ value: "1234.5" });
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    await tick();
+    const events = record();
+    const { leaving, arriving } = swapInGermanDisplay();
+    controller().displayTargetDisconnected(leaving);
+    controller().displayTargetConnected(arriving);
+    await tick();
+
+    expect(arriving.value).toBe("9.876,50");
+    expect(field().value).toBe("9876.5");
+    expect(events).toEqual([
+      { type: "reconcile", detail: { value: 9876.5, formatted: "9.876,50" } },
+    ]);
+  });
+
+  it("reads a display swapped in after the language around it changed with that language", async () => {
+    await mountBare("en-US");
+    type("1234.5");
+    blur();
+    const events = record();
+    // No Value declares the locale, so only the inherited `lang` moves.
+    (root().parentElement as HTMLElement).setAttribute("lang", "de-DE");
+    const { leaving, arriving } = swapInGermanDisplay();
+    controller().displayTargetDisconnected(leaving);
+    controller().displayTargetConnected(arriving);
+    await tick();
+
+    expect(arriving.value).toBe("9.876,50");
+    expect(field().value).toBe("9876.5");
+    expect(events).toEqual([
+      { type: "reconcile", detail: { value: 9876.5, formatted: "9.876,50" } },
+    ]);
+  });
+
+  it("reads text the page writes into the display with the locale it declares alongside", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    display().value = "9.876,5"; // the page's text, written for the locale it now declares
+    controller().localeValueChanged();
+    await tick();
+
+    expect(display().value).toBe("9.876,50");
+    expect(field().value).toBe("9876.5");
+    expect(events).toEqual([
+      { type: "reconcile", detail: { value: 9876.5, formatted: "9.876,50" } },
+    ]);
+  });
+
+  it("reads a display swapped in with a locale change from the same batch with the new locale", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    const { leaving, arriving } = swapInGermanDisplay();
+    controller().localeValueChanged();
+    controller().displayTargetDisconnected(leaving);
+    controller().displayTargetConnected(arriving);
+    await tick();
+
+    expect(arriving.value).toBe("9.876,50");
+    expect(field().value).toBe("9876.5");
+    expect(events).toEqual([
+      { type: "reconcile", detail: { value: 9876.5, formatted: "9.876,50" } },
+    ]);
+  });
+
+  it("rounds an entry left unrounded mid-typing when it connects again, as reconcile", async () => {
+    await mount();
+    typeKeys("1.555");
+    const instance = controller();
+    const events = record();
+    instance.disconnect();
+    instance.connect();
+    await tick();
+
+    // Re-rendering the committed value applies the fixed precision, and the
+    // rounding is this controller's decision rather than the user's edit.
+    expect(display().value).toBe("1.56");
+    expect(field().value).toBe("1.56");
+    expect(events).toEqual([{ type: "reconcile", detail: { value: 1.56, formatted: "1.56" } }]);
+  });
+
+  it("keeps the declarations a composition held when the controller disconnects", async () => {
+    await mount();
+    display().focus();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    const instance = controller();
+    instance.disconnect();
+    instance.connect();
+
+    // `,` is the decimal mark only once the held de-DE declaration applies.
+    type("1234,5");
+    expect(field().value).toBe("1234.5");
+  });
+
+  /** Types 1,234, then composes ５ after it while a de-DE locale change is held. */
+  const composeWhileHeld = async () => {
+    display().focus();
+    typeKeys("1234");
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    press("５");
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    await tick();
+  };
+
+  it("reads a composition the controller stops hearing when it moves with the separators it was typed against, as reconcile", async () => {
+    await mount();
+    await composeWhileHeld();
+    const events = record();
+    const instance = controller();
+    // The composition listeners leave with the controller: no compositionend follows.
+    instance.disconnect();
+    instance.connect();
+    await tick();
+
+    expect(display().value).toBe("12.345,00");
+    expect(field().value).toBe("12345");
+    expect(events).toEqual([{ type: "reconcile", detail: { value: 12345, formatted: "12,345" } }]);
+  });
+
+  it("reads a composing display that moves within the controller with the separators it was typed against, as reconcile", async () => {
+    await mount();
+    await composeWhileHeld();
+    const events = record();
+    const moving = display();
+    root().append(moving);
+    controller().displayTargetDisconnected(moving);
+    controller().displayTargetConnected(moving);
+    await tick();
+
+    expect(moving.value).toBe("12.345,00");
+    expect(field().value).toBe("12345");
+    expect(events).toEqual([{ type: "reconcile", detail: { value: 12345, formatted: "12,345" } }]);
+  });
+
+  it("reads its own rendering on a display that moves within the controller before a held change applies", async () => {
+    await mount();
+    await composeWhileHeld();
+    const events = record();
+    // A blur formats the text under the declarations it was typed against.
+    blur();
+    const moving = display();
+    root().append(moving);
+    controller().displayTargetDisconnected(moving);
+    controller().displayTargetConnected(moving);
+    await tick();
+
+    expect(moving.value).toBe("12.345,00");
+    expect(field().value).toBe("12345");
+    expect(events).toEqual([{ type: "change", detail: { value: 12345, formatted: "12,345.00" } }]);
+  });
+
+  it("re-renders in the language around it when it connects again with an empty locale", async () => {
+    // An empty `locale` attribute is authored, so reconnecting fires no Value callback.
+    await mount({ locale: "", value: "1234.5" });
+    expect(display().value).toBe("1,234.50");
+    const instance = controller();
+    instance.disconnect();
+    document.documentElement.lang = "de-DE";
+    instance.connect();
+    await tick();
+
+    expect(display().value).toBe("1.234,50");
+    expect(field().value).toBe("1234.5");
+  });
+
+  it("syncs a late field from the display when nothing is composing", async () => {
+    await mount();
+    typeKeys("12");
+    // Written by the page, so no input event reports it; the display is still the truth.
+    display().value = "34";
+    field().remove();
+    const lateField = document.createElement("input");
+    lateField.type = "hidden";
+    lateField.setAttribute("data-stimeo--currency-input-target", "field");
+    root().appendChild(lateField);
+    controller().fieldTargetConnected();
+
+    expect(lateField.value).toBe("34");
+  });
+
+  it("syncs a late field to the committed value while the display is composing", async () => {
+    await mount();
+    typeKeys("12");
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    display().value = "12３";
+    display().dispatchEvent(new Event("input", { bubbles: true }));
+    field().remove();
+    const lateField = document.createElement("input");
+    lateField.type = "hidden";
+    lateField.setAttribute("data-stimeo--currency-input-target", "field");
+    root().appendChild(lateField);
+    controller().fieldTargetConnected();
+
+    expect(lateField.value).toBe("12");
+  });
+
   it("strips invalid characters before parsing", async () => {
     await mount();
     type("ab1,2c3,4d.5x");
@@ -316,20 +696,22 @@ describe("CurrencyInputController", () => {
     ]);
   });
 
-  it("does not dispatch change on connect when the initial value rounds", async () => {
-    const values: Array<number | null> = [];
-    const onChange = (e: Event) => values.push((e as CustomEvent).detail.value);
+  it("dispatches neither event on connect when the initial value rounds", async () => {
+    const events: string[] = [];
+    const onEvent = (e: Event) => events.push(e.type);
     // The controller dispatches on its root element, which doesn't exist until
     // mount; listen on document (and clean up) to catch any connect-time event.
-    document.addEventListener("stimeo--currency-input:change", onChange);
+    document.addEventListener("stimeo--currency-input:change", onEvent);
+    document.addEventListener("stimeo--currency-input:reconcile", onEvent);
     try {
-      // 1234.567 rounds to 1234.57 at connect; that re-format is idempotent and
-      // must not surface as a user-driven change event.
+      // 1234.567 rounds to 1234.57 at connect. Connecting describes the value the
+      // page rendered rather than moving it, so it reports nothing at all.
       await mount({ value: "1234.567" });
       expect(display().value).toBe("1,234.57");
-      expect(values).toEqual([]);
+      expect(events).toEqual([]);
     } finally {
-      document.removeEventListener("stimeo--currency-input:change", onChange);
+      document.removeEventListener("stimeo--currency-input:change", onEvent);
+      document.removeEventListener("stimeo--currency-input:reconcile", onEvent);
     }
   });
 
@@ -447,6 +829,140 @@ describe("CurrencyInputController", () => {
     expect(srValue().textContent).toBe("1.235");
   });
 
+  it("reports a precision change that moves the value as reconcile, never as change", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    root().setAttribute("data-stimeo--currency-input-precision-value", "0");
+    controller().precisionValueChanged();
+    await tick();
+
+    expect(display().value).toBe("1,235");
+    expect(field().value).toBe("1235");
+    expect(events).toEqual([{ type: "reconcile", detail: { value: 1235, formatted: "1,235" } }]);
+  });
+
+  it("stays silent when a locale or currency change leaves the value where it was", async () => {
+    // The display is read under the separators that wrote it, so the amount
+    // survives the switch and only its rendering moves.
+    await mount({ value: "1234.5" });
+    const events = record();
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    root().setAttribute("data-stimeo--currency-input-currency-value", "USD");
+    controller().currencyValueChanged();
+    await tick();
+
+    expect(display().value).toBe("1.234,50");
+    expect(field().value).toBe("1234.5");
+    expect(events).toEqual([]);
+  });
+
+  it("reports a display the page swaps in as reconcile, never as change", async () => {
+    await mount();
+    typeKeys("1234");
+    const events = record();
+    const replacement = document.createElement("input");
+    replacement.type = "text";
+    replacement.value = "5678.9";
+    replacement.setAttribute("data-stimeo--currency-input-target", "display");
+    display().replaceWith(replacement);
+    controller().displayTargetConnected(replacement);
+    await tick();
+
+    expect(replacement.value).toBe("5,678.90");
+    expect(events).toEqual([
+      { type: "reconcile", detail: { value: 5678.9, formatted: "5,678.90" } },
+    ]);
+  });
+
+  it("reports a declaration change over a display the page emptied as a move to empty", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    display().value = ""; // written by the page, so no input event reports it
+    root().setAttribute("data-stimeo--currency-input-precision-value", "0");
+    controller().precisionValueChanged();
+    await tick();
+
+    expect(field().value).toBe("");
+    expect(root().hasAttribute("data-stimeo--currency-input-empty")).toBe(true);
+    expect(events).toEqual([{ type: "reconcile", detail: { value: null, formatted: "" } }]);
+  });
+
+  it("reports a display swapped in without digits as a move to empty", async () => {
+    await mount();
+    typeKeys("1234");
+    const events = record();
+    const replacement = document.createElement("input");
+    replacement.type = "text";
+    replacement.value = "-";
+    replacement.setAttribute("data-stimeo--currency-input-target", "display");
+    display().replaceWith(replacement);
+    controller().displayTargetConnected(replacement);
+    await tick();
+
+    expect(replacement.value).toBe("");
+    expect(field().value).toBe("");
+    expect(events).toEqual([{ type: "reconcile", detail: { value: null, formatted: "" } }]);
+  });
+
+  it("re-renders the screen-reader text of an entry in progress without reporting it", async () => {
+    await mount();
+    display().focus();
+    typeKeys("1.5");
+    expect(srValue().textContent).toBe("1.50");
+    const events = record();
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    await tick();
+
+    expect(display().value).toBe("1,5");
+    expect(srValue().textContent).toBe("1,50");
+    expect(events).toEqual([]);
+  });
+
+  it("clears a stale field and marks the root empty when it connects over an empty display", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--currency-input">
+        <label for="amount">Amount</label>
+        <input id="amount" type="text" value=""
+               data-stimeo--currency-input-target="display" />
+        <span data-stimeo--currency-input-target="srValue">99.00</span>
+        <input type="hidden" value="99" data-stimeo--currency-input-target="field" />
+      </div>`;
+    const events: string[] = [];
+    const onEvent = (e: Event) => events.push(e.type);
+    document.addEventListener("stimeo--currency-input:change", onEvent);
+    document.addEventListener("stimeo--currency-input:reconcile", onEvent);
+    try {
+      application = Application.start();
+      application.register("stimeo--currency-input", CurrencyInputController);
+      await tick();
+
+      expect(field().value).toBe("");
+      expect(srValue().textContent).toBe("");
+      expect(root().hasAttribute("data-stimeo--currency-input-empty")).toBe(true);
+      expect(events).toEqual([]);
+    } finally {
+      document.removeEventListener("stimeo--currency-input:change", onEvent);
+      document.removeEventListener("stimeo--currency-input:reconcile", onEvent);
+    }
+  });
+
+  it("compares the next edit with the value a reconcile moved it to", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    root().setAttribute("data-stimeo--currency-input-precision-value", "0");
+    controller().precisionValueChanged();
+    await tick();
+    type("1,235"); // the value the page already moved it to: no edit
+    type("1,236");
+
+    expect(events).toEqual([
+      { type: "reconcile", detail: { value: 1235, formatted: "1,235" } },
+      { type: "change", detail: { value: 1236, formatted: "1,236" } },
+    ]);
+  });
+
   it("builds no formatter on the typing hot path", async () => {
     await mount();
     const constructed = vi.spyOn(Intl, "NumberFormat");
@@ -541,8 +1057,9 @@ describe("CurrencyInputController", () => {
   it("keeps target arrival and connect silent for a locale-authored value", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const values: Array<number | null> = [];
-    const onChange = (e: Event) => values.push((e as CustomEvent).detail.value);
-    document.addEventListener("stimeo--currency-input:change", onChange);
+    const onEvent = (e: Event) => values.push((e as CustomEvent).detail.value);
+    document.addEventListener("stimeo--currency-input:change", onEvent);
+    document.addEventListener("stimeo--currency-input:reconcile", onEvent);
     try {
       // "1,5" is 1.5 only under de-DE separators; a premature sync reading it
       // under the defaults would surface a wrong 15 before connect seeds it.
@@ -552,7 +1069,8 @@ describe("CurrencyInputController", () => {
       expect(values).toEqual([]);
       expect(error).not.toHaveBeenCalled();
     } finally {
-      document.removeEventListener("stimeo--currency-input:change", onChange);
+      document.removeEventListener("stimeo--currency-input:change", onEvent);
+      document.removeEventListener("stimeo--currency-input:reconcile", onEvent);
     }
   });
 
@@ -649,6 +1167,36 @@ describe("CurrencyInputController", () => {
       { value: 5, formatted: "5" },
       { value: null, formatted: "" }, // never { null, "-" }
     ]);
+  });
+
+  it("pairs a null value with an empty formatted when a declaration change reads a sign the page wrote", async () => {
+    await mount({ value: "5" });
+    display().focus();
+    const events = record();
+    display().value = "-"; // the page's in-progress text: no input event reports it
+    expect(field().value).toBe("5");
+    root().setAttribute("data-stimeo--currency-input-precision-value", "0");
+    controller().precisionValueChanged();
+    await tick();
+
+    // The committed 5 moved to empty, and a move to empty rides with "".
+    expect(display().value).toBe("-");
+    expect(field().value).toBe("");
+    expect(events).toEqual([{ type: "reconcile", detail: { value: null, formatted: "" } }]);
+  });
+
+  it("reports nothing when a declaration change reads a sign the page wrote over an empty value", async () => {
+    await mount();
+    display().focus();
+    const events = record();
+    display().value = "-";
+    root().setAttribute("data-stimeo--currency-input-precision-value", "0");
+    controller().precisionValueChanged();
+    await tick();
+
+    expect(display().value).toBe("-");
+    expect(field().value).toBe("");
+    expect(events).toEqual([]);
   });
 
   it("adopts a late-arriving display after a display-less connect", async () => {

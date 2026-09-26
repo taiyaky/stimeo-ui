@@ -90,7 +90,12 @@ export class SkeletonController extends Controller<HTMLElement> {
     this.element.setAttribute("data-state", "loading");
   }
 
-  /** Hides the placeholder, shows content, and clears the busy state. */
+  /**
+   * Hides the placeholder, shows content, and clears the busy state.
+   *
+   * @stimeoRuntimeOnly `announceReadyText` is the wording of the one announcement this reveal
+   *   makes.
+   */
   #reveal(): void {
     if (this.hasPlaceholderTarget) this.placeholderTarget.hidden = true;
     if (this.hasContentTarget) this.contentTarget.hidden = false;

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DialogController } from "../src/controllers/dialog_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -158,5 +159,149 @@ describe("DialogController", () => {
     expect(background.inert).toBe(false);
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     expect(dialog().hidden).toBe(false);
+  });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    const controller = () => {
+      const root = document.querySelector("[data-controller='stimeo--dialog']") as HTMLElement;
+      const instance = application.getControllerForElementAndIdentifier(root, "stimeo--dialog");
+      if (!(instance instanceof DialogController)) throw new Error("dialog controller not found");
+      return instance;
+    };
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--dialog");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a trigger click as user, after hidden is written and before focus moves", () => {
+      const states: string[] = [];
+      const root = document.querySelector("[data-controller='stimeo--dialog']") as HTMLElement;
+      root.addEventListener("stimeo--dialog:open", () => {
+        states.push(`${dialog().hidden} ${document.activeElement?.id}`);
+      });
+
+      trigger().focus();
+      trigger().click();
+
+      expect(capture.names()).toEqual(["open"]);
+      expect(capture.reasons()).toEqual(["user"]);
+      expect(states).toEqual(["false trigger"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+    });
+
+    it("reports a call with no DOM event as api", () => {
+      controller().open();
+      controller().close();
+
+      expect(capture.reasons()).toEqual(["api", "api"]);
+    });
+
+    it("reports a close button as user and a backdrop click as outside", () => {
+      trigger().click();
+      capture.clear();
+      (document.getElementById("cancel") as HTMLButtonElement).click();
+
+      expect(capture.reasons()).toEqual(["user"]);
+
+      capture.clear();
+      controller().open();
+      capture.clear();
+      dialog().click();
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["outside"]);
+    });
+
+    it("reports Escape as escape", () => {
+      trigger().click();
+      capture.clear();
+
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+      expect(capture.reasons()).toEqual(["escape"]);
+    });
+
+    it("stays silent for an idempotent call in either direction", () => {
+      controller().close();
+      expect(capture.seen).toEqual([]);
+
+      controller().open();
+      capture.clear();
+      controller().open();
+
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("stays silent while connect normalizes an authored-open dialog", async () => {
+      disconnectAndStopApplication(application);
+      document.body.innerHTML = `
+        <div data-controller="stimeo--dialog">
+          <div data-stimeo--dialog-target="dialog" role="dialog" aria-label="Confirm"></div>
+        </div>`;
+      const fresh = captureStateEvents("stimeo--dialog");
+      application = Application.start();
+      application.register("stimeo--dialog", DialogController);
+      await tick();
+
+      expect(dialog().hidden).toBe(true);
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+    });
+
+    it("stays silent through a disconnect and a Turbo-style reconnect", async () => {
+      trigger().click();
+      capture.clear();
+
+      const element = document.querySelector("[data-controller='stimeo--dialog']") as HTMLElement;
+      element.remove();
+      await tick();
+      document.body.append(element);
+      await tick();
+
+      expect(dialog().hidden).toBe(true);
+      expect(capture.seen).toEqual([]);
+    });
+  });
+
+  // --- Re-entry from a subscriber ---
+
+  describe("re-entry from a subscriber", () => {
+    const root = () => document.querySelector("[data-controller='stimeo--dialog']") as HTMLElement;
+    const controller = () => {
+      const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--dialog");
+      if (!(instance instanceof DialogController)) throw new Error("dialog controller not found");
+      return instance;
+    };
+
+    it("drops the modal side effects when the open handler closes it again", () => {
+      root().addEventListener("stimeo--dialog:open", () => controller().close());
+
+      controller().open();
+
+      // They must not land on a dialog that is hidden again: a later close()
+      // returns early, so there would be no way back.
+      expect(dialog().hidden).toBe(true);
+      expect(document.body.style.overflow).toBe("");
+      expect(document.getElementById("background")?.hasAttribute("inert")).toBe(false);
+    });
+
+    it("keeps the live trap when the close handler reopens it", () => {
+      controller().open();
+      root().addEventListener("stimeo--dialog:close", () => controller().open());
+
+      controller().close();
+
+      expect(dialog().hidden).toBe(false);
+      expect(document.body.style.overflow).toBe("hidden");
+    });
   });
 });

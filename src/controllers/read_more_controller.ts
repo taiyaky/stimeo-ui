@@ -1,6 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
 import { BlurDeferral } from "../utils/blur_deferral";
 import { LayoutObserver } from "../utils/layout_observer";
+import { stateReasonFor } from "../utils/state_reason";
+import { StateRegions } from "../utils/state_regions";
 
 /**
  * Headless "read more / truncate" behavior for visually clamped text.
@@ -10,7 +12,10 @@ import { LayoutObserver } from "../utils/layout_observer";
  *     <p id="bio" data-stimeo--read-more-target="content" data-state="collapsed">…</p>
  *     <button data-stimeo--read-more-target="trigger"
  *             data-action="click->stimeo--read-more#toggle"
- *             aria-expanded="false" aria-controls="bio" hidden>Read more</button>
+ *             aria-expanded="false" aria-controls="bio" hidden>
+ *       <span data-stimeo--read-more-target="collapsedLabel">Read more</span>
+ *       <span data-stimeo--read-more-target="expandedLabel" hidden>Read less</span>
+ *     </button>
  *   </div>
  *
  * There is no dedicated APG widget; the toggle borrows the **Disclosure**
@@ -25,16 +30,33 @@ import { LayoutObserver } from "../utils/layout_observer";
  * content is not actually clamped (it fits), the toggle is `hidden` so no
  * pointless "read more" is offered. Resizes, content changes, and target
  * replacement re-evaluate it; hiding a focused toggle waits until blur.
+ *
+ * The trigger takes an optional **label pair**: where both `collapsedLabel` and
+ * `expandedLabel` sit inside it, `hidden` follows the expanded state — the half that
+ * belongs to the state is shown and the other hidden, over whatever visibility the
+ * markup declares. A half whose counterpart is missing is left as authored, since
+ * hiding it would take the trigger's only label with it. The accessible name is the
+ * consumer's to write.
+ *
+ * Each move of the expanded state is reported: `stimeo--read-more:open` and
+ * `stimeo--read-more:close` dispatch `{ reason: StateReason }`, after
+ * `data-state` and `aria-expanded` are written. Both are informational, so
+ * neither is cancelable. {@link toggle} is the only thing that moves the state,
+ * so the baseline {@link connect} establishes, the re-evaluation that follows
+ * a resize or target churn, and {@link disconnect} say nothing.
  */
 export class ReadMoreController extends Controller<HTMLElement> {
-  static override targets = ["content", "trigger"];
+  static override targets = ["content", "trigger", "expandedLabel", "collapsedLabel"];
   static override values = {
     collapsed: { type: Boolean, default: true },
   };
   static actions = ["toggle"] as const;
+  static events = ["close", "open"] as const;
 
   declare readonly contentTarget: HTMLElement;
   declare readonly triggerTarget: HTMLElement;
+  declare readonly expandedLabelTargets: HTMLElement[];
+  declare readonly collapsedLabelTargets: HTMLElement[];
   declare readonly hasContentTarget: boolean;
   declare readonly hasTriggerTarget: boolean;
 
@@ -49,6 +71,12 @@ export class ReadMoreController extends Controller<HTMLElement> {
     if (this.#connected) this.#evaluateOverflow();
   };
   readonly #layout = new LayoutObserver(this.#update);
+
+  /** Owns `hidden` on the trigger's two labels. */
+  readonly #labels = new StateRegions({
+    whenTrue: () => this.expandedLabelTargets,
+    whenFalse: () => this.collapsedLabelTargets,
+  });
 
   /** Holds the trigger's hide back while it has focus; re-evaluates on blur. */
   readonly #deferredHide = new BlurDeferral(() => {
@@ -89,12 +117,23 @@ export class ReadMoreController extends Controller<HTMLElement> {
     this.#syncTargets();
   }
 
+  expandedLabelTargetConnected(): void {
+    this.#syncTargets();
+  }
+
+  collapsedLabelTargetConnected(): void {
+    this.#syncTargets();
+  }
+
   /** Toggles between the collapsed (clamped) and expanded states. */
-  toggle(): void {
+  toggle(event?: Event): void {
     if (!this.#connected) return;
     this.#collapsed = !this.#collapsed;
     this.#reflect();
     this.#evaluateOverflow();
+    const detail = { reason: stateReasonFor(event) };
+    if (this.#collapsed) this.dispatch("close", { detail, cancelable: false });
+    else this.dispatch("open", { detail, cancelable: false });
   }
 
   #initialCollapsed(): boolean {
@@ -112,6 +151,7 @@ export class ReadMoreController extends Controller<HTMLElement> {
     }
     if (this.hasTriggerTarget) {
       this.triggerTarget.setAttribute("aria-expanded", this.#collapsed ? "false" : "true");
+      this.#labels.reflect(this.triggerTarget, !this.#collapsed);
     }
   }
 

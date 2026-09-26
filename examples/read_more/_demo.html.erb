@@ -1,7 +1,9 @@
 <%# Markup for the read-more demo.
     The body is visually truncated with a CSS line clamp, and a toggle switches to the
-    full text. The library syncs aria-expanded / data-state and hides the toggle when
-    there is no overflow (so no needless button appears). The clamp itself lives in demo.css. %>
+    full text. The toggle carries both wordings: the library shows the half that belongs
+    to the current state and hides the other. It also syncs aria-expanded / data-state and
+    hides the whole toggle when there is no overflow (so no needless button appears).
+    The clamp itself lives in demo.css. %>
 <div class="read-more" data-controller="stimeo--read-more">
   <p
     class="read-more__content"
@@ -18,6 +20,20 @@
     hidden
     data-stimeo--read-more-target="trigger"
     data-action="click->stimeo--read-more#toggle">
-    <%= t("components.read_more.demo.trigger") %>
+    <span data-stimeo--read-more-target="collapsedLabel">
+      <%= t("components.read_more.demo.trigger") %>
+    </span>
+    <span data-stimeo--read-more-target="expandedLabel" hidden>
+      <%= t("components.read_more.demo.trigger_expanded") %>
+    </span>
   </button>
 </div>
+
+<%# Readout: what the component just reported. Purely visual — the component
+    already announces what a screen reader needs, so this line is aria-hidden to
+    keep it from being read twice. The value is a code fragment (API identifiers
+    and values), so only the label is translated. %>
+<p class="demo-readout" aria-hidden="true">
+  <span><%= t("catalog.readout.events") %></span>
+  <span class="demo-readout__value" data-readout>—</span>
+</p>

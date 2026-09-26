@@ -10,9 +10,9 @@ import { tick } from "./helpers/timing";
  * Behavioral tests for {@link StickToBottomController}. happy-dom has no layout, so the
  * scroll geometry is stubbed and `scrollTo` is mocked: pinned detection, the opt-in
  * `pinOnConnect` start (instant jump, whatever `behavior` says), follow-on-append while
- * pinned, the has-new flag + event while unpinned, scroll-driven re-pin, the
- * scrollToBottom action, reduced-motion behavior, and teardown. Real scrolling needs a
- * real browser and is not asserted here.
+ * pinned, the has-new flag + event while unpinned, the region declared for that flag,
+ * scroll-driven re-pin, the scrollToBottom action, reduced-motion behavior, and teardown.
+ * Real scrolling needs a real browser and is not asserted here.
  */
 
 let originalMatchMedia: typeof window.matchMedia;
@@ -683,6 +683,134 @@ describe("StickToBottomController", () => {
 
       expect(scrollTo).not.toHaveBeenCalled(); // no pinOnConnect: nothing jumps
       expect(box().hasAttribute("data-pinned")).toBe(false);
+    });
+  });
+
+  /**
+   * The has-new flag names a state; the `hasNew` target is the region declared for it —
+   * the "new messages" affordance. Which side shows is a pure function of that state,
+   * written wherever the flag moves, so an authored `hidden` never survives the first
+   * reflection and a restored DOM cannot leave the region contradicting the flag.
+   */
+  describe("the region declared for the has-new flag", () => {
+    const setupWithRegion = (regionAttrs = "", attrs = "") => {
+      document.body.innerHTML = `
+        <div id="box" data-controller="stimeo--stick-to-bottom" ${attrs}>
+          <ul id="content" data-stimeo--stick-to-bottom-target="content"><li>1</li></ul>
+          <button id="jump" type="button" ${regionAttrs}
+                  data-stimeo--stick-to-bottom-target="hasNew"
+                  data-action="stimeo--stick-to-bottom#scrollToBottom">New messages</button>
+        </div>`;
+    };
+    const jump = () => query("#jump");
+
+    it("hides a region authored visible when the connection records no arrival", async () => {
+      setupWithRegion(); // no `hidden` authored, and the flag starts down
+      setGeom(1000, 400, 100); // unpinned
+      const news = recordNews();
+      await start();
+
+      expect(box().hasAttribute("data-has-new")).toBe(false);
+      expect(jump().hidden).toBe(true);
+      expect(news).toEqual([]); // normalizing a region announces no arrival
+    });
+
+    it("follows the flag in both directions", async () => {
+      setupWithRegion("hidden");
+      setGeom(1000, 400, 100); // unpinned: the append is flagged rather than followed
+      await start();
+      box().scrollTo = vi.fn();
+
+      await appendChild();
+      expect(box().getAttribute("data-has-new")).toBe("true");
+      expect(jump().hidden).toBe(false);
+
+      setGeom(1100, 400, 700); // the user scrolls back down: distance 0 → pinned
+      box().dispatchEvent(new Event("scroll"));
+      expect(box().hasAttribute("data-has-new")).toBe(false);
+      expect(jump().hidden).toBe(true);
+    });
+
+    it("hides the region when a jump that never lands acknowledges the arrival", async () => {
+      setupWithRegion("hidden");
+      setGeom(1000, 400, 100); // unpinned, and the stubbed geometry never moves
+      await start();
+      box().scrollTo = vi.fn();
+      await appendChild();
+      expect(jump().hidden).toBe(false);
+
+      controller().scrollToBottom();
+      expect(box().hasAttribute("data-pinned")).toBe(false); // the container never arrived
+      expect(jump().hidden).toBe(true); // the arrival is acknowledged all the same
+    });
+
+    it("syncs a region that arrives while the flag is already up", async () => {
+      setup(); // the markup declares no region yet
+      setGeom(1000, 400, 100); // unpinned
+      await start();
+      box().scrollTo = vi.fn();
+      await appendChild();
+      expect(box().getAttribute("data-has-new")).toBe("true");
+
+      const late = document.createElement("button");
+      late.type = "button";
+      late.hidden = true;
+      late.textContent = "New messages";
+      late.setAttribute("data-stimeo--stick-to-bottom-target", "hasNew");
+      box().appendChild(late);
+      await tick();
+
+      expect(late.hidden).toBe(false);
+    });
+
+    it("hides a region that arrives while no arrival is pending", async () => {
+      setup(); // the markup declares no region yet
+      setGeom(1000, 400, 100); // unpinned, and nothing has arrived to flag
+      await start();
+      box().scrollTo = vi.fn();
+      expect(box().hasAttribute("data-has-new")).toBe(false);
+
+      const late = document.createElement("button");
+      late.type = "button";
+      late.textContent = "New messages"; // authored visible
+      late.setAttribute("data-stimeo--stick-to-bottom-target", "hasNew");
+      box().appendChild(late);
+      await tick();
+
+      expect(late.hidden).toBe(true);
+    });
+
+    it("leaves a region attached before connect to the connect-time normalization", async () => {
+      // Stimulus attaches targets before connect(), and a container that leaves the
+      // document and comes back keeps its controller: the flag there still reads the
+      // arrival of the connection that ended. The region is settled once, by the
+      // normalization that drops it, rather than written to the flagged side first.
+      setupWithRegion("hidden");
+      setGeom(1000, 400, 100); // unpinned: the append is flagged rather than followed
+      await start();
+      box().scrollTo = vi.fn();
+      await appendChild();
+      const el = box();
+      const region = jump();
+      expect(region.hidden).toBe(false); // the flag is up
+
+      const parent = el.parentElement as HTMLElement;
+      el.remove();
+      await tick();
+      region.hidden = true; // the subtree returns authored the way the markup declares
+
+      let writes = 0;
+      const observer = new MutationObserver((records) => {
+        writes += records.length;
+      });
+      observer.observe(region, { attributes: true, attributeFilter: ["hidden"] });
+      parent.appendChild(el);
+      await tick();
+      observer.disconnect();
+
+      expect(box().hasAttribute("data-has-new")).toBe(false); // the flag is dropped
+      expect(region.hidden).toBe(true);
+      expect(writes).toBe(0); // settled already, so hidden never moved on the way in
     });
   });
 

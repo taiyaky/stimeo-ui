@@ -86,6 +86,18 @@ const actionlessMarkup = () =>
     .replace(/data-action="[^"]*"/g, "")
     .replace(/data-action="[\s\S]*?"/g, "");
 
+const AUTOPLAY_ATTR = "data-stimeo--carousel-autoplay-value";
+
+/** Makes `prefers-reduced-motion: reduce` match until the returned spy is restored. */
+const preferReducedMotion = () =>
+  vi.spyOn(window, "matchMedia").mockImplementation(
+    (query: string) =>
+      ({
+        matches: query.includes("prefers-reduced-motion"),
+        media: query,
+      }) as MediaQueryList,
+  );
+
 describe("CarouselController", () => {
   let application: Application;
 
@@ -123,6 +135,9 @@ describe("CarouselController", () => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     vi.useRealTimers();
+    // A test that fails before its own `mockRestore()` must not hand a stubbed
+    // `matchMedia` or `visibilityState` to the tests after it.
+    vi.restoreAllMocks();
   });
 
   const root = () =>
@@ -141,6 +156,7 @@ describe("CarouselController", () => {
     document.querySelector<HTMLElement>(`[data-stimeo--carousel-target='${name}']`) as HTMLElement;
   const states = () => slides().map((slide) => slide.getAttribute("data-state"));
   const selected = () => pickers().map((picker) => picker.getAttribute("aria-selected"));
+  const autoplayAttr = () => root().getAttribute(AUTOPLAY_ATTR);
   const click = (element: HTMLElement | undefined) =>
     element?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   const press = (element: HTMLElement | undefined, key: string) =>
@@ -149,6 +165,57 @@ describe("CarouselController", () => {
   const moveFocus = (from: HTMLElement | null, to: HTMLElement | null) => {
     from?.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: to }));
     to?.dispatchEvent(new FocusEvent("focusin", { bubbles: true, relatedTarget: from }));
+  };
+  /** Records the `play` / `pause` edges the root reports, in order. */
+  const recordRunEdges = () => {
+    const edges: string[] = [];
+    const host = root();
+    for (const type of ["play", "pause"]) {
+      host.addEventListener(`stimeo--carousel:${type}`, () => edges.push(type));
+    }
+    return edges;
+  };
+  /** Mounts the default carousel inside a host it can be moved out of. */
+  const startMovable = async (attrs: string) => {
+    document.body.innerHTML = `<div id="from"></div><div id="to"></div>`;
+    (document.getElementById("from") as HTMLElement).innerHTML = markup(attrs);
+    await boot();
+  };
+  /** Re-inserts the root elsewhere, so Stimulus reconnects the same instance. */
+  const moveRoot = async () => {
+    (document.getElementById("to") as HTMLElement).appendChild(root());
+    await vi.advanceTimersByTimeAsync(0);
+  };
+  /**
+   * Answers `:hover` for the root from `hovered`. This DOM-only environment has no
+   * pointer, so the engine's answer is modelled; after a move an engine can go on
+   * answering from before the move until the pointer moves again.
+   */
+  const stubHover = (hovered: () => boolean) => {
+    const host = root();
+    const matches = host.matches.bind(host);
+    vi.spyOn(host, "matches").mockImplementation((selector: string) =>
+      selector === ":hover" ? hovered() : matches(selector),
+    );
+  };
+  /** Moves the pointer somewhere on the page, the way a person does. */
+  const movePointer = () =>
+    document.body.dispatchEvent(new PointerEvent("pointermove", { bubbles: true }));
+  /**
+   * Reports whether the controller is listening for the pointer to move: every
+   * `pointermove` registration it makes on the document from here on, and whether one of
+   * them is still live.
+   */
+  const watchPointerListener = () => {
+    const signals: AbortSignal[] = [];
+    const add = document.addEventListener.bind(document);
+    vi.spyOn(document, "addEventListener").mockImplementation((type, listener, options) => {
+      if (type === "pointermove" && typeof options === "object" && options.signal) {
+        signals.push(options.signal);
+      }
+      add(type, listener, options);
+    });
+    return { listening: () => signals.some((signal) => !signal.aborted) };
   };
 
   it("reverses the horizontal arrows under RTL, leaving Down/Up alone", async () => {
@@ -628,6 +695,28 @@ describe("CarouselController", () => {
       visibility.mockRestore();
     });
 
+    it("connects held while the tab is hidden, and starts once the tab is shown", async () => {
+      // `connect()` asks the document whether the tab is hidden, so a carousel that
+      // connects in a background tab keeps still and reports no run until it is shown.
+      document.body.innerHTML = markup(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const edges = recordRunEdges();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+      await boot();
+
+      expect(root().dataset.state).toBe("paused");
+      expect(edges).toEqual([]);
+      vi.advanceTimersByTime(2000);
+      expect(states()).toEqual(["active", "inactive", "inactive"]);
+
+      visibility.mockReturnValue("visible");
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(edges).toEqual(["play"]);
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
+    });
+
     it("does not autostart when the user asked for reduced motion", async () => {
       const matchMedia = vi.spyOn(window, "matchMedia").mockImplementation(
         (query: string) =>
@@ -643,13 +732,49 @@ describe("CarouselController", () => {
       expect(playToggle().getAttribute("aria-pressed")).toBe("false");
       vi.advanceTimersByTime(2000);
       expect(states()).toEqual(["active", "inactive", "inactive"]);
+      // The preference holds the declaration back; it does not rewrite it.
+      expect(autoplayAttr()).toBe("true");
 
       // An explicit press still rotates: the preference suppresses the autostart,
       // not the control.
       click(playToggle());
+      expect(playToggle().getAttribute("aria-pressed")).toBe("true");
       vi.advanceTimersByTime(500);
       expect(states()).toEqual(["inactive", "active", "inactive"]);
+      expect(autoplayAttr()).toBe("true");
 
+      matchMedia.mockRestore();
+    });
+
+    it("keeps holding a declared autoplay back when a morph re-renders the same declaration", async () => {
+      // The attribute still reads what the page declared, so a morph carrying the
+      // same markup is no change at all and the preference keeps its hold.
+      const matchMedia = preferReducedMotion();
+      await start(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+
+      root().setAttribute(AUTOPLAY_ATTR, "true");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(playToggle().getAttribute("aria-pressed")).toBe("false");
+      vi.advanceTimersByTime(2000);
+      expect(states()).toEqual(["active", "inactive", "inactive"]);
+      matchMedia.mockRestore();
+    });
+
+    it("follows an autoplay Value the page turns on at runtime under reduced motion", async () => {
+      // The preference holds back the intent declared at connect; an intent the page
+      // states afterwards is followed, as the user's press is.
+      const matchMedia = preferReducedMotion();
+      await start('data-stimeo--carousel-interval-value="500"');
+
+      root().setAttribute(AUTOPLAY_ATTR, "true");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(playToggle().getAttribute("aria-pressed")).toBe("true");
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
       matchMedia.mockRestore();
     });
 
@@ -662,13 +787,86 @@ describe("CarouselController", () => {
 
       vi.advanceTimersByTime(500); // -> slide 3 (last): nothing left to advance to
       expect(states()).toEqual(["inactive", "inactive", "active"]);
-      // Autoplay turned itself off, so the toggle reflects the stop…
+      // With nowhere to go the toggle reads off and unavailable…
       expect(playToggle().getAttribute("aria-pressed")).toBe("false");
       expect(playToggle().getAttribute("aria-disabled")).toBe("true");
+      // …while the declaration stays as the page wrote it…
+      expect(autoplayAttr()).toBe("true");
 
       // …and the interval is gone — further time never wraps or re-advances.
       vi.advanceTimersByTime(2000);
       expect(states()).toEqual(["inactive", "inactive", "active"]);
+    });
+
+    it("rotates again once a move back from the non-looping end leaves somewhere to go", async () => {
+      // The run-out is a state of the slide set, not a stop the user asked for, so
+      // the declared intent takes effect again as soon as a slide lies ahead.
+      await start(
+        'data-stimeo--carousel-loop-value="false" data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      vi.advanceTimersByTime(1000); // -> slide 3 (last)
+      expect(playToggle().getAttribute("aria-pressed")).toBe("false");
+
+      click(stepControl("prev"));
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
+      expect(playToggle().getAttribute("aria-pressed")).toBe("true");
+      expect(playToggle().hasAttribute("aria-disabled")).toBe(false);
+
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["inactive", "inactive", "active"]);
+      expect(autoplayAttr()).toBe("true");
+    });
+
+    it("keeps a declared autoplay on a carousel with nothing to rotate, and rotates once slides arrive", async () => {
+      // The page's declaration is delivered once and never answered with a write;
+      // the toggle reads off only while a single slide leaves nowhere to go.
+      const deliveries: string[] = [];
+      document.body.innerHTML = skewedMarkup(
+        1,
+        1,
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      application = Application.start();
+      application.register(
+        "stimeo--carousel",
+        class extends CarouselController {
+          override autoplayValueChanged(): void {
+            deliveries.push(String(this.autoplayValue));
+            super.autoplayValueChanged();
+          }
+        },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(deliveries).toEqual(["true"]);
+      expect(autoplayAttr()).toBe("true");
+      expect(playToggle().getAttribute("aria-pressed")).toBe("false");
+      expect(playToggle().getAttribute("aria-disabled")).toBe("true");
+
+      const tablist = document.querySelector('[role="tablist"]') as HTMLElement;
+      for (const n of [2, 3]) {
+        const slide = document.createElement("div");
+        slide.id = `s${n}`;
+        slide.setAttribute("role", "tabpanel");
+        slide.setAttribute("aria-label", String(n));
+        slide.setAttribute("data-stimeo--carousel-target", "slide");
+        viewport().appendChild(slide);
+        const picker = document.createElement("button");
+        picker.id = `d${n}`;
+        picker.type = "button";
+        picker.setAttribute("role", "tab");
+        picker.setAttribute("aria-label", `Slide ${n}`);
+        picker.setAttribute("data-stimeo--carousel-target", "picker");
+        tablist.appendChild(picker);
+      }
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(playToggle().getAttribute("aria-pressed")).toBe("true");
+      expect(playToggle().hasAttribute("aria-disabled")).toBe(false);
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
+      expect(deliveries).toEqual(["true"]);
     });
 
     it("marks the toggle unavailable when there is nothing to rotate", async () => {
@@ -737,39 +935,657 @@ describe("CarouselController", () => {
       expect(playToggle().getAttribute("aria-pressed")).toBe("false");
       vi.advanceTimersByTime(2000);
       expect(states()).toEqual(["inactive", "inactive", "active"]);
+      expect(autoplayAttr()).toBe("true");
+
+      // Looping again leaves somewhere to go, and the declared intent rotates again.
+      root().setAttribute("data-stimeo--carousel-loop-value", "true");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(playToggle().getAttribute("aria-pressed")).toBe("true");
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["active", "inactive", "inactive"]);
     });
 
-    it("clears the autoplay interval on disconnect", async () => {
+    it("keeps a slide move the page writes in the same batch as a loop change, and reports it once", async () => {
+      await start();
+      const reports: string[] = [];
+      for (const type of ["change", "reconcile"]) {
+        root().addEventListener(`stimeo--carousel:${type}`, (event) =>
+          reports.push(`${type} ${(event as CustomEvent<{ index: number }>).detail.index}`),
+        );
+      }
+
+      // One batch, as a morph writes it: loop goes off and the second slide becomes current.
+      root().setAttribute("data-stimeo--carousel-loop-value", "false");
+      slides()[0]?.setAttribute("data-state", "inactive");
+      slides()[1]?.setAttribute("data-state", "active");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
+      expect(selected()).toEqual(["false", "true", "false"]);
+      expect(reports).toEqual(["reconcile 1"]);
+    });
+
+    it("reports nothing and publishes once when loop changes at runtime", async () => {
+      await start();
+      const reports: string[] = [];
+      for (const type of ["change", "reconcile"]) {
+        root().addEventListener(`stimeo--carousel:${type}`, () => reports.push(type));
+      }
+      const records: MutationRecord[] = [];
+      const observer = new MutationObserver((batch) => records.push(...batch));
+      observer.observe(playToggle(), { attributes: true, attributeFilter: ["aria-pressed"] });
+
+      root().setAttribute("data-stimeo--carousel-loop-value", "false");
+      await vi.advanceTimersByTimeAsync(0);
+      records.push(...observer.takeRecords());
+      observer.disconnect();
+
+      // The index stays where it was, so nothing is reported. This DOM-only environment
+      // records an identical reassignment too, so one record is one pass over what the
+      // carousel publishes.
+      expect(reports).toEqual([]);
+      expect(records).toHaveLength(1);
+      expect(stepControl("prev").getAttribute("aria-disabled")).toBe("true");
+      expect(states()).toEqual(["active", "inactive", "inactive"]);
+    });
+
+    it("clears the autoplay interval of a tree that leaves the document, silently", async () => {
+      // A node on its way out keeps the markup it had: no reader is left for a
+      // `pause`, and the timer goes at once.
       await start(
         'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
       );
+      const host = root();
+      const held = slides();
+      const edges = recordRunEdges();
+      const controller = application.getControllerForElementAndIdentifier(
+        host,
+        "stimeo--carousel",
+      ) as CarouselController;
+
+      host.remove();
+      controller.disconnect();
+      vi.advanceTimersByTime(2000);
+
+      expect(held.map((slide) => slide.getAttribute("data-state"))).toEqual([
+        "active",
+        "inactive",
+        "inactive",
+      ]);
+      expect(edges).toEqual([]);
+      expect(host.dataset.state).toBe("playing");
+    });
+
+    it("ends the run with pause when no reconnect follows a disconnect", async () => {
+      // An element left in the document with no reconnect — the application
+      // stopping, the element leaving a scoped root — is still read, so the run it
+      // heard start is heard ending once the one-microtask probe finds no reconnect.
+      await start(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const edges = recordRunEdges();
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--carousel",
+      ) as CarouselController;
+
+      controller.disconnect();
+      await Promise.resolve();
+
+      expect(edges).toEqual(["pause"]);
+      expect(root().dataset.state).toBe("paused");
+      vi.advanceTimersByTime(2000);
+      expect(states()).toEqual(["active", "inactive", "inactive"]);
+    });
+
+    it("ends the run once when an ambiguous disconnect is followed by a definite one", async () => {
+      // The probe the first disconnect queued is disarmed by the second, and the
+      // end of the run is reported a single time however many disconnects follow.
+      await start(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const host = root();
+      const edges = recordRunEdges();
+      const controller = application.getControllerForElementAndIdentifier(
+        host,
+        "stimeo--carousel",
+      ) as CarouselController;
+
+      controller.disconnect(); // the element and its identifier are both still there
+      host.setAttribute("data-controller", "");
+      controller.disconnect();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(edges).toEqual(["pause"]);
+      expect(host.dataset.state).toBe("paused");
+    });
+
+    it("ends the run with pause when the identifier leaves a carousel still in the document", async () => {
+      // A morph that drops the controller keeps the element, and the level hook
+      // must stop claiming a rotation nothing drives any more.
+      await start(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const host = root();
+      const edges = recordRunEdges();
+
+      host.setAttribute("data-controller", "");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(edges).toEqual(["pause"]);
+      expect(host.dataset.state).toBe("paused");
+      vi.advanceTimersByTime(2000);
+      expect(states()).toEqual(["active", "inactive", "inactive"]);
+    });
+
+    it("keeps the rotation and its phase across an in-page move, reporting nothing", async () => {
+      // The move reconnects the same instance with the run unchanged: there is no
+      // edge to report, and the interval keeps counting from where it was.
+      await startMovable(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const edges = recordRunEdges();
+      vi.advanceTimersByTime(300);
+
+      await moveRoot();
+      expect(edges).toEqual([]);
+      expect(root().dataset.state).toBe("playing");
+
+      vi.advanceTimersByTime(200); // 500ms since the rotation started
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
+    });
+
+    it("reports pause when an in-page move lands where the rotation is held back", async () => {
+      preferReducedMotion();
+      await startMovable(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const edges = recordRunEdges();
+      click(playToggle());
+      expect(edges).toEqual(["play"]);
+
+      await moveRoot();
+
+      expect(edges).toEqual(["play", "pause"]);
+      expect(root().dataset.state).toBe("paused");
+    });
+
+    it("keeps the hover suspension across an in-page move until the pointer moves off the carousel", async () => {
+      // Stimulus hands an in-page move to the same controller instance, and the
+      // element leaves the pointer without ever firing mouseleave, while `:hover` may
+      // still answer from before the move. The suspension stays until the pointer moves.
+      await startMovable(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      root().dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+
+      await moveRoot();
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["active", "inactive", "inactive"]);
+      expect(root().dataset.state).toBe("paused");
+
+      // The engine answers `:hover` afresh once the pointer moves; here it is elsewhere.
+      movePointer();
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
+      expect(playToggle().getAttribute("aria-pressed")).toBe("true");
+    });
+
+    it("reports play once the pointer moves and finds a moved hover-paused carousel away from it", async () => {
+      // The move keeps the suspension; the first pointer movement reads `:hover` afresh,
+      // so the run the hover suspended starts then, and its start is reported as the edge
+      // it is.
+      await startMovable(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const edges = recordRunEdges();
+      root().dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      expect(edges).toEqual(["pause"]);
+
+      await moveRoot();
+      expect(edges).toEqual(["pause"]);
+
+      movePointer();
+      expect(edges).toEqual(["pause", "play"]);
+      expect(root().dataset.state).toBe("playing");
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
+    });
+
+    it("reports pause when the reconnect finds the pointer over the moved carousel", async () => {
+      // The reconnect suspends the rotation on whatever `:hover` answers at that
+      // moment; the stub gives that answer directly, and the stop is its edge. The
+      // pointer's next movement confirms it.
+      await startMovable(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const edges = recordRunEdges();
+      stubHover(() => true);
+
+      await moveRoot();
+      expect(edges).toEqual(["pause"]);
+      expect(root().dataset.state).toBe("paused");
+
+      movePointer();
+      vi.advanceTimersByTime(2000);
+      expect(edges).toEqual(["pause"]);
+      expect(states()).toEqual(["active", "inactive", "inactive"]);
+    });
+
+    it("lifts a suspension the reconnect read from a stale `:hover` once the pointer moves", async () => {
+      // `moveBefore` leaves `:hover` answering from before the move, and no mouseleave
+      // follows the node. The pointer's next movement is what tells the carousel it left.
+      await startMovable(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const edges = recordRunEdges();
+      let hovered = true;
+      stubHover(() => hovered);
+      await moveRoot();
+      expect(edges).toEqual(["pause"]);
+
+      hovered = false;
+      movePointer();
+
+      expect(edges).toEqual(["pause", "play"]);
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
+    });
+
+    it("reads the pointer on the first movement after the move only", async () => {
+      await startMovable(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const watch = watchPointerListener();
+      let hovered = true;
+      stubHover(() => hovered);
+      await moveRoot();
+      expect(watch.listening()).toBe(true);
+
+      movePointer();
+      expect(watch.listening()).toBe(false);
+
+      // Past the first movement the carousel's own mouseleave says when the pointer leaves.
+      hovered = false;
+      movePointer();
+      expect(root().dataset.state).toBe("paused");
+    });
+
+    it("stops listening for the pointer when the controller disconnects", async () => {
+      await startMovable(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const watch = watchPointerListener();
+      root().dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      await moveRoot();
+      expect(watch.listening()).toBe(true);
+
       const controller = application.getControllerForElementAndIdentifier(
         root(),
         "stimeo--carousel",
       ) as CarouselController;
       controller.disconnect();
+
+      expect(watch.listening()).toBe(false);
+    });
+
+    it("leaves a pause called after the move to the calls and events that follow it", async () => {
+      // A newer answer about the pointer suspension ends the wait on the next movement,
+      // so that movement cannot lift a suspension the page asked for itself.
+      await startMovable(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const watch = watchPointerListener();
+      root().dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      await moveRoot();
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--carousel",
+      ) as CarouselController;
+
+      controller.pause();
+      expect(watch.listening()).toBe(false);
+      movePointer();
       vi.advanceTimersByTime(2000);
+
+      expect(root().dataset.state).toBe("paused");
       expect(states()).toEqual(["active", "inactive", "inactive"]);
     });
 
-    it("keeps rotating after an in-page move that started under the pointer", async () => {
-      // Stimulus hands an in-page move to the same controller instance, and the
-      // element leaves the pointer without ever firing mouseleave. A suspension
-      // carried across that move would never lift.
+    it("suspends a carousel the pointer reads over when it first connects, until the pointer moves off it", async () => {
+      document.body.innerHTML = markup(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      let hovered = true;
+      stubHover(() => hovered);
+      await boot();
+      expect(root().dataset.state).toBe("paused");
+
+      hovered = false;
+      movePointer();
+
+      expect(root().dataset.state).toBe("playing");
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
+    });
+
+    it("carries no pointer suspension into a connect that follows a real detach", async () => {
+      // Only a reconnect in the same batch is a move; after the run has ended, a later
+      // connect reads the pointer afresh like any first one.
+      await startMovable(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      root().dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--carousel",
+      ) as CarouselController;
+
+      controller.disconnect();
+      await Promise.resolve(); // no reconnect: the probe ends the run
+      controller.connect();
+
+      expect(root().dataset.state).toBe("playing");
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
+    });
+
+    it("holds the declared intent back again under reduced motion after an in-page move", async () => {
+      // The press lifts the hold for the connection it happens in. An in-page move
+      // connects the same instance again, every connect reads the preference afresh,
+      // and the declaration the hold applies to stays as the page wrote it.
+      preferReducedMotion();
       document.body.innerHTML = `<div id="from"></div><div id="to"></div>`;
-      const from = document.getElementById("from") as HTMLElement;
-      from.innerHTML = markup(
+      (document.getElementById("from") as HTMLElement).innerHTML = markup(
         'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
       );
       await boot();
+      click(playToggle());
+      expect(playToggle().getAttribute("aria-pressed")).toBe("true");
+      expect(root().dataset.state).toBe("playing");
 
-      root().dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
       (document.getElementById("to") as HTMLElement).appendChild(root());
       await vi.advanceTimersByTimeAsync(0);
-      vi.advanceTimersByTime(500);
 
+      expect(playToggle().getAttribute("aria-pressed")).toBe("false");
+      expect(root().dataset.state).toBe("paused");
+      vi.advanceTimersByTime(2000);
+      expect(states()).toEqual(["active", "inactive", "inactive"]);
+      expect(autoplayAttr()).toBe("true");
+    });
+
+    it("reads focus afresh at an in-page move, holding while it stays inside and starting once it has gone", async () => {
+      // A move reconnects the same instance, and `connect()` asks the document where
+      // focus is: still inside, the suspension holds with no edge; gone, the run starts
+      // and reports it.
+      await startMovable(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const edges = recordRunEdges();
+      const focused = vi.spyOn(document, "activeElement", "get").mockReturnValue(playToggle());
+      moveFocus(null, playToggle());
+      expect(edges).toEqual(["pause"]);
+
+      await moveRoot();
+      expect(edges).toEqual(["pause"]);
+      vi.advanceTimersByTime(1000);
+      expect(states()).toEqual(["active", "inactive", "inactive"]);
+
+      focused.mockReturnValue(document.body);
+      await moveRoot();
+      expect(edges).toEqual(["pause", "play"]);
+      vi.advanceTimersByTime(500);
       expect(states()).toEqual(["inactive", "active", "inactive"]);
+    });
+  });
+
+  describe("play toggle labels", () => {
+    /** A label pair authored for a carousel that is not rotating. */
+    const stoppedPair = `
+        <span data-stimeo--carousel-target="onLabel" hidden>Pause</span>
+        <span data-stimeo--carousel-target="offLabel">Play</span>`;
+    /** The same pair authored the other way round. */
+    const rotatingPair = `
+        <span data-stimeo--carousel-target="onLabel">Pause</span>
+        <span data-stimeo--carousel-target="offLabel" hidden>Play</span>`;
+    /** A pair with no authored visibility on either half. */
+    const barePair = `
+        <span data-stimeo--carousel-target="onLabel">Pause</span>
+        <span data-stimeo--carousel-target="offLabel">Play</span>`;
+
+    /** The default carousel with `inner` as the play toggle's content. */
+    const toggleMarkup = (inner: string, attrs = "") =>
+      markup(attrs).replace(">Play</button>", `>${inner}</button>`);
+
+    /** The same carousel with a second play toggle, each carrying its own content. */
+    const twoToggles = (first: string, second: string, attrs = "") =>
+      toggleMarkup(first, attrs).replace(
+        '<div data-stimeo--carousel-target="viewport">',
+        `<button type="button" aria-label="Autoplay (caption)"
+            data-stimeo--carousel-target="playToggle"
+            data-action="stimeo--carousel#togglePlay">${second}</button>
+    <div data-stimeo--carousel-target="viewport">`,
+      );
+
+    const playToggles = () =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>("[data-stimeo--carousel-target='playToggle']"),
+      );
+    /** Whether each half of the pair inside `host` is hidden, in on/off order. */
+    const pairIn = (host: HTMLElement): Array<HTMLElement["hidden"] | undefined> =>
+      (["onLabel", "offLabel"] as const).map(
+        (name) =>
+          host.querySelector<HTMLElement>(`[data-stimeo--carousel-target='${name}']`)?.hidden,
+      );
+    const pair = () => pairIn(playToggle());
+
+    it("shows the half the rotation state belongs to, in both directions", async () => {
+      await startWith(toggleMarkup(stoppedPair, 'data-stimeo--carousel-interval-value="500"'));
+      expect(pair()).toEqual([true, false]);
+
+      click(playToggle());
       expect(playToggle().getAttribute("aria-pressed")).toBe("true");
+      expect(pair()).toEqual([false, true]);
+
+      click(playToggle());
+      expect(playToggle().getAttribute("aria-pressed")).toBe("false");
+      expect(pair()).toEqual([true, false]);
+    });
+
+    it("corrects a pair the markup authored against the rotation state", async () => {
+      // Which half shows is a pure function of the state, so an authored `hidden`
+      // is settled by the first reflection rather than read back.
+      await startWith(
+        toggleMarkup(
+          stoppedPair,
+          'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+        ),
+      );
+
+      expect(playToggle().getAttribute("aria-pressed")).toBe("true");
+      expect(pair()).toEqual([false, true]);
+    });
+
+    it("settles a pair that carries no authored visibility, reporting nothing", async () => {
+      // The opening reflection is normalization, not a state change, so it stays
+      // silent on every event this controller publishes.
+      const reports: string[] = [];
+      const record = (event: Event) => reports.push(event.type);
+      const types = ["change", "play", "pause", "reconcile"].map(
+        (name) => `stimeo--carousel:${name}`,
+      );
+      for (const type of types) document.body.addEventListener(type, record);
+
+      await startWith(toggleMarkup(barePair));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(pair()).toEqual([true, false]);
+      expect(reports).toEqual([]);
+      for (const type of types) document.body.removeEventListener(type, record);
+    });
+
+    it("leaves a toggle's lone half as the author wrote it", async () => {
+      // Hiding the only label a toggle has would take its whole accessible name
+      // with it, so a pair moves only where both halves sit inside the same toggle.
+      await startWith(
+        twoToggles(
+          stoppedPair,
+          '<span data-stimeo--carousel-target="onLabel">Pause</span>',
+          'data-stimeo--carousel-interval-value="500"',
+        ),
+      );
+      const lone = playToggles()[1] as HTMLElement;
+      expect(pairIn(playToggles()[0] as HTMLElement)).toEqual([true, false]);
+      expect(pairIn(lone)).toEqual([false, undefined]);
+
+      click(playToggles()[0] as HTMLElement);
+
+      expect(pairIn(playToggles()[0] as HTMLElement)).toEqual([false, true]);
+      expect(pairIn(lone)).toEqual([false, undefined]);
+    });
+
+    it("reflects each play toggle from the pair that sits inside it", async () => {
+      // The two toggles hold different material: the whole pair follows the
+      // rotation in both directions, while the toggle holding a single half keeps
+      // what the author wrote through the very transition that moves the pair.
+      await startWith(
+        twoToggles(
+          rotatingPair,
+          '<span data-stimeo--carousel-target="offLabel" hidden>Play</span>',
+          'data-stimeo--carousel-interval-value="500"',
+        ),
+      );
+      const paired = playToggles()[0] as HTMLElement;
+      const lone = playToggles()[1] as HTMLElement;
+      expect(pairIn(paired)).toEqual([true, false]);
+      expect(pairIn(lone)).toEqual([undefined, true]);
+
+      click(paired);
+
+      expect(paired.getAttribute("aria-pressed")).toBe("true");
+      expect(pairIn(paired)).toEqual([false, true]);
+      expect(pairIn(lone)).toEqual([undefined, true]);
+    });
+
+    it("settles a whole play toggle that joins after connect", async () => {
+      // A toggle the markup already carries is settled by the opening pass; one that
+      // arrives later reaches the pair only through its own target callback.
+      await startWith(toggleMarkup(stoppedPair));
+
+      // The arriving toggle carries no label half of its own, so its own target
+      // callback is the only thing that can publish the rotation state on it.
+      const late = document.createElement("button");
+      late.type = "button";
+      late.textContent = "Play";
+      late.setAttribute("aria-label", "Autoplay (caption)");
+      late.setAttribute("data-stimeo--carousel-target", "playToggle");
+      playToggle().after(late);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(late.getAttribute("aria-pressed")).toBe("false");
+    });
+
+    it("reflects a pair completed by an on half that arrives after connect", async () => {
+      // A half joining a connected toggle is a childList change, which the
+      // state-attribute observer does not report: only the target callback does.
+      await startWith(
+        toggleMarkup('<span data-stimeo--carousel-target="offLabel" hidden>Play</span>'),
+      );
+      expect(pair()).toEqual([undefined, true]);
+
+      const half = document.createElement("span");
+      half.setAttribute("data-stimeo--carousel-target", "onLabel");
+      half.textContent = "Pause";
+      playToggle().appendChild(half);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(pair()).toEqual([true, false]);
+    });
+
+    it("reflects a pair completed by an off half that arrives after connect", async () => {
+      await startWith(toggleMarkup('<span data-stimeo--carousel-target="onLabel">Pause</span>'));
+      expect(pair()).toEqual([false, undefined]);
+
+      const half = document.createElement("span");
+      half.setAttribute("data-stimeo--carousel-target", "offLabel");
+      half.hidden = true;
+      half.textContent = "Play";
+      playToggle().appendChild(half);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(pair()).toEqual([true, false]);
+    });
+
+    it("leaves the rotation for the opening pass to publish", async () => {
+      // The authored halves connect ahead of `connect()`, where the suspensions
+      // and the reduced-motion hold settle. Publishing from a half that arrived
+      // first would report a rotation that never runs.
+      const matchMedia = vi.spyOn(window, "matchMedia").mockImplementation(
+        (query: string) =>
+          ({
+            matches: query.includes("prefers-reduced-motion"),
+            media: query,
+          }) as MediaQueryList,
+      );
+      const reports: string[] = [];
+      const record = (event: Event) => reports.push(event.type);
+      document.body.addEventListener("stimeo--carousel:play", record);
+      document.body.addEventListener("stimeo--carousel:pause", record);
+
+      await startWith(
+        toggleMarkup(
+          barePair,
+          'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+        ),
+      );
+
+      expect(reports).toEqual([]);
+      expect(playToggle().getAttribute("aria-pressed")).toBe("false");
+      expect(pair()).toEqual([true, false]);
+
+      document.body.removeEventListener("stimeo--carousel:play", record);
+      document.body.removeEventListener("stimeo--carousel:pause", record);
+      matchMedia.mockRestore();
+    });
+
+    it("moves a label only on a transition, leaving the observer nothing to repair", async () => {
+      // The controller watches `hidden` across its own subtree, so a label written
+      // on every reflection would feed it a pass for every pass.
+      await startWith(toggleMarkup(stoppedPair, 'data-stimeo--carousel-interval-value="1000"'));
+      const repairs: unknown[] = [];
+      root().addEventListener("stimeo--carousel:reconcile", (event) => {
+        repairs.push((event as CustomEvent).detail);
+      });
+      const writes: string[] = [];
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          writes.push(
+            (record.target as HTMLElement).getAttribute("data-stimeo--carousel-target") as string,
+          );
+        }
+      });
+      observer.observe(root(), { subtree: true, attributes: true, attributeFilter: ["hidden"] });
+
+      click(playToggle());
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // One transition is one write per half, and no repair follows it.
+      expect(pair()).toEqual([false, true]);
+      expect(writes).toEqual(["onLabel", "offLabel"]);
+      expect(repairs).toEqual([]);
+
+      // Re-arming at a new interval reflects the same rotation state again.
+      root().setAttribute("data-stimeo--carousel-interval-value", "100");
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(pair()).toEqual([false, true]);
+      expect(writes).toEqual(["onLabel", "offLabel"]);
+      expect(repairs).toEqual([]);
+      observer.disconnect();
     });
   });
 

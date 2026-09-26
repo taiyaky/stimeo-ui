@@ -23,9 +23,9 @@ type CancelReason = "user" | "escape";
  * Implements the WAI-ARIA APG **Alert Dialog** pattern. It is the same modal as
  * `stimeo--dialog` with two deliberate differences that suit an *interrupting
  * confirmation*: it never closes on a backdrop click (an accidental dismissal
- * would be dangerous), and it exposes explicit {@link confirm}/{@link cancel}
- * actions that emit events so the consumer only writes the message and "what to
- * do on confirm".
+ * would be dangerous), and it exposes explicit
+ * {@link AlertDialogController.confirm | confirm}/{@link cancel} actions that emit
+ * events so the consumer only writes the message and "what to do on confirm".
  *
  * `cancel` dispatches `{ reason: "user" | "escape" }`; `confirm` carries no detail.
  *
@@ -36,11 +36,12 @@ type CancelReason = "user" | "escape";
  * and `Escape` (which cancels) — there is intentionally no backdrop close.
  *
  * Behavior provided:
- * - {@link open} shows the dialog and moves focus to the `initialFocus` target
- *   (the least destructive action, by convention), else the first focusable
- *   element.
+ * - {@link AlertDialogController.open | open} shows the dialog and moves focus to
+ *   the `initialFocus` target (the least destructive action, by convention), else
+ *   the first focusable element.
  * - `Tab`/`Shift+Tab` cycle focus within the dialog (focus trap).
- * - {@link confirm} closes and dispatches `stimeo--alert-dialog:confirm`.
+ * - {@link AlertDialogController.confirm | confirm} closes and dispatches
+ *   `stimeo--alert-dialog:confirm`.
  * - {@link cancel} and `Escape` close and dispatch `stimeo--alert-dialog:cancel`
  *   with a `reason` of `"user"` / `"escape"`. Focus returns to the opener.
  */

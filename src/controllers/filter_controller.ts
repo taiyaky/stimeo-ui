@@ -3,6 +3,13 @@ import { Controller } from "@hotwired/stimulus";
 /** A control whose "on" state contributes its token to the active filter set. */
 type FilterControl = HTMLElement;
 
+/** What an evaluation settles on and `change` reports. */
+interface FilterOutcome {
+  readonly active: readonly string[];
+  readonly visibleCount: number;
+  readonly total: number;
+}
+
 /**
  * Headless faceted-filter behavior: shows or hides a collection of items based on the
  * set of currently-active facet tokens, decoupled from how those tokens are toggled
@@ -25,9 +32,13 @@ type FilterControl = HTMLElement;
  * `match` decides how multiple active tokens combine: `all` (default — an item must
  * carry every active token) or `any` (at least one). With no active token every item
  * is shown. Items are toggled via `hidden`; groups with zero visible items and the
- * `empty` element are kept in sync, and `stimeo--filter:change` is dispatched.
+ * `empty` element are kept in sync, and `stimeo--filter:change` reports the outcome
+ * when it moves.
  *
- * `change` dispatches `{ active, visible, total }`.
+ * `change` dispatches `{ active, visibleCount, total }` — the active tokens, how
+ * many items they leave visible, and how many items there are — whenever an
+ * evaluation lands on an outcome other than the one it last reported. The first
+ * evaluation after `connect()` always reports.
  *
  * @remarks
  * Behavior only — the consumer owns all styling and the controls' own accessible
@@ -36,8 +47,10 @@ type FilterControl = HTMLElement;
  * `connect()`, on every native `change` that bubbles to the root, on the `apply`
  * and `clear` actions, and when `match` changes at runtime — the declaration
  * decides what is shown, so an element kept across a morph still follows it.
- * Button toggles that emit no native `change` wire their event to the `apply`
- * action (e.g. `stimeo--toggle-group:change->stimeo--filter#apply`).
+ * Button toggles that emit no native `change` wire their events to the `apply`
+ * action: `stimeo--toggle-group:change->stimeo--filter#apply` for a press, and
+ * `stimeo--toggle-group:reconcile->stimeo--filter#apply` for a pressed set the
+ * page moves.
  */
 export class FilterController extends Controller<HTMLElement> {
   static override targets = ["item", "control", "group", "empty"];
@@ -57,6 +70,13 @@ export class FilterController extends Controller<HTMLElement> {
   };
 
   /**
+   * The outcome the last `change` reported, which the next evaluation is compared
+   * with; `null` until the first evaluation after `connect()`, which reports
+   * whatever it finds.
+   */
+  #reported: FilterOutcome | null = null;
+
+  /**
    * Gates the declaration callback to the connected window.
    *
    * Stimulus delivers a Value callback ahead of `connect()` and again for every
@@ -66,6 +86,7 @@ export class FilterController extends Controller<HTMLElement> {
   #connected = false;
 
   override connect(): void {
+    this.#reported = null;
     this.#evaluate();
     this.element.addEventListener("change", this.#onChange);
     this.#connected = true;
@@ -96,7 +117,10 @@ export class FilterController extends Controller<HTMLElement> {
 
   /**
    * The evaluation itself: every item's visibility from the active tokens, then
-   * the groups and the empty element, then the `change` event.
+   * the groups and the empty element, then `change` when the outcome moved from
+   * the one last reported. Several triggers can land on the same outcome — a
+   * `clear` evaluates, and a toggle group wired to `apply` reports the presses it
+   * turned off — so an evaluation that changes nothing reports nothing.
    *
    * @stimeoRenderRoot
    */
@@ -116,9 +140,19 @@ export class FilterController extends Controller<HTMLElement> {
       empty.hidden = visibleCount > 0;
     }
 
-    this.dispatch("change", {
-      detail: { active, visible: visibleCount, total: this.itemTargets.length },
-    });
+    const total = this.itemTargets.length;
+    const reported = this.#reported;
+    if (
+      reported !== null &&
+      reported.visibleCount === visibleCount &&
+      reported.total === total &&
+      reported.active.length === active.length &&
+      reported.active.every((token, index) => token === active[index])
+    ) {
+      return;
+    }
+    this.#reported = { active, visibleCount, total };
+    this.dispatch("change", { detail: { active: [...active], visibleCount, total } });
   }
 
   /** Turns every control off (uncheck / aria-pressed="false") and re-applies. */
@@ -150,7 +184,7 @@ export class FilterController extends Controller<HTMLElement> {
 
   /** A control's token: explicit `data-stimeo--filter-token`, else `data-value` / value. */
   #tokenOf(control: FilterControl): string {
-    const explicit = control.getAttribute("data-stimeo--filter-token") ?? control.dataset.value;
+    const explicit = control.getAttribute(`data-${this.identifier}-token`) ?? control.dataset.value;
     if (explicit) return explicit;
     return control instanceof HTMLInputElement ? control.value : "";
   }
@@ -166,7 +200,7 @@ export class FilterController extends Controller<HTMLElement> {
 
   /** An item's declared tokens (`data-stimeo--filter-tokens`, space-separated). */
   #tokensOf(item: HTMLElement): string[] {
-    return (item.getAttribute("data-stimeo--filter-tokens") ?? "").split(/\s+/).filter(Boolean);
+    return (item.getAttribute(`data-${this.identifier}-tokens`) ?? "").split(/\s+/).filter(Boolean);
   }
 
   /** Whether a group still contains at least one non-hidden item. */

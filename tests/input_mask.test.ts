@@ -599,6 +599,123 @@ describe("InputMaskController", () => {
     ]);
   });
 
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(
+      input(),
+      "stimeo--input-mask",
+    ) as InputMaskController;
+
+  it("holds a pattern change while the field is composing, then formats the commit under it", async () => {
+    await start(ZIP);
+    const log = record();
+    const field = input();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "12３";
+    field.setSelectionRange(3, 3);
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    field.setAttribute("data-stimeo--input-mask-pattern-value", "99/99");
+    controller().patternValueChanged();
+
+    // The page's re-format would discard the conversion in progress.
+    expect(field.value).toBe("12３");
+    expect(log).toEqual([]);
+
+    field.value = "１２３４";
+    field.setSelectionRange(4, 4);
+    field.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    await tick();
+
+    // The user committed text, so the one format that follows is their edit.
+    expect(field.value).toBe("12/34");
+    expect(log).toEqual([
+      { event: "change", detail: { masked: "12/34", unmasked: "1234", complete: true } },
+    ]);
+  });
+
+  it("reports a pattern change that waited out a cancelled composition as reconciled", async () => {
+    await start(ZIP);
+    type("1234567");
+    const log = record();
+    const field = input();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "123-4567あ";
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    field.setAttribute("data-stimeo--input-mask-pattern-value", "999-99-99");
+    controller().patternValueChanged();
+    expect(field.value).toBe("123-4567あ");
+    expect(log).toEqual([]);
+
+    // Cancelling the conversion puts back the text it started from, so the
+    // re-format that follows is the page's alone.
+    field.value = "123-4567";
+    field.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    await tick();
+
+    expect(field.value).toBe("123-45-67");
+    expect(log).toEqual([
+      { event: "reconcile", detail: { masked: "123-45-67", unmasked: "1234567", complete: true } },
+    ]);
+  });
+
+  it("holds a tokens change while the field is composing, then formats the commit under it", async () => {
+    await start(ZIP);
+    const log = record();
+    const field = input();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "12３";
+    field.setSelectionRange(3, 3);
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    // From here on a digit slot takes 0 to 5 only.
+    field.setAttribute("data-stimeo--input-mask-tokens-value", JSON.stringify({ "9": "[0-5]" }));
+    controller().tokensValueChanged();
+
+    expect(field.value).toBe("12３");
+    expect(log).toEqual([]);
+
+    field.value = "１２３４５６７";
+    field.setSelectionRange(7, 7);
+    field.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+
+    // The one format the composition's end runs already uses the new tokens.
+    expect(field.value).toBe("123-45");
+    expect(hidden().value).toBe("12345");
+    await tick();
+    expect(log).toEqual([
+      { event: "change", detail: { masked: "123-45", unmasked: "12345", complete: false } },
+    ]);
+  });
+
+  it("empties the sink at once when unmaskToHidden turns off mid-composition, and formats the commit without it", async () => {
+    await start(ZIP);
+    type("123");
+    expect(hidden().value).toBe("123");
+    const log = record();
+    const field = input();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "123４";
+    field.setSelectionRange(4, 4);
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    field.setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    controller().unmaskToHiddenValueChanged();
+
+    // The sink stops carrying a raw value nothing maintains any more, while the
+    // text the IME owns and the events wait for the composition to end.
+    expect(hidden().value).toBe("");
+    expect(field.value).toBe("123４");
+    expect(log).toEqual([]);
+
+    field.value = "123４５";
+    field.setSelectionRange(5, 5);
+    field.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+
+    expect(field.value).toBe("123-45");
+    expect(hidden().value).toBe("");
+    await tick();
+    expect(log).toEqual([
+      { event: "change", detail: { masked: "123-45", unmasked: "12345", complete: false } },
+    ]);
+  });
+
   it("re-formats and reconciles when the pattern changes at runtime", async () => {
     await start(ZIP);
     type("1234567");

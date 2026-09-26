@@ -92,6 +92,8 @@ export class EditableController extends Controller<HTMLElement> {
    * "saves wherever focus moved" true only for focus that leaves the input
    * itself, and tabbing straight past an inner button would strand the editor
    * open.
+   *
+   * @stimeoRuntimeOnly `submitOnBlur` decides whether this one blur commits the edit.
    */
   readonly #onFocusOut = (event: FocusEvent): void => {
     // Entering edit mode hides the display element, and hiding the element that

@@ -23,6 +23,9 @@ interface Scan {
   value: number | null;
 }
 
+/** Who moved the value: the user editing the display, or the page. */
+type Cause = "edit" | "reconcile";
+
 /**
  * The locale a declaration falls back to when `Intl` rejects it, so a broken tag
  * still leaves a field that formats and parses the same way every time.
@@ -50,13 +53,19 @@ const FALLBACK_LOCALE = "en-US";
  *     <input type="hidden" data-stimeo--currency-input-target="field" />
  *   </div>
  *
- * `change` dispatches `{ value: number | null, formatted: string }` — `null`
- * (with an empty `formatted`) when the amount is cleared, so consumers hear
- * every transition of the numeric value, including back to empty.
+ * `change` and `reconcile` dispatch `{ value: number | null, formatted: string }`
+ * — `null` (with an empty `formatted`) when the amount is cleared, so consumers
+ * hear every transition of the numeric value, including back to empty. `change`
+ * is the user's edit: typing, or the rounding applied on `blur`. `reconcile` is a
+ * value the page moved: a `locale`, `currency` or `precision` change that
+ * re-rounds the committed amount, a display target swapped in holding another
+ * amount, a reconnect that rounds an entry left unrounded mid-typing, or a move
+ * that ends a composition before its `compositionend`. Connecting over a
+ * server-rendered value reports neither.
  *
  * @remarks
  * Behavior only — no styling, no validation (range/required belong to the
- * consumer or Form Field). The display field is the sole Tab stop and keeps its
+ * consumer or `stimeo--form-field`). The display field is the sole Tab stop and keeps its
  * native text-editing behavior; this controller never steals focus.
  *
  * While typing, the entry is preserved as typed: grouping is applied to the
@@ -71,17 +80,41 @@ const FALLBACK_LOCALE = "en-US";
  * only counts as a decimal mark in locales where it is not the grouping
  * separator. Together these keep the controller's own output re-parseable to
  * the same value in every locale. Events fired mid-IME-composition are
- * ignored; the confirmed text is formatted once on `compositionend`.
+ * ignored; the confirmed text is formatted once on `compositionend`. A
+ * `locale` / `currency` / `precision` change that arrives mid-composition
+ * leaves the uncommitted text alone and applies right after that confirmed
+ * text has been read. A composition this controller stops hearing — its display
+ * leaves, or the controller disconnects, before `compositionend` — ends there:
+ * a display still in place is read as `compositionend` would read it, and a
+ * value that moves is reported as `reconcile`. A field or screen-reader span
+ * arriving mid-composition takes the committed value.
+ *
+ * Display text is read with the declarations it was written for. This
+ * controller's own rendering was written with the separators in force, so a
+ * declaration change reads it before they change. Any other text is the page's
+ * — a display swapped in, or text written into the display alongside a
+ * declaration change — written for the declarations the page carries, so it is
+ * read with those.
  *
  * With no `locale` declared the field formats in the nearest `lang` up the
  * ancestor chain, else in the runtime default. A malformed `locale` falls back
  * to `en-US`, and a malformed `currency` or `precision` to that Value's default,
- * instead of throwing: each is validated once in its
- * `<name>ValueChanged`, and the hot path only ever sees validated values
- * through cached `Intl.NumberFormat` instances (rebuilt on Value changes, never
- * per keystroke). Late-arriving or swapped `field` / `srValue` / `display`
- * targets are re-synced on connection. The composition listeners are released
- * on `disconnect()`.
+ * instead of throwing. The declarations, the nearest `lang` among them, are
+ * read and validated before a display is read after they may have moved — on a
+ * Value change, when the controller connects, and when a display arrives; the
+ * hot path only ever sees validated values through cached `Intl.NumberFormat`
+ * instances, never built per keystroke. Late-arriving or swapped `field` /
+ * `srValue` / `display` targets are re-synced on connection.
+ *
+ * Reconnecting starts from the committed value: a display still showing this
+ * controller's own rendering is not read back but re-rendered from that value
+ * under the current declarations, so a `locale` changed while the element was
+ * away never re-reads its separators. The re-render is the fixed-precision
+ * form, so it rounds whenever the value has more places than the current
+ * `precision` allows — because `precision` changed while the element was away,
+ * or because the entry was left unrounded mid-typing (`1.555` becomes `1.56`) —
+ * and a value it moves is reported as `reconcile`. The composition listeners
+ * are released on `disconnect()`.
  *
  * Honest a11y note: a hidden `<input>` is not exposed to assistive tech, so the
  * normalized value is *also* published as text in the `srValue` span referenced
@@ -96,7 +129,7 @@ export class CurrencyInputController extends Controller<HTMLElement> {
     precision: { type: Number, default: 2 },
   };
   static actions = ["format", "onInput"] as const;
-  static events = ["change"] as const;
+  static events = ["change", "reconcile"] as const;
 
   declare readonly displayTarget: HTMLInputElement;
   declare readonly fieldTarget: HTMLInputElement;
@@ -108,16 +141,25 @@ export class CurrencyInputController extends Controller<HTMLElement> {
   declare currencyValue: string;
   declare precisionValue: number;
 
-  /** Last committed numeric value, to suppress duplicate `change` dispatches. */
+  /** The numeric value last committed; both events report only a move away from it. */
   #lastValue: number | null = null;
   #started = false;
+  /** A declaration change that arrived mid-composition, applied once nothing composes. */
+  #changeHeld = false;
+  /** The display a composition is running on, until that composition ends. */
+  #composing: EventTarget | null = null;
+  /**
+   * The display text this controller last rendered. It tells this controller's own
+   * text, written with the separators in force, from text the page wrote.
+   */
+  #rendered: string | null = null;
 
   /** Validated mirrors of the Values; the hot path never reads a raw Value. */
   #locale: string | undefined;
   #currency = "";
   #precision = 2;
 
-  /** Formatters rebuilt only when a Value changes, never per keystroke. */
+  /** Formatters rebuilt when the declarations are taken in, never per keystroke. */
   #grouping!: Intl.NumberFormat;
   #fixed!: Intl.NumberFormat;
   #accessible!: Intl.NumberFormat;
@@ -126,12 +168,26 @@ export class CurrencyInputController extends Controller<HTMLElement> {
   /** The locale's non-Latin digits mapped back to ASCII (empty for Latin locales). */
   readonly #digits = new Map<string, string>();
 
-  /** Holds mid-composition input so the IME's uncommitted text is never rewritten. */
+  /**
+   * Holds mid-composition input so the IME's uncommitted text is never rewritten.
+   * The confirmed text is formatted once, and a declaration change the composition
+   * held back is applied after it.
+   */
   readonly #composition = new CompositionTracker({
-    onEnd: () => this.#reformat(false),
+    onStart: (event) => {
+      this.#composing = event.currentTarget;
+    },
+    onEnd: () => {
+      this.#composing = null;
+      this.#reformat(false, "edit");
+      this.#applyHeldChange();
+    },
   });
 
-  /** Re-validates on declaration changes and re-renders the committed display. */
+  /**
+   * Re-validates on declaration changes and re-renders the committed display,
+   * reporting a value the re-render moved as `reconcile`.
+   */
   localeValueChanged(): void {
     this.#applyValueChange();
   }
@@ -145,59 +201,136 @@ export class CurrencyInputController extends Controller<HTMLElement> {
   }
 
   /**
-   * Scans the display under the *outgoing* configuration (its separators wrote
-   * that text), then revalidates and re-renders under the new one — so a locale
-   * switch re-interprets the value, never the old text with new separators.
+   * Reads the display with the declarations its text was written for, then
+   * re-renders it under the new ones — so a locale switch re-interprets the
+   * value, never the old text with new separators, and text the page wrote for
+   * the declarations it changes is never read with the old ones.
+   *
+   * While the display is composing, its text is the IME's: the change is held,
+   * configuration and all, until the composition ends, so the confirmed text is
+   * read with the separators it was typed against before the change applies.
+   *
+   * @stimeoRenderRoot
    */
   #applyValueChange(): void {
-    const scan =
-      this.#started && this.hasDisplayTarget ? this.#scan(this.displayTarget.value) : null;
-    this.#revalidate();
-    if (!scan || !this.hasDisplayTarget) return;
+    if (this.#composition.isComposing()) {
+      this.#changeHeld = true;
+      return;
+    }
+    // With nothing to read, the next display or the next connect takes the
+    // declarations in before reading.
+    if (!this.#started || !this.hasDisplayTarget) return;
+    const scan = this.#readDisplay();
     if (document.activeElement === this.displayTarget) {
       const formatted = this.#render(scan.parts);
-      this.displayTarget.value = formatted;
-      this.#reflect(scan.value, formatted);
-    } else if (scan.value === null) {
-      this.displayTarget.value = "";
-      this.#reflect(null, "");
+      this.#show(formatted);
+      this.#reflect(scan.value, formatted, "reconcile");
     } else {
-      const rounded = round(scan.value, this.#precision);
-      const formatted = this.#fixed.format(rounded);
-      this.displayTarget.value = formatted;
-      this.#reflect(rounded, formatted);
+      this.#renderFixed(scan.value, "reconcile");
     }
   }
 
-  /** Normalizes any pre-filled display value to its fixed-precision form. */
+  /** Applies a declaration change a composition held back. */
+  #applyHeldChange(): void {
+    if (!this.#changeHeld) return;
+    this.#changeHeld = false;
+    this.#applyValueChange();
+  }
+
+  /**
+   * Reads the display and takes in the declarations the page carries now. This
+   * controller's own rendering was written with the separators in force, so it
+   * is read before they change; any other text is the page's, written for the
+   * declarations it carries, so it is read after.
+   */
+  #readDisplay(): Scan {
+    const text = this.displayTarget.value;
+    const own = text === this.#rendered ? this.#scan(text) : null;
+    this.#takeInDeclarations();
+    return own ?? this.#scan(text);
+  }
+
+  /** Takes in the declarations the page carries now, a change a composition held among them. */
+  #takeInDeclarations(): void {
+    this.#changeHeld = false;
+    this.#revalidate();
+  }
+
+  /**
+   * Takes in the declarations the page carries now and normalizes the display
+   * to its fixed-precision form.
+   *
+   * A display still showing this controller's own last rendering is not read
+   * back: its separators may belong to declarations that changed while the
+   * controller was away, and the committed value is known anyway. That value is
+   * re-rendered at the current fixed precision, which rounds it whether
+   * `precision` changed meanwhile or the entry was left unrounded mid-typing, and
+   * a move the rounding causes is reported as `reconcile`. Any other text is the
+   * page's, written for the declarations it carries, so it is read with them.
+   */
   override connect(): void {
     this.#started = true;
+    this.#takeInDeclarations();
     if (!this.hasDisplayTarget) return;
-    // Seed lastValue with the *rounded* initial value so the idempotent
-    // connect-time reformat does not dispatch a spurious `change`.
+    if (this.displayTarget.value === this.#rendered) {
+      this.#renderFixed(this.#lastValue, "reconcile");
+      return;
+    }
+    // Seed the baseline with the *rounded* initial value: the idempotent
+    // connect-time reformat describes the value the page rendered, so it
+    // reports nothing.
     const { value } = this.#scan(this.displayTarget.value);
     this.#lastValue = value === null ? null : round(value, this.#precision);
-    if (value === null) {
-      this.displayTarget.value = "";
-      this.#reflect(null, "");
-    } else {
-      this.#reformat(true);
-    }
+    this.#renderFixed(value, "reconcile");
   }
 
+  /**
+   * Releases the composition listeners. A composition still running hears no
+   * `compositionend` once they are gone, so it ends here; a change it held is
+   * taken in on the next `connect()`.
+   */
   override disconnect(): void {
-    this.#started = false;
+    this.#endUntrackedComposition();
     this.#composition.disconnect();
+    this.#started = false;
   }
 
-  /** Tracks composition on an arriving (or swapped-in) display and normalizes it. */
+  /**
+   * Tracks composition on an arriving (or swapped-in) display and normalizes it
+   * under the declarations the page carries now, reading this controller's own
+   * rendering with the separators it was written under; an amount that differs
+   * from the committed one is the page's, so it is reported as `reconcile`.
+   */
   displayTargetConnected(target: HTMLInputElement): void {
     this.#composition.observe(target);
-    if (this.#started) this.#reformat(true);
+    if (!this.#started) return;
+    this.#renderFixed(this.#readDisplay().value, "reconcile");
   }
 
+  /**
+   * Stops tracking a display that leaves. A composition running on it hears no
+   * `compositionend` any more, so it ends here; a change it held waits for the
+   * next display to be read.
+   */
   displayTargetDisconnected(target: HTMLInputElement): void {
     this.#composition.unobserve(target);
+    this.#endUntrackedComposition();
+  }
+
+  /**
+   * Ends a composition no `compositionend` will reach. A display still in place —
+   * one a move re-inserted, or the display of a controller that moves — holds the
+   * text the composition left, typed against the declarations in force, so it is
+   * read as `compositionend` would read it and becomes this controller's own
+   * rendering. The page's move ended the composition, so a value it moves is
+   * reported as `reconcile`. A display that left takes its composition along.
+   */
+  #endUntrackedComposition(): void {
+    const display = this.#composing;
+    this.#composing = null;
+    if (this.hasDisplayTarget && this.displayTarget === display) {
+      this.#reformat(false, "reconcile");
+    }
   }
 
   /** Syncs a late-arriving hidden field without touching the display or events. */
@@ -213,37 +346,27 @@ export class CurrencyInputController extends Controller<HTMLElement> {
   /** Re-groups digits as the user types, preserving the caret position. */
   onInput(event: Event): void {
     if (this.#composition.isComposing(event as InputEvent)) return;
-    this.#reformat(false);
+    this.#reformat(false, "edit");
   }
 
   /** Applies the fixed-precision rounding on blur. */
   format(): void {
-    this.#reformat(true);
+    this.#reformat(true, "edit");
   }
 
   /**
    * Parses the display value, rewrites it grouped (optionally at fixed
    * precision), keeps the caret stable by significant characters, and syncs the
-   * field, the screen-reader span, and the `change` event.
-   *
-   * @stimeoRenderRoot
+   * field, the screen-reader span, and the event `cause` selects.
    */
-  #reformat(fixedPrecision: boolean): void {
+  #reformat(fixedPrecision: boolean, cause: Cause): void {
     if (!this.hasDisplayTarget) return;
     const raw = this.displayTarget.value;
     const { parts, value } = this.#scan(raw);
 
     if (fixedPrecision) {
-      if (value === null) {
-        // Blur with no digits (an abandoned sign or dot) clears the entry.
-        this.displayTarget.value = "";
-        this.#reflect(null, "");
-        return;
-      }
-      const rounded = round(value, this.#precision);
-      const formatted = this.#fixed.format(rounded);
-      this.displayTarget.value = formatted;
-      this.#reflect(rounded, formatted);
+      // Blur with no digits (an abandoned sign or dot) clears the entry.
+      this.#renderFixed(value, cause);
       return;
     }
 
@@ -254,15 +377,34 @@ export class CurrencyInputController extends Controller<HTMLElement> {
       this.displayTarget.value = formatted;
       if (anchor !== null) this.#restoreCaret(formatted, anchor);
     }
-    // The display may hold an in-progress "-", but a null value always rides
-    // with an empty `formatted` so consumers can treat the pair as "cleared".
-    this.#reflect(value, value === null ? "" : formatted);
+    this.#rendered = formatted;
+    this.#reflect(value, formatted, cause);
+  }
+
+  /**
+   * Shows `value` at the fixed precision — an empty display for no value — and
+   * reports a move under the event `cause` selects.
+   */
+  #renderFixed(value: number | null, cause: Cause): void {
+    if (value === null) {
+      this.#show("");
+      this.#reflect(null, "", cause);
+      return;
+    }
+    const rounded = round(value, this.#precision);
+    const formatted = this.#fixed.format(rounded);
+    this.#show(formatted);
+    this.#reflect(rounded, formatted, cause);
+  }
+
+  /** Writes `text` to the display as this controller's own rendering. */
+  #show(text: string): void {
+    this.displayTarget.value = text;
+    this.#rendered = text;
   }
 
   /**
    * The in-progress rendering: grouped integer, sign and fraction as typed.
-   *
-   * @stimeoRenderRoot
    */
   #render(parts: EntryParts): string {
     const int = parts.int === "" ? "" : this.#grouping.format(BigInt(parts.int));
@@ -328,16 +470,23 @@ export class CurrencyInputController extends Controller<HTMLElement> {
     if (this.hasSrValueTarget) {
       this.srValueTarget.textContent = isEmpty ? "" : this.#accessible.format(value);
     }
-    this.element.toggleAttribute("data-stimeo--currency-input-empty", isEmpty);
+    this.element.toggleAttribute(`data-${this.identifier}-empty`, isEmpty);
   }
 
-  /** {@link #write}, then reports a moved value as `change` (`""` rides with `null`). */
-  #reflect(value: number | null, formatted: string): void {
+  /**
+   * {@link #write}, then reports a moved value under the event `cause` selects:
+   * `change` for the user's edit, `reconcile` for a move the page caused. The
+   * display may hold an in-progress `-`, but a `null` value always rides with an
+   * empty `formatted`, whichever event reports it, so consumers can treat the
+   * pair as cleared.
+   */
+  #reflect(value: number | null, formatted: string, cause: Cause): void {
     this.#write(value);
-    if (value !== this.#lastValue) {
-      this.#lastValue = value;
-      this.dispatch("change", { detail: { value, formatted } });
-    }
+    if (value === this.#lastValue) return;
+    this.#lastValue = value;
+    const detail = { value, formatted: value === null ? "" : formatted };
+    if (cause === "edit") this.dispatch("change", { detail });
+    else this.dispatch("reconcile", { detail });
   }
 
   /**
@@ -374,10 +523,17 @@ export class CurrencyInputController extends Controller<HTMLElement> {
     return ch === this.#decimal || (ch === "." && this.#group !== ".");
   }
 
-  /** Re-syncs field / srValue / hook from the current display without dispatching. */
+  /**
+   * Re-syncs field / srValue / hook without dispatching: from the display, or —
+   * while it is composing, when its text is not committed yet — from the value
+   * last committed.
+   */
   #resync(): void {
     if (!this.hasDisplayTarget) return;
-    this.#write(this.#scan(this.displayTarget.value).value);
+    const value = this.#composition.isComposing()
+      ? this.#lastValue
+      : this.#scan(this.displayTarget.value).value;
+    this.#write(value);
   }
 
   /**

@@ -206,7 +206,11 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     this.#lastEdge = null;
   }
 
-  /** Runs the full structural and positional measurement pass. */
+  /**
+   * Runs the full structural and positional measurement pass.
+   *
+   * @stimeoRenderRoot
+   */
   #refresh(): void {
     const viewport = this.#viewport;
     if (!viewport) return;

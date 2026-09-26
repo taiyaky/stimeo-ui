@@ -1,7 +1,10 @@
 <%# Markup for the password-reveal demo.
     The toggle switches the input's type between password ↔ text and syncs aria-pressed /
-    data-state. If the input was focused, focus and caret position are preserved. The eye
-    icon rendering switches on aria-pressed in demo.css. %>
+    data-state. If the input was focused, focus and caret position are preserved. The toggle
+    carries one glyph per state as an off-label / on-label pair; the controller shows the half
+    that matches the state and hides the other, so demo.css needs no rule for the swap. Both
+    halves are aria-hidden, so the accessible name stays the toggle's aria-label in either
+    state. %>
 <div class="password-reveal" data-controller="stimeo--password-reveal">
   <label class="password-reveal__label" for="password-reveal-demo-input">
     <%= t("components.password_reveal.demo.label") %>
@@ -21,7 +24,15 @@
       aria-label="<%= t('components.password_reveal.demo.show') %>"
       data-stimeo--password-reveal-target="toggle"
       data-action="click->stimeo--password-reveal#toggle">
-      <span class="password-reveal__icon" aria-hidden="true"></span>
+      <span
+        class="password-reveal__icon"
+        aria-hidden="true"
+        data-stimeo--password-reveal-target="offLabel">👁</span>
+      <span
+        class="password-reveal__icon"
+        aria-hidden="true"
+        hidden
+        data-stimeo--password-reveal-target="onLabel">🙈</span>
     </button>
   </div>
 </div>

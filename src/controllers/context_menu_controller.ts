@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { type StateReason, stateReasonFor } from "../utils/state_reason";
 
 /**
  * Headless, accessible **context menu** behavior.
@@ -56,6 +57,11 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *   exactly one layer. `Tab` lets the browser move focus first, then closes on
  *   the next task. An outside click or context-menu invocation closes without
  *   stealing focus from its destination.
+ * - Each move of the open state is reported: `stimeo--context-menu:open` and
+ *   `stimeo--context-menu:close` dispatch `{ reason: StateReason }`, after the
+ *   state attributes are written. Both are informational, so neither is
+ *   cancelable. A call that leaves the state where it already was, the
+ *   normalization in {@link connect}, and {@link disconnect} are all silent.
  *
  * Roving focus skips `hidden` and natively `disabled` items. An
  * `aria-disabled="true"` item stays reachable by arrow keys — APG marks that
@@ -65,6 +71,7 @@ import { SafeTimeout } from "../utils/safe_timeout";
 export class ContextMenuController extends Controller<HTMLElement> {
   static override targets = ["region", "menu", "item"];
   static actions = ["activate", "onItemKeydown", "onRegionKeydown", "open"] as const;
+  static events = ["close", "open"] as const;
 
   declare readonly regionTarget: HTMLElement;
   declare readonly menuTarget: HTMLElement;
@@ -77,16 +84,21 @@ export class ContextMenuController extends Controller<HTMLElement> {
   /** Escape-stack membership while open; the shared resolver dismisses via it. */
   readonly #escapeLayer = new EscapeLayer();
 
+  /** Whether state moves are reported: set once `connect()` settled the baseline. */
+  #reporting = false;
+
   /** Starts closed and registers delegated activation and outside-pointer listeners. */
   override connect(): void {
-    this.#closeMenu();
+    this.#closeMenu("api");
     this.element.addEventListener("click", this.#onItemClickCapture, true);
     document.addEventListener("click", this.#onOutsidePointer, true);
     document.addEventListener("contextmenu", this.#onOutsidePointer, true);
+    this.#reporting = true;
   }
 
   /** Releases the listeners, stack membership, and pending Tab-close task. */
   override disconnect(): void {
+    this.#reporting = false;
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
     this.element.removeEventListener("click", this.#onItemClickCapture, true);
@@ -100,7 +112,7 @@ export class ContextMenuController extends Controller<HTMLElement> {
    */
   open(event: MouseEvent): void {
     event.preventDefault();
-    this.#openAt(event.clientX, event.clientY);
+    this.#openAt(event.clientX, event.clientY, stateReasonFor(event));
   }
 
   /** Keyboard entry on the region: `Shift+F10` / `ContextMenu` open at center. */
@@ -114,7 +126,7 @@ export class ContextMenuController extends Controller<HTMLElement> {
     const rect = this.hasRegionTarget
       ? this.regionTarget.getBoundingClientRect()
       : { left: 0, top: 0, width: 0, height: 0 };
-    this.#openAt(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    this.#openAt(rect.left + rect.width / 2, rect.top + rect.height / 2, stateReasonFor(event));
   }
 
   /** Roving focus and closing keys inside the menu. */
@@ -153,7 +165,7 @@ export class ContextMenuController extends Controller<HTMLElement> {
         // Closing synchronously removes the focused item before the browser's
         // default Tab action, which can restart traversal at the document head.
         this.#timers.clearAll();
-        this.#timers.set(() => this.#closeMenu(), 0);
+        this.#timers.set(() => this.#closeMenu("focus"), 0);
         break;
       default:
         break;
@@ -162,36 +174,43 @@ export class ContextMenuController extends Controller<HTMLElement> {
 
   /** Closes after an item is activated and restores focus to the region. */
   activate(): void {
-    this.#closeAndRestore();
+    this.#closeAndRestore("select");
   }
 
   /** Opens the menu at viewport coordinates `(x, y)` and focuses the first item. */
-  #openAt(x: number, y: number): void {
+  #openAt(x: number, y: number, reason: StateReason): void {
     if (!this.hasMenuTarget) return;
     this.#timers.clearAll();
+    const was = this.#isOpen;
     this.#escapeLayer.activate(document, {
-      onDismiss: () => this.#closeAndRestore(),
+      onDismiss: () => this.#closeAndRestore("escape"),
       claims: claimsWhileFocusWithin(this.element),
     });
     this.menuTarget.style.setProperty("--stimeo--context-menu-x", `${x}px`);
     this.menuTarget.style.setProperty("--stimeo--context-menu-y", `${y}px`);
     this.menuTarget.hidden = false;
     if (this.hasRegionTarget) this.regionTarget.setAttribute("data-state", "open");
+    if (!was && this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
+    // A subscriber may close it again from the handler above; focusing then puts
+    // the caret on an item nobody can see.
+    if (!this.#isOpen) return;
     this.#navigableItems[0]?.focus();
   }
 
-  /** Hides the menu and reflects the collapsed state on the region. */
-  #closeMenu(): void {
+  /** Hides the menu, reflects the collapsed state on the region, and reports a move. */
+  #closeMenu(reason: StateReason): void {
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
     if (!this.hasMenuTarget) return;
+    const was = this.#isOpen;
     this.menuTarget.hidden = true;
     if (this.hasRegionTarget) this.regionTarget.setAttribute("data-state", "closed");
+    if (was && this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
   }
 
   /** Closes the menu and returns focus to the region (Escape / activation). */
-  #closeAndRestore(): void {
-    this.#closeMenu();
+  #closeAndRestore(reason: StateReason): void {
+    this.#closeMenu(reason);
     if (this.hasRegionTarget) this.regionTarget.focus();
   }
 
@@ -203,7 +222,7 @@ export class ContextMenuController extends Controller<HTMLElement> {
    * open.
    */
   readonly #onOutsidePointer = (event: MouseEvent): void => {
-    if (this.#isOpen && !this.element.contains(event.target as Node)) this.#closeMenu();
+    if (this.#isOpen && !this.element.contains(event.target as Node)) this.#closeMenu("outside");
   };
 
   /**

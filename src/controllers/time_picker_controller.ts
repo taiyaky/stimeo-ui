@@ -1,6 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { commitField, writeField } from "../utils/field_mirror";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { targetSelector } from "../utils/target_selector";
 
 /** A time segment kind, as declared by `data-segment` on each spinbutton. */
 type SegmentKind = "hour" | "minute" | "second" | "meridiem";
@@ -90,7 +92,10 @@ export class TimePickerController extends Controller<HTMLElement> {
   declare secondsValue: boolean;
   declare wrapValue: boolean;
 
-  /** Collapses target, Value, and retained-attribute morphs into one silent render. */
+  /**
+   * Collapses target, Value, and retained-attribute morphs into one render that
+   * dispatches no `change`.
+   */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileDom());
   /** Canonical state; the displayed hour and meridiem are derived from this value. */
   #state: TimeState = { hour: 0, minute: 0, second: 0 };
@@ -164,7 +169,7 @@ export class TimePickerController extends Controller<HTMLElement> {
   onKeydown(event: KeyboardEvent): void {
     if (isReservedArrowChord(event)) return;
     const segment = (event.target as HTMLElement | null)?.closest<HTMLElement>(
-      "[data-stimeo--time-picker-target~='segment']",
+      targetSelector(this.identifier, "segment"),
     );
     if (!segment || !this.segmentTargets.includes(segment)) return;
     const kind = this.#kindOf(segment);
@@ -214,7 +219,7 @@ export class TimePickerController extends Controller<HTMLElement> {
   /** Clears direct-entry state when Tab, Shift+Tab, or pointer focus leaves a segment. */
   readonly #onFocusOut = (event: FocusEvent): void => {
     const segment = (event.target as HTMLElement | null)?.closest<HTMLElement>(
-      "[data-stimeo--time-picker-target~='segment']",
+      targetSelector(this.identifier, "segment"),
     );
     if (!segment || !this.segmentTargets.includes(segment)) return;
     this.#clearTypeBuffer();
@@ -381,8 +386,7 @@ export class TimePickerController extends Controller<HTMLElement> {
   #commitRender(): void {
     this.#renderSegments();
     const value = this.#composedValue;
-    const fieldChanged = this.#writeField(value);
-    if (fieldChanged) this.fieldTarget.dispatchEvent(new Event("change", { bubbles: true }));
+    if (this.#writeField(value)) commitField(this.fieldTarget);
     if (value !== this.#lastValue) this.dispatch("change", { detail: { value } });
     this.#lastValue = value;
   }
@@ -404,9 +408,7 @@ export class TimePickerController extends Controller<HTMLElement> {
 
   /** Writes a composed value to the optional form field and reports whether it changed. */
   #writeField(value: string): boolean {
-    if (!this.hasFieldTarget || this.fieldTarget.value === value) return false;
-    this.fieldTarget.value = value;
-    return true;
+    return this.hasFieldTarget && writeField(this.fieldTarget, value);
   }
 
   /** The canonical form value composed as `HH:MM[:SS]`. */

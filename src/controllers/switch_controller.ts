@@ -1,7 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
 import { setDefaultAttribute } from "../utils/default_attribute";
+import { commitField, writeField } from "../utils/field_mirror";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { isInteractiveHost } from "../utils/interactive_host";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
 /** Attributes whose in-place changes can alter the host or its required defaults. */
 const OBSERVED_ATTRIBUTES = [
@@ -23,12 +25,14 @@ const OBSERVED_ANCESTOR_ATTRIBUTES = ["contenteditable"];
  * Markup contract (identifier: `stimeo--switch`):
  *   <button type="button" data-controller="stimeo--switch"
  *           data-action="click->stimeo--switch#toggle keydown->stimeo--switch#onKeydown"
- *           role="switch" aria-checked="false">…</button>
+ *           role="switch" aria-checked="false">
+ *     <input type="hidden" name="notify" data-stimeo--switch-target="field" />
+ *   </button>
  *
  * Implements the WAI-ARIA APG **Switch** pattern. The controller element is the
  * switch itself; its on/off state is reflected solely through `aria-checked`.
  *
- * `changed` dispatches `{ checked: boolean }`.
+ * `change` and `reconcile` dispatch `{ checked: boolean }`.
  *
  * @remarks
  * Behavior only — the consumer owns all styling (typically keyed off the
@@ -41,25 +45,41 @@ const OBSERVED_ANCESTOR_ATTRIBUTES = ["contenteditable"];
  *
  * Behavior provided:
  * - Click (or Space/Enter) toggles `aria-checked` between `"true"` and `"false"`.
- * - A `stimeo--switch:changed` event is dispatched on every toggle so the
- *   consumer can react (its `detail.checked` carries the new boolean state).
+ * - `stimeo--switch:change` is dispatched for every toggle the user makes; its
+ *   `detail.checked` carries the new boolean state.
+ * - `stimeo--switch:reconcile` reports a checked state the page moved instead —
+ *   a retained-element morph that writes `aria-checked` or strips it (the state
+ *   then falls back to the `"false"` default), or a host that stops supporting
+ *   the switch and takes back the `aria-checked` this controller supplied. It
+ *   carries the same detail, once per batch of changes, and never on connect.
+ * - The optional `field` target mirrors the state as `"true"` / `"false"` so the
+ *   switch can be submitted and read server-side. A toggle the user made emits
+ *   a native bubbling `change` from that field, the way a form control does, so
+ *   `stimeo--auto-submit` and form-level validation hear it. The mirror is
+ *   refreshed silently on connect, on a replacement field, and whenever the
+ *   defaults are re-derived after an attribute change. A hidden input is not
+ *   interactive content, so it is valid inside the `<button>` host.
  */
 export class SwitchController extends Controller<HTMLElement> {
+  static override targets = ["field"];
   static actions = ["onKeydown", "toggle"] as const;
-  static events = ["changed"] as const;
+  static events = ["change", "reconcile"] as const;
+
+  declare readonly fieldTarget: HTMLInputElement;
+  declare readonly hasFieldTarget: boolean;
 
   /** Defaults this instance introduced and may therefore remove safely. */
   readonly #ownedDefaults = new Set<string>();
   /** Controller writes that must not be mistaken for authored morph changes. */
   readonly #internalAttributeValues = new Map<string, string>();
+  /** One pass per batch of retained-element changes and field arrivals. */
+  readonly #pass = new MicrotaskCoalescer(() => this.#reconcile());
+  /** The checked state last published: read on connect, then committed or reported. */
+  #committedChecked = false;
 
   readonly #attributeObserver = new MutationObserver((records) => {
     this.#releaseAuthoredDefaults(records);
-    // Stop observation while restoring defaults so the writes do not schedule a
-    // second, empty callback batch. Re-observe synchronously before returning.
-    this.#attributeObserver.disconnect();
-    this.#reconcileDefaults();
-    this.#observeAttributes();
+    this.#pass.schedule();
   });
 
   /** Blocks disabled pointer/native-key activation before consumer click handlers. */
@@ -69,15 +89,27 @@ export class SwitchController extends Controller<HTMLElement> {
     event.stopImmediatePropagation();
   };
 
-  /** Ensures the switch exposes a role and is keyboard-reachable. */
+  /**
+   * Ensures the switch exposes a role and is keyboard-reachable, and takes the
+   * state it finds as the one a later move is measured from, reporting nothing.
+   */
   override connect(): void {
     this.#reconcileDefaults();
+    this.#mirrorField(false);
+    this.#committedChecked = this.#checked;
     this.element.addEventListener("click", this.#onClickCapture, true);
+    this.#pass.activate();
     this.#observeAttributes();
   }
 
-  /** Releases the explicit click guard and retained-element attribute observer. */
+  /** Fills a form field inserted or replaced at runtime with the current state. */
+  fieldTargetConnected(): void {
+    this.#pass.schedule();
+  }
+
+  /** Releases the click guard, the attribute observer, and a pass still queued. */
   override disconnect(): void {
+    this.#pass.cancel();
     this.element.removeEventListener("click", this.#onClickCapture, true);
     this.#attributeObserver.disconnect();
     this.#internalAttributeValues.clear();
@@ -86,7 +118,7 @@ export class SwitchController extends Controller<HTMLElement> {
   /** Toggles the checked state. Bound via `data-action` (click). */
   toggle(): void {
     if (!this.#isSupportedHost || this.#isActivationDisabled) return;
-    this.#checked = !this.#checked;
+    this.#commit(!this.#checked);
   }
 
   /**
@@ -115,6 +147,30 @@ export class SwitchController extends Controller<HTMLElement> {
     this.toggle();
   }
 
+  /**
+   * Re-derives the defaults and the field after the page changed the host, then
+   * reports a checked state that moved. Records still queued are read first, so
+   * an author's write is not lost when observation is suspended for this pass's
+   * own writes; observation resumes before the report, so an edit a listener
+   * makes is seen by the next pass.
+   */
+  #reconcile(): void {
+    this.#releaseAuthoredDefaults(this.#attributeObserver.takeRecords());
+    this.#attributeObserver.disconnect();
+    this.#reconcileDefaults();
+    this.#mirrorField(false);
+    this.#observeAttributes();
+    this.#reportMove();
+  }
+
+  /** Reports a checked state that moved since the one this switch last published. */
+  #reportMove(): void {
+    const checked = this.#checked;
+    if (checked === this.#committedChecked) return;
+    this.#committedChecked = checked;
+    this.dispatch("reconcile", { detail: { checked } });
+  }
+
   /** Re-adds only missing defaults, preserving every authored attribute value. */
   #reconcileDefaults(): void {
     if (!this.#isSupportedHost) {
@@ -128,6 +184,13 @@ export class SwitchController extends Controller<HTMLElement> {
     if (!(this.element instanceof HTMLButtonElement)) {
       this.#setOwnedDefault("tabindex", "0");
     }
+  }
+
+  /** Mirrors the checked state into the optional form field. */
+  #mirrorField(notify: boolean): void {
+    if (!this.hasFieldTarget) return;
+    const moved = writeField(this.fieldTarget, this.#checked ? "true" : "false");
+    if (moved && notify) commitField(this.fieldTarget);
   }
 
   /** Records a newly introduced default without claiming authored markup. */
@@ -199,11 +262,17 @@ export class SwitchController extends Controller<HTMLElement> {
     return this.element.getAttribute("aria-checked") === "true";
   }
 
-  /** Reflects the new state on `aria-checked` and notifies listeners. */
-  set #checked(value: boolean) {
+  /**
+   * Applies one toggle the user made. The state is taken as published before
+   * either report goes out, so a listener that toggles again or writes the
+   * attribute is measured from it.
+   */
+  #commit(value: boolean): void {
     const reflected = value ? "true" : "false";
     this.#internalAttributeValues.set("aria-checked", reflected);
     this.element.setAttribute("aria-checked", reflected);
-    this.dispatch("changed", { detail: { checked: value } });
+    this.#committedChecked = value;
+    this.#mirrorField(true);
+    this.dispatch("change", { detail: { checked: value } });
   }
 }

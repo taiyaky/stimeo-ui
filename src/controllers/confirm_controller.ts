@@ -135,6 +135,9 @@ export class ConfirmController extends Controller<HTMLElement> {
   /**
    * Opens the dialog for `message` and resolves once the user confirms or cancels.
    * Degrades to native `window.confirm` when no dialog target is present.
+   *
+   * @stimeoRuntimeOnly The labels word the one dialog this call opens; every opening writes both
+   *   labels again, and the dialog stays hidden between prompts.
    */
   #prompt(message: string): Promise<boolean> {
     if (!this.hasDialogTarget) return Promise.resolve(window.confirm(message));

@@ -1,7 +1,16 @@
 <%# Markup for the number-input (APG Spinbutton) demo.
     Increment/decrement buttons and the arrow keys step by `step`, clamped to min/max.
     The input is the only tab stop (buttons are tabindex="-1"); a button is disabled at
-    its boundary. %>
+    its boundary.
+
+    The widget owns the stepping, so it reports a step the way the browser reports its
+    own: a bubbling `input` then a bubbling `change` on its own input. That is why the
+    surrounding `stimeo--auto-submit` reacts to a button or an arrow key with nothing
+    wired between them. %>
+<form class="number-input-demo__form"
+      data-controller="stimeo--auto-submit"
+      data-stimeo--auto-submit-debounce-value="400"
+      data-action="change->stimeo--auto-submit#submit">
 <div class="number-input-demo" data-controller="stimeo--number-input"
      data-stimeo--number-input-min-value="0"
      data-stimeo--number-input-max-value="10"
@@ -16,7 +25,8 @@
     </svg>
   </button>
 
-  <input type="number" class="number-input-demo__input" min="0" max="10" step="1" value="1"
+  <input type="number" class="number-input-demo__input" name="quantity"
+         min="0" max="10" step="1" value="1"
          aria-label="<%= t('components.number_input.demo.quantity') %>"
          data-stimeo--number-input-target="input"
          data-action="change->stimeo--number-input#onInput
@@ -33,3 +43,13 @@
     </svg>
   </button>
 </div>
+</form>
+
+<%# The readout is aria-hidden: the value is already in the field the screen reader
+    reads, so repeating it here would say it twice. The value is a code fragment
+    (API identifiers and values), so only the label is translated. %>
+<p class="demo-readout" aria-hidden="true">
+  <span><%= t("catalog.readout.field") %></span>
+  <span class="demo-readout__value" data-readout
+        data-empty-text="<%= t("catalog.readout.empty") %>">—</span>
+</p>

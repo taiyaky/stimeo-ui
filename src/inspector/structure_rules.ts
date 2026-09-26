@@ -27,7 +27,27 @@ const SUBMIT_CONTROL_HOSTS: readonly HostSelector[] = [
  * reflected `static actions`; this table owns only target requiredness.
  */
 export const structureRules: StructureRules = {
-  "stimeo--accordion": { requiredTargets: ["trigger", "panel"] },
+  // Each header may carry a pair of labels that swap with its own `aria-expanded`,
+  // so the halves are paired per header rather than across the whole accordion.
+  "stimeo--accordion": {
+    requiredTargets: ["trigger", "panel"],
+    conditionalTargets: [
+      {
+        whenPresent: "expandedLabel",
+        require: ["collapsedLabel"],
+        requireSameTargetHost: "trigger",
+        suggestion:
+          'Add the "collapsedLabel" half inside the same header as the "expandedLabel" one, or drop both: the controller swaps a pair, so a half on its own never swaps and shows the same thing in both states.',
+      },
+      {
+        whenPresent: "collapsedLabel",
+        require: ["expandedLabel"],
+        requireSameTargetHost: "trigger",
+        suggestion:
+          'Add the "expandedLabel" half inside the same header as the "collapsedLabel" one, or drop both: the controller swaps a pair, so a half on its own never swaps and shows the same thing in both states.',
+      },
+    ],
+  },
   "stimeo--alert-dialog": { requiredTargets: ["trigger", "dialog"] },
   // Opt-in positioning controller: both the reference and the positioned element
   // are structurally required (it positions `floating` against `anchor`).
@@ -67,6 +87,20 @@ export const structureRules: StructureRules = {
     requiredTargets: ["slide"],
     conditionalTargets: [
       {
+        whenPresent: "onLabel",
+        require: ["offLabel"],
+        requireSameTargetHost: "playToggle",
+        suggestion:
+          'Add the "offLabel" half inside the same play toggle as the "onLabel" one, or drop both: the controller swaps a pair, so a half on its own never swaps and shows the same thing in both states.',
+      },
+      {
+        whenPresent: "offLabel",
+        require: ["onLabel"],
+        requireSameTargetHost: "playToggle",
+        suggestion:
+          'Add the "onLabel" half inside the same play toggle as the "offLabel" one, or drop both: the controller swaps a pair, so a half on its own never swaps and shows the same thing in both states.',
+      },
+      {
         whenPresent: "prev",
         require: ["next"],
         suggestion:
@@ -87,7 +121,26 @@ export const structureRules: StructureRules = {
   // and an empty root degrades to the explicit `none` aggregate.
   "stimeo--checkbox": {},
   "stimeo--clipboard": { requiredTargets: ["button"] },
-  "stimeo--collapsible": { requiredTargets: ["trigger", "content"] },
+  // The trigger may carry a pair of labels that swap with `aria-expanded`.
+  "stimeo--collapsible": {
+    requiredTargets: ["trigger", "content"],
+    conditionalTargets: [
+      {
+        whenPresent: "expandedLabel",
+        require: ["collapsedLabel"],
+        requireSameTargetHost: "trigger",
+        suggestion:
+          'Add the "collapsedLabel" half inside the same trigger as the "expandedLabel" one, or drop both: the controller swaps a pair, so a half on its own never swaps and shows the same thing in both states.',
+      },
+      {
+        whenPresent: "collapsedLabel",
+        require: ["expandedLabel"],
+        requireSameTargetHost: "trigger",
+        suggestion:
+          'Add the "expandedLabel" half inside the same trigger as the "collapsedLabel" one, or drop both: the controller swaps a pair, so a half on its own never swaps and shows the same thing in both states.',
+      },
+    ],
+  },
   "stimeo--color-picker": { requiredTargets: ["slider"] },
   "stimeo--combobox": { requiredTargets: ["input", "list"] },
   "stimeo--command-palette": { requiredTargets: ["dialog", "input", "list"] },
@@ -118,6 +171,16 @@ export const structureRules: StructureRules = {
   "stimeo--empty-state": { requiredTargets: ["list"] },
   "stimeo--file-dropzone": {
     requiredTargets: ["input", "trigger"],
+    templateRoots: [
+      {
+        template: "itemTemplate",
+        rootTarget: "item",
+        suggestion:
+          'Make the preview item itself the one element the template holds, carrying the "item" ' +
+          "target: the row is cloned on its own, so a wrapper around it — or a second element " +
+          "beside it — is never rendered and no file is added.",
+      },
+    ],
     // The selected-file list is opt-in, and both halves are load-bearing: the
     // template supplies the item markup and the list is where it is appended.
     // With one of them the picker still works and the files are still submitted —
@@ -192,6 +255,14 @@ export const structureRules: StructureRules = {
   // author-owned, and a selection whose chip cannot be built commits nothing.
   "stimeo--multi-select": {
     requiredTargets: ["input", "list", "tags"],
+    templateRoots: [
+      {
+        template: "tagTemplate",
+        rootTarget: "tag",
+        suggestion:
+          'Make the chip itself the one element the template holds, carrying the "tag" target: the row is cloned on its own, so a wrapper around it — or a second element beside it — is never rendered and no selection can commit.',
+      },
+    ],
     conditionalTargets: [
       {
         whenPresent: "tagTemplate",
@@ -203,7 +274,19 @@ export const structureRules: StructureRules = {
     ],
   },
   "stimeo--navigation-menu": { requiredTargets: ["trigger", "panel"] },
-  "stimeo--nested-form": { requiredTargets: ["list", "template"] },
+  // The row is the one element the template holds: the renumbered markup is
+  // inserted as it stands, and a removal takes back exactly that element.
+  "stimeo--nested-form": {
+    requiredTargets: ["list", "template"],
+    templateRoots: [
+      {
+        template: "template",
+        suggestion:
+          "Write exactly one element inside the template — the row. Anything beside it is " +
+          "rolled back, so the row is never added.",
+      },
+    ],
+  },
   // No required targets: offline and online announcement channels are optional.
   "stimeo--network-status": {},
   "stimeo--number-input": { requiredTargets: ["input"] },
@@ -218,7 +301,27 @@ export const structureRules: StructureRules = {
   // targets — so requiring `page` would reject valid markup. Boundary buttons
   // stay optional too (either one alone works).
   "stimeo--pagination": {},
-  "stimeo--password-reveal": { requiredTargets: ["input", "toggle"] },
+  // The toggle may carry a pair of decorations that swap with `aria-pressed`. The
+  // accessible name stays the same in both states, so the pair is what changes.
+  "stimeo--password-reveal": {
+    requiredTargets: ["input", "toggle"],
+    conditionalTargets: [
+      {
+        whenPresent: "onLabel",
+        require: ["offLabel"],
+        requireSameTargetHost: "toggle",
+        suggestion:
+          'Add the "offLabel" half inside the same toggle button as the "onLabel" one, or drop both: the controller swaps a pair, so a half on its own never swaps and shows the same thing in both states.',
+      },
+      {
+        whenPresent: "offLabel",
+        require: ["onLabel"],
+        requireSameTargetHost: "toggle",
+        suggestion:
+          'Add the "onLabel" half inside the same toggle button as the "offLabel" one, or drop both: the controller swaps a pair, so a half on its own never swaps and shows the same thing in both states.',
+      },
+    ],
+  },
   // `label` is optional (a plain visible readout); the input + meter are core.
   "stimeo--password-strength": { requiredTargets: ["input", "meter"] },
   // No required targets: `field` is optional (defaults to the form's named controls).
@@ -241,7 +344,27 @@ export const structureRules: StructureRules = {
   "stimeo--rating": { requiredTargets: ["symbol"] },
   // No targets: progress is measured and published from the controller element.
   "stimeo--reading-progress": {},
-  "stimeo--read-more": { requiredTargets: ["content", "trigger"] },
+  // The toggle may carry a pair of labels that swap with `aria-expanded`; the
+  // controller owns `hidden` on them, so both halves belong inside the trigger.
+  "stimeo--read-more": {
+    requiredTargets: ["content", "trigger"],
+    conditionalTargets: [
+      {
+        whenPresent: "expandedLabel",
+        require: ["collapsedLabel"],
+        requireSameTargetHost: "trigger",
+        suggestion:
+          'Add the "collapsedLabel" half inside the same trigger as the "expandedLabel" one, or drop both: the controller swaps a pair, so a half on its own never swaps and shows the same thing in both states.',
+      },
+      {
+        whenPresent: "collapsedLabel",
+        require: ["expandedLabel"],
+        requireSameTargetHost: "trigger",
+        suggestion:
+          'Add the "expandedLabel" half inside the same trigger as the "collapsedLabel" one, or drop both: the controller swaps a pair, so a half on its own never swaps and shows the same thing in both states.',
+      },
+    ],
+  },
   // No targets: the controller formats its own <time> element.
   "stimeo--relative-time": {},
   // No required targets: it scans for `data-reset-*` directives within scope.
@@ -324,6 +447,14 @@ export const structureRules: StructureRules = {
   // Free-input commit has the same all-or-nothing template contract as multi-select.
   "stimeo--tags-input": {
     requiredTargets: ["input", "tags", "tagTemplate"],
+    templateRoots: [
+      {
+        template: "tagTemplate",
+        rootTarget: "tag",
+        suggestion:
+          'Make the chip itself the one element the template holds, carrying the "tag" target: the row is cloned on its own, so a wrapper around it — or a second element beside it — is never rendered and no tag can commit.',
+      },
+    ],
     conditionalTargets: [
       {
         whenPresent: "tagTemplate",
@@ -340,7 +471,20 @@ export const structureRules: StructureRules = {
   "stimeo--theme": {},
   // The form field is optional; segment spinbuttons are the widget itself.
   "stimeo--time-picker": { requiredTargets: ["segment"] },
-  "stimeo--toast": { requiredTargets: ["list"] },
+  // A toast is cloned on its own from the template's one element, so an "item"
+  // sitting beside that element — or wrapped by it — is never shown.
+  "stimeo--toast": {
+    requiredTargets: ["list"],
+    templateRoots: [
+      {
+        template: "template",
+        rootTarget: "item",
+        suggestion:
+          'Make the toast itself the one element the template holds, carrying the "item" ' +
+          "target. Anything beside it is never cloned, so no toast appears.",
+      },
+    ],
+  },
   "stimeo--toggle-group": { requiredTargets: ["item"] },
   "stimeo--toolbar": { requiredTargets: ["control"] },
   "stimeo--tooltip": { requiredTargets: ["trigger", "content"] },

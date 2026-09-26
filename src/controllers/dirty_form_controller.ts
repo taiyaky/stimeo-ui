@@ -1,6 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { ListenerSet } from "../utils/listener_set";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { TransientHooks } from "../utils/transient_hooks";
+
+/** The hook a connection may find written by an earlier, now-gone one. */
+const TRANSIENT = new TransientHooks({ attributes: ["data-dirty"] });
 
 type VisitDecision =
   | { readonly kind: "block" }
@@ -29,6 +33,9 @@ type SerializedControl = readonly [
   checked?: 0 | 1,
 ];
 
+/** The coordinator of each document, dropped once its last participant leaves. */
+const visitCoordinators = new WeakMap<Document, TurboVisitCoordinator>();
+
 /**
  * Coordinates native Turbo confirmations for every dirty form in one document.
  *
@@ -37,8 +44,6 @@ type SerializedControl = readonly [
  * disconnect; the shared coordinator only gives one navigation event a single,
  * deterministic decision point.
  */
-const visitCoordinators = new WeakMap<Document, TurboVisitCoordinator>();
-
 class TurboVisitCoordinator {
   readonly #document: Document;
   readonly #participants = new Set<VisitParticipant>();
@@ -140,8 +145,8 @@ function registerVisitParticipant(document: Document, participant: VisitParticip
  * `dirty` dispatches `{ dirty }`; `guard` dispatches `{ event }`.
  *
  * @remarks
- * Behavior only — it renders no confirmation UI (pair with a Confirm Bridge) and
- * does not persist input (pair with Persist). The dirty baseline is read from the
+ * Behavior only — it renders no confirmation UI (pair with `stimeo--confirm`) and
+ * does not persist input (pair with `stimeo--persist`). The dirty baseline is read from the
  * DOM on `connect()` (no module-scope state) — which also clears a stale
  * `data-dirty` left in a Turbo cache snapshot, since the restored values are the
  * new baseline — `beforeunload` is wired only while dirty, and every listener is
@@ -239,10 +244,10 @@ export class DirtyFormController extends Controller<HTMLFormElement> {
     this.#resetSubmission();
     this.#baseline = this.#serialize();
     this.#setDirty(false);
-    // Re-baselining means the restored values ARE the clean state, so a stale
-    // data-dirty captured in a Turbo cache snapshot mid-edit must not linger
-    // (the guard would not fire, but consumer CSS would keep claiming "unsaved").
-    this.element.removeAttribute("data-dirty");
+    // Re-baselining means the restored values ARE the clean state, so a hook a
+    // snapshot preserved mid-edit must not linger: the guard would not fire, but
+    // consumer CSS would keep claiming "unsaved".
+    TRANSIENT.reset(this.element);
     this.#listeners.add(this.element, "input", this.#onFieldChange);
     this.#listeners.add(this.element, "change", this.#onFieldChange);
     this.#listeners.add(this.element, "submit", this.#onSubmit);

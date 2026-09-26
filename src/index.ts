@@ -106,6 +106,9 @@ import { ToolbarController } from "./controllers/toolbar_controller";
 import { TooltipController } from "./controllers/tooltip_controller";
 import { TransitionController } from "./controllers/transition_controller";
 import { TreeViewController } from "./controllers/tree_view_controller";
+import type { StateReason } from "./utils/state_reason";
+
+export type { StateReason };
 
 export {
   AccordionController,

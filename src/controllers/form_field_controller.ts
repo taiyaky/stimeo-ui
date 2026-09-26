@@ -86,8 +86,10 @@ export class FormFieldController extends Controller<HTMLElement> {
   /** Whether an explicit {@link setError} call moves focus to the current control. */
   declare focusOnErrorValue: boolean;
 
-  /** Root attribute (CSS hook) reflecting the invalid state. */
-  static readonly #INVALID_ATTR = "data-stimeo--form-field-invalid";
+  /** Root attribute (CSS hook) reflecting the invalid state, in this controller's namespace. */
+  get #invalidAttribute(): string {
+    return `data-${this.identifier}-invalid`;
+  }
 
   /** Collapses one target/morph batch into one silent ARIA reconciliation. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileDom());
@@ -119,8 +121,7 @@ export class FormFieldController extends Controller<HTMLElement> {
     // visible server errors remain derived and can clear when their DOM clears.
     if (!this.#initialized) {
       this.#explicitInvalid =
-        this.element.hasAttribute(FormFieldController.#INVALID_ATTR) &&
-        this.#shownErrors().length === 0;
+        this.element.hasAttribute(this.#invalidAttribute) && this.#shownErrors().length === 0;
       this.#initialized = true;
     }
 
@@ -233,7 +234,7 @@ export class FormFieldController extends Controller<HTMLElement> {
 
     const shown = this.#shownErrors();
     const invalid = this.#explicitInvalid || shown.length > 0;
-    this.element.toggleAttribute(FormFieldController.#INVALID_ATTR, invalid);
+    this.element.toggleAttribute(this.#invalidAttribute, invalid);
 
     const control = this.#activeControl;
     if (!control) return;

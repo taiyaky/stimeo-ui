@@ -5,6 +5,7 @@ import { EscapeLayer } from "../src/utils/escape_layer";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -320,6 +321,75 @@ describe("TooltipController", () => {
     fire(query("#second button"), "mouseenter");
     expect(query("#first-tip").hidden).toBe(false);
     expect(query("#second-tip").hidden).toBe(false);
+  });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--tooltip");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a pointer show, with the state already written", async () => {
+      const states: string[] = [];
+      root().addEventListener("stimeo--tooltip:open", () => {
+        states.push(`${content().hidden} ${content().getAttribute("data-state")}`);
+      });
+
+      trigger().dispatchEvent(new MouseEvent("mouseenter"));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(capture.names()).toEqual(["open"]);
+      expect(capture.reasons()).toEqual(["pointer"]);
+      expect(states).toEqual(["false open"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+    });
+
+    it("reports a focus-driven show as focus and its hide as focus", async () => {
+      trigger().dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(capture.reasons()).toEqual(["focus"]);
+
+      capture.clear();
+      trigger().dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["focus"]);
+    });
+
+    it("reports Escape as escape", async () => {
+      trigger().dispatchEvent(new MouseEvent("mouseenter"));
+      await vi.advanceTimersByTimeAsync(0);
+      capture.clear();
+
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["escape"]);
+    });
+
+    it("stays silent while connect normalizes and on a repeated show", async () => {
+      const fresh = captureStateEvents("stimeo--tooltip");
+      await start();
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+
+      trigger().dispatchEvent(new MouseEvent("mouseenter"));
+      await vi.advanceTimersByTimeAsync(0);
+      capture.clear();
+      trigger().dispatchEvent(new MouseEvent("mouseenter"));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(capture.seen).toEqual([]);
+    });
   });
 });
 

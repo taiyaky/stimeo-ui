@@ -36,9 +36,12 @@ const DEFAULT_MAX = 100;
  * then restores the attributes it displaced on disconnect and before Turbo
  * caches the page. Existing finite range ARIA is hydrated into otherwise
  * absent Values once, which preserves progressively enhanced server markup
- * without leaving two live sources of truth.
+ * without leaving two live sources of truth. That fill is the one write
+ * `connect()` makes to a Value: a declared Value is never overwritten, and the
+ * normalized value is published through `aria-valuenow` without being written
+ * back.
  *
- * `change` dispatches `{ value: number }`.
+ * `change` and `reconcile` dispatch `{ value: number }`.
  *
  * @remarks
  * Behavior only — line drawing is the consumer's CSS. The axis follows Window
@@ -47,10 +50,30 @@ const DEFAULT_MAX = 100;
  * there, so it follows the slider convention (ArrowRight/ArrowUp increase).
  * Home/End are optional in the pattern and are implemented here; F6 is not.
  *
- * Runtime Value changes repaint silently. A maximum below the effective
- * minimum collapses to that minimum; non-finite bounds use `0`/`100`, and an
- * invalid or non-positive step uses `1`. Finite endpoints remain reachable even
- * when they do not align to the step grid.
+ * A maximum below the effective minimum collapses to that minimum; non-finite
+ * bounds use `0`/`100`, and an invalid or non-positive step uses `1`. Finite
+ * endpoints remain reachable even when they do not align to the step grid.
+ * `change` reports a key the user pressed that left the value somewhere other
+ * than the value last published. Runtime Value changes — a Turbo morph or
+ * application code — repaint once per batch, and when they move the value a
+ * focusable separator publishes, `reconcile` reports it with the same detail,
+ * so a consumer can tell its user's move from the page's. A key handled before
+ * a page write is repainted reads the written value, so its `change` covers the
+ * write as well, and a key that ends on the value last published reports
+ * nothing. A key dispatched from script runs every listener with no microtask
+ * between them, so a write made just before it, or by a listener that runs
+ * ahead of the separator, is handled that way. A key the browser dispatches
+ * runs microtasks between the listeners it calls separately, so a write made
+ * by one called ahead of the separator's — a capture listener on an ancestor or
+ * on `document`, a `:capture` action, or a listener added to the separator
+ * before its action was bound — is repainted, and reported as `reconcile`,
+ * before the key is measured from it. Stimulus calls the actions an element
+ * declares for one event and one set of listener options from a single
+ * listener, in declaration order, so a write made by an action declared before
+ * the separator's own is handled like a write within a key dispatched from
+ * script. A decorative
+ * separator publishes no value and reports nothing; one that becomes focusable
+ * again reports a value that moved meanwhile. Connecting reports neither.
  *
  * Because no position is ever applied here, two Window Splitter requirements
  * fall to the consumer: `aria-controls` naming the **primary** pane — the one
@@ -71,7 +94,7 @@ export class SeparatorController extends Controller<HTMLElement> {
     value: { type: Number, default: DEFAULT_MIN },
   };
   static actions = ["onKeydown"] as const;
-  static events = ["change"] as const;
+  static events = ["change", "reconcile"] as const;
 
   declare orientationValue: string;
   declare focusableValue: boolean;
@@ -87,19 +110,33 @@ export class SeparatorController extends Controller<HTMLElement> {
   readonly #maximum = new AttributeLease<HTMLElement>("aria-valuemax");
   readonly #current = new AttributeLease<HTMLElement>("aria-valuenow");
 
-  /** Collapses a morph that changes several render Values into one silent repaint. */
+  /** Collapses a morph that changes several render Values into one repaint. */
   readonly #repaint = new MicrotaskCoalescer(() => this.#render());
 
   /** Restores authored semantics before Turbo snapshots the element. */
   readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
 
-  /** Hydrates legacy ARIA input once, normalizes the current Value, and renders. */
+  /**
+   * The baseline a published value is compared with: the value last published
+   * through `aria-valuenow`, or `null` while this connection has published none.
+   * It moves to each value a key the user presses or a repaint publishes. While
+   * nothing is published — the separator is decorative — it keeps the last
+   * value published, so a value that moved meanwhile is reported once when the
+   * separator publishes again; one that connected decorative keeps `null`, so
+   * its first published value is only taken as the baseline.
+   */
+  #settled: number | null = null;
+
+  /**
+   * Hydrates authored range ARIA into absent Values once and renders them
+   * without writing the normalized value back. What the first render publishes
+   * is the baseline, so connecting reports nothing.
+   */
   override connect(): void {
     this.#hydrateValues();
     this.#repaint.activate();
     this.#beforeCache.activate();
-    const value = this.#currentValue();
-    if (!Object.is(this.valueValue, value)) this.valueValue = value;
+    this.#settled = null;
     this.#render();
   }
 
@@ -110,32 +147,32 @@ export class SeparatorController extends Controller<HTMLElement> {
     this.#returnAttributes();
   }
 
-  /** Silently repaints an orientation changed by application code or a Turbo morph. */
+  /** Repaints an orientation changed by application code or a Turbo morph. */
   orientationValueChanged(): void {
     this.#repaint.schedule();
   }
 
-  /** Silently adds or removes the focusable range semantics at runtime. */
+  /** Adds or removes the focusable range semantics at runtime. */
   focusableValueChanged(): void {
     this.#repaint.schedule();
   }
 
-  /** Silently repaints a minimum changed by application code or a Turbo morph. */
+  /** Repaints a minimum changed by application code or a Turbo morph. */
   minValueChanged(): void {
     this.#repaint.schedule();
   }
 
-  /** Silently repaints a maximum changed by application code or a Turbo morph. */
+  /** Repaints a maximum changed by application code or a Turbo morph. */
   maxValueChanged(): void {
     this.#repaint.schedule();
   }
 
-  /** Silently repaints a step changed by application code or a Turbo morph. */
+  /** Repaints a step changed by application code or a Turbo morph. */
   stepValueChanged(): void {
     this.#repaint.schedule();
   }
 
-  /** Silently repaints a current value changed by application code or a Turbo morph. */
+  /** Repaints a current value changed by application code or a Turbo morph. */
   valueValueChanged(): void {
     this.#repaint.schedule();
   }
@@ -146,20 +183,21 @@ export class SeparatorController extends Controller<HTMLElement> {
 
     const horizontal = this.#effectiveOrientation === "horizontal";
     const range = this.#effectiveRange;
-    const current = snapSteppedValue(this.valueValue, range);
+    // Stepping snaps the declaration onto the value it publishes before moving.
+    const declared = this.valueValue;
     let next: number | null = null;
     switch (event.key) {
       case "ArrowUp":
-        if (horizontal) next = stepSteppedValue(current, 1, range);
+        if (horizontal) next = stepSteppedValue(declared, 1, range);
         break;
       case "ArrowDown":
-        if (horizontal) next = stepSteppedValue(current, -1, range);
+        if (horizontal) next = stepSteppedValue(declared, -1, range);
         break;
       case "ArrowRight":
-        if (!horizontal) next = stepSteppedValue(current, 1, range);
+        if (!horizontal) next = stepSteppedValue(declared, 1, range);
         break;
       case "ArrowLeft":
-        if (!horizontal) next = stepSteppedValue(current, -1, range);
+        if (!horizontal) next = stepSteppedValue(declared, -1, range);
         break;
       case "Home":
         next = range.min;
@@ -173,40 +211,54 @@ export class SeparatorController extends Controller<HTMLElement> {
     if (next === null) return;
 
     event.preventDefault();
-    this.#commit(next, current);
-  }
-
-  /** Stores a normalized user value, renders immediately, and reports real changes. */
-  #commit(raw: number, previous: number): void {
-    const value = snapSteppedValue(raw, this.#effectiveRange);
-    if (!Object.is(this.valueValue, value)) this.valueValue = value;
-    this.#render();
-    if (value !== previous) this.dispatch("change", { detail: { value } });
+    this.#commit(next);
   }
 
   /**
-   * Reflects live Values into the connected element without dispatching.
+   * Stores a normalized user value, renders immediately, and reports it as
+   * `change` when it differs from the value last published. The comparison is
+   * with the value last published, not with the value the key started from, so
+   * a page write no repaint has published yet is reported once, as this change,
+   * and a key that ends where the value was last published reports nothing. The
+   * baseline moves before the render and the report, so neither the repaint the
+   * Value write schedules nor a move a subscriber makes while `change` is
+   * dispatched is measured from the value this key replaced.
+   */
+  #commit(raw: number): void {
+    const value = snapSteppedValue(raw, this.#effectiveRange);
+    const reported = this.#settled;
+    this.#settled = value;
+    if (!Object.is(this.valueValue, value)) this.valueValue = value;
+    this.#render();
+    if (value !== reported) this.dispatch("change", { detail: { value } });
+  }
+
+  /**
+   * Reflects live Values into the connected element without writing them back,
+   * then compares what it published with the baseline. A decorative separator
+   * publishes no value (`null` here): the baseline stays the last value
+   * published. A value is reported once as `reconcile` only when it moved from a
+   * published baseline, so the first value a connection publishes is only taken
+   * as the baseline.
    *
    * @stimeoRenderRoot
    */
   #render(): void {
     const range = this.#effectiveRange;
-    const value = snapSteppedValue(this.valueValue, range);
+    const focusable = this.focusableValue;
+    const published = focusable ? snapSteppedValue(this.valueValue, range) : null;
     this.#role.write(this.element, "separator");
     this.#orientation.write(this.element, this.#effectiveOrientation);
+    this.#tabindex.write(this.element, focusable ? "0" : null);
+    this.#minimum.write(this.element, focusable ? String(range.min) : null);
+    this.#maximum.write(this.element, focusable ? String(range.max) : null);
+    this.#current.write(this.element, published === null ? null : String(published));
 
-    if (!this.focusableValue) {
-      this.#tabindex.write(this.element, null);
-      this.#minimum.write(this.element, null);
-      this.#maximum.write(this.element, null);
-      this.#current.write(this.element, null);
-      return;
+    const previous = this.#settled;
+    if (published !== null) this.#settled = published;
+    if (previous !== null && published !== null && published !== previous) {
+      this.dispatch("reconcile", { detail: { value: published } });
     }
-
-    this.#tabindex.write(this.element, "0");
-    this.#minimum.write(this.element, String(range.min));
-    this.#maximum.write(this.element, String(range.max));
-    this.#current.write(this.element, String(value));
   }
 
   /** Effective orientation; unknown strings fall back to the horizontal contract. */
@@ -226,12 +278,12 @@ export class SeparatorController extends Controller<HTMLElement> {
     };
   }
 
-  /** Current normalized value derived from the live declarative inputs. */
-  #currentValue(): number {
-    return snapSteppedValue(this.valueValue, this.#effectiveRange);
-  }
-
-  /** Copies valid authored ARIA into Values only when no explicit Value exists. */
+  /**
+   * Copies valid authored ARIA into Values only when no explicit Value exists.
+   * This fill is the one Value write `connect()` makes: it never overwrites a
+   * declaration, and no Value callback runs it, so a declaration the page
+   * changes later is only ever read.
+   */
   #hydrateValues(): void {
     if (!this.#hasInput("orientation")) {
       const orientation = this.element.getAttribute("aria-orientation");

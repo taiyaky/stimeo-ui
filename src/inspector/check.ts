@@ -1,8 +1,11 @@
 import { compileRegExp, parseJsonObject } from "../utils/declared_value";
 import { erbElements, erbRanges, neutralizeErb } from "./erb";
 import {
+  type AttributeToken,
   actionDescriptors,
+  attributeTokens,
   controllerIdentifiers,
+  controllerIdentifierTokens,
   dasherize,
   isStimeoDataAttr,
   parseTargetAttr,
@@ -12,6 +15,7 @@ import { type ElementNode, type ParsedAttr, parseHtml, walk } from "./html_parse
 import {
   type A11yAlternative,
   type A11yRequirement,
+  type ActionParamRule,
   type ContentCondition,
   type ControllerManifest,
   DIAGNOSTIC_CODES,
@@ -30,8 +34,16 @@ import {
   type ValueConstraint,
 } from "./types";
 
-/** Whether `node` sits somewhere under `ancestor` (not counting itself). */
-function isInside(node: ElementNode, ancestor: ElementNode): boolean {
+/**
+ * Whether `node` sits somewhere under `ancestor`, not counting `node` itself.
+ *
+ * The narrower of the two containment questions. It answers for a place an element
+ * is put into — the content of a `<template>`, which no element can be its own — so
+ * an element never satisfies it by carrying the name of the thing holding it.
+ * Where the runtime asks `contains`, {@link isSelfOrDescendantOf} is usually the
+ * match; a pair that must sit strictly inside its host is the exception.
+ */
+function isDescendantOf(node: ElementNode, ancestor: ElementNode): boolean {
   for (let current = node.parent; current; current = current.parent) {
     if (current === ancestor) return true;
   }
@@ -48,9 +60,10 @@ function matchesHost(node: ElementNode, selector: HostSelector): boolean {
 
 /**
  * The nearest ancestor of `node` matching any selector, or a falsy result when
- * none can be named: `null` where the chain holds no match, `undefined` where a
- * generated ancestor sits in the way and has no tag to compare. Both leave the
- * host unknown, which callers treat the same way.
+ * none can be named: `null` where the chain is readable the whole way and holds
+ * no match, `undefined` where a generated ancestor sits in the way and has no tag
+ * to compare. Only the second leaves the host unknown — `null` is the answer that
+ * the node reaches no host at all.
  */
 function nearestHost(
   node: ElementNode,
@@ -273,11 +286,13 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
     identifier: string,
   ): boolean => {
     for (const node of unresolved) {
-      if (isWithin(node, container) && findOwner(node, identifier) === scope) return true;
+      if (isSelfOrDescendantOf(node, container) && findOwner(node, identifier) === scope)
+        return true;
     }
     for (const { node, identifier: hidden } of unnamedTargets) {
       if (hidden !== identifier) continue;
-      if (isWithin(node, container) && findOwner(node, identifier) === scope) return true;
+      if (isSelfOrDescendantOf(node, container) && findOwner(node, identifier) === scope)
+        return true;
     }
     return false;
   };
@@ -377,7 +392,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
     const nodes = targetNodes.get(scope)?.get(identifier)?.get(condition.target) ?? [];
     const container = condition.within === "scope" ? scope : element;
     let held = 0;
-    for (const node of nodes) if (isWithin(node, container)) held += 1;
+    for (const node of nodes) if (isSelfOrDescendantOf(node, container)) held += 1;
     if (condition.min !== undefined && held < condition.min) return false;
     if (condition.max !== undefined && held > condition.max) return false;
     return true;
@@ -454,9 +469,9 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       if (attr.name === IGNORE_ATTR) {
         // Spell-check the code list so a typo'd suppression cannot silently
         // fail open. Reported directly: this meta-diagnostic is unsuppressible.
-        for (const token of attr.value.split(/\s+/).filter((t) => t.length > 0)) {
-          if (!(DIAGNOSTIC_CODES as readonly string[]).includes(token)) {
-            const best = nearestName(token, DIAGNOSTIC_CODES);
+        for (const token of attributeTokens(attr.value)) {
+          if (!(DIAGNOSTIC_CODES as readonly string[]).includes(token.name)) {
+            const best = nearestName(token.name, DIAGNOSTIC_CODES);
             push(
               diagnostics,
               "unknown-ignore-code",
@@ -473,7 +488,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
 
       // --- fragment declaration: data-stimeo-fragment ----------------------
       if (attr.name === FRAGMENT_ATTR) {
-        const identifiers = attr.value.split(/\s+/).filter((token) => token.length > 0);
+        const identifiers = attributeTokens(attr.value);
         if (identifiers.length === 0) {
           report(
             node,
@@ -484,13 +499,13 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           );
         }
         for (const identifier of identifiers) {
-          if (!(identifier in known)) {
-            const best = nearestName(identifier, knownIdentifiers);
+          if (!(identifier.name in known)) {
+            const best = nearestName(identifier.name, knownIdentifiers);
             report(
               node,
               "unknown-controller",
               "error",
-              `Fragment declaration references unknown Stimeo controller "${identifier}".`,
+              `Fragment declaration references unknown Stimeo controller "${identifier.name}".`,
               attr,
               asDidYouMean(best),
               tokenFix(attr, identifier, best),
@@ -502,7 +517,8 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
 
       // --- data-controller -------------------------------------------------
       if (attr.name === "data-controller") {
-        for (const identifier of controllerIdentifiers(attr.value)) {
+        for (const token of controllerIdentifierTokens(attr.value)) {
+          const identifier = token.name;
           if (identifier in known) {
             scopes.push({ node, identifier });
           } else {
@@ -514,7 +530,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
               `Unknown Stimeo controller "${identifier}".`,
               attr,
               asDidYouMean(best),
-              tokenFix(attr, identifier, best),
+              tokenFix(attr, token, best),
             );
           }
         }
@@ -542,24 +558,29 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
         // target the runtime never resolves — the same fabrication the
         // cardinality count avoids. Undecidable, exactly like a fully generated
         // name, whose blanked value already falls through the guards below.
-        const targetName = isDynamicValue(attr) ? "" : attr.value.trim();
-        if (targetName.length > 0 && !controller.targets.includes(targetName)) {
-          const best = nearestName(targetName, controller.targets);
+        const declared = isDynamicValue(attr) ? [] : attributeTokens(attr.value);
+        for (const token of declared) {
+          if (controller.targets.includes(token.name)) continue;
+          const best = nearestName(token.name, controller.targets);
           report(
             node,
             "unknown-target",
             "error",
-            `Unknown target "${targetName}" for "${targetIdentifier}". Known targets: ${list(controller.targets)}.`,
+            `Unknown target "${token.name}" for "${targetIdentifier}". Known targets: ${list(controller.targets)}.`,
             attr,
             asDidYouMean(best),
-            tokenFix(attr, targetName, best),
+            tokenFix(attr, token, best),
           );
         }
         const owner = findOwner(node, targetIdentifier);
         if (owner) {
-          if (targetName.length > 0) {
-            recordPresence(owner, targetIdentifier, targetName);
-            recordTargetNode(owner, targetIdentifier, targetName, node);
+          if (declared.length > 0) {
+            // Every name the element declares, so a row that is its own label and
+            // its own button answers for each of them where a rule asks.
+            for (const token of declared) {
+              recordPresence(owner, targetIdentifier, token.name);
+              recordTargetNode(owner, targetIdentifier, token.name, node);
+            }
           } else if (isDynamicValue(attr)) {
             // The declaration is real; only its name is generated. Counting it
             // as absent would report a target the page may well register.
@@ -636,7 +657,18 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           tag: node.tag,
           inputType: node.attrs.find((a) => a.name === "type")?.value,
         };
-        for (const { identifier, method, eventType } of actionDescriptors(attr.value, host)) {
+        // Two descriptors can bind the same action on one element (a click and a
+        // key, say). The params they read are the element's, not the descriptor's,
+        // so the attribute set is judged once rather than once per binding.
+        const paramsChecked = new Set<string>();
+        for (const {
+          identifier,
+          identifierStart,
+          method,
+          methodStart,
+          eventType,
+          eventStart,
+        } of actionDescriptors(attr.value, host)) {
           const controller = known[identifier];
           if (controller && method.length > 0) {
             const owner = findOwner(node, identifier);
@@ -672,7 +704,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
               `Action references unknown Stimeo controller "${identifier}".`,
               attr,
               asDidYouMean(best),
-              tokenFix(attr, identifier, best),
+              tokenFix(attr, { name: identifier, start: identifierStart }, best),
             );
           } else if (method.length > 0 && !controller.actions.includes(method)) {
             const best = nearestName(method, controller.actions);
@@ -683,11 +715,175 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
               `Unknown action "${method}" for "${identifier}". Known actions: ${list(controller.actions)}.`,
               attr,
               asDidYouMean(best),
-              tokenFix(attr, method, best),
+              tokenFix(attr, { name: method, start: methodStart }, best),
             );
+          }
+          if (controller && method.length > 0 && !paramsChecked.has(`${identifier}#${method}`)) {
+            paramsChecked.add(`${identifier}#${method}`);
+            checkActionParams(node, attr, identifier, method, controller);
+          }
+          // The other half of a declarative wire: the event a part dispatches is
+          // as easy to misspell as the method that receives it, and a listener
+          // for a name nothing emits binds cleanly and never fires. A generated
+          // value could render to anything, so it answers for itself.
+          //
+          // A descriptor spells the emitting identifier ahead of the event, so
+          // locating the name by its text alone finds the identifier whenever the
+          // misspelling is a substring of it, and lands in the wrong descriptor
+          // whenever a correct one stands first. The fix is therefore cut from the
+          // descriptor's own offset, advanced past the prefix the event carries.
+          if (!isDynamicValue(attr)) {
+            const emitted = /^(stimeo--[a-z0-9-]+):(.+)$/.exec(eventType);
+            const source = emitted ? known[emitted[1] as string] : undefined;
+            const name = emitted?.[2] as string | undefined;
+            if (source && name !== undefined && !source.events.includes(name)) {
+              const best = nearestName(name, source.events);
+              report(
+                node,
+                "unknown-action-event",
+                "error",
+                `Unknown event "${name}" for "${emitted?.[1]}". Known events: ${list(source.events)}.`,
+                attr,
+                asDidYouMean(best),
+                tokenFix(attr, { name, start: eventStart + eventType.length - name.length }, best),
+              );
+            }
           }
         }
       }
+    }
+
+    // --- action params: data-<identifier>-<param>-param -------------------
+    // Stimulus assembles `event.params` from these, and nothing about the
+    // spelling is reflected, so a name that never arrives reads exactly like one
+    // the author never meant to send: the method runs, finds nothing, returns.
+    function checkActionParams(
+      element: ElementNode,
+      action: ParsedAttr,
+      identifier: string,
+      method: string,
+      controller: ControllerManifest,
+    ): void {
+      const rules = controller.actionParams.filter((rule) => rule.action === method);
+      if (rules.length === 0) return;
+      // A generated descriptor list, or an element the parser could not read, can
+      // carry the attribute out of sight; only the enum check survives that.
+      const readable = !isDynamicValue(action) && element.origin === "markup" && !element.opaque;
+      const expected = new Map<string, ActionParamRule>(
+        rules.map((rule) => [`data-${identifier}-${dasherize(rule.param)}-param`, rule]),
+      );
+      for (const [attrName, rule] of expected) {
+        const written = element.attrs.find((candidate) => candidate.name === attrName);
+        if (!written) {
+          if (!rule.required || !readable) continue;
+          const confusable = confusableParamAttr(element, attrName, rule.param);
+          report(
+            element,
+            "missing-action-param",
+            "error",
+            confusable
+              ? `"${identifier}#${method}" reads its "${rule.param}" param, and "${confusable.name}" is not the attribute Stimulus builds it from.`
+              : `"${identifier}#${method}" reads its "${rule.param}" param, which nothing on this element supplies.`,
+            confusable ?? action,
+            rule.suggestion,
+          );
+          continue;
+        }
+        if (isDynamicValue(written)) continue;
+        // Stimulus hands a literal it cannot parse to the reader untouched, so the
+        // value judged here is what stands between the quotes, surrounding space
+        // included. Trimming first would accept a spelling the widget rejects.
+        const value = written.value;
+        if (value.length === 0) {
+          // The key arrives holding the empty string, which every reader treats as
+          // nothing supplied: one that falls back to the event settles on the
+          // fallback, and one with no other route to the value returns. Only the
+          // second is a defect, and only where the attribute set can be trusted.
+          if (!rule.required || !readable) continue;
+          report(
+            element,
+            "missing-action-param",
+            "error",
+            `"${identifier}#${method}" reads its "${rule.param}" param, and "${attrName}" carries no value.`,
+            written,
+            rule.suggestion,
+          );
+          continue;
+        }
+        if (rule.integer && !Number.isInteger(Number(value))) {
+          report(
+            element,
+            "invalid-action-param",
+            "error",
+            `"${value}" is not an "${rule.param}" this action reads. It accepts a whole number.`,
+            written,
+            rule.suggestion,
+          );
+          continue;
+        }
+        if (!rule.allowedValues || rule.allowedValues.includes(value)) continue;
+        const best = nearestName(value, rule.allowedValues);
+        report(
+          element,
+          "invalid-action-param",
+          "error",
+          `"${value}" is not a "${rule.param}" this action reads. It accepts ${list(rule.allowedValues)}.`,
+          written,
+          asDidYouMean(best) ?? rule.suggestion,
+          best !== undefined && written.valueStart !== undefined
+            ? {
+                start: written.valueStart,
+                end: written.valueStart + written.value.length,
+                text: best,
+                title: `Replace with "${best}"`,
+              }
+            : undefined,
+        );
+      }
+      if (!readable) return;
+      // An attribute in this controller's own namespace that names no target, no
+      // Value and no param it has is an author reaching for one of them. The
+      // library never hand-writes that namespace, so a near miss here is theirs.
+      for (const candidate of element.attrs) {
+        if (!candidate.name.startsWith(`data-${identifier}-`)) continue;
+        if (expected.has(candidate.name)) continue;
+        if (parseTargetAttr(candidate.name) || candidate.name.endsWith("-value")) continue;
+        const best = [...expected.keys()].find((name) => namesTheParam(candidate.name, name));
+        if (best === undefined) continue;
+        report(
+          element,
+          "confusable-action-param",
+          "warning",
+          `"${candidate.name}" is not an attribute Stimulus reads. Action params are named "<param>-param".`,
+          candidate,
+          `Did you mean ${best}?`,
+        );
+      }
+    }
+
+    /**
+     * Whether `written` is an attempt at `attrName`: the same name with the `-param`
+     * suffix left off, or a near miss of it. Dropping the suffix is too many edits
+     * for a distance test, and it is the spelling an author reaches for.
+     */
+    function namesTheParam(written: string, attrName: string): boolean {
+      if (written === attrName) return false;
+      return `${written}-param` === attrName || nearestName(written, [attrName]) !== undefined;
+    }
+
+    /** The attribute on `element` an author most likely meant as `attrName`. */
+    function confusableParamAttr(
+      element: ElementNode,
+      attrName: string,
+      param: string,
+    ): ParsedAttr | undefined {
+      // A bare `data-<param>` is what the namespace gets dropped to. It only ever
+      // sharpens a report already firing on the absent attribute: outside this
+      // controller's namespace such a name is the consumer's own to use.
+      const bare = `data-${dasherize(param)}`;
+      return element.attrs.find(
+        (candidate) => candidate.name === bare || namesTheParam(candidate.name, attrName),
+      );
     }
 
     // --- relationships between literal Values -----------------------------
@@ -787,24 +983,58 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       // a `<template>` is cloned at runtime, so a part outside it never reaches
       // the clone and the controller refuses to build.
       const hosts = rule.requireSameHost;
-      // A host is only judged when both sides resolve to one. A template helper
-      // that emits the host leaves nothing in the parsed tree, so "no host
-      // above this element" and "the host is generated" look identical here —
-      // reporting either would be a guess.
       const sharesHost = (target: string, selectors: readonly HostSelector[]): boolean => {
-        const ownerHosts = owners.map((owner) => nearestHost(owner, selectors));
-        if (ownerHosts.some((host) => !host)) return true;
+        const hostOf = (el: ElementNode) => nearestHost(el, selectors);
+        // Only the halves that land in a readable host are judged. A template helper
+        // that emits the host leaves nothing in the parsed tree, and a half standing
+        // outside every host reaches none of them, so neither answers for the rest.
+        const ownerHosts = owners
+          .map(hostOf)
+          .filter((host): host is ElementNode => host !== null && host !== undefined);
         const candidates = nodesOf(target);
-        if (candidates.length === 0) return false;
-        return candidates.some((el) => {
-          const host = nearestHost(el, selectors);
-          return host ? ownerHosts.includes(host) : true;
-        });
+        // Every host holding one half needs its own counterpart: a complete pair in
+        // one submit control says nothing about the control beside it. A counterpart
+        // a helper stands above (`undefined`) is left to answer for any of them,
+        // because that helper may well emit the control it belongs to; one whose
+        // chain is readable the whole way and holds no host (`null`) answers for
+        // none, since at runtime it sits outside every one of them.
+        return ownerHosts.every((ownerHost) =>
+          candidates.some((el) => {
+            const host = hostOf(el);
+            if (host === null) return false;
+            return host ? host === ownerHost : true;
+          }),
+        );
+      };
+      // A host named by target rather than by tag: both sides must land inside the
+      // same declared element, so a pair split across two triggers is two incomplete
+      // pairs rather than one complete set. A scope whose hosts are all generated
+      // leaves the question undecidable, exactly as a tag-described host does.
+      const sharesTargetHost = (target: string, hostTarget: string): boolean => {
+        const hostNodes = nodesOf(hostTarget);
+        // Strictly inside: the widget hides the side the state does not show, and a
+        // half that is the host itself goes out of view with the control it labels,
+        // leaving nothing to press. `contains` answers for the host, so the pair has
+        // to be judged by where it sits rather than by what the runtime resolves.
+        const hostOf = (el: ElementNode): ElementNode | null =>
+          hostNodes.find((host) => isDescendantOf(el, host)) ?? null;
+        // Only the halves that land in a host are judged. One sitting outside every
+        // readable host says nothing either way — a helper may render the host it
+        // belongs to — so it is set aside, and a scope whose hosts are all generated
+        // asks nothing of the other half.
+        const ownerHosts = owners.map(hostOf).filter((host) => host !== null);
+        const candidates = nodesOf(target);
+        // Every host holding one half needs its own counterpart: a complete pair in one
+        // header says nothing about the header whose other half is missing, and a half
+        // outside every host reaches none of them at runtime.
+        return ownerHosts.every((ownerHost) => candidates.some((el) => hostOf(el) === ownerHost));
       };
       const satisfied = (target: string): boolean => {
+        const hostTarget = rule.requireSameTargetHost;
+        if (hostTarget) return sharesTargetHost(target, hostTarget);
         if (hosts) return sharesHost(target, hosts);
         if (rule.requireInside)
-          return nodesOf(target).some((el) => owners.some((owner) => isInside(el, owner)));
+          return nodesOf(target).some((el) => owners.some((owner) => isDescendantOf(el, owner)));
         return present.has(target);
       };
       const missing = rule.require.filter((target) => !satisfied(target));
@@ -813,14 +1043,89 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
         node,
         "missing-conditional-target",
         complete ? "error" : "warning",
-        hosts
-          ? `"${identifier}" requires ${list(missing)} in the same ${rule.hostLabel ?? "element"} as its "${rule.whenPresent}".`
-          : rule.requireInside
-            ? `"${identifier}" requires ${list(missing)} inside its "${rule.whenPresent}".`
-            : `"${identifier}" has a "${rule.whenPresent}" target, which also requires ${list(missing)}.`,
+        rule.requireSameTargetHost
+          ? `"${identifier}" requires ${list(missing)} in the same "${rule.requireSameTargetHost}" as its "${rule.whenPresent}".`
+          : hosts
+            ? `"${identifier}" requires ${list(missing)} in the same ${rule.hostLabel ?? "element"} as its "${rule.whenPresent}".`
+            : rule.requireInside
+              ? `"${identifier}" requires ${list(missing)} inside its "${rule.whenPresent}".`
+              : `"${identifier}" has a "${rule.whenPresent}" target, which also requires ${list(missing)}.`,
         node,
         complete ? rule.suggestion : UNRESOLVED_TARGET_HINT,
       );
+    }
+  }
+
+  // --- Stage 2a: the one row a <template> holds ---------------------------
+  // A row is cloned on its own, so the node appended is the node a later removal
+  // takes back. A template holding anything else renders only the part the row
+  // covers — or, when the row is not the element that carries the declared
+  // target, nothing at all.
+  for (const { node, identifier } of scopes) {
+    const controller = known[identifier];
+    if (!controller) continue;
+    const complete = scopeIsComplete(node, node, identifier);
+    const nodesOf = (target: string): readonly ElementNode[] =>
+      targetNodes.get(node)?.get(identifier)?.get(target) ?? [];
+    const hint = complete ? undefined : UNRESOLVED_TARGET_HINT;
+    for (const rule of controller.templateRoots) {
+      for (const template of nodesOf(rule.template)) {
+        // The controller reads `HTMLTemplateElement.content`, so the target has
+        // to be a `<template>` before its contents mean anything. A generated
+        // node has no tag to compare, and answers for itself.
+        if (template.origin === "markup" && template.tag !== "template") {
+          report(
+            node,
+            "invalid-template-root",
+            complete ? "error" : "warning",
+            `"${identifier}" requires its "${rule.template}" to be a <template>, ` +
+              `and it is a <${template.tag}>.`,
+            template,
+            hint ?? rule.suggestion,
+          );
+          continue;
+        }
+        // ERB inside the template stands for markup nobody can read here: how
+        // many elements it renders, and which targets they carry, are both
+        // undecidable, and reporting either way would be a guess.
+        if (template.children.some((child) => child.origin === "erb")) continue;
+        const rows = template.children;
+        const row = rows[0];
+        // Content that parses to no element at all is undecidable: neutralized
+        // ERB leaves the same empty template behind as an author who wrote one,
+        // and a row rendered entirely by the server is a supported spelling. The
+        // runtime, where it reports one, names an empty template once per
+        // connection instead.
+        if (rows.length === 0) continue;
+        if (rows.length !== 1 || !row) {
+          report(
+            node,
+            "invalid-template-root",
+            complete ? "error" : "warning",
+            `"${identifier}" requires its "${rule.template}" to hold exactly one element, ` +
+              `and it holds ${rows.length}.`,
+            template,
+            hint ?? rule.suggestion,
+          );
+          continue;
+        }
+        if (!rule.rootTarget) continue;
+        // A target whose name is generated hides which one this element declares,
+        // so the element is there and only the answer is missing.
+        if (unnamedTargets.some((entry) => entry.node === row && entry.identifier === identifier)) {
+          continue;
+        }
+        if (nodesOf(rule.rootTarget).includes(row)) continue;
+        report(
+          node,
+          "invalid-template-root",
+          complete ? "error" : "warning",
+          `"${identifier}" requires the one element in its "${rule.template}" to be its ` +
+            `"${rule.rootTarget}" itself.`,
+          row,
+          hint ?? rule.suggestion,
+        );
+      }
     }
   }
 
@@ -1189,7 +1494,11 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
         if (rule.values && !rule.values.includes(value)) continue;
         if (findOwner(el, identifier) !== node) continue;
         const declaredAs = el.attrs.find((a) => a.name === targetAttrName);
-        if (declaredAs && !isDynamicValue(declaredAs) && declaredAs.value.trim() === rule.target) {
+        if (
+          declaredAs &&
+          !isDynamicValue(declaredAs) &&
+          attributeTokens(declaredAs.value).some((token) => token.name === rule.target)
+        ) {
           continue;
         }
         if (declaredAs && isDynamicValue(declaredAs)) continue;
@@ -1236,7 +1545,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
         // firing on almost no real markup.
         const matched: Array<{ el: ElementNode; at: Anchor }> = [];
         for (const el of counted) {
-          if (!isWithin(el, container)) continue;
+          if (!isSelfOrDescendantOf(el, container)) continue;
           if (rule.attr === undefined) {
             matched.push({ el, at: el });
             continue;
@@ -1307,14 +1616,14 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   for (const el of anchored) {
     for (const attr of el.attrs) {
       if (!IDREF_ATTRS.has(attr.name) || isDynamicValue(attr)) continue;
-      for (const token of attr.value.split(/\s+/).filter((t) => t.length > 0)) {
-        if (!ids.has(token)) {
-          const best = nearestName(token, [...ids]);
+      for (const token of attributeTokens(attr.value)) {
+        if (!ids.has(token.name)) {
+          const best = nearestName(token.name, [...ids]);
           report(
             el,
             "unresolved-idref",
             "warning",
-            `${attr.name} references id "${token}", but no element in this file declares it.`,
+            `${attr.name} references id "${token.name}", but no element in this file declares it.`,
             attr,
             asDidYouMean(best),
             tokenFix(attr, token, best),
@@ -1561,8 +1870,15 @@ function checkA11y(
   }
 }
 
-/** Whether `node` is `container` itself or lives inside it. */
-function isWithin(node: ElementNode, container: ElementNode): boolean {
+/**
+ * Whether `node` is `container` itself or lives inside it.
+ *
+ * The same question `Node.contains` answers, so this is the one to ask wherever the
+ * widget resolves parts against a host at runtime. A target declaration is a token
+ * list, so one element can be both the host and a part of it, and reading that as
+ * two separate elements would refuse markup the widget drives.
+ */
+function isSelfOrDescendantOf(node: ElementNode, container: ElementNode): boolean {
   let current: ElementNode | null = node;
   while (current) {
     if (current === container) return true;
@@ -1764,26 +2080,23 @@ function push(
 }
 
 /**
- * Machine fix replacing one occurrence of `token` inside the attribute's
- * value with `replacement`. Returns undefined when there is no replacement,
- * the attribute is boolean (no value offsets), or the token cannot be located
- * verbatim. Uses the first occurrence — a value repeating the same broken
- * token is pathological enough that fixing the first is still the right edit.
+ * Machine fix replacing `token` inside the attribute's value with
+ * `replacement`, at the offset the token carries. Returns undefined when there
+ * is no replacement, the attribute is boolean (no value offsets), or the token
+ * is empty.
  */
 function tokenFix(
   attr: ParsedAttr,
-  token: string,
+  token: AttributeToken,
   replacement: string | undefined,
 ): DiagnosticFix | undefined {
-  if (replacement === undefined || attr.valueStart === undefined || token.length === 0) {
+  if (replacement === undefined || attr.valueStart === undefined || token.name.length === 0) {
     return undefined;
   }
-  const index = attr.value.indexOf(token);
-  if (index < 0) return undefined;
-  const start = attr.valueStart + index;
+  const start = attr.valueStart + token.start;
   return {
     start,
-    end: start + token.length,
+    end: start + token.name.length,
     text: replacement,
     title: `Replace with "${replacement}"`,
   };

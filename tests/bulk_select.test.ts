@@ -34,10 +34,10 @@ describe("BulkSelectController", () => {
       </div>
     </div>`;
 
-  const start = async (markup: string) => {
+  const start = async (markup: string, controller = BulkSelectController) => {
     document.body.innerHTML = markup;
     application = Application.start();
-    application.register("stimeo--bulk-select", BulkSelectController);
+    application.register("stimeo--bulk-select", controller);
     await tick();
   };
 
@@ -233,12 +233,49 @@ describe("BulkSelectController", () => {
     expect(count().textContent).toBe("0");
   });
 
-  it("falls a non-finite totalCount back to the default and writes it back", async () => {
+  it("counts a non-finite totalCount as the default without rewriting it", async () => {
     await start(MARKUP(`data-stimeo--bulk-select-total-count-value="abc"`));
     setChecked(itemAt(0), true);
     query<HTMLButtonElement>("[data-action*='selectAllPages']").click();
     expect(count().textContent).toBe("0");
-    expect(root().getAttribute("data-stimeo--bulk-select-total-count-value")).toBe("0");
+    expect(root().getAttribute("data-stimeo--bulk-select-total-count-value")).toBe("abc");
+  });
+
+  it("repaints once for a non-finite totalCount written at runtime, writing nothing back", async () => {
+    // The page's write delivers one callback and one repair; the attribute keeps
+    // what the page wrote, and the count shows the default in its place.
+    const deliveries: string[] = [];
+    const Counting = class extends BulkSelectController {
+      override totalCountValueChanged(): void {
+        deliveries.push(String(this.totalCountValue));
+        super.totalCountValueChanged();
+      }
+    };
+    await start(MARKUP(`data-stimeo--bulk-select-total-count-value="128"`), Counting);
+    setChecked(itemAt(0), true);
+    query<HTMLButtonElement>("[data-action*='selectAllPages']").click();
+    expect(count().textContent).toBe("128");
+    const log = recordEvents("reconcile");
+    const previousValues: Array<string | null> = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) previousValues.push(record.oldValue);
+    });
+    observer.observe(root(), {
+      attributes: true,
+      attributeOldValue: true,
+      attributeFilter: ["data-stimeo--bulk-select-total-count-value"],
+    });
+    deliveries.length = 0;
+
+    root().setAttribute("data-stimeo--bulk-select-total-count-value", "abc");
+    await tick();
+    observer.disconnect();
+
+    expect(count().textContent).toBe("0");
+    expect(log).toEqual([{ count: 0, allPages: true }]);
+    expect(deliveries).toEqual(["NaN"]);
+    expect(previousValues).toEqual(["128"]);
+    expect(root().getAttribute("data-stimeo--bulk-select-total-count-value")).toBe("abc");
   });
 
   it("handles dynamically-added rows via delegation", async () => {

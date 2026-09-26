@@ -372,7 +372,7 @@ describe("checkSource", () => {
         expect(diagnostics[0]?.message).toContain('"max" (20)');
       });
 
-      it("checks a Range Slider bound against the missing peer's public default", () => {
+      it("checks a stimeo--range-slider bound against the missing peer's public default", () => {
         expect(codes(`<div data-stimeo--range-slider-min-value="101"></div>`)).toContain(
           "invalid-value",
         );
@@ -542,6 +542,104 @@ describe("checkSource", () => {
       );
       expect(codeList).not.toContain("unknown-action-method");
     });
+
+    // The receiving half of a declarative wire is already checked; the emitting
+    // half is as easy to misspell, and a listener for a name nothing dispatches
+    // binds cleanly and simply never fires.
+    it("accepts an event a part declares", () => {
+      const codeList = codes(
+        `<ol data-controller="stimeo--step-indicator" data-action="stimeo--stepper:change->stimeo--step-indicator#setIndex"><li data-stimeo--step-indicator-target="step"></li></ol>`,
+      );
+      expect(codeList).not.toContain("unknown-action-event");
+    });
+
+    it("flags an event the emitting part does not declare", () => {
+      const diagnostic = checkSource(
+        `<ol data-controller="stimeo--step-indicator" data-action="stimeo--stepper:changed->stimeo--step-indicator#setIndex"><li data-stimeo--step-indicator-target="step"></li></ol>`,
+        manifest,
+      ).find((d) => d.code === "unknown-action-event");
+
+      expect(diagnostic?.message).toContain('"changed"');
+      expect(diagnostic?.message).toContain("stimeo--stepper");
+      expect(diagnostic?.suggestion).toContain("change");
+    });
+
+    // A machine-applicable fix has to name the exact range it replaces. In a
+    // descriptor the emitting identifier comes before the event name, so a
+    // misspelling that is also a substring of that identifier would be located
+    // there first — and applying the fix would corrupt working markup while
+    // leaving the typo in place.
+    it("never rewrites the emitting identifier when offering a fix", () => {
+      const source = `<div data-controller="stimeo--toast" data-action="stimeo--dismissible:dismis->stimeo--toast#show"><ol data-stimeo--toast-target="list"></ol></div>`;
+      const diagnostic = checkSource(source, manifest).find(
+        (d) => d.code === "unknown-action-event",
+      );
+      const applied = diagnostic?.fix
+        ? source.slice(0, diagnostic.fix.start) +
+          diagnostic.fix.text +
+          source.slice(diagnostic.fix.end)
+        : source;
+
+      expect(diagnostic?.suggestion).toContain("dismiss");
+      expect(applied).toContain("stimeo--dismissible:");
+    });
+
+    it("offers a machine fix that replaces the event name alone", () => {
+      const source = `<div data-controller="stimeo--toast" data-action="stimeo--dismissible:dismis->stimeo--toast#show"><ol data-stimeo--toast-target="list"></ol></div>`;
+      const diagnostic = checkSource(source, manifest).find(
+        (d) => d.code === "unknown-action-event",
+      );
+
+      expect(diagnostic?.fix?.text).toBe("dismiss");
+      expect(source.slice(diagnostic?.fix?.start ?? 0, diagnostic?.fix?.end ?? 0)).toBe("dismis");
+    });
+
+    it("points the fix at the descriptor that carries the misspelling", () => {
+      // The emitting identifier is spelled ahead of the event, and a correct
+      // descriptor may stand before the broken one: locating the name by its text
+      // would land inside the identifier, or inside the descriptor beside it.
+      const source = `<div data-controller="stimeo--toast" data-action="stimeo--dismissible:dismiss->stimeo--toast#show stimeo--dismissible:dismis->stimeo--toast#show"><ol data-stimeo--toast-target="list"></ol></div>`;
+      const found = checkSource(source, manifest).filter((d) => d.code === "unknown-action-event");
+      const fix = found[0]?.fix;
+      const applied = fix ? source.slice(0, fix.start) + fix.text + source.slice(fix.end) : source;
+
+      expect(found).toHaveLength(1);
+      expect(source.slice(fix?.start ?? 0, fix?.end ?? 0)).toBe("dismis");
+      expect(applied).not.toContain("dismisssible");
+      expect(checkSource(applied, manifest).map((d) => d.code)).not.toContain(
+        "unknown-action-event",
+      );
+    });
+
+    it("offers no fix for an event the element resolves by default", () => {
+      // Nothing about the event is written down, so there is no range to replace.
+      const source = `<button data-controller="stimeo--toast" data-action="stimeo--toast#show"></button>`;
+
+      expect(
+        checkSource(source, manifest).find((d) => d.code === "unknown-action-event")?.fix,
+      ).toBeUndefined();
+    });
+
+    it("reads the event name through an @window suffix", () => {
+      const codeList = codes(
+        `<ol data-controller="stimeo--step-indicator" data-action="stimeo--stepper:changed@window->stimeo--step-indicator#setIndex"><li data-stimeo--step-indicator-target="step"></li></ol>`,
+      );
+      expect(codeList).toContain("unknown-action-event");
+    });
+
+    it("leaves an event named on an unknown controller to the controller check", () => {
+      const codeList = codes(
+        `<ol data-controller="stimeo--step-indicator" data-action="stimeo--stepperr:change->stimeo--step-indicator#setIndex"><li data-stimeo--step-indicator-target="step"></li></ol>`,
+      );
+      expect(codeList).not.toContain("unknown-action-event");
+    });
+
+    it("stays silent on a generated data-action value", () => {
+      const codeList = codes(
+        `<ol data-controller="stimeo--step-indicator" data-action="<%= wiring %>"><li data-stimeo--step-indicator-target="step"></li></ol>`,
+      );
+      expect(codeList).not.toContain("unknown-action-event");
+    });
   });
 
   describe("stage 2 — structure", () => {
@@ -637,7 +735,7 @@ describe("checkSource", () => {
       expect(codeList).not.toContain("missing-required-target");
     });
 
-    it("still requires a Time Picker segment when its optional field is present", () => {
+    it("still requires a stimeo--time-picker segment when its optional field is present", () => {
       const codeList = codes(`
         <div data-controller="stimeo--time-picker" role="group" aria-label="Time">
           <input type="hidden" data-stimeo--time-picker-target="field">
@@ -826,6 +924,47 @@ describe("checkSource", () => {
         ).not.toContain("missing-conditional-target");
       });
 
+      it("still judges a submit control beside one whose pair is complete", () => {
+        // The swap is resolved per button, so a complete pair in one says nothing
+        // about the button next to it.
+        const diagnostics = checkSource(
+          `
+            <form data-controller="stimeo--submit-once">
+              <button type="submit">
+                <span data-stimeo--submit-once-target="idle">Send</span>
+                <span data-stimeo--submit-once-target="busy" hidden>Sending</span>
+              </button>
+              <button type="submit">
+                <span data-stimeo--submit-once-target="idle">Save</span>
+              </button>
+            </form>`,
+          manifest,
+        );
+
+        expect(diagnostics.map((d) => d.code)).toContain("missing-conditional-target");
+      });
+
+      it("still judges a readable submit control when another one is generated", () => {
+        // One half sits under a helper, so its own control cannot be read. That says
+        // nothing about the control beside it, whose pair is plainly incomplete.
+        const diagnostics = checkSource(
+          `
+            <form data-controller="stimeo--submit-once">
+              <button type="submit">
+                <%= tag.span data: { wrapper: true } do %>
+                  <span data-stimeo--submit-once-target="idle">Send</span>
+                <% end %>
+              </button>
+              <button type="submit">
+                <span data-stimeo--submit-once-target="idle">Save</span>
+              </button>
+            </form>`,
+          manifest,
+        );
+
+        expect(diagnostics.map((d) => d.code)).toContain("missing-conditional-target");
+      });
+
       it("rejects a submit-once label pair split across two submit buttons", () => {
         const diagnostics = checkSource(
           `
@@ -893,17 +1032,19 @@ describe("checkSource", () => {
         ).not.toContain("missing-conditional-target");
       });
 
-      it("leaves a half alone when only its counterpart resolves to a host", () => {
+      it("reports a half that reaches no submit control at all", () => {
+        // The walk up from the half is readable the whole way and finds no control,
+        // so at runtime it sits outside every one of them and swaps with none. That
+        // is decidable, unlike a chain a helper interrupts.
         expect(
           codes(`
             <form data-controller="stimeo--submit-once">
               <button type="submit">
                 <span data-stimeo--submit-once-target="idle">Send</span>
               </button>
-              <%= tag.span "Sending", data: { "stimeo--submit-once-target": "busy" } %>
               <span data-stimeo--submit-once-target="busy" hidden>Sending</span>
             </form>`),
-        ).not.toContain("missing-conditional-target");
+        ).toContain("missing-conditional-target");
       });
     });
 
@@ -1442,10 +1583,12 @@ describe("checkSource", () => {
               values: [],
               valueConstraints: [],
               valueRelations: [],
+              actionParams: [],
               actions: [],
               events: [],
               requiredTargets: [],
               conditionalTargets: [],
+              templateRoots: [],
               requiredActions: [],
               actionCompletion: [],
               a11y: [
@@ -2127,8 +2270,8 @@ describe("checkSource", () => {
       });
 
       it("still reports the only menu when it is empty without declaring it", () => {
-        // The other half of dropping the scope-level `item` requirement: the
-        // absence must still be reported, just by the per-menu rule.
+        // The scope asks for no `item` target, so an empty menu with no
+        // `aria-busy` is reported by the per-menu rule instead.
         const silent = `
           <div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
             <button id="t-file" role="menuitem" aria-controls="m-file" data-stimeo--menubar-target="top">File</button>
@@ -2665,6 +2808,344 @@ describe("checkSource", () => {
     });
   });
 
+  describe("stage 2 — a label pair inside one host", () => {
+    const readMore = (trigger: string) => `
+    <div data-controller="stimeo--read-more">
+      <div data-stimeo--read-more-target="content">…</div>
+      ${trigger}
+    </div>`;
+    const halves = `<span data-stimeo--read-more-target="collapsedLabel">More</span>
+            <span data-stimeo--read-more-target="expandedLabel" hidden>Less</span>`;
+
+    it("accepts both halves inside the trigger", () => {
+      const source = readMore(`<button type="button" aria-expanded="false"
+              data-stimeo--read-more-target="trigger"
+              data-action="click->stimeo--read-more#toggle">${halves}</button>`);
+
+      expect(codes(source)).not.toContain("missing-conditional-target");
+    });
+
+    it("accepts a trigger with no labels at all", () => {
+      const source = readMore(`<button type="button" aria-expanded="false"
+              data-stimeo--read-more-target="trigger"
+              data-action="click->stimeo--read-more#toggle">More</button>`);
+
+      expect(codes(source)).not.toContain("missing-conditional-target");
+    });
+
+    // A rule without a host condition keeps its own wording, which the host branches
+    // must not take over.
+    it("names a plain conditional requirement without mentioning a host", () => {
+      const source = `
+      <div data-controller="stimeo--breadcrumb">
+        <nav aria-label="Breadcrumb"><ol>
+          <li data-stimeo--breadcrumb-target="collapsible">…</li>
+        </ol></nav>
+      </div>`;
+      const found = checkSource(source, manifest).find(
+        (d) => d.code === "missing-conditional-target",
+      );
+
+      expect(found?.message).toContain('has a "collapsible" target, which also requires');
+      expect(found?.message).not.toContain("in the same");
+      expect(found?.message).not.toContain("inside its");
+    });
+
+    it("rejects a lone half and names the host it belongs in", () => {
+      const source = readMore(`<button type="button" aria-expanded="false"
+              data-stimeo--read-more-target="trigger"
+              data-action="click->stimeo--read-more#toggle">
+          <span data-stimeo--read-more-target="collapsedLabel">More</span>
+        </button>`);
+      const found = checkSource(source, manifest).find(
+        (d) => d.code === "missing-conditional-target",
+      );
+
+      expect(found?.message).toContain('"expandedLabel"');
+      expect(found?.message).toContain('in the same "trigger"');
+      expect(found?.severity).toBe("error");
+      expect(found?.suggestion).toContain("swaps a pair");
+    });
+
+    it("rejects halves split across two headers", () => {
+      const source = `
+      <div data-controller="stimeo--accordion">
+        <h3><button type="button" aria-expanded="false" aria-controls="p1"
+                data-stimeo--accordion-target="trigger"
+                data-action="click->stimeo--accordion#toggle keydown->stimeo--accordion#onKeydown">
+          <span data-stimeo--accordion-target="collapsedLabel">Open</span>
+        </button></h3>
+        <div id="p1" data-stimeo--accordion-target="panel" hidden>one</div>
+        <h3><button type="button" aria-expanded="false" aria-controls="p2"
+                data-stimeo--accordion-target="trigger"
+                data-action="click->stimeo--accordion#toggle keydown->stimeo--accordion#onKeydown">
+          <span data-stimeo--accordion-target="expandedLabel">Close</span>
+        </button></h3>
+        <div id="p2" data-stimeo--accordion-target="panel" hidden>two</div>
+      </div>`;
+
+      expect(codes(source)).toContain("missing-conditional-target");
+    });
+
+    it("accepts a pair per header when each header carries both halves", () => {
+      const header = (id: string) => `
+        <h3><button type="button" aria-expanded="false" aria-controls="${id}"
+                data-stimeo--accordion-target="trigger"
+                data-action="click->stimeo--accordion#toggle keydown->stimeo--accordion#onKeydown">
+          <span data-stimeo--accordion-target="collapsedLabel">Open</span>
+          <span data-stimeo--accordion-target="expandedLabel" hidden>Close</span>
+        </button></h3>
+        <div id="${id}" data-stimeo--accordion-target="panel" hidden>body</div>`;
+      const source = `<div data-controller="stimeo--accordion">${header("p1")}${header("p2")}</div>`;
+
+      expect(codes(source)).not.toContain("missing-conditional-target");
+    });
+
+    it("rejects an incomplete header even when another header carries a whole pair", () => {
+      const header = (id: string, halves: string) => `
+        <h3><button type="button" aria-expanded="false" aria-controls="${id}"
+                data-stimeo--accordion-target="trigger"
+                data-action="click->stimeo--accordion#toggle keydown->stimeo--accordion#onKeydown">
+          ${halves}
+        </button></h3>
+        <div id="${id}" data-stimeo--accordion-target="panel" hidden>body</div>`;
+      const whole = `<span data-stimeo--accordion-target="collapsedLabel">Open</span>
+          <span data-stimeo--accordion-target="expandedLabel" hidden>Close</span>`;
+      const half = `<span data-stimeo--accordion-target="collapsedLabel">Open</span>`;
+      const source = `<div data-controller="stimeo--accordion">${header("p1", half)}${header("p2", whole)}</div>`;
+
+      expect(codes(source)).toContain("missing-conditional-target");
+    });
+
+    // A half outside every host reaches no trigger at runtime, so the header that holds
+    // the other one is still short of its pair.
+    it("rejects a header whose counterpart sits outside every host", () => {
+      const source = `
+      <div data-controller="stimeo--accordion">
+        <h3><button type="button" aria-expanded="false" aria-controls="p1"
+                data-stimeo--accordion-target="trigger"
+                data-action="click->stimeo--accordion#toggle keydown->stimeo--accordion#onKeydown">
+          <span data-stimeo--accordion-target="collapsedLabel">Open</span>
+        </button></h3>
+        <div id="p1" data-stimeo--accordion-target="panel" hidden>body</div>
+        <span data-stimeo--accordion-target="expandedLabel">Close</span>
+      </div>`;
+
+      expect(codes(source)).toContain("missing-conditional-target");
+    });
+
+    // One header rendered by a helper cannot silence the header beside it, whose own
+    // pair is fully readable.
+    it("still judges a readable header when another one is generated", () => {
+      const source = `
+      <div data-controller="stimeo--accordion">
+        <%= tag.button data: { "stimeo--accordion-target": "trigger" } %>
+        <span data-stimeo--accordion-target="collapsedLabel">Generated open</span>
+        <h3><button type="button" aria-expanded="false" aria-controls="p2"
+                data-stimeo--accordion-target="trigger"
+                data-action="click->stimeo--accordion#toggle keydown->stimeo--accordion#onKeydown">
+          <span data-stimeo--accordion-target="collapsedLabel">Open</span>
+        </button></h3>
+        <div id="p2" data-stimeo--accordion-target="panel" hidden>body</div>
+      </div>`;
+
+      expect(codes(source)).toContain("missing-conditional-target");
+    });
+
+    // A generated host has no target attribute to read, so which header a half sits
+    // in is undecidable and reporting either way would be a guess.
+    it("leaves a pair alone when the host is rendered by a helper", () => {
+      const source = `
+      <div data-controller="stimeo--accordion">
+        <%= tag.button data: { "stimeo--accordion-target": "trigger" } %>
+        <div data-stimeo--accordion-target="panel" hidden>one</div>
+        <span data-stimeo--accordion-target="collapsedLabel">Open</span>
+      </div>`;
+
+      expect(codes(source)).not.toContain("missing-conditional-target");
+    });
+  });
+
+  describe("stage 2a — the one row a <template> holds", () => {
+    const tagsInput = (template: string) => `
+    <div data-controller="stimeo--tags-input">
+      <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
+      <input aria-label="Add tag" data-stimeo--tags-input-target="input"
+             data-action="keydown->stimeo--tags-input#onKeydown">
+      <template data-stimeo--tags-input-target="tagTemplate">${template}</template>
+    </div>`;
+
+    const chip = `
+        <li role="listitem" data-stimeo--tags-input-target="tag">
+          <span data-stimeo--tags-input-target="label"></span>
+          <button type="button" aria-label="Remove {label}"
+                  data-stimeo--tags-input-target="remove">×</button>
+        </li>`;
+
+    it("accepts a template whose one element is the row", () => {
+      expect(codes(tagsInput(chip))).not.toContain("invalid-template-root");
+    });
+
+    it("rejects a target that is not a <template> at all", () => {
+      const source = `
+        <div data-controller="stimeo--tags-input">
+          <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
+          <input aria-label="Add tag" data-stimeo--tags-input-target="input"
+                 data-action="keydown->stimeo--tags-input#onKeydown">
+          <div data-stimeo--tags-input-target="tagTemplate">${chip}</div>
+        </div>`;
+      const found = checkSource(source, manifest).find((d) => d.code === "invalid-template-root");
+
+      expect(found?.message).toContain("to be a <template>");
+      expect(found?.message).toContain("<div>");
+      // Literal markup can be acted on, so the rule's own fix is the suggestion.
+      expect(found?.severity).toBe("error");
+      expect(found?.suggestion).toContain("Make the chip itself");
+    });
+
+    it("softens the wrong-element report the same way for an unresolved scope", () => {
+      const source = `
+        <div data-controller="stimeo--tags-input">
+          <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
+          <input aria-label="Add tag" data-stimeo--tags-input-target="input"
+                 data-action="keydown->stimeo--tags-input#onKeydown">
+          <%= tag.div data: chip_attrs %>
+          <div data-stimeo--tags-input-target="tagTemplate">${chip}</div>
+        </div>`;
+      const found = checkSource(source, manifest).find((d) => d.code === "invalid-template-root");
+
+      expect(found?.message).toContain("to be a <template>");
+      expect(found?.severity).toBe("warning");
+      expect(found?.suggestion).toContain("may exist at runtime");
+    });
+
+    it("rejects a row wrapped in another element", () => {
+      expect(codes(tagsInput(`<div>${chip}</div>`))).toContain("invalid-template-root");
+    });
+
+    it("rejects a second element beside the row", () => {
+      expect(codes(tagsInput(`${chip}<hr>`))).toContain("invalid-template-root");
+    });
+
+    // Neutralized ERB leaves the same empty template behind as an author who wrote
+    // one, so content that parses to no element is left to the runtime diagnostic.
+    it("leaves a template that parses to no element alone", () => {
+      expect(codes(tagsInput("just text"))).not.toContain("invalid-template-root");
+    });
+
+    it("says how many elements the template holds, and how to write it", () => {
+      const reported = checkSource(tagsInput(`${chip}<hr>`), manifest).find(
+        (d) => d.code === "invalid-template-root",
+      );
+      expect(reported?.message).toContain("exactly one element");
+      expect(reported?.message).toContain("holds 2");
+      // Literal markup can be acted on, so the rule's own fix is the suggestion.
+      expect(reported?.severity).toBe("error");
+      expect(reported?.suggestion).toContain("Make the chip itself");
+    });
+
+    it("says which target the one element has to be, and how to write it", () => {
+      const reported = checkSource(tagsInput(`<div>${chip}</div>`), manifest).find(
+        (d) => d.code === "invalid-template-root",
+      );
+      expect(reported?.message).toContain('"tag" itself');
+      expect(reported?.severity).toBe("error");
+      expect(reported?.suggestion).toContain("Make the chip itself");
+    });
+
+    it("leaves a template alone when ERB generates what it holds", () => {
+      expect(codes(tagsInput('<%= render "chip" %>'))).not.toContain("invalid-template-root");
+    });
+
+    it("leaves a template alone when a helper renders one of the elements it holds", () => {
+      // A helper's data: hash puts a real element in the tree, but how many
+      // elements it renders — and which targets they carry — cannot be read.
+      const source = `
+        <div data-controller="stimeo--tags-input">
+          <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
+          <input aria-label="Add tag" data-stimeo--tags-input-target="input"
+                 data-action="keydown->stimeo--tags-input#onKeydown">
+          <template data-stimeo--tags-input-target="tagTemplate">
+            <%= tag.li data: { "stimeo--tags-input-target": "tag" } %>
+            <span data-stimeo--tags-input-target="label"></span>
+          </template>
+        </div>`;
+
+      expect(codes(source)).not.toContain("invalid-template-root");
+    });
+
+    it("leaves the one element alone when a helper generates the target it declares", () => {
+      const source = `
+        <div data-controller="stimeo--tags-input">
+          <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
+          <input aria-label="Add tag" data-stimeo--tags-input-target="input"
+                 data-action="keydown->stimeo--tags-input#onKeydown">
+          <template data-stimeo--tags-input-target="tagTemplate">
+            <li data-stimeo--tags-input-target="<%= part %>">
+              <span data-stimeo--tags-input-target="label"></span>
+              <button type="button" aria-label="Remove {label}"
+                      data-stimeo--tags-input-target="remove">×</button>
+            </li>
+          </template>
+        </div>`;
+
+      expect(codes(source)).not.toContain("invalid-template-root");
+    });
+
+    it("hands an unresolved scope the runtime hint instead of the rule's fix", () => {
+      // A non-literal data: hash elsewhere in the scope can carry the parts the
+      // rule names, so naming the exact markup to write would be a guess.
+      const source = `
+        <div data-controller="stimeo--tags-input">
+          <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
+          <input aria-label="Add tag" data-stimeo--tags-input-target="input"
+                 data-action="keydown->stimeo--tags-input#onKeydown">
+          <%= tag.div data: chip_attrs %>
+          <template data-stimeo--tags-input-target="tagTemplate">
+            <div>${chip}</div>
+          </template>
+        </div>`;
+      const found = checkSource(source, manifest).find((d) => d.code === "invalid-template-root");
+
+      expect(found?.severity).toBe("warning");
+      expect(found?.suggestion).toContain("may exist at runtime");
+      expect(found?.suggestion).not.toContain("Make the chip itself");
+    });
+
+    it("softens the element count the same way for an unresolved scope", () => {
+      const source = `
+        <div data-controller="stimeo--tags-input">
+          <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
+          <input aria-label="Add tag" data-stimeo--tags-input-target="input"
+                 data-action="keydown->stimeo--tags-input#onKeydown">
+          <%= tag.div data: chip_attrs %>
+          <template data-stimeo--tags-input-target="tagTemplate">${chip}<hr></template>
+        </div>`;
+      const found = checkSource(source, manifest).find((d) => d.code === "invalid-template-root");
+
+      expect(found?.message).toContain("holds 2");
+      expect(found?.severity).toBe("warning");
+      expect(found?.suggestion).toContain("may exist at runtime");
+    });
+
+    it("requires one row without naming a target where the row declares none", () => {
+      const nestedForm = (rows: string) => `
+    <div data-controller="stimeo--nested-form">
+      <div data-stimeo--nested-form-target="list"></div>
+      <template data-stimeo--nested-form-target="template">${rows}</template>
+      <button type="button" data-stimeo--nested-form-target="add"
+              data-action="click->stimeo--nested-form#add">Add</button>
+    </div>`;
+
+      expect(codes(nestedForm('<fieldset><input name="a"></fieldset>'))).not.toContain(
+        "invalid-template-root",
+      );
+      expect(codes(nestedForm("<fieldset></fieldset><fieldset></fieldset>"))).toContain(
+        "invalid-template-root",
+      );
+    });
+  });
+
   describe("stage 4 — fix suggestions", () => {
     it("suggests the nearest target name for a likely typo", () => {
       const diagnostics = checkSource(
@@ -3145,5 +3626,444 @@ describe("checkSource", () => {
         prev.line < curr.line || (prev.line === curr.line && prev.column <= curr.column);
       expect(ordered).toBe(true);
     }
+  });
+
+  describe("a target attribute is a token list", () => {
+    // Stimulus reads `data-<identifier>-target` as space-separated tokens, so one
+    // element can name several targets at once. Reading the value as a single name
+    // rejects correct markup and leaves the element out of every name-keyed lookup,
+    // which makes the rules that read those lookups report in turn.
+    const rowNaming = (declaration: string) => `
+    <div data-controller="stimeo--tags-input">
+      <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
+      <input aria-label="Add tag" data-stimeo--tags-input-target="input"
+             data-action="keydown->stimeo--tags-input#onKeydown">
+      <template data-stimeo--tags-input-target="tagTemplate">
+        <button type="button" aria-label="Remove {label}"
+                data-stimeo--tags-input-target="${declaration}"></button>
+      </template>
+    </div>`;
+
+    it("accepts a row that names every part it plays", () => {
+      expect(checkSource(rowNaming("tag label remove"), manifest)).toEqual([]);
+    });
+
+    it("accepts a declaration padded by whitespace", () => {
+      expect(checkSource(rowNaming("  tag   label remove  "), manifest)).toEqual([]);
+    });
+
+    it("names only the token it does not know", () => {
+      const diagnostics = checkSource(rowNaming("tag labell remove"), manifest);
+      const unknown = diagnostics.filter((d) => d.code === "unknown-target");
+
+      expect(unknown).toHaveLength(1);
+      expect(unknown[0]?.message).toContain('"labell"');
+    });
+
+    it("keeps the known tokens registered when one is unknown", () => {
+      // The row still is the row, so the rules that ask where the parts sit are
+      // answered rather than reporting a second time on the same element.
+      expect(codes(rowNaming("tag labell remove"))).not.toContain("invalid-template-root");
+    });
+
+    it("counts a repeated token once", () => {
+      expect(checkSource(rowNaming("tag tag label remove"), manifest)).toEqual([]);
+    });
+
+    it("reports a pair whose host stands in for one half of it", () => {
+      // The widget hides the side the state does not show, and `contains` answers
+      // for the host itself: a trigger that carries a half hides itself when that
+      // half is the one out of view, and nothing can open it again.
+      const source = `
+      <div data-controller="stimeo--accordion">
+        <h3><button type="button" aria-expanded="false" aria-controls="p1"
+                data-stimeo--accordion-target="trigger expandedLabel"
+                data-action="click->stimeo--accordion#toggle keydown->stimeo--accordion#onKeydown">
+          <span data-stimeo--accordion-target="collapsedLabel">Open</span>
+        </button></h3>
+        <div id="p1" data-stimeo--accordion-target="panel" hidden>one</div>
+      </div>`;
+
+      expect(codes(source)).toContain("missing-conditional-target");
+    });
+
+    it("reports a repeated unknown token once", () => {
+      // One attribute naming the same thing twice names it once, so a second
+      // diagnostic would describe an element the page does not have.
+      const unknown = checkSource(rowNaming("tag labell labell remove"), manifest).filter(
+        (d) => d.code === "unknown-target",
+      );
+
+      expect(unknown).toHaveLength(1);
+    });
+
+    it("puts the fix on the token it names, not on one that contains it", () => {
+      // Locating a token by searching the value for its text lands inside an
+      // earlier token that contains it, which would rewrite the wrong span.
+      const source = rowNaming("tag ag remove");
+      const unknown = checkSource(source, manifest).find((d) => d.code === "unknown-target");
+      const standalone = source.indexOf("tag ag remove") + "tag ".length;
+
+      expect(unknown?.fix?.start).toBe(standalone);
+      expect(unknown?.fix?.end).toBe(standalone + "ag".length);
+    });
+
+    it("leaves a generated declaration undecided", () => {
+      expect(codes(rowNaming("<%= part %> label"))).not.toContain("unknown-target");
+    });
+  });
+
+  describe("action params", () => {
+    // Stimulus assembles `event.params` from `data-<identifier>-<param>-param` on the
+    // element carrying the `data-action`. Nothing reflects that spelling, so a name
+    // that never arrives reads like one the author never meant to send.
+    const scroller = (buttonAttrs: string) => `
+      <div data-controller="stimeo--overflow-indicator">
+        <button type="button" aria-label="Next" ${buttonAttrs}
+                data-action="click->stimeo--overflow-indicator#scrollByPage">›</button>
+        <div data-stimeo--overflow-indicator-target="viewport" tabindex="0"
+             role="region" aria-label="Items">items</div>
+      </div>`;
+
+    it("reports a required param nothing on the element supplies", () => {
+      expect(codes(scroller(""))).toContain("missing-action-param");
+    });
+
+    it("names a bare attribute the author reached for instead", () => {
+      const diagnostic = checkSource(scroller('data-direction="end"'), manifest).find(
+        (d) => d.code === "missing-action-param",
+      );
+
+      expect(diagnostic?.message).toContain('"data-direction"');
+    });
+
+    it("names a namespaced attribute that dropped the param suffix", () => {
+      const written = 'data-stimeo--overflow-indicator-direction="end"';
+      const diagnostic = checkSource(scroller(written), manifest).find(
+        (d) => d.code === "missing-action-param",
+      );
+
+      expect(diagnostic?.message).toContain("-direction");
+    });
+
+    it("accepts the param the action actually reads", () => {
+      expect(
+        codes(scroller('data-stimeo--overflow-indicator-direction-param="end"')),
+      ).not.toContain("missing-action-param");
+    });
+
+    it("rejects a value outside the set the reader accepts", () => {
+      const diagnostic = checkSource(
+        scroller('data-stimeo--overflow-indicator-direction-param="middle"'),
+        manifest,
+      ).find((d) => d.code === "invalid-action-param");
+
+      expect(diagnostic?.message).toContain('"middle"');
+    });
+
+    it("reports a required param written with nothing between the quotes", () => {
+      // Stimulus builds the key from the attribute either way, so an empty one
+      // reaches the reader as the empty string and the control is as dead as it
+      // is with no attribute at all.
+      const empty = 'data-stimeo--overflow-indicator-direction-param=""';
+
+      expect(codes(scroller(empty))).toContain("missing-action-param");
+    });
+
+    it("reports an empty param the reader accepts no fixed set for", () => {
+      const source = `
+        <div data-controller="stimeo--stepper" data-stimeo--stepper-count-value="3">
+          <button type="button" data-stimeo--stepper-index-param=""
+                  data-action="click->stimeo--stepper#goto">Two</button>
+        </div>`;
+
+      expect(codes(source)).toContain("missing-action-param");
+    });
+
+    it("leaves an empty param the reader can reach another way alone", () => {
+      // The reader takes the key only where it holds something, so an empty
+      // attribute settles on the event's detail exactly as no attribute would.
+      const source = `
+        <div data-controller="stimeo--toast">
+          <ol data-stimeo--toast-target="list"></ol>
+          <button type="button" data-stimeo--toast-type-param=""
+                  data-action="click->stimeo--toast#show">Notify</button>
+        </div>`;
+
+      expect(codes(source)).not.toContain("missing-action-param");
+      expect(codes(source)).not.toContain("invalid-action-param");
+    });
+
+    it("leaves an empty required param undecided when the descriptor list is generated", () => {
+      // Which params the element wants cannot be read, so an empty attribute beside
+      // a generated descriptor is not evidence the control is dead.
+      const source = `
+        <div data-controller="stimeo--overflow-indicator">
+          <button type="button" aria-label="Next"
+                  data-stimeo--overflow-indicator-direction-param=""
+                  data-action="<%= wiring %>">›</button>
+          <div data-stimeo--overflow-indicator-target="viewport" tabindex="0"
+               role="region" aria-label="Items">items</div>
+        </div>`;
+
+      expect(codes(source)).not.toContain("missing-action-param");
+    });
+
+    it("judges the value with the space the reader sees", () => {
+      // Stimulus hands a literal it cannot parse to the reader untouched, so the
+      // space is part of the value and the comparison it fails is the same one the
+      // widget makes.
+      const padded = 'data-stimeo--overflow-indicator-direction-param=" end"';
+
+      expect(codes(scroller(padded))).toContain("invalid-action-param");
+    });
+
+    it("rejects a step the jump cannot land on", () => {
+      // The reader takes a whole number and returns on anything else, so a
+      // fraction binds cleanly and does nothing.
+      const source = `
+        <div data-controller="stimeo--stepper" data-stimeo--stepper-count-value="3">
+          <button type="button" data-stimeo--stepper-index-param="1.5"
+                  data-action="click->stimeo--stepper#goto">Two</button>
+        </div>`;
+
+      expect(codes(source)).toContain("invalid-action-param");
+    });
+
+    it("leaves a generated param value undecided", () => {
+      const generated = 'data-stimeo--overflow-indicator-direction-param="<%= d %>"';
+
+      expect(codes(scroller(generated))).not.toContain("invalid-action-param");
+    });
+
+    it("reports a missing param once for an element bound twice", () => {
+      // Both descriptors read the same params off the same element, so the missing
+      // attribute is one defect and a second diagnostic would name the same spot.
+      const twice = scroller("").replace(
+        'data-action="click->stimeo--overflow-indicator#scrollByPage"',
+        'data-action="click->stimeo--overflow-indicator#scrollByPage keydown.enter->stimeo--overflow-indicator#scrollByPage"',
+      );
+
+      expect(
+        checkSource(twice, manifest).filter((d) => d.code === "missing-action-param"),
+      ).toHaveLength(1);
+    });
+
+    it("suppresses the report through the ignore attribute", () => {
+      const ignored = 'data-stimeo-ignore="missing-action-param"';
+
+      expect(codes(scroller(ignored))).not.toContain("missing-action-param");
+    });
+
+    it("says nothing about a param the action can reach another way", () => {
+      // The reader falls back to the event's detail, so a page dispatching a
+      // CustomEvent with no attribute at all is driving it correctly.
+      const source = `
+        <div data-controller="stimeo--meter" role="meter" aria-valuenow="0"
+             aria-valuemin="0" aria-valuemax="100" aria-label="Disk"
+             data-action="meter:set->stimeo--meter#setValue"></div>`;
+
+      expect(codes(source)).not.toContain("missing-action-param");
+    });
+
+    it("leaves a value the author only half wrote undecided", () => {
+      // Neutralization blanks the ERB tag in place, so a partly generated value reads
+      // as its literal remnant. Judging that remnant would report a value the page
+      // never renders.
+      const partly = 'data-stimeo--overflow-indicator-direction-param="sta<%= rt %>"';
+
+      expect(codes(scroller(partly))).not.toContain("invalid-action-param");
+    });
+
+    it("says nothing about a param whose reader accepts no fixed set", () => {
+      const source = `
+        <div data-controller="stimeo--stepper" data-stimeo--stepper-count-value="3">
+          <button type="button" data-stimeo--stepper-index-param="2"
+                  data-action="click->stimeo--stepper#goto">Two</button>
+        </div>`;
+
+      expect(codes(source)).not.toContain("invalid-action-param");
+    });
+
+    it("offers the nearest accepted value as a machine fix", () => {
+      const source = scroller('data-stimeo--overflow-indicator-direction-param="stat"');
+      const diagnostic = checkSource(source, manifest).find(
+        (d) => d.code === "invalid-action-param",
+      );
+
+      expect(diagnostic?.fix?.text).toBe("start");
+      expect(source.slice(diagnostic?.fix?.start ?? 0, diagnostic?.fix?.end ?? 0)).toBe("stat");
+    });
+
+    it("offers no fix when nothing accepted is close", () => {
+      const diagnostic = checkSource(
+        scroller('data-stimeo--overflow-indicator-direction-param="middle"'),
+        manifest,
+      ).find((d) => d.code === "invalid-action-param");
+
+      expect(diagnostic?.fix).toBeUndefined();
+    });
+
+    it("stays quiet about a near miss when the descriptor list is generated", () => {
+      // The action the element binds cannot be read, so which params it wants is
+      // unknown and a near miss is not evidence of anything. The list is only
+      // partly generated, so a descriptor still parses and the rules still load:
+      // what holds the report back is the generated remnant beside it.
+      const source = `
+        <div data-controller="stimeo--overflow-indicator">
+          <button type="button" aria-label="Next"
+                  data-stimeo--overflow-indicator-direction="end"
+                  data-action="click->stimeo--overflow-indicator#scrollByPage <%= extra %>">›</button>
+          <div data-stimeo--overflow-indicator-target="viewport" tabindex="0"
+               role="region" aria-label="Items">items</div>
+        </div>`;
+
+      expect(codes(source)).not.toContain("confusable-action-param");
+      expect(codes(source)).not.toContain("missing-action-param");
+    });
+
+    it("stays quiet about an attribute outside this controller's namespace", () => {
+      // A misspelled identifier puts the attribute outside the namespace the library
+      // guarantees it never hand-writes, so the name is the consumer's to use.
+      const foreign = 'data-stimeo--overflow-indicatr-direction-param="end"';
+      const written = 'data-stimeo--overflow-indicator-direction-param="end"';
+
+      expect(codes(scroller(`${written} ${foreign}`))).not.toContain("confusable-action-param");
+    });
+
+    it("stays quiet about the param attribute the action actually reads", () => {
+      const written = 'data-stimeo--overflow-indicator-direction-param="end"';
+
+      expect(codes(scroller(written))).not.toContain("confusable-action-param");
+    });
+
+    it("stays quiet about an attribute in the namespace that names nothing close", () => {
+      const unrelated = 'data-stimeo--overflow-indicator-zzz="1"';
+      const written = 'data-stimeo--overflow-indicator-direction-param="end"';
+
+      expect(codes(scroller(`${written} ${unrelated}`))).not.toContain("confusable-action-param");
+    });
+
+    it("stays quiet about a target attribute a param name collides with", () => {
+      // A param named after a target makes the target attribute look like the param
+      // attribute with its suffix dropped. The target is a real declaration, so it
+      // is not the author reaching for a param.
+      const collidingManifest: Manifest = {
+        schemaVersion: 14,
+        packageVersion: "0.0.0",
+        controllers: {
+          "stimeo--demo": {
+            targets: ["target"],
+            values: [],
+            valueConstraints: [],
+            valueRelations: [],
+            actionParams: [
+              { action: "go", param: "target", required: false, suggestion: "Name the target." },
+            ],
+            actions: ["go"],
+            events: [],
+            requiredTargets: [],
+            conditionalTargets: [],
+            templateRoots: [],
+            requiredActions: [],
+            actionCompletion: [],
+            a11y: [],
+            keyboard: [],
+            hosts: [],
+            managedAria: [],
+            compositions: [],
+            companions: [],
+            targetDeclarations: [],
+            cardinality: [],
+            forbiddenAria: [],
+          },
+        },
+      };
+      const source = `
+        <div data-controller="stimeo--demo">
+          <button type="button" data-stimeo--demo-target="target"
+                  data-action="click->stimeo--demo#go">Go</button>
+        </div>`;
+
+      expect(checkSource(source, collidingManifest).map((d) => d.code)).not.toContain(
+        "confusable-action-param",
+      );
+    });
+
+    it("stays quiet about a near miss on an element a helper renders", () => {
+      // The helper decides the element's final attributes, so what is written in the
+      // hash is not the whole set: a name missing here may well be added there.
+      const source = `
+        <div data-controller="stimeo--overflow-indicator">
+          <%= tag.button data: {
+                action: "click->stimeo--overflow-indicator#scrollByPage",
+                "stimeo--overflow-indicator-direction": "end"
+              } %>
+          <div data-stimeo--overflow-indicator-target="viewport" tabindex="0"
+               role="region" aria-label="Items">items</div>
+        </div>`;
+
+      expect(codes(source)).not.toContain("confusable-action-param");
+    });
+
+    it("stays quiet about one param attribute that reads like a sibling", () => {
+      // Two params of the same action can be a single edit apart. Each is a real
+      // attribute the reader wants, not an attempt at the other.
+      const siblingManifest: Manifest = {
+        schemaVersion: 14,
+        packageVersion: "0.0.0",
+        controllers: {
+          "stimeo--demo": {
+            targets: [],
+            values: [],
+            valueConstraints: [],
+            valueRelations: [],
+            actionParams: [
+              { action: "go", param: "from", suggestion: "Name the origin." },
+              { action: "go", param: "form", suggestion: "Name the form." },
+            ],
+            actions: ["go"],
+            events: [],
+            requiredTargets: [],
+            conditionalTargets: [],
+            templateRoots: [],
+            requiredActions: [],
+            actionCompletion: [],
+            a11y: [],
+            keyboard: [],
+            hosts: [],
+            managedAria: [],
+            compositions: [],
+            companions: [],
+            targetDeclarations: [],
+            cardinality: [],
+            forbiddenAria: [],
+          },
+        },
+      };
+      const source = `
+        <div data-controller="stimeo--demo">
+          <button type="button" data-stimeo--demo-from-param="a"
+                  data-stimeo--demo-form-param="b"
+                  data-action="click->stimeo--demo#go">Go</button>
+        </div>`;
+
+      expect(checkSource(source, siblingManifest).map((d) => d.code)).not.toContain(
+        "confusable-action-param",
+      );
+    });
+
+    it("warns about a namespaced attribute that names no param it has", () => {
+      const source = `
+        <div data-controller="stimeo--announcer">
+          <div data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
+          <div data-stimeo--announcer-target="assertive" aria-live="assertive"
+               aria-atomic="true"></div>
+          <button type="button" data-stimeo--announcer-assertive="true"
+                  data-action="click->stimeo--announcer#announce">Say</button>
+        </div>`;
+
+      expect(codes(source)).toContain("confusable-action-param");
+    });
   });
 });

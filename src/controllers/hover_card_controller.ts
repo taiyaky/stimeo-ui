@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { EscapeLayer } from "../utils/escape_layer";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { observeScrollDismiss } from "../utils/scroll_dismiss";
+import { type StateReason, stateReasonFor } from "../utils/state_reason";
 
 /**
  * Headless, accessible **hover card** behavior.
@@ -50,6 +51,13 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  *   scroll-parent ancestor (or the window) closes the card, the usual convention for
  *   anchored popups. Covers keyboard/programmatic scroll and scrollbar-drag, which the
  *   pointer-leave close cannot. Off by default.
+ * - Each move of the open state is reported: `stimeo--hover-card:open` and
+ *   `stimeo--hover-card:close` dispatch `{ reason: StateReason }`, after the
+ *   state attributes are written. The reason is taken from the event that
+ *   started the move and survives the delay, so a `mouseleave` that closes
+ *   `closeDelay` later still reports `"pointer"`. Both are informational, so
+ *   neither is cancelable. A call that leaves the state where it already was,
+ *   the normalization in {@link connect}, and {@link disconnect} are all silent.
  */
 export class HoverCardController extends Controller<HTMLElement> {
   static override targets = ["trigger", "card"];
@@ -59,6 +67,7 @@ export class HoverCardController extends Controller<HTMLElement> {
     closeOnScroll: { type: Boolean, default: false },
   };
   static actions = ["close", "open"] as const;
+  static events = ["close", "open"] as const;
 
   declare readonly triggerTarget: HTMLElement;
   declare readonly cardTarget: HTMLElement;
@@ -77,15 +86,20 @@ export class HoverCardController extends Controller<HTMLElement> {
   /** Cleanup for the dismiss-on-scroll listeners while open, or `null`. */
   #stopScrollDismiss: (() => void) | null = null;
 
+  /** Whether state moves are reported: set once `connect()` settled the baseline. */
+  #reporting = false;
+
   /** Starts closed and discards any stale pending state from a prior connection. */
   override connect(): void {
     this.#cancelOpen();
     this.#cancelClose();
-    this.#conceal();
+    this.#conceal("api");
+    this.#reporting = true;
   }
 
   /** Clears timers, the Escape-stack membership, and scroll listeners so nothing outlives the element. */
   override disconnect(): void {
+    this.#reporting = false;
     this.#cancelOpen();
     this.#cancelClose();
     this.#escapeLayer.deactivate();
@@ -94,16 +108,17 @@ export class HoverCardController extends Controller<HTMLElement> {
   }
 
   /** Opens the card, after `openDelay` ms (or immediately at 0). Cancels a pending close. */
-  open(): void {
+  open(event?: Event): void {
+    const reason = stateReasonFor(event);
     this.#cancelClose();
     if (this.#isOpen || this.#pendingOpen !== null) return;
     if (this.openDelayValue <= 0) {
-      this.#reveal();
+      this.#reveal(reason);
       return;
     }
     this.#pendingOpen = this.#timers.set(() => {
       this.#pendingOpen = null;
-      this.#reveal();
+      this.#reveal(reason);
     }, this.openDelayValue);
   }
 
@@ -113,35 +128,44 @@ export class HoverCardController extends Controller<HTMLElement> {
    * (e.g. a link in the card) and, if so, aborts the close — covering keyboard
    * traversal that the pointer-only hoverable bridge cannot.
    */
-  close(): void {
+  close(event?: Event): void {
+    const reason = stateReasonFor(event);
     this.#cancelOpen();
     if (!this.#isOpen || this.#pendingClose !== null) return;
     this.#pendingClose = this.#timers.set(() => {
       this.#pendingClose = null;
       if (this.element.contains(document.activeElement)) return;
-      this.#conceal();
+      this.#conceal(reason);
     }, this.closeDelayValue);
   }
 
-  /** Reveals the card, reflects state, and joins the Escape stack / scroll watcher. */
-  #reveal(): void {
+  /**
+   * Reveals the card, reflects state, reports a move, and joins the Escape stack.
+   *
+   * @stimeoRuntimeOnly `closeOnScroll` decides whether this reveal wires the scroll dismissal; what
+   *   is shown does not depend on it.
+   */
+  #reveal(reason: StateReason): void {
     if (!this.hasCardTarget) return;
+    const was = this.#isOpen;
     this.cardTarget.hidden = false;
     this.cardTarget.setAttribute("data-state", "open");
     if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "true");
+    if (!was && this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
     // No claims predicate: hover-revealed content is dismissible regardless of
     // where focus sits (WCAG 2.2 SC 1.4.13), so it always claims while open.
-    this.#escapeLayer.activate(document, { onDismiss: () => this.#dismiss() });
+    this.#escapeLayer.activate(document, { onDismiss: () => this.#dismiss("escape") });
     if (this.closeOnScrollValue && !this.#stopScrollDismiss) {
-      this.#stopScrollDismiss = observeScrollDismiss(this.element, () => this.#dismiss());
+      this.#stopScrollDismiss = observeScrollDismiss(this.element, () => this.#dismiss("scroll"));
     }
   }
 
-  /** Hides the card, reflects state, and leaves the Escape stack / scroll watcher. */
-  #conceal(): void {
+  /** Hides the card, reflects state, reports a move, and leaves the Escape stack. */
+  #conceal(reason: StateReason): void {
     // Release the layer and observers first, unconditionally: if the card
     // target was removed from the DOM while open, an early return would leak
     // the stack entry and the scroll-dismiss listeners.
+    const was = this.#isOpen;
     this.#escapeLayer.deactivate();
     this.#stopScrollDismiss?.();
     this.#stopScrollDismiss = null;
@@ -150,13 +174,14 @@ export class HoverCardController extends Controller<HTMLElement> {
       this.cardTarget.setAttribute("data-state", "closed");
     }
     if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "false");
+    if (was && this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
   }
 
   /** Cancels pending timers and conceals immediately (shared Escape path). */
-  #dismiss(): void {
+  #dismiss(reason: StateReason): void {
     this.#cancelOpen();
     this.#cancelClose();
-    this.#conceal();
+    this.#conceal(reason);
   }
 
   /** Cancels any pending open timer. */

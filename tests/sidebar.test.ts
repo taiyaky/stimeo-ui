@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SidebarController } from "../src/controllers/sidebar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -640,5 +641,175 @@ describe("SidebarController", () => {
     await tick();
     const collapsed = await captureSpeech({ container: trigger(), steps: 0 });
     expect(collapsed).toEqual(["button, Menu, not expanded"]);
+  });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--sidebar", ["close", "open", "reconcile"]);
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports an inline collapse and expand, naming the mode", async () => {
+      await start();
+      const states: string[] = [];
+      root().addEventListener("stimeo--sidebar:close", () => {
+        states.push(
+          `${panel().getAttribute("data-state")} ${trigger().getAttribute("aria-expanded")}`,
+        );
+      });
+
+      trigger().click();
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.seen[0]?.detail).toEqual({ reason: "user", mode: "inline" });
+      expect(states).toEqual(["collapsed false"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+
+      trigger().click();
+      expect(capture.names()).toEqual(["close", "open"]);
+      expect(capture.seen[1]?.detail).toEqual({ reason: "user", mode: "inline" });
+    });
+
+    it("reports an overlay open and close, naming the mode", async () => {
+      viewportWidth = 600;
+      await start();
+      capture.clear();
+
+      trigger().click();
+      expect(capture.seen[0]?.detail).toEqual({ reason: "user", mode: "overlay" });
+
+      closeAction().click();
+      expect(capture.names()).toEqual(["open", "close"]);
+      expect(capture.seen[1]?.detail).toEqual({ reason: "user", mode: "overlay" });
+    });
+
+    it("reports a backdrop click as outside", async () => {
+      viewportWidth = 600;
+      await start();
+      trigger().click();
+      capture.clear();
+
+      backdrop().click();
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.seen[0]?.detail).toEqual({ reason: "outside", mode: "overlay" });
+    });
+
+    it("reports Escape from the overlay as escape", async () => {
+      viewportWidth = 600;
+      await start();
+      trigger().click();
+      capture.clear();
+
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.seen[0]?.detail).toEqual({ reason: "escape", mode: "overlay" });
+    });
+
+    it("reports the expanded rail when the mode change lands on inline", async () => {
+      viewportWidth = 600;
+      await start();
+      capture.clear();
+
+      changeViewport(true);
+
+      expect(capture.names()).toEqual(["reconcile"]);
+      expect(capture.seen[0]?.detail).toEqual({ mode: "inline", open: true });
+    });
+
+    it("closes an open overlay through toggle", async () => {
+      viewportWidth = 600;
+      await start();
+      trigger().click();
+      capture.clear();
+
+      trigger().click();
+
+      expect(panel().getAttribute("data-state")).toBe("closed");
+      expect(capture.names()).toEqual(["close"]);
+    });
+
+    it("stays silent for a call made after disconnect", async () => {
+      await start();
+      const instance = controller();
+      instance.disconnect();
+      capture.clear();
+
+      instance.close();
+
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("reports a viewport-driven mode change as reconcile, without a reason", async () => {
+      await start();
+      capture.clear();
+
+      changeViewport(false);
+
+      expect(capture.names()).toEqual(["reconcile"]);
+      expect(capture.seen[0]?.detail).toEqual({ mode: "overlay", open: false });
+      expect(capture.seen[0]?.cancelable).toBe(false);
+    });
+
+    it("stays silent while connect establishes the baseline", async () => {
+      const fresh = captureStateEvents("stimeo--sidebar", ["close", "open", "reconcile"]);
+      await start();
+
+      expect(panel().getAttribute("data-mode")).toBe("inline");
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+    });
+
+    it("stays silent for an idempotent call and for the before-cache sanitization", async () => {
+      viewportWidth = 600;
+      await start();
+      capture.clear();
+
+      controller().close();
+      expect(capture.seen).toEqual([]);
+
+      trigger().click();
+      capture.clear();
+      document.dispatchEvent(new Event("turbo:before-cache"));
+
+      expect(panel().getAttribute("data-state")).toBe("closed");
+      expect(capture.seen).toEqual([]);
+    });
+  });
+
+  // --- Re-entry from a subscriber ---
+
+  describe("re-entry from a subscriber", () => {
+    it("drops the modal side effects when the open handler closes it again", async () => {
+      viewportWidth = 600;
+      await start();
+      root().addEventListener("stimeo--sidebar:open", () => controller().close());
+
+      trigger().click();
+
+      expect(panel().getAttribute("data-state")).toBe("closed");
+      expect(document.body.style.overflow).toBe("");
+    });
+
+    it("keeps the panel on screen when the close handler reopens it", async () => {
+      viewportWidth = 600;
+      await start();
+      trigger().click();
+      root().addEventListener("stimeo--sidebar:close", () => controller().open());
+
+      closeAction().click();
+
+      expect(panel().getAttribute("data-state")).toBe("open");
+      expect(panel().hidden).toBe(false);
+    });
   });
 });

@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { EscapeLayer } from "../utils/escape_layer";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { observeScrollDismiss } from "../utils/scroll_dismiss";
+import { type StateReason, stateReasonFor } from "../utils/state_reason";
 
 /**
  * Headless, accessible **tooltip** behavior.
@@ -46,6 +47,13 @@ import { observeScrollDismiss } from "../utils/scroll_dismiss";
  *   scroll-parent ancestor (or the window) hides the tooltip, the usual convention for
  *   anchored popups and useful for focus-triggered tooltips that a pointer-leave cannot
  *   dismiss. Off by default.
+ * - Each move of the shown state is reported: `stimeo--tooltip:open` and
+ *   `stimeo--tooltip:close` dispatch `{ reason: StateReason }`, after the state
+ *   attributes are written. The reason is taken from the event that started the
+ *   move and survives the delay, so a `mouseleave` that hides `hideDelay` later
+ *   still reports `"pointer"`. Both are informational, so neither is
+ *   cancelable. A call that leaves the state where it already was, the
+ *   normalization in {@link connect}, and {@link disconnect} are all silent.
  */
 export class TooltipController extends Controller<HTMLElement> {
   static override targets = ["trigger", "content"];
@@ -55,6 +63,7 @@ export class TooltipController extends Controller<HTMLElement> {
     closeOnScroll: { type: Boolean, default: false },
   };
   static actions = ["hide", "show"] as const;
+  static events = ["close", "open"] as const;
 
   declare readonly contentTarget: HTMLElement;
   declare readonly hasContentTarget: boolean;
@@ -76,16 +85,21 @@ export class TooltipController extends Controller<HTMLElement> {
   /** Cleanup for the dismiss-on-scroll listeners while shown, or `null`. */
   #stopScrollDismiss: (() => void) | null = null;
 
+  /** Whether state moves are reported: set once `connect()` settled the baseline. */
+  #reporting = false;
+
   /** Starts hidden with no stale timer or interaction state from a prior connection. */
   override connect(): void {
     this.#cancelShow();
     this.#cancelHide();
     this.#resetInteractionState();
-    this.#conceal();
+    this.#conceal("api");
+    this.#reporting = true;
   }
 
   /** Clears timers, the Escape-stack membership, and scroll listeners so nothing outlives the element. */
   override disconnect(): void {
+    this.#reporting = false;
     this.#cancelShow();
     this.#cancelHide();
     this.#resetInteractionState();
@@ -96,21 +110,23 @@ export class TooltipController extends Controller<HTMLElement> {
 
   /** Shows after `showDelay`, recording the focus/pointer reason supplied by an action event. */
   show(event?: Event): void {
+    const reason = stateReasonFor(event);
     this.#activateInteraction(event);
     this.#cancelHide();
     if (this.#isVisible || this.#pendingShow !== null) return;
     if (this.showDelayValue <= 0) {
-      this.#reveal();
+      this.#reveal(reason);
       return;
     }
     this.#pendingShow = this.#timers.set(() => {
       this.#pendingShow = null;
-      this.#reveal();
+      this.#reveal(reason);
     }, this.showDelayValue);
   }
 
   /** Hides after `hideDelay` once no focus/pointer reason remains; eventless calls are explicit. */
   hide(event?: Event): void {
+    const reason = stateReasonFor(event);
     const interactionEnded = this.#deactivateInteraction(event);
     if (interactionEnded && this.#hasActiveInteraction) {
       this.#cancelHide();
@@ -119,46 +135,55 @@ export class TooltipController extends Controller<HTMLElement> {
     this.#cancelShow();
     if (!this.#isVisible || this.#pendingHide !== null) return;
     if (this.hideDelayValue <= 0) {
-      this.#conceal();
+      this.#conceal(reason);
       return;
     }
     this.#pendingHide = this.#timers.set(() => {
       this.#pendingHide = null;
-      this.#conceal();
+      this.#conceal(reason);
     }, this.hideDelayValue);
   }
 
-  /** Reveals the content and joins the Escape stack / starts the scroll watcher. */
-  #reveal(): void {
+  /**
+   * Reveals the content, reports a move, and joins the Escape stack / scroll watcher.
+   *
+   * @stimeoRuntimeOnly `closeOnScroll` decides whether this reveal wires the scroll dismissal; what
+   *   is shown does not depend on it.
+   */
+  #reveal(reason: StateReason): void {
     if (!this.hasContentTarget) return;
+    const was = this.#isVisible;
     this.contentTarget.hidden = false;
     this.contentTarget.setAttribute("data-state", "open");
+    if (!was && this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
     // No claims predicate: a shown hover hint is dismissible regardless of
     // where focus sits (WCAG 2.2 SC 1.4.13), so it always claims while shown.
-    this.#escapeLayer.activate(document, { onDismiss: () => this.#dismiss() });
+    this.#escapeLayer.activate(document, { onDismiss: () => this.#dismiss("escape") });
     if (this.closeOnScrollValue && !this.#stopScrollDismiss) {
-      this.#stopScrollDismiss = observeScrollDismiss(this.element, () => this.#dismiss());
+      this.#stopScrollDismiss = observeScrollDismiss(this.element, () => this.#dismiss("scroll"));
     }
   }
 
-  /** Hides the content and leaves the Escape stack / stops the scroll watcher. */
-  #conceal(): void {
+  /** Hides the content, reports a move, and leaves the Escape stack / scroll watcher. */
+  #conceal(reason: StateReason): void {
     // Release the layer and observers first, unconditionally: if the content
     // target was removed from the DOM while shown, an early return would leak
     // the stack entry and the scroll-dismiss listeners.
+    const was = this.#isVisible;
     this.#escapeLayer.deactivate();
     this.#stopScrollDismiss?.();
     this.#stopScrollDismiss = null;
     if (!this.hasContentTarget) return;
     this.contentTarget.hidden = true;
     this.contentTarget.setAttribute("data-state", "closed");
+    if (was && this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
   }
 
   /** Cancels pending timers and conceals immediately (shared Escape / scroll path). */
-  #dismiss(): void {
+  #dismiss(reason: StateReason): void {
     this.#cancelShow();
     this.#cancelHide();
-    this.#conceal();
+    this.#conceal(reason);
   }
 
   /** Records the modality whose enter/focus event requires the tooltip to stay visible. */

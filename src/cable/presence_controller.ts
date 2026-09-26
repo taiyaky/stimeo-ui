@@ -2,12 +2,19 @@ import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { KeyedTimers } from "../utils/keyed_timers";
 import { MAX_TIMER_DELAY_MS, SafeInterval, SafeTimeout } from "../utils/safe_timeout";
+import { cloneTemplateRoot } from "../utils/template_row";
+import { TransientHooks } from "../utils/transient_hooks";
 import {
   type ConfirmedCableSubscription,
   createConfirmedSubscription,
   identifierOf,
   parseSubscriptionParams,
 } from "./consumer";
+
+/** The hooks a connection may find written by an earlier, now-gone one. */
+const TRANSIENT = new TransientHooks({
+  attributes: ["data-present", "data-present-count", "data-presence-rejected"],
+});
 
 /** A peer currently present (another client in the same room). */
 interface Peer {
@@ -238,7 +245,6 @@ export class PresenceController extends Controller<HTMLElement> {
     // Rejection is transient server state too — the fresh subscription below
     // re-decides the hook.
     this.#reset();
-    this.element.removeAttribute("data-presence-rejected");
     // The roster is known-empty here, so the count target can say so right
     // away instead of sitting blank until the first roster change. The
     // data-present* hooks intentionally stay absent until the first beacon.
@@ -271,7 +277,6 @@ export class PresenceController extends Controller<HTMLElement> {
     this.#subscription = null;
     this.#intervals.clearAll();
     this.#reset();
-    this.element.removeAttribute("data-presence-rejected");
   }
 
   /**
@@ -356,6 +361,9 @@ export class PresenceController extends Controller<HTMLElement> {
    * Tracks a broadcast beacon: upserts the peer (restarting its expiry timer),
    * removes it on a `leaving` notice, and re-announces this client when the
    * peer was unknown (roster convergence — see the class doc).
+   *
+   * @stimeoRuntimeOnly `id` filters this client's own echo, `timeout` arms one peer's expiry,
+   *   `name` answers one beacon and the texts word one announcement.
    */
   #onReceived(data: unknown): void {
     const beacon = data as { id?: unknown; name?: unknown; leaving?: unknown } | null;
@@ -384,7 +392,11 @@ export class PresenceController extends Controller<HTMLElement> {
     }
   }
 
-  /** Removes a peer (expiry or graceful leave) and reflects the change. */
+  /**
+   * Removes a peer (expiry or graceful leave) and reflects the change.
+   *
+   * @stimeoRuntimeOnly `announceLeaveText` words the one announcement this departure makes.
+   */
   #drop(id: string): void {
     const peer = this.#peers.get(id);
     if (peer === undefined) return;
@@ -396,7 +408,9 @@ export class PresenceController extends Controller<HTMLElement> {
     this.dispatch("leave", { detail: { id } });
   }
 
-  /** Reflects the roster onto the hooks + count target and emits `change`. */
+  /**
+   * Reflects the roster onto the hooks + count target and emits `change`.
+   */
   #render(): void {
     const users = [...this.#peers.entries()].map(([id, peer]) => ({ id, name: peer.name }));
     this.element.setAttribute("data-present", users.length > 0 ? "true" : "false");
@@ -440,8 +454,8 @@ export class PresenceController extends Controller<HTMLElement> {
   /** Appends one template clone for a newly present peer (list + template only). */
   #appendClone(id: string, name: string): void {
     if (!this.hasListTarget || !this.hasTemplateTarget) return;
-    const root = this.templateTarget.content.firstElementChild?.cloneNode(true);
-    if (!(root instanceof Element)) return;
+    const root = cloneTemplateRoot(this.templateTarget);
+    if (!root) return;
     root.setAttribute("data-presence-id", id);
     this.#fillName(root, name);
     this.listTarget.appendChild(root);
@@ -482,8 +496,7 @@ export class PresenceController extends Controller<HTMLElement> {
     this.#announceId = null;
     this.#peers.clear();
     this.#lastBeaconAt = 0;
-    this.element.removeAttribute("data-present");
-    this.element.removeAttribute("data-present-count");
+    TRANSIENT.reset(this.element);
     if (this.hasCountTarget) this.countTarget.textContent = "";
     if (this.hasListTarget) {
       for (const child of this.listTarget.querySelectorAll("[data-presence-id]")) {

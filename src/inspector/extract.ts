@@ -16,15 +16,50 @@ export function dasherize(value: string): string {
   return value.replace(/([A-Z])/g, (_match, char: string) => `-${char.toLowerCase()}`);
 }
 
+/** One whitespace-separated token of an attribute value, and where it begins. */
+export interface AttributeToken {
+  /** The token itself. */
+  readonly name: string;
+  /** Offset of the token within the attribute value. */
+  readonly start: number;
+}
+
+/**
+ * The whitespace-separated tokens of an attribute value, each with its offset.
+ *
+ * Several `data-*` attributes Stimulus reads are token lists, so one element can
+ * name several things in one attribute. A repeat collapses onto its first
+ * occurrence: an attribute naming the same thing twice names it once, and counting
+ * or reporting it twice would describe a page that does not exist.
+ *
+ * The offset travels with the token because a fix range needs it. Searching the
+ * value for the token text instead lands inside an earlier token that contains it,
+ * which would rewrite the wrong span.
+ */
+export function attributeTokens(value: string): AttributeToken[] {
+  const tokens: AttributeToken[] = [];
+  const seen = new Set<string>();
+  const pattern = /\S+/g;
+  for (let match = pattern.exec(value); match; match = pattern.exec(value)) {
+    if (seen.has(match[0])) continue;
+    seen.add(match[0]);
+    tokens.push({ name: match[0], start: match.index });
+  }
+  return tokens;
+}
+
 /** Extracts the `stimeo--*` identifiers listed in a `data-controller` value.
  * Duplicates are collapsed (Stimulus connects a repeated identifier once), which
  * keeps downstream scope-based diagnostics from being reported multiple times. */
 export function controllerIdentifiers(dataControllerValue: string): string[] {
-  const seen = new Set<string>();
-  for (const token of dataControllerValue.split(/\s+/)) {
-    if (token.startsWith(NAMESPACE_PREFIX)) seen.add(token);
-  }
-  return [...seen];
+  return controllerIdentifierTokens(dataControllerValue).map((token) => token.name);
+}
+
+/** The same identifiers, each with where it begins, for a fix that rewrites one. */
+export function controllerIdentifierTokens(dataControllerValue: string): AttributeToken[] {
+  return attributeTokens(dataControllerValue).filter((token) =>
+    token.name.startsWith(NAMESPACE_PREFIX),
+  );
 }
 
 /**
@@ -87,14 +122,24 @@ export function parseValueAttr(
 export interface ActionDescriptor {
   /** The `stimeo--*` controller identifier (e.g. `stimeo--menu`). */
   readonly identifier: string;
+  /** Offset of {@link ActionDescriptor.identifier} within the attribute value. */
+  readonly identifierStart: number;
   /** The action method name after `#` (e.g. `toggle`), or `""` if absent. */
   readonly method: string;
+  /** Offset of {@link ActionDescriptor.method} within the attribute value. */
+  readonly methodStart: number;
   /**
    * The event type before `->` with any `@window` / `@document` scope removed
    * (e.g. `click`), or `""` when the descriptor relies on the element's default
    * event.
    */
   readonly eventType: string;
+  /**
+   * Offset of {@link ActionDescriptor.eventType} within the attribute value. A
+   * descriptor that omits the event has none written down, and the offset then
+   * points at the descriptor's start, which is where one would be spelled.
+   */
+  readonly eventStart: number;
 }
 
 /** The element a descriptor is written on, as far as the event default needs it. */
@@ -146,7 +191,7 @@ export function actionDescriptors(
   host?: DescriptorHost,
 ): ActionDescriptor[] {
   const descriptors: ActionDescriptor[] = [];
-  for (const descriptor of dataActionValue.split(/\s+/)) {
+  for (const { name: descriptor, start } of attributeTokens(dataActionValue)) {
     const hash = descriptor.indexOf("#");
     if (hash === -1) continue;
     let lhs = descriptor.slice(0, hash);
@@ -162,7 +207,14 @@ export function actionDescriptors(
     }
     if (!lhs.startsWith(NAMESPACE_PREFIX)) continue;
     const method = /^[a-zA-Z_$][\w$]*/.exec(descriptor.slice(hash + 1))?.[0] ?? "";
-    descriptors.push({ identifier: lhs, method, eventType });
+    descriptors.push({
+      identifier: lhs,
+      identifierStart: start + (arrow === -1 ? 0 : arrow + 2),
+      method,
+      methodStart: start + hash + 1,
+      eventType,
+      eventStart: start,
+    });
   }
   return descriptors;
 }

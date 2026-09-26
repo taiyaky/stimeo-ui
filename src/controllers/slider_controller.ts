@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { commitField, writeField } from "../utils/field_mirror";
 import { isRtl } from "../utils/logical_scroll";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { OwnedPointerSession } from "../utils/owned_pointer_session";
@@ -18,6 +19,7 @@ const FRACTION_PROPERTY = "--stimeo--slider-fraction";
  *        data-stimeo--slider-max-value="100"
  *        data-stimeo--slider-step-value="1"
  *        data-stimeo--slider-value-value="40">
+ *     <input type="hidden" name="volume" data-stimeo--slider-target="field" />
  *     <div data-stimeo--slider-target="track"
  *          data-action="pointerdown->stimeo--slider#onPointerDown">
  *       <div data-stimeo--slider-target="thumb" role="slider" tabindex="0" aria-label="Volume"
@@ -32,7 +34,37 @@ const FRACTION_PROPERTY = "--stimeo--slider-fraction";
  * property (a number in `[0, 1]`) set on the controller element — the library
  * positions nothing itself.
  *
- * `change` dispatches `{ value: number }`.
+ * `change` dispatches `{ value: number }`; `reconcile` dispatches `{ value: number }`.
+ *
+ * The Values are inputs. A declared `value` outside `[min, max]` or off the step
+ * grid stays in its attribute as the page wrote it; the thumb's ARIA, the
+ * fraction and the field publish the normalized value instead, and only a move
+ * the user makes writes `value`. `change` reports a move the user made that left
+ * the value somewhere other than the value last published. When a Value the page
+ * changes at runtime — a Turbo morph or application code — moves the published
+ * value, `reconcile` reports it once per batch with the same detail, so a
+ * consumer can tell its user's move from the page's. Connecting reports
+ * neither. A move handled before a page write is repainted reads the written
+ * value, so its `change` covers the write as well, and a move that ends on the
+ * value last published reports nothing. An event dispatched from script runs
+ * every listener with no microtask between them, so a write made just before
+ * it, or by a listener that runs ahead of the slider, is handled that way. An
+ * event the browser dispatches runs microtasks between the listeners it calls
+ * separately, so a write made by one called ahead of the slider's — a capture
+ * listener on an ancestor or on `document`, a `:capture` action, or a listener
+ * added to the thumb or the track before the slider's action was bound — is
+ * repainted, and reported as `reconcile`, before the move is measured from it.
+ * Stimulus calls the actions an element declares for one event and one set of
+ * listener options from a single listener, in declaration order, so a write
+ * made by an action declared before the slider's own on the thumb or the track
+ * is handled like a write within an event dispatched from script.
+ *
+ * The optional `field` target mirrors the normalized value so the slider can be
+ * submitted and read server-side. A value the user moved emits a native
+ * bubbling `change` from that field, the way a form control does, so
+ * `stimeo--auto-submit` and form-level validation hear it. The mirror is
+ * refreshed silently on connect, on a replacement field, and whenever a morph
+ * or application code writes a Value.
  *
  * @remarks
  * Behavior only. The consumer owns all layout (e.g. positioning the thumb from
@@ -51,7 +83,7 @@ const FRACTION_PROPERTY = "--stimeo--slider-fraction";
  * writing direction. Left unset, nothing here reads `direction`.
  */
 export class SliderController extends Controller<HTMLElement> {
-  static override targets = ["track", "thumb"];
+  static override targets = ["track", "thumb", "field"];
   static override values = {
     min: { type: Number, default: 0 },
     max: { type: Number, default: 100 },
@@ -60,12 +92,14 @@ export class SliderController extends Controller<HTMLElement> {
     logicalTrack: { type: Boolean, default: false },
   };
   static actions = ["onKeydown", "onPointerDown"] as const;
-  static events = ["change"] as const;
+  static events = ["change", "reconcile"] as const;
 
   declare readonly trackTarget: HTMLElement;
   declare readonly thumbTarget: HTMLElement;
+  declare readonly fieldTarget: HTMLInputElement;
   declare readonly hasTrackTarget: boolean;
   declare readonly hasThumbTarget: boolean;
+  declare readonly hasFieldTarget: boolean;
   declare minValue: number;
   declare maxValue: number;
   declare stepValue: number;
@@ -75,7 +109,13 @@ export class SliderController extends Controller<HTMLElement> {
   /** One initiating pointer owns each live drag and its stable target snapshot. */
   #drag: SliderDrag | null = null;
 
-  /** Collapses a morph that swaps several render Values into one silent repaint. */
+  /**
+   * The value last published: taken on connect, then moved by each user commit
+   * and by each repaint that reports a page-driven move.
+   */
+  #settled = 0;
+
+  /** Collapses a morph that swaps several render Values into one repaint. */
   readonly #repaint = new MicrotaskCoalescer(() => this.#render());
 
   /** Whether the consumer declared a mirroring track and the direction mirrors it. */
@@ -83,10 +123,14 @@ export class SliderController extends Controller<HTMLElement> {
     return this.logicalTrackValue && isRtl(this.element);
   }
 
-  /** Clamps the initial value and renders the starting position. */
+  /**
+   * Renders the normalized value as the starting position without writing it
+   * back, and takes it as the baseline, so connecting reports nothing.
+   */
   override connect(): void {
     this.#repaint.activate();
-    this.#commit(this.valueValue, false);
+    this.#settled = this.#currentValue();
+    this.#render();
   }
 
   /** Cancels any active pointer drag so document listeners never leak. */
@@ -95,22 +139,22 @@ export class SliderController extends Controller<HTMLElement> {
     this.#endDrag();
   }
 
-  /** Silently repaints a minimum changed by application code or a Turbo morph. */
+  /** Repaints a minimum changed by application code or a Turbo morph. */
   minValueChanged(): void {
     this.#repaint.schedule();
   }
 
-  /** Silently repaints a maximum changed by application code or a Turbo morph. */
+  /** Repaints a maximum changed by application code or a Turbo morph. */
   maxValueChanged(): void {
     this.#repaint.schedule();
   }
 
-  /** Silently repaints a step changed by application code or a Turbo morph. */
+  /** Repaints a step changed by application code or a Turbo morph. */
   stepValueChanged(): void {
     this.#repaint.schedule();
   }
 
-  /** Silently repaints a value changed by application code or a Turbo morph. */
+  /** Repaints a value changed by application code or a Turbo morph. */
   valueValueChanged(): void {
     this.#repaint.schedule();
   }
@@ -124,6 +168,11 @@ export class SliderController extends Controller<HTMLElement> {
       this.#drag.thumb = thumb;
       thumb.focus();
     }
+    this.#repaint.schedule();
+  }
+
+  /** Fills a form field inserted or replaced at runtime on the next repaint. */
+  fieldTargetConnected(): void {
     this.#repaint.schedule();
   }
 
@@ -141,24 +190,25 @@ export class SliderController extends Controller<HTMLElement> {
   onKeydown(event: KeyboardEvent): void {
     if (isReservedArrowChord(event)) return;
     let next: number | null = null;
-    const current = this.#currentValue();
+    // Stepping snaps the declaration onto the value it publishes before moving.
+    const declared = this.valueValue;
     const range = this.#steppedRange;
     // On a mirrored track the greater value sits at the visual left, so the
     // horizontal pair trades places; the vertical pair passes through.
     switch (this.#mirrored ? logicalArrowKey(event.key, this.element) : event.key) {
       case "ArrowRight":
       case "ArrowUp":
-        next = stepSteppedValue(current, 1, range);
+        next = stepSteppedValue(declared, 1, range);
         break;
       case "ArrowLeft":
       case "ArrowDown":
-        next = stepSteppedValue(current, -1, range);
+        next = stepSteppedValue(declared, -1, range);
         break;
       case "PageUp":
-        next = stepSteppedValue(current, 10, range);
+        next = stepSteppedValue(declared, 10, range);
         break;
       case "PageDown":
-        next = stepSteppedValue(current, -10, range);
+        next = stepSteppedValue(declared, -10, range);
         break;
       case "Home":
         next = this.minValue;
@@ -170,7 +220,7 @@ export class SliderController extends Controller<HTMLElement> {
         return;
     }
     event.preventDefault();
-    this.#commit(next, true);
+    this.#commit(next);
   }
 
   /** Begins a pointer drag: sets the value and tracks subsequent movement. */
@@ -185,7 +235,7 @@ export class SliderController extends Controller<HTMLElement> {
     const value = this.#valueFromClientX(event.clientX, mirrored, track);
     if (value === null) return;
     event.preventDefault();
-    this.#commit(value, true);
+    this.#commit(value);
     thumb.focus();
 
     const drag: SliderDrag = { pointer: null, track, thumb };
@@ -196,7 +246,7 @@ export class SliderController extends Controller<HTMLElement> {
           return;
         }
         const moved = this.#valueFromClientX(move.clientX, mirrored, track);
-        if (moved !== null) this.#commit(moved, true);
+        if (moved !== null) this.#commit(moved);
       },
       end: () => {
         if (this.#drag === drag) this.#drag = null;
@@ -215,25 +265,46 @@ export class SliderController extends Controller<HTMLElement> {
   }
 
   /**
-   * Stores a normalized value and renders synchronously for responsive input.
-   * Morph callbacks use {@link #render} instead, so they never write Values back
-   * or dispatch a user-facing change event.
+   * Stores the normalized value the user moved to, renders it synchronously for
+   * responsive input, and reports it as `change` when it differs from the value
+   * last published. The comparison is with the value last published, not with
+   * the value the move started from, so a page write no repaint has published
+   * yet is reported once, as this change, and a move that ends where the value
+   * was last published reports nothing. The baseline moves before either report
+   * goes out, so the repaint the Value write schedules — and any move a
+   * subscriber makes while the report is dispatched — is measured from this
+   * value.
    */
-  #commit(raw: number, notify: boolean): void {
-    const previous = this.#currentValue();
+  #commit(raw: number): void {
     const value = snapSteppedValue(raw, this.#steppedRange);
+    const reported = this.#settled;
+    this.#settled = value;
     if (!Object.is(this.valueValue, value)) this.valueValue = value;
     this.#renderValue(value);
-    if (notify && value !== previous) this.dispatch("change", { detail: { value } });
+    this.#mirrorField(value, true);
+    if (value !== reported) this.dispatch("change", { detail: { value } });
+  }
+
+  /** Mirrors `value` into the optional form field, reporting only a user's move. */
+  #mirrorField(value: number, notify: boolean): void {
+    if (!this.hasFieldTarget) return;
+    if (writeField(this.fieldTarget, String(value)) && notify) commitField(this.fieldTarget);
   }
 
   /**
-   * Reflects the normalized current Value without mutating or dispatching it.
+   * Reflects the normalized current Value without writing it back. A published
+   * value that moved from the last one is reported once as `reconcile`; the
+   * field follows without a native `change`.
    *
    * @stimeoRenderRoot
    */
   #render(): void {
-    this.#renderValue(this.#currentValue());
+    const value = this.#currentValue();
+    this.#renderValue(value);
+    this.#mirrorField(value, false);
+    if (value === this.#settled) return;
+    this.#settled = value;
+    this.dispatch("reconcile", { detail: { value } });
   }
 
   /** Reflects one normalized value on the current target and CSS output. */

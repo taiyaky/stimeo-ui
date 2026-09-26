@@ -5,8 +5,60 @@ import { AttributeLease } from "../utils/attribute_lease";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { compileRegExp } from "../utils/declared_value";
+import { FormResetWatcher } from "../utils/form_reset_watcher";
 import { toHalfWidth } from "../utils/half_width";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+
+/** The error attributes this component writes on each field while input is rejected. */
+type ErrorAttribute = "aria-invalid" | "aria-errormessage" | "aria-describedby";
+
+/**
+ * Each error attribute's lease, kept on the field itself.
+ *
+ * `AttributeLease` keeps its records in memory, which the connection that adopts
+ * a restored DOM does not have. These records travel with the markup instead,
+ * so any connection can give the authored value back — and only while the
+ * attribute still holds what this component last wrote there, so a value a
+ * consumer changed in the meantime is theirs and stays.
+ */
+const LEASE_MARKERS: Readonly<Record<ErrorAttribute, string>> = {
+  "aria-invalid": "data-otp-invalid-lease",
+  "aria-errormessage": "data-otp-errormessage-lease",
+  "aria-describedby": "data-otp-describedby-lease",
+};
+
+/** What an error attribute carried before this component wrote it, and what it wrote. */
+interface ErrorLease {
+  readonly authored: string | null;
+  readonly written: string;
+}
+
+/** Whether a parsed marker holds a lease this component could have recorded. */
+function isErrorLease(value: unknown): value is ErrorLease {
+  const lease = value as Partial<Record<keyof ErrorLease, unknown>> | null;
+  return (
+    typeof lease?.written === "string" &&
+    (lease.authored === null || typeof lease.authored === "string")
+  );
+}
+
+/** Reads the lease a field carries; a marker holding anything else is not one. */
+function readLease(field: Element, marker: string): ErrorLease | null {
+  try {
+    const parsed: unknown = JSON.parse(field.getAttribute(marker) ?? "null");
+    return isErrorLease(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The field's own description tokens with the error id appended once. */
+function describedByWith(described: string | null, errorId: string): string {
+  const tokens = (described ?? "")
+    .split(/\s+/)
+    .filter((token) => token.length > 0 && token !== errorId);
+  return [...tokens, errorId].join(" ");
+}
 
 /** Single-character pattern used when a `pattern` declaration cannot compile. */
 const DEFAULT_PATTERN = "[0-9]";
@@ -79,8 +131,17 @@ function statesDiffer(left: OtpState, right: OtpState): boolean {
  * `change` and `complete` dispatch `{ value: string }` and fire only when the
  * combined value actually moves — one confirmed IME character emits one event,
  * and a passcode re-completed with a different digit reports the new value.
- * State moved by adding or removing fields is the page's doing rather than an
- * edit, so it is reported as `reconcile` with the same `{ value: string }`.
+ * State moved by adding or removing fields, by a `pattern` change dropping
+ * entered digits it no longer accepts, or by a native form reset restoring the
+ * fields is not an edit of the passcode, so it is reported as `reconcile` with
+ * the same `{ value: string }` — once per change, after it settles — and never
+ * as `change` or `complete`. While a field is composing, the IME's uncommitted
+ * text is neither read nor written: a change already in the DOM — fields added
+ * or removed, a reset — is reported at once, counting that field by the
+ * character it had committed, while a `pattern` change's drop waits for the
+ * composition to end and is then applied and reported before the commit is
+ * taken. A composition that ends on the text the field held when it began was
+ * cancelled: no edit, so it reports nothing and focus stays.
  * Completeness belongs to that state: dropping a trailing empty field completes
  * a passcode whose combined value never moved, and that transition is reported
  * too, so a consumer reading `data-state` is never left behind a silent move.
@@ -89,15 +150,18 @@ function statesDiffer(left: OtpState, right: OtpState): boolean {
  * Controller-owned output: `data-filled` on each entered field, `data-state`
  * (`empty` / `partial` / `complete`) on the root, and — while input is being
  * reported invalid — `aria-invalid`, `aria-errormessage`, `aria-describedby`,
- * and the `error` target's `hidden`. Those four are leased, so authored values
- * return on teardown and before the page is cached.
+ * and the `error` target's `hidden`. Authored values return on teardown and
+ * before the page is cached: the three ARIA attributes keep their lease on the
+ * field itself, so a connection that adopts a restored DOM can give them back
+ * too, and the `hidden` is leased.
  *
  * @remarks
  * Behavior only. `connect()` reads the fields back as the source of truth, which
  * is what restores consistency after a `type="password"` field returns from the
- * Turbo cache emptied, or after a native form reset. A `pattern` that cannot
- * compile falls back to `[0-9]`; the compiled matcher is built once per
- * declaration rather than per keystroke.
+ * Turbo cache emptied; a native form reset is read back the same way once the
+ * browser has restored the fields. A `pattern` that cannot compile falls back to
+ * `[0-9]`; the compiled matcher is built once per declaration rather than per
+ * keystroke.
  */
 export class OtpController extends Controller<HTMLElement> {
   static override targets = ["field", "value", "error"];
@@ -121,48 +185,70 @@ export class OtpController extends Controller<HTMLElement> {
   #patternSource = DEFAULT_PATTERN;
   /** Public state carried by the last dispatch; keeps a no-op sync silent. */
   #published: OtpState | null = null;
-  /** Field whose confirming `input` after `compositionend` is already handled. */
-  #confirmedField: HTMLInputElement | null = null;
   /** True between connect and disconnect, so pre-connect Value changes stay silent. */
   #connected = false;
   /** Digit each field last committed, restored when rejected input replaced it. */
   readonly #committed = new WeakMap<HTMLInputElement, string>();
+  /** The field being composed, and the text it held when the composition began. */
+  #composing: { readonly field: HTMLInputElement; readonly before: string } | null = null;
+  /** A `pattern` change whose rejected characters wait for the composition to end. */
+  #dropHeld = false;
 
-  /** Collapses one batch of field target callbacks into a single reconciliation. */
+  /**
+   * Collapses one batch of page changes — field target and `pattern` callbacks, a
+   * form reset — into a single reconciliation.
+   */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileFields());
 
-  readonly #ariaInvalid = new AttributeLease<HTMLInputElement>("aria-invalid");
-  readonly #ariaErrorMessage = new AttributeLease<HTMLInputElement>("aria-errormessage");
-  readonly #ariaDescribedBy = new AttributeLease<HTMLInputElement>("aria-describedby");
   readonly #errorHidden = new AttributeLease<HTMLElement>("hidden");
   readonly #state = new AttributeLease<HTMLElement>("data-state");
 
   /** Rewinds the transient error surface before Turbo freezes the page. */
   readonly #beforeCache = new BeforeCacheReset(() => this.#clearError());
+  /** Reads the fields back once a native reset restored them, as a reconciliation. */
+  readonly #formReset = new FormResetWatcher(
+    (form) => this.#ownedBy(form),
+    () => {
+      this.#adopt();
+      this.#reconcile.schedule();
+    },
+  );
 
-  /** Owns IME lifecycle state across every digit field. */
+  /**
+   * Owns IME lifecycle state across every digit field. When a composition ends, a
+   * `pattern` drop it held back applies first — it was declared first — and the
+   * user's commit is taken after it.
+   */
   readonly #composition = new CompositionTracker({
-    onStart: () => {
-      this.#confirmedField = null;
+    onStart: (event) => {
+      const field = this.#fieldFrom(event);
+      if (field) this.#composing = { field, before: field.value };
     },
     onEnd: (event) => {
+      const composing = this.#composing;
+      this.#composing = null;
       const input = this.#fieldFrom(event);
-      if (!input) return;
-      // The browser follows a commit with one more `input` carrying the same
-      // text; marking the field lets that echo be dropped instead of rerun.
-      this.#confirmedField = input;
       // `maxlength` has already cut the field down to one character, but the
       // commit itself carries the whole confirmed string — so a conversion that
       // ends in several characters still reaches the fields after this one.
-      const committed = (event as CompositionEvent).data ?? "";
-      this.#accept(input, committed.length > input.value.length ? committed : input.value);
+      const data = (event as CompositionEvent).data ?? "";
+      const text = input && data.length <= input.value.length ? input.value : data;
+      // A composition that ends on the text the field held when it began was
+      // cancelled: the user entered nothing, so there is nothing to take.
+      const commit = input !== null && (composing?.field !== input || text !== composing.before);
+      if (this.#dropHeld) {
+        // The drop judges what the fields had committed; the commit waits aside.
+        if (input && commit) input.value = this.#committed.get(input) ?? "";
+        this.#reconcileFields();
+      }
+      if (input && commit) this.#accept(input, text);
     },
   });
 
   override connect(): void {
     this.#connected = true;
     for (const field of this.fieldTargets) this.#bind(field);
-    document.addEventListener("reset", this.#onReset, true);
+    this.#formReset.observe();
     this.#beforeCache.activate();
     this.#reconcile.activate();
     this.#adopt();
@@ -173,9 +259,11 @@ export class OtpController extends Controller<HTMLElement> {
     this.#connected = false;
     for (const field of this.fieldTargets) this.#unbind(field);
     this.#composition.disconnect();
-    document.removeEventListener("reset", this.#onReset, true);
+    this.#formReset.disconnect();
     this.#beforeCache.deactivate();
     this.#reconcile.cancel();
+    // A drop a composition held goes with the connection, like a pending pass.
+    this.#dropHeld = false;
     this.#clearError();
     this.#state.return(this.element);
   }
@@ -194,20 +282,31 @@ export class OtpController extends Controller<HTMLElement> {
   /** Releases a dropped field's listeners and leases, then reconciles the rest. */
   fieldTargetDisconnected(element: HTMLInputElement): void {
     this.#unbind(element);
-    this.#returnFieldLeases(element);
+    this.#returnLeases(element);
     this.#reconcile.schedule();
   }
 
   /**
    * Re-validates a changed `pattern` declaration once and drops any entered digit
    * the new pattern no longer accepts, so the combined value stays interpretable.
+   * The page changed the declaration, so the move joins the same reconciliation
+   * as fields added or removed in that mutation. While a field is composing, its
+   * text is the IME's, and the drop waits for the composition to end.
    */
   patternValueChanged(): void {
     const compiled = compileRegExp(this.patternValue, "exact");
     this.#patternSource = compiled ? this.patternValue : DEFAULT_PATTERN;
     this.#pattern = compiled ?? DEFAULT_MATCHER;
     if (!this.#connected) return;
+    if (this.#composing !== null) {
+      this.#dropHeld = true;
+      return;
+    }
+    if (this.#dropRejected()) this.#reconcile.schedule();
+  }
 
+  /** Empties every writable field holding a character the pattern rejects; whether one did. */
+  #dropRejected(): boolean {
     let dropped = false;
     for (const field of this.fieldTargets) {
       if (field.value === "" || !this.#isWritable(field)) continue;
@@ -215,7 +314,7 @@ export class OtpController extends Controller<HTMLElement> {
       this.#writeField(field, "");
       dropped = true;
     }
-    if (dropped) this.#syncAndDispatch();
+    return dropped;
   }
 
   /** Handles keystroke inputs, distributes autofilled text, and advances focus. */
@@ -223,9 +322,9 @@ export class OtpController extends Controller<HTMLElement> {
     const input = this.#fieldFrom(event);
     if (!input) return;
 
-    const confirmed = this.#confirmedField;
-    this.#confirmedField = null;
-    if (confirmed === input) return;
+    // The browser may follow a commit with one more `input` carrying the same
+    // text; running it again would spread the commit twice.
+    if (this.#composition.consumesConfirmedInput(event)) return;
 
     // Guard during active composition to prevent premature focus switching
     if (this.#composition.isComposing(event as InputEvent)) return;
@@ -239,8 +338,6 @@ export class OtpController extends Controller<HTMLElement> {
     const input = this.#fieldFrom(event);
     if (!input) return;
 
-    // A keyed edit always starts with this event, so no post-commit echo is pending
-    this.#confirmedField = null;
     // Do not trigger keydown actions during composition
     if (this.#composition.isComposing(event)) return;
 
@@ -325,7 +422,6 @@ export class OtpController extends Controller<HTMLElement> {
     if (!input) return;
 
     event.preventDefault();
-    this.#confirmedField = null;
     this.#distribute(input, toHalfWidth(event.clipboardData?.getData("text") ?? ""));
   }
 
@@ -363,17 +459,6 @@ export class OtpController extends Controller<HTMLElement> {
     }
   };
 
-  /** Reconciles derived state after a non-cancelled reset restores the fields. */
-  readonly #onReset = (event: Event): void => {
-    const form = event.target;
-    if (!(form instanceof HTMLFormElement) || !this.#ownedBy(form)) return;
-    queueMicrotask(() => {
-      if (event.defaultPrevented) return;
-      this.#adopt();
-      this.#syncAndDispatch();
-    });
-  };
-
   /** Whether a form owns at least one field or the hidden combined value. */
   #ownedBy(form: HTMLFormElement): boolean {
     if (this.fieldTargets.some((field) => field.form === form)) return true;
@@ -388,7 +473,8 @@ export class OtpController extends Controller<HTMLElement> {
   #unbind(field: HTMLInputElement): void {
     field.removeEventListener("focus", this.#onFieldFocus);
     this.#composition.unobserve(field);
-    if (this.#confirmedField === field) this.#confirmedField = null;
+    // A field that leaves mid-composition never ends that composition here.
+    if (this.#composing?.field === field) this.#composing = null;
   }
 
   /** Reads every field back so a restored or reset group starts consistent. */
@@ -399,6 +485,27 @@ export class OtpController extends Controller<HTMLElement> {
     if (this.hasErrorTarget) this.errorTarget.setAttribute("hidden", "");
   }
 
+  /** Writes one error attribute, keeping the first authored value it displaces. */
+  #lease(field: HTMLInputElement, attribute: ErrorAttribute, value: string): void {
+    const marker = LEASE_MARKERS[attribute];
+    const held = readLease(field, marker);
+    const authored = held ? held.authored : field.getAttribute(attribute);
+    field.setAttribute(marker, JSON.stringify({ authored, written: value }));
+    field.setAttribute(attribute, value);
+  }
+
+  /** Gives one field's error attributes back where they still hold what this wrote. */
+  #returnLeases(field: HTMLInputElement): void {
+    for (const [attribute, marker] of Object.entries(LEASE_MARKERS)) {
+      const held = readLease(field, marker);
+      if (!held) continue;
+      field.removeAttribute(marker);
+      if (field.getAttribute(attribute) !== held.written) continue;
+      if (held.authored === null) field.removeAttribute(attribute);
+      else field.setAttribute(attribute, held.authored);
+    }
+  }
+
   /** Takes one field's current value as the truth behind its derived state. */
   #adoptField(field: HTMLInputElement): void {
     this.#committed.set(field, field.value);
@@ -406,19 +513,30 @@ export class OtpController extends Controller<HTMLElement> {
   }
 
   /**
-   * Absorbs a batch of field additions or removals as one state transition.
+   * Absorbs one batch of page changes — fields added or removed, entered digits a
+   * new `pattern` rejects, fields a native form reset restored — as one state
+   * transition.
    *
-   * The page, not the user, moved the state here, so it is reported as
-   * `reconcile`: automation listening for `change` must not read a re-render as
-   * an edit, and a passcode that happens to end up full must not fire the
+   * Nobody edited the passcode here, so the move is reported as `reconcile`:
+   * automation listening for `change` must not read a re-render or a reset as an
+   * edit, and a passcode that happens to end up full must not fire the
    * `complete` that submits it.
    *
    * Completeness moves on its own when the field count changes: dropping a
    * trailing empty field completes a passcode whose combined value never moved,
    * and adding one un-completes it. Comparing the whole derived state, not the
    * string it contains, is what makes those transitions reportable.
+   *
+   * A change already in the DOM — a field added or removed, a reset — is
+   * published at once, even while a field is composing: that field counts by the
+   * character it had committed, never by the IME's uncommitted text. Only a
+   * `pattern` drop waits for the composition to end.
    */
   #reconcileFields(): void {
+    if (this.#dropHeld && this.#composing === null) {
+      this.#dropHeld = false;
+      this.#dropRejected();
+    }
     const previous = this.#published;
     const current = this.#sync();
     if (previous && !statesDiffer(previous, current)) return;
@@ -531,13 +649,18 @@ export class OtpController extends Controller<HTMLElement> {
   }
 
   #combinedValue(): string {
-    return this.fieldTargets.map((field) => field.value).join("");
+    return this.fieldTargets.map((field) => this.#publishedText(field)).join("");
   }
 
   /** Every field carries a character, and there is at least one field. */
   #isComplete(): boolean {
     const fields = this.fieldTargets;
-    return fields.length > 0 && fields.every((field) => field.value.length > 0);
+    return fields.length > 0 && fields.every((field) => this.#publishedText(field).length > 0);
+  }
+
+  /** A field's text as the combined value counts it: a composing field by its committed character. */
+  #publishedText(field: HTMLInputElement): string {
+    return field === this.#composing?.field ? (this.#committed.get(field) ?? "") : field.value;
   }
 
   /**
@@ -581,11 +704,12 @@ export class OtpController extends Controller<HTMLElement> {
     const errorId = this.hasErrorTarget ? ensureId(this.errorTarget, "stimeo--otp-error") : null;
 
     for (const field of this.fieldTargets) {
-      this.#ariaInvalid.write(field, "true");
+      this.#lease(field, "aria-invalid", "true");
       if (!errorId) continue;
-      this.#ariaErrorMessage.write(field, errorId);
+      this.#lease(field, "aria-errormessage", errorId);
       // Assistive tech without aria-errormessage support still reads a description
-      this.#ariaDescribedBy.write(field, this.#describedByWith(field, errorId));
+      const described = field.getAttribute("aria-describedby");
+      this.#lease(field, "aria-describedby", describedByWith(described, errorId));
     }
     if (this.hasErrorTarget) this.#errorHidden.write(this.errorTarget, null);
 
@@ -596,23 +720,7 @@ export class OtpController extends Controller<HTMLElement> {
 
   /** Returns every error lease, restoring the authored error surface. */
   #clearError(): void {
-    this.#ariaInvalid.returnAll();
-    this.#ariaErrorMessage.returnAll();
-    this.#ariaDescribedBy.returnAll();
+    for (const field of this.fieldTargets) this.#returnLeases(field);
     this.#errorHidden.returnAll();
-  }
-
-  #returnFieldLeases(field: HTMLInputElement): void {
-    this.#ariaInvalid.return(field);
-    this.#ariaErrorMessage.return(field);
-    this.#ariaDescribedBy.return(field);
-  }
-
-  /** The field's own description tokens with the error id appended once. */
-  #describedByWith(field: HTMLInputElement, errorId: string): string {
-    const tokens = (field.getAttribute("aria-describedby") ?? "")
-      .split(/\s+/)
-      .filter((token) => token.length > 0 && token !== errorId);
-    return [...tokens, errorId].join(" ");
   }
 }

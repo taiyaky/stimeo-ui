@@ -5,7 +5,7 @@
 
     Showing a toast is done with attributes alone (no hand-written JS):
     put data-action="click->stimeo--toast#show" plus
-    data-stimeo--toast-body-param / data-stimeo--toast-type-param on the trigger button.
+    data-stimeo--toast-message-param / data-stimeo--toast-type-param on the trigger button.
     For advanced cases where you want to trigger it remotely from JS, the controller
     element keeps show->stimeo--toast#show, so CustomEvent('show', { detail }) works too. %>
 <div
@@ -20,7 +20,7 @@
       type="button"
       class="demo-trigger toast-demo__btn--status"
       data-action="click->stimeo--toast#show"
-      data-stimeo--toast-body-param="<%= t("components.toast.demo.status_body") %>"
+      data-stimeo--toast-message-param="<%= t("components.toast.demo.status_message") %>"
       data-stimeo--toast-type-param="status">
       <%= t("components.toast.demo.show_status") %>
     </button>
@@ -29,7 +29,7 @@
       type="button"
       class="demo-trigger toast-demo__btn--alert"
       data-action="click->stimeo--toast#show"
-      data-stimeo--toast-body-param="<%= t("components.toast.demo.alert_body") %>"
+      data-stimeo--toast-message-param="<%= t("components.toast.demo.alert_message") %>"
       data-stimeo--toast-type-param="alert">
       <%= t("components.toast.demo.show_alert") %>
     </button>
@@ -54,7 +54,7 @@
         data-stimeo--toast-target="item"
         tabindex="0">
         <div class="toast-item__content">
-          <span role="status" data-toast-slot="body" class="toast-item__body"></span>
+          <span role="status" data-toast-slot="message" class="toast-item__body"></span>
           <button
             type="button"
             class="toast-item__dismiss"

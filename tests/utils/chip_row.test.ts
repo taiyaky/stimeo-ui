@@ -237,4 +237,43 @@ describe("ChipRow", () => {
     expect(chipRow.focusLast()).toBe(false);
     expect(document.activeElement).not.toBe(input());
   });
+
+  describe("the default button resolution", () => {
+    // A chip may be the button rather than contain one. The default resolution has to
+    // answer for that shape, or such a row gets no tab stop and no activation.
+    let ownRow: ChipRow;
+
+    beforeEach(() => {
+      chipRow.disconnect();
+      document.body.innerHTML = `
+      <div id="root">
+        <div id="row">
+          <button type="button" data-chip tabindex="-1">A</button>
+          <button type="button" data-chip tabindex="-1">B</button>
+        </div>
+        <input id="input">
+      </div>`;
+      ownRow = new ChipRow({
+        directionElement: root(),
+        getItems: items,
+        onRemove: remove,
+        focusAfterEnd: () => input().focus(),
+      });
+      ownRow.connect(document.querySelector<HTMLElement>("#row") as HTMLElement);
+    });
+
+    afterEach(() => ownRow.disconnect());
+
+    it("gives the single tab stop to a chip that is its own button", () => {
+      ownRow.ensureTabStop();
+
+      expect(items().map((item) => (item as HTMLButtonElement).tabIndex)).toEqual([0, -1]);
+    });
+
+    it("removes the chip that was clicked", () => {
+      (items()[1] as HTMLButtonElement).click();
+
+      expect(remove).toHaveBeenCalledWith(1);
+    });
+  });
 });

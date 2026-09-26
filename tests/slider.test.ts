@@ -2,7 +2,9 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SliderController } from "../src/controllers/slider_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
@@ -79,11 +81,8 @@ describe("SliderController", () => {
     expect(fraction()).toBe("0");
   });
 
-  it("silently reconciles a batch of render Values swapped by a morph", async () => {
-    const values: number[] = [];
-    root().addEventListener("stimeo--slider:change", (event) => {
-      values.push((event as CustomEvent<{ value: number }>).detail.value);
-    });
+  it("reports a batch of render Values swapped by a morph as one reconcile", async () => {
+    const events = captureStateEvents("stimeo--slider", ["change", "reconcile"]);
     root().setAttribute("data-stimeo--slider-min-value", "10");
     root().setAttribute("data-stimeo--slider-max-value", "94");
     root().setAttribute("data-stimeo--slider-step-value", "10");
@@ -101,7 +100,10 @@ describe("SliderController", () => {
     expect(thumb().getAttribute("aria-valuemax")).toBe("94");
     expect(thumb().getAttribute("aria-valuenow")).toBe("94");
     expect(fraction()).toBe("1");
-    expect(values).toEqual([]);
+    expect(events.seen.map(({ name, detail }) => ({ name, detail }))).toEqual([
+      { name: "reconcile", detail: { value: 94 } },
+    ]);
+    events.stop();
   });
 
   it("hydrates a replacement thumb with current ARIA without dispatching change", async () => {
@@ -150,6 +152,26 @@ describe("SliderController", () => {
     press("End"); // -> 100
     press("ArrowRight"); // already at max: no change, no event
     expect(values).toEqual([50, 100]);
+  });
+
+  it("reports nothing for a key at the lower edge or a press that lands on the current value", () => {
+    const values: number[] = [];
+    root().addEventListener("stimeo--slider:change", (e) =>
+      values.push((e as CustomEvent).detail.value),
+    );
+    track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+
+    press("Home"); // 40 -> 0
+    press("Home");
+    press("ArrowLeft");
+    press("PageDown");
+    // The left end of the track maps to the minimum the thumb already holds.
+    track().dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 0, pointerId: 41, bubbles: true }),
+    );
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 41, bubbles: true }));
+
+    expect(values).toEqual([0]);
   });
 
   it("increments by one step on ArrowRight", () => {
@@ -270,6 +292,24 @@ describe("SliderController", () => {
       new PointerEvent("pointermove", { clientX: 100, pointerId: 7, bubbles: true }),
     );
     expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+  });
+
+  it("keeps the drag alive when the track loses pointer capture", () => {
+    track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    track().dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 20, pointerId: 13, bubbles: true }),
+    );
+    expect(thumb().getAttribute("aria-valuenow")).toBe("10");
+
+    // Pointer capture is delivery, not lifetime: a consumer re-inserting the
+    // owner mid-gesture releases it, and the document listeners keep the pointer.
+    track().dispatchEvent(new PointerEvent("lostpointercapture", { pointerId: 13, bubbles: true }));
+    document.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 100, pointerId: 13, bubbles: true }),
+    );
+    expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 13, bubbles: true }));
   });
 
   it("keeps simultaneous sliders isolated by pointer identity", async () => {
@@ -500,6 +540,366 @@ describe("SliderController", () => {
 
       press("ArrowLeft");
       expect(thumb().getAttribute("aria-valuenow")).toBe("90");
+    });
+  });
+
+  // --- Hidden form field ---
+
+  describe("hidden form field", () => {
+    let commits: ReturnType<typeof captureFieldCommits>;
+
+    const mount = async (value = "40") => {
+      disconnectAndStopApplication(application);
+      document.body.innerHTML = `
+        <div data-controller="stimeo--slider"
+             data-stimeo--slider-min-value="0" data-stimeo--slider-max-value="100"
+             data-stimeo--slider-step-value="10" data-stimeo--slider-value-value="${value}">
+          <input type="hidden" name="volume" data-stimeo--slider-target="field" />
+          <div data-stimeo--slider-target="track">
+            <div data-stimeo--slider-target="thumb" role="slider" tabindex="0" aria-label="Volume"
+                 data-action="keydown->stimeo--slider#onKeydown"></div>
+          </div>
+        </div>`;
+      application = Application.start();
+      application.register("stimeo--slider", SliderController);
+      await tick();
+    };
+
+    const field = () =>
+      document.querySelector<HTMLInputElement>(
+        "[data-stimeo--slider-target='field']",
+      ) as HTMLInputElement;
+
+    beforeEach(() => {
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      commits.stop();
+    });
+
+    it("seeds the field from the value without reporting a commit", async () => {
+      await mount();
+
+      expect(field().value).toBe("40");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("writes and reports once per key the user pressed", async () => {
+      await mount();
+      commits.clear();
+
+      press("ArrowRight");
+
+      expect(field().value).toBe("50");
+      expect(commits.seen).toEqual([field()]);
+    });
+
+    it("stays silent at a bound where the value cannot move", async () => {
+      await mount("100");
+      commits.clear();
+
+      press("ArrowRight");
+
+      expect(field().value).toBe("100");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("writes a value changed by application code without reporting a commit", async () => {
+      await mount();
+      commits.clear();
+      const events = captureStateEvents("stimeo--slider", ["change", "reconcile"]);
+
+      controller().valueValue = 70;
+      controller().valueValueChanged();
+      await tick();
+      await flushMicrotasks();
+
+      expect(field().value).toBe("70");
+      expect(commits.seen).toEqual([]);
+      expect(events.names()).toEqual(["reconcile"]);
+      events.stop();
+    });
+
+    it("fills a field inserted after connect without reporting a commit", async () => {
+      await mount();
+      field().remove();
+      commits.clear();
+
+      const late = document.createElement("input");
+      late.type = "hidden";
+      late.setAttribute("data-stimeo--slider-target", "field");
+      root().append(late);
+      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      controller().fieldTargetConnected();
+      await flushMicrotasks();
+
+      expect(late.value).toBe("40");
+      expect(commits.seen).toEqual([]);
+    });
+  });
+
+  // --- Page-driven reconciliation ---
+
+  describe("page-driven reconciliation", () => {
+    let events: StateEventCapture;
+
+    const mount = async (value: string) => {
+      disconnectAndStopApplication(application);
+      document.body.innerHTML = `
+        <div data-controller="stimeo--slider"
+             data-stimeo--slider-min-value="0" data-stimeo--slider-max-value="100"
+             data-stimeo--slider-step-value="5" data-stimeo--slider-value-value="${value}">
+          <input type="hidden" name="volume" data-stimeo--slider-target="field" />
+          <div data-stimeo--slider-target="track"
+               data-action="pointerdown->stimeo--slider#onPointerDown">
+            <div data-stimeo--slider-target="thumb" role="slider" tabindex="0" aria-label="Volume"
+                 data-action="keydown->stimeo--slider#onKeydown"></div>
+          </div>
+        </div>`;
+      application = Application.start();
+      application.register("stimeo--slider", SliderController);
+      await tick();
+    };
+
+    const field = () =>
+      document.querySelector<HTMLInputElement>(
+        "[data-stimeo--slider-target='field']",
+      ) as HTMLInputElement;
+    const declared = () => root().getAttribute("data-stimeo--slider-value-value");
+    const reports = () => events.seen.map(({ name, detail }) => ({ name, detail }));
+    /** Writes `value` the way a morph does and delivers its callback directly. */
+    const declare = async (value: string) => {
+      root().setAttribute("data-stimeo--slider-value-value", value);
+      controller().valueValueChanged();
+      await flushMicrotasks();
+    };
+
+    beforeEach(() => {
+      events = captureStateEvents("stimeo--slider", ["change", "reconcile"]);
+    });
+
+    afterEach(() => {
+      events.stop();
+    });
+
+    it("keeps an off-grid declaration on connect and publishes the snapped value silently", async () => {
+      await mount("47.3");
+
+      expect(declared()).toBe("47.3");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("45");
+      expect(field().value).toBe("45");
+      expect(fraction()).toBe("0.45");
+      expect(reports()).toEqual([]);
+    });
+
+    it("reports a declaration that snaps to a new published value once as reconcile", async () => {
+      await mount("40");
+
+      await declare("47.3");
+
+      expect(declared()).toBe("47.3");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("45");
+      expect(field().value).toBe("45");
+      expect(reports()).toEqual([{ name: "reconcile", detail: { value: 45 } }]);
+    });
+
+    it("reports a move once, so a later pass that finds the same value stays silent", async () => {
+      await mount("40");
+
+      await declare("60");
+      controller().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(reports()).toEqual([{ name: "reconcile", detail: { value: 60 } }]);
+    });
+
+    it("takes a new baseline silently when it connects again after the declaration moved", async () => {
+      await mount("40");
+
+      controller().disconnect();
+      root().setAttribute("data-stimeo--slider-value-value", "70");
+      controller().connect();
+      controller().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(thumb().getAttribute("aria-valuenow")).toBe("70");
+      expect(reports()).toEqual([]);
+    });
+
+    it("stays silent when a page change leaves the published value where it was", async () => {
+      await mount("40");
+
+      // 41 snaps back onto 40, and a lower maximum still contains it.
+      await declare("41");
+      root().setAttribute("data-stimeo--slider-max-value", "90");
+      controller().maxValueChanged();
+      await flushMicrotasks();
+
+      expect(thumb().getAttribute("aria-valuenow")).toBe("40");
+      expect(thumb().getAttribute("aria-valuemax")).toBe("90");
+      expect(reports()).toEqual([]);
+    });
+
+    it("reports a user's move as change only, and the pass its Value write starts stays silent", async () => {
+      await mount("40");
+
+      press("ArrowRight");
+      controller().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(declared()).toBe("45");
+      expect(reports()).toEqual([{ name: "change", detail: { value: 45 } }]);
+    });
+
+    it("steps from the published value when the declaration is off the grid", async () => {
+      await mount("47.3");
+
+      press("ArrowRight");
+
+      expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+      expect(declared()).toBe("50");
+      expect(reports()).toEqual([{ name: "change", detail: { value: 50 } }]);
+    });
+
+    it("reports a move a reconcile subscriber makes on the next pass, from the new baseline", async () => {
+      await mount("40");
+      let redirected = false;
+      root().addEventListener("stimeo--slider:reconcile", () => {
+        if (redirected) return;
+        redirected = true;
+        root().setAttribute("data-stimeo--slider-value-value", "80");
+        controller().valueValueChanged();
+      });
+
+      await declare("60");
+      await tick();
+
+      expect(thumb().getAttribute("aria-valuenow")).toBe("80");
+      expect(reports()).toEqual([
+        { name: "reconcile", detail: { value: 60 } },
+        { name: "reconcile", detail: { value: 80 } },
+      ]);
+    });
+
+    it("keeps the baseline in step when a change subscriber moves again synchronously", async () => {
+      await mount("40");
+      let again = true;
+      // Registered after the capture, so the capture records each report before
+      // this subscriber answers it.
+      const moveAgain = (): void => {
+        if (!again) return;
+        again = false;
+        press("ArrowRight");
+      };
+      document.addEventListener("stimeo--slider:change", moveAgain);
+
+      press("ArrowRight");
+      controller().valueValueChanged();
+      await flushMicrotasks();
+      document.removeEventListener("stimeo--slider:change", moveAgain);
+
+      expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+      expect(reports()).toEqual([
+        { name: "change", detail: { value: 45 } },
+        { name: "change", detail: { value: 50 } },
+      ]);
+    });
+
+    it("drops a pass queued before disconnect", async () => {
+      await mount("40");
+
+      root().setAttribute("data-stimeo--slider-value-value", "60");
+      controller().valueValueChanged();
+      controller().disconnect();
+      await flushMicrotasks();
+
+      expect(reports()).toEqual([]);
+    });
+
+    it.each([
+      ["a script writes the value just before the key", false],
+      ["a keydown listener ahead of the slider writes the value", true],
+    ] as const)(
+      "reports a page write folded into a key once, as that key's change, when %s",
+      async (_case, ahead) => {
+        await mount("40");
+        const commits = captureFieldCommits();
+        const write = (): void => {
+          root().setAttribute("data-stimeo--slider-value-value", "100");
+        };
+        const writeAhead = (event: Event): void => {
+          if ((event as KeyboardEvent).key === "End") write();
+        };
+        if (ahead) document.addEventListener("keydown", writeAhead, true);
+        else write();
+
+        press("End");
+        document.removeEventListener("keydown", writeAhead, true);
+        controller().valueValueChanged();
+        await flushMicrotasks();
+
+        expect(thumb().getAttribute("aria-valuenow")).toBe("100");
+        expect(reports()).toEqual([{ name: "change", detail: { value: 100 } }]);
+        // The field reports the same move once, as the user's commit.
+        expect(commits.values()).toEqual(["100"]);
+        commits.stop();
+      },
+    );
+
+    it("reports a page write folded into a pointer press once, as that press's change", async () => {
+      await mount("40");
+      track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+
+      // The press lands on the value the page has just declared.
+      root().setAttribute("data-stimeo--slider-value-value", "70");
+      track().dispatchEvent(
+        new PointerEvent("pointerdown", { clientX: 140, pointerId: 51, bubbles: true }),
+      );
+      document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 51, bubbles: true }));
+      controller().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(thumb().getAttribute("aria-valuenow")).toBe("70");
+      expect(reports()).toEqual([{ name: "change", detail: { value: 70 } }]);
+    });
+
+    it("reports nothing when a page write and a key in one task end on the value last published", async () => {
+      await mount("40");
+      const commits = captureFieldCommits();
+
+      root().setAttribute("data-stimeo--slider-value-value", "45");
+      press("ArrowLeft");
+      controller().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(thumb().getAttribute("aria-valuenow")).toBe("40");
+      expect(reports()).toEqual([]);
+      expect(commits.seen).toEqual([]);
+      commits.stop();
+    });
+
+    it("keeps a key pressed inside a reconcile listener a change, and reports nothing after it", async () => {
+      await mount("40");
+      let spent = false;
+      // Registered after the capture, so the recording keeps dispatch order.
+      const pressOnce = (): void => {
+        if (spent) return;
+        spent = true;
+        press("ArrowRight");
+      };
+      document.addEventListener("stimeo--slider:reconcile", pressOnce);
+
+      await declare("60");
+      controller().valueValueChanged();
+      await flushMicrotasks();
+      document.removeEventListener("stimeo--slider:reconcile", pressOnce);
+
+      expect(thumb().getAttribute("aria-valuenow")).toBe("65");
+      expect(reports()).toEqual([
+        { name: "reconcile", detail: { value: 60 } },
+        { name: "change", detail: { value: 65 } },
+      ]);
     });
   });
 });

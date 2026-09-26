@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TabsController } from "../src/controllers/tabs_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -301,6 +302,101 @@ describe("TabsController", () => {
       await remount([]);
 
       expect(states()).toEqual(["true", "false", "false"]);
+    });
+  });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--tabs", ["change"]);
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a click with the index that moved, after the attributes", () => {
+      const states: string[] = [];
+      const root = document.querySelector("[data-controller='stimeo--tabs']") as HTMLElement;
+      root.addEventListener("stimeo--tabs:change", () => {
+        states.push(`${tabs()[1]?.getAttribute("aria-selected")} ${panels()[1]?.hidden}`);
+      });
+
+      tabs()[1]?.click();
+
+      expect(capture.names()).toEqual(["change"]);
+      expect(capture.seen[0]?.detail).toEqual({ index: 1, total: 3, previous: 0 });
+      expect(states).toEqual(["true false"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+    });
+
+    it("reports an arrow-key move", () => {
+      tabs()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+
+      expect(capture.seen[0]?.detail).toEqual({ index: 1, total: 3, previous: 0 });
+    });
+
+    it("stays silent when the selected tab is reselected", () => {
+      tabs()[0]?.click();
+
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("stays silent while connect normalizes an unmarked tablist", async () => {
+      disconnectAndStopApplication(application);
+      document.body.innerHTML = `
+        <div data-controller="stimeo--tabs">
+          <div role="tablist" aria-label="Example tabs" data-stimeo--tabs-target="list">
+            <button role="tab" id="t1" data-stimeo--tabs-target="tab">One</button>
+            <button role="tab" id="t2" data-stimeo--tabs-target="tab">Two</button>
+          </div>
+          <div role="tabpanel" id="p1" data-stimeo--tabs-target="panel">Panel one</div>
+          <div role="tabpanel" id="p2" data-stimeo--tabs-target="panel">Panel two</div>
+        </div>`;
+      const fresh = captureStateEvents("stimeo--tabs", ["change"]);
+      application = Application.start();
+      application.register("stimeo--tabs", TabsController);
+      await tick();
+
+      expect(tabs()[0]?.getAttribute("aria-selected")).toBe("true");
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+    });
+
+    it("stays silent through a disconnect and a Turbo-style reconnect", async () => {
+      tabs()[1]?.click();
+      capture.clear();
+
+      const element = document.querySelector("[data-controller='stimeo--tabs']") as HTMLElement;
+      element.remove();
+      await tick();
+      document.body.append(element);
+      await tick();
+
+      expect(capture.seen).toEqual([]);
+    });
+  });
+
+  // --- Re-entry from a subscriber ---
+
+  describe("re-entry from a subscriber", () => {
+    it("leaves focus on the tab the change handler settled on", () => {
+      const host = document.querySelector("[data-controller='stimeo--tabs']") as HTMLElement;
+      let redirected = false;
+      host.addEventListener("stimeo--tabs:change", () => {
+        if (redirected) return;
+        redirected = true;
+        tabs()[2]?.click();
+      });
+
+      tabs()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+
+      expect(tabs()[2]?.getAttribute("aria-selected")).toBe("true");
+      expect(document.activeElement).not.toBe(tabs()[1]);
     });
   });
 });

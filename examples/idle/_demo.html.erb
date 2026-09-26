@@ -1,8 +1,9 @@
 <%# Idle / session-timeout demo: the controller watches document-level activity and,
     after a short demo timeout, fires prompt -> idle; interacting again fires active.
     Real apps use a ~15-minute timeout; this demo shortens it (6s, warning at 3s) so the
-    transitions are visible. The library ships no UI, so demo.js mirrors the events into
-    the status badge below (whose labels are owned here for i18n). %>
+    transitions are visible. The two notices are declared regions: the controller owns
+    hidden on them and shows each only while its own phase holds, so both are authored
+    hidden and no consumer JS is needed. Status semantics are this markup's to give. %>
 <div
   class="idle-demo"
   data-controller="stimeo--idle"
@@ -10,11 +11,13 @@
   data-stimeo--idle-prompt-before-value="3000">
   <p class="idle-demo__hint"><%= t("components.idle.demo.hint") %></p>
   <p
-    class="idle-demo__status"
+    class="idle-demo__notice idle-demo__notice--prompt"
     role="status"
-    aria-live="polite"
-    data-idle-demo-status
-    data-label-active="<%= t("components.idle.demo.active") %>"
-    data-label-prompt="<%= t("components.idle.demo.prompt") %>"
-    data-label-idle="<%= t("components.idle.demo.idle") %>"></p>
+    data-stimeo--idle-target="prompt"
+    hidden><%= t("components.idle.demo.prompt") %></p>
+  <p
+    class="idle-demo__notice idle-demo__notice--idle"
+    role="status"
+    data-stimeo--idle-target="idle"
+    hidden><%= t("components.idle.demo.idle") %></p>
 </div>

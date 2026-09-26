@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NavigationMenuController } from "../src/controllers/navigation_menu_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -316,6 +317,119 @@ describe("NavigationMenuController", () => {
       "end of listitem, level 1, position 1, set size 2",
     ]);
   });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--navigation-menu");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a trigger click with the panel that moved, after the attributes", () => {
+      const states: string[] = [];
+      byId("t1")
+        .closest("nav")
+        ?.addEventListener("stimeo--navigation-menu:open", () => {
+          states.push(`${panelHidden("p1")} ${expanded("t1")}`);
+        });
+
+      byId("t1").click();
+
+      expect(capture.names()).toEqual(["open"]);
+      expect(capture.seen[0]?.detail).toEqual({ reason: "user", index: 0, panel: byId("p1") });
+      expect(states).toEqual(["false true"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+
+      byId("t1").click();
+      expect(capture.names()).toEqual(["open", "close"]);
+      expect(capture.reasons()).toEqual(["user", "user"]);
+    });
+
+    it("reports the outgoing close before the incoming open when panels switch", () => {
+      byId("t1").click();
+      capture.clear();
+
+      byId("t2").click();
+
+      expect(capture.names()).toEqual(["close", "open"]);
+      expect(capture.seen[0]?.detail).toEqual({ reason: "user", index: 0, panel: byId("p1") });
+      expect(capture.seen[1]?.detail).toEqual({ reason: "user", index: 1, panel: byId("p2") });
+    });
+
+    it("reports an outside click as outside and Escape as escape", () => {
+      byId("t1").click();
+      capture.clear();
+      byId("outside").click();
+
+      expect(capture.reasons()).toEqual(["outside"]);
+
+      byId("t1").click();
+      capture.clear();
+      byId("t1").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+      expect(capture.reasons()).toEqual(["escape"]);
+    });
+
+    it("reports a focusout to an outside destination as focus", () => {
+      byId("t1").click();
+      capture.clear();
+
+      byId("p1").dispatchEvent(
+        new FocusEvent("focusout", { bubbles: true, relatedTarget: byId("outside") }),
+      );
+
+      expect(capture.reasons()).toEqual(["focus"]);
+    });
+
+    it("stays silent while an arrow key only moves focus between triggers", () => {
+      byId("t1").click();
+      capture.clear();
+
+      byId("t1").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+
+      // The arrow moves the focus, it does not open or close anything.
+      expect(panelHidden("p1")).toBe(false);
+      expect(document.activeElement).toBe(byId("t2"));
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("stays silent while connect normalizes an authored-open panel", async () => {
+      disconnectAndStopApplication(application);
+      document.body.innerHTML = markup().replace(
+        'aria-expanded="false" aria-controls="p1"',
+        'aria-expanded="true" aria-controls="p1"',
+      );
+      const fresh = captureStateEvents("stimeo--navigation-menu");
+      application = Application.start();
+      application.register("stimeo--navigation-menu", NavigationMenuController);
+      await tick();
+
+      expect(panelHidden("p1")).toBe(true);
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+    });
+
+    it("stays silent through a disconnect and a Turbo-style reconnect", async () => {
+      byId("t1").click();
+      capture.clear();
+
+      const element = document.querySelector("nav") as HTMLElement;
+      element.remove();
+      await tick();
+      document.body.append(element);
+      await tick();
+
+      expect(panelHidden("p1")).toBe(true);
+      expect(capture.seen).toEqual([]);
+    });
+  });
 });
 
 describe("NavigationMenuController with openOnHover", () => {
@@ -496,6 +610,28 @@ describe("NavigationMenuController with openOnHover", () => {
       vi.advanceTimersByTime(150);
       expect(byId("p1").hidden).toBe(false); // wired again without a reconnect
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stays silent when hover reopens the panel that is already open", () => {
+    vi.useFakeTimers();
+    const capture = captureStateEvents("stimeo--navigation-menu");
+    try {
+      enter("t1");
+      vi.advanceTimersByTime(150);
+      expect(byId("p1").hidden).toBe(false);
+      capture.clear();
+
+      // The guard that refuses a re-open lives on this path only: the click
+      // action never reaches it (it toggles instead).
+      enter("t1");
+      vi.advanceTimersByTime(150);
+
+      expect(byId("p1").hidden).toBe(false);
+      expect(capture.seen).toEqual([]);
+    } finally {
+      capture.stop();
       vi.useRealTimers();
     }
   });

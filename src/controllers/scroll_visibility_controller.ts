@@ -239,7 +239,6 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
     if (notify) this.dispatch("change", { detail: { visible: next } });
   }
 
-  /** Resolves the scroll source from `root` (falling back to the window). */
   /**
    * The focus owner inside the target, or `null` when focus is elsewhere.
    *

@@ -1,10 +1,12 @@
 import { Controller } from "@hotwired/stimulus";
 import { BlurDeferral } from "../utils/blur_deferral";
+import { FrameCoalescer } from "../utils/frame_coalescer";
 import { LayoutObserver } from "../utils/layout_observer";
+import { ListenerSet } from "../utils/listener_set";
 import { logicalScrollMetrics, physicalScrollDelta } from "../utils/logical_scroll";
 import { prefersReducedMotion } from "../utils/reduced_motion";
 
-const DIRECTION_BUTTON_SELECTOR = "[data-stimeo--overflow-indicator-direction-param]";
+const DIRECTION_PARAM = "direction-param";
 
 /**
  * Headless **Overflow Indicator**: detects whether a scroll container can still
@@ -19,7 +21,6 @@ const DIRECTION_BUTTON_SELECTOR = "[data-stimeo--overflow-indicator-direction-pa
  *             data-stimeo--overflow-indicator-direction-param="start"
  *             data-action="click->stimeo--overflow-indicator#scrollByPage">‹</button>
  *     <div data-stimeo--overflow-indicator-target="viewport"
- *          data-action="scroll->stimeo--overflow-indicator#update"
  *          tabindex="0" role="region" aria-label="Products"
  *          style="overflow-x: auto;"><!-- items --></div>
  *     <button type="button" aria-label="Next"
@@ -27,11 +28,13 @@ const DIRECTION_BUTTON_SELECTOR = "[data-stimeo--overflow-indicator-direction-pa
  *             data-action="click->stimeo--overflow-indicator#scrollByPage">›</button>
  *   </div>
  *
- * The viewport's scroll position and size are watched (via the wired `scroll`
- * action, plus `LayoutObserver` for viewport/content resize, a
- * {@link MutationObserver}, and descendant load events). Optional page buttons
- * scroll one logical viewport page at a time (including RTL) and have their
- * disabled state synced to the matching direction's remaining room.
+ * The viewport's scroll position and size are watched by the controller itself:
+ * a passive `scroll` listener on the viewport, coalesced to one measurement per
+ * animation frame, plus `LayoutObserver` for viewport/content resize, a
+ * {@link MutationObserver}, and descendant load events. Nothing about the
+ * measurement is the consumer's to wire. Optional page buttons scroll one logical
+ * viewport page at a time (including RTL) and have their disabled state synced to
+ * the matching direction's remaining room.
  *
  * `change` dispatches `{ start: boolean, end: boolean }`.
  *
@@ -43,12 +46,22 @@ const DIRECTION_BUTTON_SELECTOR = "[data-stimeo--overflow-indicator-direction-pa
  * of the consumer's CSS `scroll-behavior`.
  */
 export class OverflowIndicatorController extends Controller<HTMLElement> {
+  /** The direction param above, in the namespace this controller is registered under. */
+  get #directionParam(): string {
+    return `data-${this.identifier}-${DIRECTION_PARAM}`;
+  }
+
+  /** Selects every button carrying that param. */
+  get #directionButtonSelector(): string {
+    return `[${this.#directionParam}]`;
+  }
+
   static override targets = ["viewport"];
   static override values = {
     orientation: { type: String, default: "horizontal" },
     threshold: { type: Number, default: 1 },
   };
-  static actions = ["scrollByPage", "update"] as const;
+  static actions = ["scrollByPage"] as const;
   static events = ["change"] as const;
 
   declare readonly viewportTarget: HTMLElement;
@@ -58,8 +71,13 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
   declare thresholdValue: number;
 
   readonly #layout = new LayoutObserver(() => {
-    if (this.#connected) this.update();
+    if (this.#connected) this.#refresh();
   });
+  /** Folds a burst of scrolls into one measurement per frame. */
+  readonly #frames = new FrameCoalescer();
+  /** Holds the viewport's scroll listener for exactly as long as that viewport. */
+  readonly #viewportListeners = new ListenerSet();
+  readonly #onScroll = (): void => this.#frames.schedule(() => this.#refresh());
   #connected = false;
   #observedViewport: HTMLElement | null = null;
   readonly #observedContent = new Set<Element>();
@@ -101,18 +119,19 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
   }
 
   orientationValueChanged(): void {
-    if (this.#connected) this.update();
+    if (this.#connected) this.#refresh();
   }
 
   thresholdValueChanged(): void {
-    if (this.#connected) this.update();
+    if (this.#connected) this.#refresh();
   }
 
   /**
    * Re-measures remaining scroll room and reflects the state hooks.
-   * Public so it can be wired to the viewport's `scroll`.
+   *
+   * @stimeoRenderRoot
    */
-  update(): void {
+  #refresh(): void {
     if (!this.hasViewportTarget) return;
     const vp = this.viewportTarget;
     const horizontal = this.orientationValue !== "vertical";
@@ -158,17 +177,17 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
     for (const button of this.#pendingButtonDisables.elements) {
       if (
         !button.isConnected ||
-        button.closest("[data-controller~='stimeo--overflow-indicator']") !== this.element
+        button.closest(`[data-controller~='${this.identifier}']`) !== this.element
       ) {
         this.#cancelPendingButtonDisable(button);
       }
     }
-    const buttons = this.element.querySelectorAll<HTMLButtonElement>(DIRECTION_BUTTON_SELECTOR);
+    const buttons = this.element.querySelectorAll<HTMLButtonElement>(this.#directionButtonSelector);
     for (const button of buttons) {
-      if (button.closest("[data-controller~='stimeo--overflow-indicator']") !== this.element) {
+      if (button.closest(`[data-controller~='${this.identifier}']`) !== this.element) {
         continue;
       }
-      const direction = button.getAttribute("data-stimeo--overflow-indicator-direction-param");
+      const direction = button.getAttribute(this.#directionParam);
       if (direction === "start") this.#toggleButton(button, start);
       else if (direction === "end") this.#toggleButton(button, end);
     }
@@ -270,6 +289,7 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
     if (!next) return;
 
     this.#observedViewport = next;
+    this.#viewportListeners.add(next, "scroll", this.#onScroll, { passive: true });
     this.#layout.observe(next);
     this.#layout.observeViewport();
     this.#layout.observeDescendantLoads(next);
@@ -279,7 +299,7 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
       this.#mutationObserver = new MutationObserver(() => {
         if (!this.#connected || this.#observedViewport !== next) return;
         this.#syncContentObservation();
-        this.update();
+        this.#refresh();
       });
       this.#mutationObserver.observe(this.element, {
         childList: true,
@@ -290,7 +310,7 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
       });
     }
     this.#state = null;
-    this.update();
+    this.#refresh();
   }
 
   /** Observes direct content boxes whose resize can change the viewport's scroll extent. */
@@ -311,6 +331,8 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
   }
 
   #stopObservingViewport(): void {
+    this.#frames.cancel();
+    this.#viewportListeners.dispose();
     this.#mutationObserver?.disconnect();
     this.#mutationObserver = null;
     this.#layout.unobserveDescendantLoads();

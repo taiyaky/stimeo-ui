@@ -1,6 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { KeyedTimers } from "../utils/keyed_timers";
 import { prefersReducedMotion } from "../utils/reduced_motion";
+import { TransientHooks } from "../utils/transient_hooks";
+
+/** The hook a connection may find written by an earlier, now-gone one. */
+const TRANSIENT = new TransientHooks({ attributes: ["data-highlight"] });
 
 /**
  * The connection whose removal timer currently owns an element's `data-highlight`
@@ -97,7 +101,7 @@ export class HighlightController extends Controller<HTMLElement> {
     // has to stay reachable so the next highlight can release it. Only our own claim,
     // whose timer went down with the previous disconnect, is dropped here.
     if (hookOwners.get(el) === this) hookOwners.delete(el);
-    el.removeAttribute("data-highlight");
+    TRANSIENT.reset(el);
   }
 
   /** Highlights every element child added by a childList mutation. */
@@ -109,7 +113,11 @@ export class HighlightController extends Controller<HTMLElement> {
     }
   }
 
-  /** Flags `el` with `data-highlight` and schedules its removal (unless reduced-motion). */
+  /**
+   * Flags `el` with `data-highlight` and schedules its removal (unless reduced-motion).
+   *
+   * @stimeoRuntimeOnly `duration` is the length of the one emphasis this call arms.
+   */
   #highlight(el: HTMLElement): void {
     // Reduced motion: suppress the emphasis so the element just appears — no hook,
     // no timer, no events, nothing to transition.

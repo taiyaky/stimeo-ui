@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { toFiniteNumber } from "../utils/coerce";
+import { commitField, writeField } from "../utils/field_mirror";
 import { isRtl } from "../utils/logical_scroll";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { OwnedPointerSession } from "../utils/owned_pointer_session";
@@ -58,6 +59,18 @@ interface Hsla {
  * preview and root as the `--stimeo--color` custom property and mirrored into a
  * hidden form field.
  *
+ * Text typed into the hex input is the reader's until they commit it (`change`).
+ * A repaint the page drives replaces it only when the color it shows moves, so
+ * a slider arriving or a Value rewritten without moving the color leaves the
+ * typing alone. The reader's own commit, and a hex input that arrives, are
+ * written with the color in its canonical form.
+ *
+ * A color the user committed also emits a native bubbling `change` from every
+ * hidden `field`, the way a form control does, so `stimeo--auto-submit` and
+ * form-level validation hear it; a repaint driven by the `value` Value, by a
+ * replacement field, or by the controller's own repair refreshes the mirrors
+ * silently.
+ *
  * `change` and `reconcile` dispatch
  * `{ value: string, rgba: { r: number, g: number, b: number, a: number } }`.
  *
@@ -82,12 +95,16 @@ interface Hsla {
  * listeners are released on drag end, when the slider leaves, and on `disconnect()`
  * (Turbo navigation included).
  *
- * The `value` Value carries the color in both directions: every settled color is
- * written back, so a Turbo cache restore and a form submission both carry the color
- * the user picked. An outside write — application code or a morph — re-seeds the
- * model and reports `reconcile`. The ARIA attributes, `--stimeo--color`, and the
- * mirrored input values are this controller's own output and stay in the DOM as
- * written, which is what makes the restored snapshot show the current color.
+ * The `value` Value is the page's input, and it carries the user's color back: a
+ * color the user commits is written into it before anything reports it, so a Turbo
+ * cache restore carries the color the user picked. A repaint the page drives —
+ * connecting, an `alpha` change, a `value` spelled another way or naming no color —
+ * never rewrites it, so a declared translucency comes back once `alpha` is enabled
+ * again. An outside write that names another color — application code or a
+ * morph — re-seeds the model and reports `reconcile`. The ARIA attributes,
+ * `--stimeo--color`, and the mirrored input values are this controller's own output
+ * and stay in the DOM as written, which is what makes the restored snapshot show the
+ * current color.
  *
  * The internal model is integer HSL(A), so a hex → HSL → hex round-trip is not
  * exactly bijective: a typed hex can normalize to a near (not identical) value
@@ -134,6 +151,21 @@ export class ColorPickerController extends Controller<HTMLElement> {
   #committedHex: string | null = null;
 
   /**
+   * Whether the paint about to run was asked for by this picker's own controls.
+   * The `value` Value is shared with the page — application code and a Turbo
+   * morph write it too — so the form fields and the hex input take their "did
+   * the user commit this" answer from the route, not from the Value.
+   */
+  #movedByUser = false;
+
+  /**
+   * The hex this picker last wrote into its hex input, or `null` before it wrote
+   * one. A repaint the page drives compares with it rather than with the input's
+   * text, so a color that did not move leaves what the reader is typing alone.
+   */
+  #writtenHex: string | null = null;
+
+  /**
    * Collapses a morph that swaps render inputs into one repaint, and refuses the
    * pass Stimulus delivers before `connect()`.
    */
@@ -159,14 +191,20 @@ export class ColorPickerController extends Controller<HTMLElement> {
 
   /** Adopts a color application code (or a Turbo morph) put in `value` at runtime. */
   valueValueChanged(): void {
-    // The write-back from a render lands here too, and it already matches the DOM.
+    // The write of a color the user committed lands here too, and it already
+    // matches the DOM.
     if (this.valueValue === this.#committedHex) return;
     this.#repaint.schedule();
   }
 
-  /** Hydrates a channel slider inserted or replaced at runtime. */
-  sliderTargetConnected(slider: HTMLElement): void {
-    this.#renderSlider(slider);
+  /**
+   * Hydrates a channel slider inserted or replaced at runtime through the repaint
+   * pass, which renders every slider after the batch and reports a committed
+   * color that moved. A slider arriving moves no color, so that pass reports
+   * nothing.
+   */
+  sliderTargetConnected(): void {
+    this.#repaint.schedule();
   }
 
   /** Ends a gesture whose geometry target disappeared or ceased being a target. */
@@ -176,7 +214,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
 
   /** Fills a hex input inserted or replaced at runtime with the current color. */
   hexTargetConnected(hex: HTMLInputElement): void {
-    this.#mirrorColor(hex, this.#hexString());
+    this.#writeHex(hex, this.#hexString());
   }
 
   /** Fills a form field inserted or replaced at runtime with the current color. */
@@ -276,7 +314,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
     const parsed = hexToHsla(this.hexTarget.value);
     if (!parsed) {
       // Reject invalid input by restoring the last valid hex.
-      this.hexTarget.value = this.#hexString();
+      this.#writeHex(this.hexTarget, this.#hexString());
       return;
     }
     this.#color = this.#opaqueUnlessEnabled(parsed);
@@ -308,9 +346,16 @@ export class ColorPickerController extends Controller<HTMLElement> {
    * Renders the model and reports a color the user actually moved. A key pressed
    * at a bound, a pointer that lands on the step already showing, and a re-confirmed
    * hex all leave the committed color where it was, so no `change` describes them.
+   *
+   * The color is written into `value` first — the one path that writes it — so a
+   * Turbo snapshot and a morph read the color the user picked, and a listener of
+   * the field's native `change` already finds it there.
    */
   #commitColor(): void {
     const previous = this.#committedHex;
+    const hex = this.#hexString();
+    if (this.valueValue !== hex) this.valueValue = hex;
+    this.#movedByUser = true;
     this.#render();
     if (this.#committedHex !== previous) {
       this.dispatch("change", { detail: this.#settledDetail() });
@@ -318,21 +363,29 @@ export class ColorPickerController extends Controller<HTMLElement> {
   }
 
   /**
-   * Reflects the model onto sliders, the hex input, preview, form field, and the
-   * `value` Value it serializes into.
+   * Reflects the model onto sliders, the hex input, preview, and form field. The
+   * `value` Value is left as it is.
+   *
+   * The hex input is written for the reader's own commit, which shows the color
+   * in its canonical form, and otherwise only when the hex it shows moved: a
+   * repaint the page drives that leaves the color where it is keeps text the
+   * reader has typed there and not committed.
    *
    * @stimeoRenderRoot
    */
   #render(): void {
+    const byUser = this.#movedByUser;
+    this.#movedByUser = false;
     for (const slider of this.sliderTargets) this.#renderSlider(slider);
 
     const hex = this.#hexString();
     this.#committedHex = hex;
-    // The Value carries the color, so a Turbo snapshot and a morph read the same
-    // truth the surfaces show.
-    if (this.valueValue !== hex) this.valueValue = hex;
-    if (this.hasHexTarget) this.#mirrorColor(this.hexTarget, hex);
-    for (const field of this.fieldTargets) this.#mirrorColor(field, hex);
+    if (this.hasHexTarget && (byUser || hex !== this.#writtenHex)) {
+      this.#writeHex(this.hexTarget, hex);
+    }
+    for (const field of this.fieldTargets) {
+      if (this.#mirrorColor(field, hex) && byUser) commitField(field);
+    }
     for (const preview of this.previewTargets) this.#publishColor(preview, hex);
     this.#publishColor(this.element, hex);
   }
@@ -354,9 +407,19 @@ export class ColorPickerController extends Controller<HTMLElement> {
     }
   }
 
-  /** Mirrors the color into an input, leaving an already-equal value untouched. */
-  #mirrorColor(input: HTMLInputElement, hex: string): void {
-    if (input.value !== hex) input.value = hex;
+  /** Writes `hex` into a hex input and keeps it as the hex last written there. */
+  #writeHex(input: HTMLInputElement, hex: string): void {
+    this.#writtenHex = hex;
+    this.#mirrorColor(input, hex);
+  }
+
+  /**
+   * Mirrors the color into an input, leaving an already-equal value untouched.
+   *
+   * @returns Whether the input's value moved.
+   */
+  #mirrorColor(input: HTMLInputElement, hex: string): boolean {
+    return writeField(input, hex);
   }
 
   /** Publishes the color as the consumer's CSS hook, skipping an equal value. */
@@ -377,9 +440,10 @@ export class ColorPickerController extends Controller<HTMLElement> {
     // callback that scheduled this pass has already moved the Values, so
     // re-deriving the "before" state here would always match the "after" one.
     const previous = this.#committedHex;
-    // Only a `value` that differs from the rendered color comes from outside.
-    // Re-seeding from the controller's own write-back would round-trip the model
-    // through hex and drop the hue and saturation a gray cannot carry.
+    // A `value` that equals the rendered color is the user's own commit, and
+    // re-seeding from it would round-trip the model through hex and drop the hue
+    // and saturation a gray cannot carry. Any other `value` is the page's: the
+    // model was seeded from it, or it is new, so adopting it is safe.
     if (previous !== null && this.valueValue !== previous) this.#adoptValue();
     if (!this.alphaValue) this.#color.alpha = 100;
     this.#render();

@@ -42,8 +42,9 @@ const ANCHOR_ATTRIBUTES = ["href", "data-href"];
  * closest tracked section keeps the highlight, so a table of contents never
  * goes blank.
  *
- * `data-action` on the links is optional and opts into {@link scrollTo}, which
- * scrolls the nested container instead of bouncing the whole window.
+ * `data-action` on the links is optional and opts into
+ * {@link ScrollspyController.scrollTo | scrollTo}, which scrolls the nested
+ * container instead of bouncing the whole window.
  *
  * `change` dispatches `{ id: string, link: HTMLElement }`.
  *
@@ -369,6 +370,10 @@ export class ScrollspyController extends Controller<HTMLElement> {
     this.#scrollSource = null;
   }
 
+  /**
+   * @stimeoRuntimeOnly `rootMargin` wires the observer this call installs; the active section it
+   *   republishes is the one already recorded.
+   */
   #initializeObserver(): void {
     this.#watcher.stop();
     this.#intersectionStates.clear();
@@ -451,6 +456,8 @@ export class ScrollspyController extends Controller<HTMLElement> {
    * threshold) against a freshly computed trigger line mixes two moments in
    * time, which would make the result depend on how the reader arrived at a
    * position — a smooth scroll and an instant jump to the same offset disagree.
+   *
+   * @stimeoRenderRoot
    */
   #evaluateActiveSection(): void {
     // The trigger line is `offset` px below the top of the scroll root. When a

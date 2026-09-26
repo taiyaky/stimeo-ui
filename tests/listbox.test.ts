@@ -4,7 +4,7 @@ import { ListboxController } from "../src/controllers/listbox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link ListboxController}: the APG select-only listbox —
@@ -1085,5 +1085,650 @@ describe("ListboxController typeahead", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * A selection the page moves — a morph, a Turbo Stream, a script — is the
+ * controller's to reconcile and report as `reconcile`, once per batch and only
+ * when the selection it publishes moved. The trigger label follows the same
+ * selection: with nothing selected it shows `placeholder`, else the text it held
+ * before the controller first wrote into it.
+ */
+describe("ListboxController a selection the page moves", () => {
+  let application: Application;
+
+  const fruits = ["apple", "banana", "cherry"];
+  const title = (value: string) => `${value[0]?.toUpperCase()}${value.slice(1)}`;
+  const option = (value: string, selected: boolean) => `
+    <li id="${value}" role="option" aria-selected="${selected}" data-value="${value}"
+        data-stimeo--listbox-target="option"
+        data-action="click->stimeo--listbox#select">${title(value)}</li>`;
+
+  /**
+   * A listbox nested in the one under test: its options `n1` and `n2` carry the
+   * attributes the outer listbox watches, but they are not its options.
+   */
+  const NESTED_WIDGET = `
+    <ul role="listbox" aria-label="Nested">
+      <li id="n1" role="option" aria-selected="true">One</li>
+      <li id="n2" role="option" aria-selected="false">Two</li>
+    </ul>`;
+
+  /**
+   * The listbox markup; `label` is the value span's authored text, and `nested`
+   * puts {@link NESTED_WIDGET} inside it.
+   */
+  const listbox = (
+    selected: string | null,
+    { extra = "", label = "Choose…", nested = false } = {},
+  ) => `
+    <div data-controller="stimeo--listbox" ${extra}>
+      <span id="pm-label">Fruit</span>
+      <button type="button" role="combobox" aria-haspopup="listbox" aria-expanded="false"
+              aria-controls="pm-list" aria-labelledby="pm-label pm-value"
+              data-stimeo--listbox-target="trigger"
+              data-action="click->stimeo--listbox#toggle
+                           keydown->stimeo--listbox#onTriggerKeydown">
+        <span id="pm-value" data-stimeo--listbox-target="value">${label}</span>
+      </button>
+      <ul id="pm-list" role="listbox" aria-label="Fruit" hidden
+          data-stimeo--listbox-target="list">
+        ${fruits.map((value) => option(value, value === selected)).join("")}
+      </ul>
+      ${nested ? NESTED_WIDGET : ""}
+      <input type="hidden" name="fruit" data-stimeo--listbox-target="field" />
+    </div>`;
+
+  const mount = async (html: string) => {
+    document.body.innerHTML = html;
+    application = Application.start();
+    application.register("stimeo--listbox", ListboxController);
+    await tick();
+  };
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const root = () =>
+    document.querySelector<HTMLElement>("[data-controller='stimeo--listbox']") as HTMLElement;
+  const byId = (id: string) => document.getElementById(id) as HTMLElement;
+  const label = () => (byId("pm-value").textContent ?? "").trim();
+  const field = () =>
+    document.querySelector<HTMLInputElement>(
+      "[data-stimeo--listbox-target='field']",
+    ) as HTMLInputElement;
+  const list = () => byId("pm-list");
+  const selectedIds = () =>
+    Array.from(document.querySelectorAll<HTMLElement>("[role='option']"))
+      .filter((element) => element.getAttribute("aria-selected") === "true")
+      .map((element) => element.id);
+  const openAndClick = (id: string) => {
+    byId("pm-value")
+      .closest("button")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    byId(id).click();
+  };
+
+  /**
+   * Records what the listbox reports, in order: `change:<value>`,
+   * `reconcile:<value>` and `native` for the field's bubbling `change`.
+   */
+  const record = (target: HTMLElement = root()) => {
+    const seen: string[] = [];
+    const value = (event: Event) => (event as CustomEvent<{ value: string }>).detail.value;
+    target.addEventListener("stimeo--listbox:change", (event) => {
+      seen.push(`change:${value(event)}`);
+    });
+    target.addEventListener("stimeo--listbox:reconcile", (event) => {
+      seen.push(`reconcile:${value(event)}`);
+    });
+    target.addEventListener("change", () => seen.push("native"));
+    return seen;
+  };
+
+  /** Collects, from here on, the ids of the options whose `aria-selected` is written. */
+  const optionWrites = () => {
+    const writes: string[] = [];
+    const probe = new MutationObserver((records) => {
+      for (const entry of records) {
+        const element = entry.target as HTMLElement;
+        if (element.hasAttribute("data-stimeo--listbox-target")) writes.push(element.id);
+      }
+    });
+    probe.observe(root(), { subtree: true, attributes: true, attributeFilter: ["aria-selected"] });
+    return writes;
+  };
+
+  /** What {@link witnessNoPass} writes into the field. */
+  const UNTOUCHED = "untouched";
+
+  /**
+   * Writes over the field behind the listbox's back. Only a pass or the user's
+   * selection writes the field, so the value still being there after an await
+   * shows that no pass ran in between.
+   */
+  const witnessNoPass = () => {
+    field().value = UNTOUCHED;
+  };
+
+  it("writes only the options whose state a pass changes", async () => {
+    await mount(listbox("banana"));
+    const writes = optionWrites();
+
+    byId("banana").setAttribute("aria-selected", "false");
+    byId("apple").setAttribute("aria-selected", "true");
+    await tick();
+
+    // The two writes are the page's own; the pass settles on apple without
+    // rewriting the option it leaves as it is.
+    expect(field().value).toBe("apple");
+    expect(writes).toEqual(["banana", "apple"]);
+  });
+
+  it("writes the label's ownership markers only when they change", async () => {
+    await mount(listbox("banana", { extra: 'data-stimeo--listbox-placeholder-value="Pick"' }));
+    const writes: string[] = [];
+    const probe = new MutationObserver((records) => {
+      for (const entry of records) writes.push(entry.attributeName ?? "");
+    });
+    probe.observe(byId("pm-value"), {
+      attributes: true,
+      attributeFilter: ["data-stimeo--listbox-owns-label", "data-stimeo--listbox-original-label"],
+    });
+
+    witnessNoPass();
+    byId("cherry").remove();
+    await tick();
+    expect(field().value).toBe("banana");
+    witnessNoPass();
+    root().setAttribute("data-stimeo--listbox-placeholder-value", "Pick one");
+    await tick();
+    expect(field().value).toBe("banana");
+
+    // Both passes ran, and neither moved the selection, so the markers already
+    // held what they would have written.
+    expect(writes).toEqual([]);
+
+    openAndClick("apple");
+    await tick();
+    probe.disconnect();
+
+    // The user's selection changes the label's text, and with it one marker.
+    expect(writes).toEqual(["data-stimeo--listbox-owns-label"]);
+  });
+
+  it("runs no second pass for the writes a pass makes", async () => {
+    await mount(listbox("banana"));
+    root().addEventListener("stimeo--listbox:reconcile", witnessNoPass, { once: true });
+
+    byId("banana").setAttribute("aria-selected", "false");
+    byId("apple").setAttribute("aria-selected", "true");
+    byId("cherry").setAttribute("aria-selected", "true"); // the pass writes it back
+    await tick();
+
+    expect(selectedIds()).toEqual(["apple"]);
+    expect(field().value).toBe(UNTOUCHED);
+  });
+
+  it("leaves a widget nested in the listbox to itself", async () => {
+    await mount(listbox("banana", { nested: true }));
+    const seen = record();
+    const writes = optionWrites();
+    witnessNoPass();
+
+    for (let turn = 0; turn < 10; turn += 1) {
+      byId("n1").setAttribute("aria-selected", turn % 2 ? "true" : "false");
+      byId("n2").setAttribute("aria-selected", turn % 2 ? "false" : "true");
+      await tick();
+    }
+
+    // The nested options are not this listbox's: no pass runs, and none of its own
+    // options is written.
+    expect(field().value).toBe(UNTOUCHED);
+    expect(writes).toEqual([]);
+
+    // A move on one of its own options is still reconciled.
+    move("banana", "apple");
+    await tick();
+    expect(seen).toEqual(["reconcile:apple"]);
+    expect(field().value).toBe("apple");
+  });
+
+  it("reconciles an option move that shares a batch with a nested widget's write", async () => {
+    await mount(listbox("banana", { nested: true }));
+    const seen = record();
+
+    byId("n1").setAttribute("aria-selected", "false");
+    move("banana", "apple");
+    byId("n2").setAttribute("aria-selected", "true");
+    await tick();
+
+    // The options' records sit between the nested options' in one batch, and they
+    // still start the pass.
+    expect(field().value).toBe("apple");
+    expect(label()).toBe("Apple");
+    expect(seen).toEqual(["reconcile:apple"]);
+  });
+
+  it("reports an in-place morph that moves the selection as reconcile", async () => {
+    await mount(listbox("banana"));
+    const details: Array<{ value: string; option: HTMLElement | null }> = [];
+    root().addEventListener("stimeo--listbox:reconcile", (event) => {
+      details.push((event as CustomEvent<{ value: string; option: HTMLElement | null }>).detail);
+    });
+    const seen = record();
+
+    byId("banana").setAttribute("aria-selected", "false");
+    byId("apple").setAttribute("aria-selected", "true");
+    await tick();
+
+    expect(field().value).toBe("apple");
+    expect(label()).toBe("Apple");
+    expect(seen).toEqual(["reconcile:apple"]);
+    // The detail has the same shape as `change`.
+    expect(details).toEqual([{ value: "apple", option: byId("apple") }]);
+  });
+
+  it("seeds a replaced field with the selection, without reporting", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+
+    const fresh = document.createElement("input");
+    fresh.type = "hidden";
+    fresh.name = "fruit";
+    fresh.setAttribute("data-stimeo--listbox-target", "field");
+    field().replaceWith(fresh);
+    await tick();
+
+    expect(fresh.value).toBe("banana");
+    expect(seen).toEqual([]);
+  });
+
+  it("seeds a replaced label with the selection", async () => {
+    await mount(listbox("banana"));
+
+    const fresh = document.createElement("span");
+    fresh.id = "pm-value";
+    fresh.textContent = "Choose…";
+    fresh.setAttribute("data-stimeo--listbox-target", "value");
+    byId("pm-value").replaceWith(fresh);
+    await tick();
+
+    expect(label()).toBe("Banana");
+  });
+
+  it("reports the removal of the selected option and restores the authored label", async () => {
+    await mount(listbox("banana"));
+    const details: Array<{ value: string; option: HTMLElement | null }> = [];
+    root().addEventListener("stimeo--listbox:reconcile", (event) => {
+      details.push((event as CustomEvent<{ value: string; option: HTMLElement | null }>).detail);
+    });
+    const seen = record();
+    expect(label()).toBe("Banana");
+
+    byId("banana").remove();
+    await tick();
+
+    expect(field().value).toBe("");
+    // Never the text of the option that left: the label the author wrote returns.
+    expect(label()).toBe("Choose…");
+    expect(seen).toEqual(["reconcile:"]);
+    expect(details).toEqual([{ value: "", option: null }]);
+    // Handed back, the label carries none of the controller's bookkeeping.
+    expect(byId("pm-value").hasAttribute("data-stimeo--listbox-owns-label")).toBe(false);
+    expect(byId("pm-value").hasAttribute("data-stimeo--listbox-original-label")).toBe(false);
+  });
+
+  it("shows the placeholder Value once nothing is selected", async () => {
+    await mount(
+      listbox("banana", { extra: 'data-stimeo--listbox-placeholder-value="Pick a fruit"' }),
+    );
+
+    byId("banana").remove();
+    await tick();
+
+    expect(label()).toBe("Pick a fruit");
+  });
+
+  it("empties a label that only ever showed the selection when that option leaves", async () => {
+    // The server rendered the selection's own text, so there is no empty-state
+    // text to go back to; keeping "Banana" would name an option that is gone.
+    await mount(listbox("banana", { label: "Banana" }));
+
+    byId("banana").remove();
+    await tick();
+
+    expect(label()).toBe("");
+    expect(field().value).toBe("");
+  });
+
+  it("follows a runtime placeholder while nothing is selected", async () => {
+    await mount(listbox(null, { extra: 'data-stimeo--listbox-placeholder-value="Pick"' }));
+    expect(label()).toBe("Pick");
+
+    root().setAttribute("data-stimeo--listbox-placeholder-value", "Pick one");
+    await tick();
+    expect(label()).toBe("Pick one");
+
+    root().removeAttribute("data-stimeo--listbox-placeholder-value");
+    await tick();
+    expect(label()).toBe("Choose…");
+  });
+
+  it("returns to the authored label after a cache restore", async () => {
+    // A cached snapshot keeps the label as the controller left it; what it held
+    // before has to survive in the DOM for the new instance to return to it.
+    await mount(listbox("banana"));
+    const snapshot = root().outerHTML;
+    disconnectAndStopApplication(application);
+    await mount(snapshot);
+    expect(label()).toBe("Banana");
+
+    byId("banana").remove();
+    await tick();
+
+    expect(label()).toBe("Choose…");
+  });
+
+  it("leaves a value the page rewrote alone while nothing is selected, placeholder or not", async () => {
+    await mount(listbox(null, { extra: 'data-stimeo--listbox-placeholder-value="Pick"' }));
+    expect(label()).toBe("Pick");
+
+    byId("pm-value").textContent = "Custom";
+    const pageLeft = byId("pm-value").outerHTML;
+    byId("cherry").remove(); // a pass that moves nothing
+    await tick();
+
+    expect(byId("pm-value").outerHTML).toBe(pageLeft);
+  });
+
+  it("leaves a value the page added an element to alone while nothing is selected", async () => {
+    await mount(listbox(null, { extra: 'data-stimeo--listbox-placeholder-value="Pick"' }));
+
+    byId("pm-value").insertAdjacentHTML("afterbegin", '<svg aria-hidden="true"></svg>');
+    const pageLeft = byId("pm-value").outerHTML;
+    byId("cherry").remove(); // a pass that moves nothing
+    await tick();
+
+    expect(byId("pm-value").outerHTML).toBe(pageLeft);
+  });
+
+  it("leaves a value the page added an element to when the selection leaves", async () => {
+    await mount(listbox("banana"));
+    byId("pm-value").insertAdjacentHTML("afterbegin", '<svg aria-hidden="true"></svg>');
+    const pageLeft = byId("pm-value").outerHTML;
+
+    byId("banana").remove();
+    await tick();
+
+    // The value became the page's when an element was added to it, so it keeps
+    // what the page left there instead of going back to the author's text.
+    expect(byId("pm-value").outerHTML).toBe(pageLeft);
+    expect(field().value).toBe("");
+  });
+
+  it("goes back to the text the page left in the label", async () => {
+    await mount(listbox(null));
+    byId("pm-value").textContent = "Select a fruit";
+
+    openAndClick("apple");
+    expect(label()).toBe("Apple");
+
+    byId("apple").remove();
+    await tick();
+
+    expect(label()).toBe("Select a fruit");
+  });
+
+  it("hands the selection to a selected option that arrives ahead of it", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+
+    list().insertAdjacentHTML("afterbegin", option("apricot", true));
+    await tick();
+
+    expect(selectedIds()).toEqual(["apricot"]);
+    expect(field().value).toBe("apricot");
+    expect(label()).toBe("Apricot");
+    expect(seen).toEqual(["reconcile:apricot"]);
+  });
+
+  it("follows a morph of the selected option's value", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+
+    byId("banana").setAttribute("data-value", "plantain");
+    await tick();
+
+    expect(field().value).toBe("plantain");
+    expect(seen).toEqual(["reconcile:plantain"]);
+  });
+
+  it("keeps one selected option after an in-place morph adds a second", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+
+    byId("cherry").setAttribute("aria-selected", "true");
+    await tick();
+
+    expect(selectedIds()).toEqual(["banana"]);
+    expect(field().value).toBe("banana");
+    expect(seen).toEqual([]);
+  });
+
+  it("reports nothing when the page leaves the selection where it was", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+
+    byId("cherry").remove();
+    list().insertAdjacentHTML("beforeend", option("date", false));
+    root().setAttribute("data-stimeo--listbox-placeholder-value", "Pick");
+    await tick();
+
+    expect(field().value).toBe("banana");
+    expect(label()).toBe("Banana");
+    expect(seen).toEqual([]);
+  });
+
+  it("reports nothing on connect, whatever the authored selection", async () => {
+    document.body.innerHTML = listbox("banana").replace(
+      'id="cherry" role="option" aria-selected="false"',
+      'id="cherry" role="option" aria-selected="true"',
+    );
+    const seen = record();
+    application = Application.start();
+    application.register("stimeo--listbox", ListboxController);
+    await tick();
+
+    expect(selectedIds()).toEqual(["banana"]);
+    expect(seen).toEqual([]);
+  });
+
+  it("reports a user selection as change alone", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+
+    openAndClick("cherry");
+    await tick();
+
+    expect(seen).toEqual(["native", "change:cherry"]);
+  });
+
+  it("reports one batch of page changes once, with the settled selection", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+
+    byId("banana").setAttribute("aria-selected", "false");
+    byId("cherry").remove();
+    byId("apple").setAttribute("aria-selected", "true");
+    await tick();
+
+    expect(field().value).toBe("apple");
+    expect(seen).toEqual(["reconcile:apple"]);
+  });
+
+  it("reports what a change subscriber moves right away as reconcile", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+    root().addEventListener(
+      "stimeo--listbox:change",
+      () => {
+        byId("cherry").setAttribute("aria-selected", "false");
+        byId("apple").setAttribute("aria-selected", "true");
+      },
+      { once: true },
+    );
+
+    openAndClick("cherry");
+    await tick();
+
+    expect(field().value).toBe("apple");
+    expect(label()).toBe("Apple");
+    expect(seen).toEqual(["native", "change:cherry", "reconcile:apple"]);
+  });
+
+  /** Moves the selection from `from` to `to` the way a morph does, in place. */
+  const move = (from: string, to: string) => {
+    byId(from).setAttribute("aria-selected", "false");
+    byId(to).setAttribute("aria-selected", "true");
+  };
+
+  /** Rewrites an unselected option's state unchanged: a pass that moves nothing. */
+  const unrelatedPass = (id: string) => {
+    byId(id).setAttribute("aria-selected", "false");
+  };
+
+  it("measures page moves against the selection the user made", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+
+    openAndClick("cherry");
+    await tick();
+    unrelatedPass("apple");
+    await tick();
+    move("cherry", "banana"); // the page puts back the option the user left
+    await tick();
+
+    expect(field().value).toBe("banana");
+    expect(seen).toEqual(["native", "change:cherry", "reconcile:banana"]);
+  });
+
+  it("measures page moves against the last reconcile", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+
+    move("banana", "apple");
+    await tick();
+    unrelatedPass("cherry");
+    await tick();
+    move("apple", "banana");
+    await tick();
+
+    expect(field().value).toBe("banana");
+    expect(seen).toEqual(["reconcile:apple", "reconcile:banana"]);
+  });
+
+  it("reports and mirrors what a reconcile subscriber moves right away", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+    root().addEventListener("stimeo--listbox:reconcile", () => move("apple", "cherry"), {
+      once: true,
+    });
+
+    move("banana", "apple");
+    await tick();
+
+    // The subscriber's move comes after the report, so the next pass settles it.
+    expect(field().value).toBe("cherry");
+    expect(label()).toBe("Cherry");
+    expect(seen).toEqual(["reconcile:apple", "reconcile:cherry"]);
+  });
+
+  it("measures later passes against a selection a reconcile subscriber makes", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+    root().addEventListener("stimeo--listbox:reconcile", () => openAndClick("cherry"), {
+      once: true,
+    });
+
+    move("banana", "apple");
+    await tick();
+    unrelatedPass("banana");
+    await tick();
+
+    // The report settled `apple` before the subscriber chose `cherry`, so `cherry` stays settled.
+    expect(field().value).toBe("cherry");
+    expect(seen).toEqual(["reconcile:apple", "native", "change:cherry"]);
+  });
+
+  it("mirrors the field and the label before a reconcile subscriber reads them", async () => {
+    await mount(listbox("banana"));
+    const read: string[] = [];
+    root().addEventListener("stimeo--listbox:reconcile", () => {
+      read.push(field().value, label());
+    });
+
+    move("banana", "apple");
+    await tick();
+
+    expect(read).toEqual(["apple", "Apple"]);
+  });
+
+  it("never takes its own writes for the page's", async () => {
+    await mount(listbox("banana"));
+    const writes = optionWrites();
+
+    openAndClick("cherry");
+    witnessNoPass();
+    await tick();
+
+    // The selection writes the two options it changes, once each, and its own
+    // writes start no pass.
+    expect(writes).toEqual(["banana", "cherry"]);
+    expect(field().value).toBe(UNTOUCHED);
+  });
+
+  it("lets go of the options when disconnected, so a reconnect starts quiet", async () => {
+    await mount(listbox("banana"));
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--listbox",
+    ) as ListboxController;
+    const probe = new MutationObserver(() => {});
+    probe.observe(root(), { subtree: true, attributes: true, attributeFilter: ["aria-selected"] });
+
+    controller.disconnect();
+    byId("banana").setAttribute("aria-selected", "false");
+    byId("apple").setAttribute("aria-selected", "true");
+    controller.connect();
+    probe.takeRecords();
+    expect(field().value).toBe("apple");
+    witnessNoPass();
+    for (let turn = 0; turn < 10; turn += 1) await flushMicrotasks();
+
+    // Nothing watched the options while disconnected, so no pass runs for those writes.
+    expect(probe.takeRecords()).toEqual([]);
+    expect(field().value).toBe(UNTOUCHED);
+    probe.disconnect();
+  });
+
+  it("stops watching the options once disconnected", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--listbox",
+    ) as ListboxController;
+
+    controller.disconnect();
+    byId("banana").setAttribute("aria-selected", "false");
+    byId("apple").setAttribute("aria-selected", "true");
+    await tick();
+
+    expect(field().value).toBe("banana");
+    expect(seen).toEqual([]);
   });
 });

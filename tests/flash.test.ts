@@ -10,8 +10,9 @@ import { tick } from "./helpers/timing";
 /**
  * Behavioral tests for {@link FlashController}, driven by a mocked clock: type → role
  * mapping, the Announcer bridge for initial flashes (but not dynamic inserts),
- * auto-dismiss with pause-on-hover, the `max` stacking cap, manual dismiss, dynamic
- * detection via the MutationObserver, and observer / timer teardown.
+ * auto-dismiss with pause-on-hover, the `max` stacking cap and the messages hover or
+ * focus keeps out of its reach, manual dismiss, dynamic detection via the
+ * MutationObserver, and observer / timer teardown.
  */
 
 describe("FlashController", () => {
@@ -45,6 +46,8 @@ describe("FlashController", () => {
     window.removeEventListener("stimeo--announcer:announce", onAnnounce);
     disconnectAndStopApplication(application);
     vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     document.body.innerHTML = "";
   });
 
@@ -212,6 +215,42 @@ describe("FlashController", () => {
     );
     (query("button") as HTMLButtonElement).click();
     expect(regionEl().firstElementChild).toBeNull();
+    expect(dismissed).toEqual(["user"]);
+  });
+
+  it.each([
+    [
+      "surrounded by whitespace",
+      `<div data-controller="stimeo--flash" data-stimeo--flash-duration-value="0">
+         <div data-stimeo--flash-target="region">
+           <div data-stimeo--flash-target=" message " data-flash-type="notice">Saved
+             <button data-action="stimeo--flash#dismiss">x</button>
+           </div>
+         </div>
+       </div>`,
+    ],
+    [
+      "sharing the attribute with the region name",
+      `<div data-controller="stimeo--flash" data-stimeo--flash-duration-value="0">
+         <div data-stimeo--flash-target="message region" data-flash-type="notice">Saved
+           <button data-action="stimeo--flash#dismiss">x</button>
+         </div>
+       </div>`,
+    ],
+  ])("dismisses through a close control with the target name %s", async (_label, html) => {
+    await mount(html);
+    const el = query("[data-flash-type='notice']");
+    const dismissed: string[] = [];
+    root().addEventListener("stimeo--flash:dismiss", (e) =>
+      dismissed.push((e as CustomEvent).detail.reason),
+    );
+
+    // `data-<identifier>-target` is a space-separated token list, so a name padded by
+    // whitespace or standing next to another target name still names that target —
+    // the same reading Stimulus itself applies when it resolves the target set.
+    (query("button") as HTMLButtonElement).click();
+
+    expect(el.isConnected).toBe(false);
     expect(dismissed).toEqual(["user"]);
   });
 
@@ -898,6 +937,1215 @@ describe("FlashController", () => {
     expect(el.getAttribute("data-flash-state")).toBe("visible");
     vi.advanceTimersByTime(1000);
     expect(el.isConnected).toBe(false);
+  });
+
+  // --- max changed at runtime -----------------------------------------------
+
+  type DismissDetail = { element: HTMLElement; reason: string };
+
+  /** The first word of a message's text, which names it in these tests. */
+  const nameOf = (element: Element): string | undefined =>
+    element.textContent?.trim().split(/\s+/)[0];
+
+  /** Formats a `dismiss` event as `"<reason> <name>"`. */
+  const describeDismissal = (event: Event): string => {
+    const { element, reason } = (event as CustomEvent<DismissDetail>).detail;
+    return `${reason} ${nameOf(element)}`;
+  };
+
+  /** Collects every later `dismiss` of the mounted controller, in the order reported. */
+  const recordDismissals = (): string[] => {
+    const log: string[] = [];
+    root().addEventListener("stimeo--flash:dismiss", (e) => log.push(describeDismissal(e)));
+    return log;
+  };
+
+  const shownTexts = () => Array.from(regionEl().children).map(nameOf);
+
+  const threeMessages = () =>
+    message("notice", "A") + message("notice", "B") + message("notice", "C");
+
+  it("dismisses the oldest excess with reason 'limit' when max is lowered", async () => {
+    await mount(region(threeMessages(), 'data-stimeo--flash-duration-value="0"'));
+    const dismissed = recordDismissals();
+
+    // A morph or a script that rewrites the attribute holds the stack to the new cap
+    // the way an arrival past it does: the oldest messages leave first.
+    root().setAttribute("data-stimeo--flash-max-value", "1");
+    await flush();
+
+    expect(dismissed).toEqual(["limit A", "limit B"]);
+    expect(shownTexts()).toEqual(["C"]);
+  });
+
+  it.each([
+    ["raised", "5"],
+    ["set to 0 (unlimited)", "0"],
+  ])("dismisses nothing when max is %s", async (_label, next) => {
+    await mount(
+      region(
+        threeMessages(),
+        'data-stimeo--flash-max-value="3" data-stimeo--flash-duration-value="0"',
+      ),
+    );
+    const dismissed = recordDismissals();
+
+    root().setAttribute("data-stimeo--flash-max-value", next);
+    await flush();
+    expect(dismissed).toEqual([]);
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+
+    // The same harness sees a change that does bring the cap below the count.
+    root().setAttribute("data-stimeo--flash-max-value", "2");
+    await flush();
+    expect(dismissed).toEqual(["limit A"]);
+    expect(shownTexts()).toEqual(["B", "C"]);
+  });
+
+  it("treats a max that is not a number as no cap", async () => {
+    await mount(
+      region(
+        threeMessages(),
+        'data-stimeo--flash-max-value="abc" data-stimeo--flash-duration-value="0"',
+      ),
+    );
+    const dismissed = recordDismissals();
+
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "D"));
+    await flush();
+
+    expect(dismissed).toEqual([]);
+    expect(shownTexts()).toEqual(["A", "B", "C", "D"]);
+  });
+
+  it("holds a fresh stack to the max once connect() has taken every message on", async () => {
+    const log: string[] = [];
+    class Probe extends FlashController {
+      override maxValueChanged(): void {
+        log.push(`max ${this.maxValue}`);
+        super.maxValueChanged();
+      }
+
+      override connect(): void {
+        log.push("connect");
+        super.connect();
+      }
+    }
+    const onShow = (e: Event) => log.push(`show ${(e as CustomEvent).detail.message}`);
+    const onDismiss = (e: Event) => log.push(describeDismissal(e));
+    document.addEventListener("stimeo--flash:show", onShow);
+    document.addEventListener("stimeo--flash:dismiss", onDismiss);
+    try {
+      document.body.innerHTML = region(
+        threeMessages(),
+        'data-stimeo--flash-max-value="1" data-stimeo--flash-duration-value="0"',
+      );
+      application = Application.start();
+      application.register("stimeo--flash", Probe);
+      await flush();
+
+      // The Value arrives ahead of connect(), while no message is on the stack, and trims
+      // nothing. connect() shows every message it takes on, then holds the fresh stack to
+      // the cap once, oldest first.
+      expect(log).toEqual(["max 1", "connect", "show A", "show B", "show C", "limit A", "limit B"]);
+    } finally {
+      document.removeEventListener("stimeo--flash:show", onShow);
+      document.removeEventListener("stimeo--flash:dismiss", onDismiss);
+    }
+  });
+
+  it.each([
+    [
+      "a message arrives past the cap",
+      () => regionEl().insertAdjacentHTML("beforeend", message("notice", "C")),
+    ],
+    [
+      "max is lowered below the count",
+      () => root().setAttribute("data-stimeo--flash-max-value", "1"),
+    ],
+  ])("passes over the oldest message while focus holds it when %s", async (_label, overflow) => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    const oldest = regionEl().firstElementChild as HTMLElement;
+    oldest.dispatchEvent(new Event("focusin"));
+
+    // Taking the held message away would take the focused control with it, so the
+    // cap falls on the oldest message nothing holds, on either path.
+    overflow();
+    await flush();
+
+    expect(dismissed).toEqual(["limit B"]);
+    expect(oldest.isConnected).toBe(true);
+  });
+
+  // --- the cap and a held message --------------------------------------------
+
+  /** A message with two controls, so focus can move inside it. */
+  const messageWithControls = (text: string) =>
+    `<div data-stimeo--flash-target="message" data-flash-type="notice">${text}
+       <button type="button" data-control="undo">Undo ${text}</button>
+       <button type="button" data-control="close">Close ${text}</button>
+     </div>`;
+
+  /** A message whose close button is wired to the `dismiss` action. */
+  const closableMessage = (text: string) =>
+    `<div data-stimeo--flash-target="message" data-flash-type="notice">${text}
+       <button type="button" data-action="stimeo--flash#dismiss">Close ${text}</button>
+     </div>`;
+
+  const closeButtonOf = (element: HTMLElement): HTMLButtonElement =>
+    query("button", element) as HTMLButtonElement;
+
+  /** The message element named `text`. */
+  const messageNamed = (text: string): HTMLElement => {
+    const found = Array.from(regionEl().children).find((c) => nameOf(c) === text);
+    if (!(found instanceof HTMLElement)) throw new Error(`No message ${text}`);
+    return found;
+  };
+
+  /** One of the two controls of the message named `text`. */
+  const controlOf = (text: string, name: "undo" | "close"): HTMLElement =>
+    query(`[data-control="${name}"]`, messageNamed(text));
+
+  /** Moves focus out of `from`, reporting `to` as where it went, the way a browser does. */
+  const focusOut = (from: HTMLElement, to: Element | null) =>
+    from.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: to }));
+
+  const focusIn = (into: HTMLElement, from: Element | null = null) =>
+    into.dispatchEvent(new FocusEvent("focusin", { bubbles: true, relatedTarget: from }));
+
+  it("passes over a message the pointer is over", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    messageNamed("A").dispatchEvent(new Event("mouseenter"));
+
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+
+    expect(dismissed).toEqual(["limit B"]);
+    expect(shownTexts()).toEqual(["A", "C"]);
+  });
+
+  it("holds a message that never auto-dismisses against the cap", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="0"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    messageNamed("A").dispatchEvent(new Event("focusin"));
+
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+
+    expect(dismissed).toEqual(["limit B"]);
+    expect(shownTexts()).toEqual(["A", "C"]);
+  });
+
+  it("holds a message against the cap when pauseOnHover is off, while its timer runs on", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000" ' +
+          'data-stimeo--flash-pause-on-hover-value="false"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    messageNamed("A").dispatchEvent(new Event("focusin"));
+
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+    expect(dismissed).toEqual(["limit B"]);
+
+    // `pauseOnHover` decides whether the timer waits, not whether the cap sees the hold.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(dismissed).toEqual(["limit B", "timeout A", "timeout C"]);
+  });
+
+  it("keeps the arrival past the cap while every other message is held", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    messageNamed("A").dispatchEvent(new Event("focusin"));
+    messageNamed("B").dispatchEvent(new Event("mouseenter"));
+
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+
+    expect(dismissed).toEqual([]);
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+  });
+
+  it("applies the cap again with reason 'limit' once the last hold on a message is released", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    const a = messageNamed("A");
+    a.dispatchEvent(new Event("focusin"));
+    a.dispatchEvent(new Event("mouseenter"));
+    messageNamed("B").dispatchEvent(new Event("mouseenter"));
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+
+    // Focus still holds A after the pointer leaves it, so the stack stays over the cap.
+    a.dispatchEvent(new Event("mouseleave"));
+    await flush();
+    expect(dismissed).toEqual([]);
+
+    focusOut(a, null);
+    await flush();
+    expect(dismissed).toEqual(["limit A"]);
+    expect(shownTexts()).toEqual(["B", "C"]);
+  });
+
+  it("applies nothing again for a release on a message nothing held", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    messageNamed("A").dispatchEvent(new Event("focusin"));
+    messageNamed("B").dispatchEvent(new Event("mouseenter"));
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+
+    // A pointer that never entered the arrival cannot release it, so the arrival
+    // keeps the place it was shown in.
+    messageNamed("C").dispatchEvent(new Event("mouseleave"));
+    await flush();
+
+    expect(dismissed).toEqual([]);
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+  });
+
+  it("keeps a held message while focus moves between its own controls", async () => {
+    await mount(
+      region(
+        messageWithControls("A") + messageWithControls("B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    focusIn(controlOf("A", "undo"));
+    messageNamed("B").dispatchEvent(new Event("mouseenter"));
+    regionEl().insertAdjacentHTML("beforeend", messageWithControls("C"));
+    await flush();
+
+    // Tab from one control of A to the next: focus never leaves A.
+    focusOut(controlOf("A", "undo"), controlOf("A", "close"));
+    focusIn(controlOf("A", "close"), controlOf("A", "undo"));
+    await flush();
+    expect(dismissed).toEqual([]);
+
+    focusOut(controlOf("A", "close"), document.body);
+    await flush();
+    expect(dismissed).toEqual(["limit A"]);
+  });
+
+  it("spares the message focus moves into when the cap is applied again", async () => {
+    await mount(
+      region(
+        messageWithControls("A") + messageWithControls("B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    focusIn(controlOf("A", "close"));
+    messageNamed("B").dispatchEvent(new Event("mouseenter"));
+    root().setAttribute("data-stimeo--flash-max-value", "1");
+    await flush();
+    regionEl().insertAdjacentHTML("beforeend", messageWithControls("C"));
+    await flush();
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+
+    // Focus goes from A straight to C's control. The release of A arrives before C's
+    // own focusin, so C is passed over by name rather than by a hold it has yet to get.
+    focusOut(controlOf("A", "close"), controlOf("C", "close"));
+    await flush();
+
+    expect(dismissed).toEqual(["limit A"]);
+    expect(shownTexts()).toEqual(["B", "C"]);
+  });
+
+  it.each([
+    ["moves", (m: HTMLElement) => regionEl().appendChild(m), ["limit A"], "leaving"],
+    ["removes", (m: HTMLElement) => m.remove(), [], "visible"],
+  ] as const)(
+    "applies the cap only after the release, so a caller that %s the focused message finishes first",
+    async (_label, operate, afterwards, state) => {
+      await mount(
+        region(
+          messageWithControls("A") + messageWithControls("B"),
+          'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+        ),
+      );
+      const dismissed = recordDismissals();
+      const a = messageNamed("A");
+      focusIn(controlOf("A", "close"));
+      messageNamed("B").dispatchEvent(new Event("mouseenter"));
+      root().setAttribute("data-stimeo--flash-max-value", "1");
+      await flush();
+
+      // An engine takes a focused node out with a `focusout` while the node is still in
+      // place, and carries on with the caller's operation only after that event returns.
+      focusOut(controlOf("A", "close"), null);
+      expect(a.parentNode).toBe(regionEl());
+      operate(a);
+      expect(dismissed).toEqual([]);
+
+      await flush();
+      expect(dismissed).toEqual([...afterwards]);
+      expect(a.parentNode).toBeNull();
+      // A node the stack let go of is not taken on again from the records of its move.
+      expect(a.getAttribute("data-flash-state")).toBe(state);
+      expect(shownTexts()).toEqual(["B"]);
+    },
+  );
+
+  it("does not take on a message that left the region before the stack heard of it", async () => {
+    await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="0"'));
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "Gone"));
+    const gone = regionEl().lastElementChild as HTMLElement;
+    gone.remove();
+    await flush();
+
+    expect(gone.hasAttribute("data-flash-state")).toBe(false);
+    expect(gone.hasAttribute("role")).toBe(false);
+  });
+
+  it("spares a message only in the pass that follows the move into it", async () => {
+    await mount(
+      region(
+        messageWithControls("A") + messageWithControls("B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    focusIn(controlOf("A", "close"));
+    messageNamed("B").dispatchEvent(new Event("mouseenter"));
+    root().setAttribute("data-stimeo--flash-max-value", "1");
+    await flush();
+    regionEl().insertAdjacentHTML("beforeend", messageWithControls("C"));
+    await flush();
+    focusOut(controlOf("A", "close"), controlOf("C", "close"));
+    await flush();
+    expect(dismissed).toEqual(["limit A"]);
+
+    // The pointer then comes and goes over C: the pass that release starts spares nothing.
+    messageNamed("C").dispatchEvent(new Event("mouseenter"));
+    messageNamed("C").dispatchEvent(new Event("mouseleave"));
+    await flush();
+
+    expect(dismissed).toEqual(["limit A", "limit C"]);
+  });
+
+  it("drops the pending pass of the cap when the controller disconnects", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    const a = messageNamed("A");
+    a.dispatchEvent(new Event("focusin"));
+    messageNamed("B").dispatchEvent(new Event("mouseenter"));
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+
+    focusOut(a, null);
+    flashController().disconnect();
+    await flush();
+
+    expect(dismissed).toEqual([]);
+  });
+
+  it("runs no pass of the cap pending from before a reconnect on the next connection", async () => {
+    // A is focused whenever it is shown, so B, arriving while A holds, stays past the cap,
+    // and a reconnect of the same instance applies no cap of its own.
+    const onShow = (e: Event) => {
+      const shown = e.target as HTMLElement;
+      if (nameOf(shown) === "A") shown.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    };
+    document.addEventListener("stimeo--flash:show", onShow);
+    try {
+      await mount(
+        region(
+          message("notice", "A"),
+          'data-stimeo--flash-max-value="1" data-stimeo--flash-duration-value="1000"',
+        ),
+      );
+      regionEl().insertAdjacentHTML("beforeend", message("notice", "B"));
+      await flush();
+      const dismissed = recordDismissals();
+      focusOut(messageNamed("A"), null);
+      const controller = flashController();
+      controller.disconnect();
+      controller.connect();
+      await flush();
+
+      expect(dismissed).toEqual([]);
+      expect(shownTexts()).toEqual(["A", "B"]);
+    } finally {
+      document.removeEventListener("stimeo--flash:show", onShow);
+    }
+  });
+
+  it("counts only the messages still in the region when the cap is applied again", async () => {
+    await mount(
+      region(
+        messageWithControls("A") + messageWithControls("B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    const a = messageNamed("A");
+    focusIn(controlOf("A", "close"));
+    messageNamed("B").dispatchEvent(new Event("mouseenter"));
+    regionEl().insertAdjacentHTML("beforeend", messageWithControls("C"));
+    await flush();
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+
+    // The engine ends focus with a `focusout` while the node is still in place, then the
+    // caller's removal takes it out; the stack hears of the removal only afterwards.
+    focusOut(controlOf("A", "close"), null);
+    a.remove();
+    await flush();
+
+    expect(dismissed).toEqual([]);
+    expect(shownTexts()).toEqual(["B", "C"]);
+  });
+
+  it("applies the cap again when a message something holds is closed", async () => {
+    await mount(
+      region(
+        closableMessage("A") + closableMessage("B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="60000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    messageNamed("A").dispatchEvent(new Event("mouseenter"));
+    const b = messageNamed("B");
+    closeButtonOf(b).focus();
+    root().setAttribute("data-stimeo--flash-max-value", "1");
+    await flush();
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+
+    // B's holds leave with it, so the stack is held over the cap by A alone.
+    closeButtonOf(b).click();
+    await flush();
+
+    expect(dismissed).toEqual(["user B", "limit C"]);
+    expect(shownTexts()).toEqual(["A"]);
+  });
+
+  it("applies the cap again when a message something holds runs out while pauseOnHover is off", async () => {
+    await mount(
+      region(
+        message("notice", "A"),
+        'data-stimeo--flash-max-value="1" data-stimeo--flash-duration-value="1000" ' +
+          'data-stimeo--flash-pause-on-hover-value="false"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    messageNamed("A").dispatchEvent(new Event("mouseenter"));
+    root().setAttribute("data-stimeo--flash-duration-value", "0");
+    await flush();
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "B"));
+    await flush();
+    messageNamed("B").dispatchEvent(new Event("focusin"));
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(dismissed).toEqual(["timeout A", "limit C"]);
+    expect(shownTexts()).toEqual(["B"]);
+  });
+
+  it("applies the cap again when a script takes out a message something holds", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="0"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    messageNamed("A").dispatchEvent(new Event("mouseenter"));
+    const b = messageNamed("B");
+    b.dispatchEvent(new Event("mouseenter"));
+    root().setAttribute("data-stimeo--flash-max-value", "1");
+    await flush();
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+
+    b.remove();
+    flashController().messageTargetDisconnected(b);
+    await flush();
+
+    expect(dismissed).toEqual(["limit C"]);
+    expect(shownTexts()).toEqual(["A"]);
+  });
+
+  it.each([
+    [
+      "prepended",
+      async (_a: HTMLElement): Promise<HTMLElement> => {
+        regionEl().insertAdjacentHTML("afterbegin", message("notice", "C"));
+        await flush();
+        return messageNamed("C");
+      },
+    ],
+    [
+      "moved to the front",
+      async (a: HTMLElement): Promise<HTMLElement> => {
+        regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+        await flush();
+        const c = messageNamed("C");
+        regionEl().insertBefore(c, a);
+        flashController().messageTargetDisconnected(c);
+        await flush();
+        return c;
+      },
+    ],
+  ] as const)(
+    "evicts nothing when the same instance connects again with the spared message %s",
+    async (_label, spare) => {
+      await mount(
+        region(
+          closableMessage("A") + closableMessage("B"),
+          'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="60000"',
+        ),
+      );
+      const dismissed = recordDismissals();
+      const a = messageNamed("A");
+      stubHover(a, () => true);
+      a.dispatchEvent(new Event("mouseenter"));
+      const close = closeButtonOf(messageNamed("B"));
+      close.focus();
+      const c = await spare(a);
+      expect(shownTexts()).toEqual(["C", "A", "B"]);
+
+      // `connect()` takes the messages on in DOM order, the spared one first. A reconnect of
+      // the same instance applies no cap, so nothing the stack showed goes.
+      flashController().disconnect();
+      flashController().connect();
+      await flush();
+
+      expect(dismissed).toEqual([]);
+      expect(c.isConnected).toBe(true);
+      expect(document.activeElement).toBe(close);
+    },
+  );
+
+  it("evicts nothing when Stimulus connects the same instance again with max left to its default", async () => {
+    await mount(region(threeMessages(), 'data-stimeo--flash-duration-value="0"'));
+    const dismissed = recordDismissals();
+    const instance = flashController();
+    const host = root();
+
+    // Stimulus reports the default of every Value the markup leaves out before connect().
+    host.removeAttribute("data-controller");
+    await flush();
+    host.setAttribute("data-controller", "stimeo--flash");
+    await flush();
+
+    expect(flashController()).toBe(instance);
+    expect(dismissed).toEqual([]);
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+  });
+
+  it("keeps the stack as it was on a same-instance reconnect after max changed while connected", async () => {
+    await mount(
+      region(
+        closableMessage("A") + closableMessage("B"),
+        'data-stimeo--flash-max-value="3" data-stimeo--flash-duration-value="60000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    const b = messageNamed("B");
+    stubHover(b, () => true);
+    b.dispatchEvent(new Event("mouseenter"));
+    closeButtonOf(messageNamed("A")).focus();
+    root().setAttribute("data-stimeo--flash-max-value", "1");
+    await flush();
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+
+    // The stack was held to this max while connected, so connecting again holds it to
+    // nothing new.
+    flashController().disconnect();
+    flashController().connect();
+    await flush();
+
+    expect(dismissed).toEqual([]);
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+  });
+
+  it("holds the stack to nothing new when max is written again as the same number while the same instance is away", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="0"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    const instance = flashController();
+    const host = root();
+
+    // Away, a message comes in and `max` is written again in another spelling of the
+    // same number; the reconnect finds the stack held to that max already.
+    host.removeAttribute("data-controller");
+    await flush();
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    host.setAttribute("data-stimeo--flash-max-value", "02");
+    await flush();
+    host.setAttribute("data-controller", "stimeo--flash");
+    await flush();
+
+    expect(flashController()).toBe(instance);
+    expect(dismissed).toEqual([]);
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+  });
+
+  it("holds the stack to a max that changed while the controller was away, on its next connect", async () => {
+    await mount(
+      region(
+        threeMessages(),
+        'data-stimeo--flash-max-value="3" data-stimeo--flash-duration-value="0"',
+      ),
+    );
+    const dismissed = recordDismissals();
+
+    flashController().disconnect();
+    root().setAttribute("data-stimeo--flash-max-value", "1");
+    flashController().maxValueChanged();
+    flashController().connect();
+
+    // The connect itself holds the stack to the new max, before Stimulus hears the
+    // attribute again on the connected controller.
+    expect(dismissed).toEqual(["limit A", "limit B"]);
+    await flush();
+    expect(dismissed).toEqual(["limit A", "limit B"]);
+    expect(shownTexts()).toEqual(["C"]);
+  });
+
+  it("keeps every held message when the controller connects again over the cap", async () => {
+    await mount(
+      region(
+        closableMessage("A") + closableMessage("B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="60000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    const b = messageNamed("B");
+    stubHover(b, () => true);
+    b.dispatchEvent(new Event("mouseenter"));
+    const close = closeButtonOf(messageNamed("A"));
+    close.focus();
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+
+    // Each message is taken on with the holds it has before the cap meets the next one,
+    // so the one focus is inside and the one under the pointer both stay.
+    flashController().disconnect();
+    flashController().connect();
+    await flush();
+
+    expect(dismissed).toEqual([]);
+    expect(shownTexts()).toEqual(["A", "B", "C"]);
+    expect(document.activeElement).toBe(close);
+  });
+
+  it("holds a message that focus is inside when the controller takes it on again", async () => {
+    await mount(
+      region(
+        closableMessage("A") + closableMessage("B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="60000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    const close = closeButtonOf(messageNamed("A"));
+    close.focus();
+
+    // A reconnect drops every hold; taking the messages on again reads focus back.
+    flashController().disconnect();
+    flashController().connect();
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+
+    expect(dismissed).toEqual(["limit B"]);
+    expect(document.activeElement).toBe(close);
+  });
+
+  it("keeps the timer of a message that focus is inside when the controller takes it on again", async () => {
+    await mount(region(closableMessage("A"), 'data-stimeo--flash-duration-value="1000"'));
+    const a = messageNamed("A");
+    const close = closeButtonOf(a);
+    close.focus();
+
+    flashController().disconnect();
+    flashController().connect();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(a.isConnected).toBe(true);
+    expect(document.activeElement).toBe(close);
+  });
+
+  it("holds a message that focus is inside when the controller first connects", async () => {
+    document.body.innerHTML = region(
+      closableMessage("A") + closableMessage("B"),
+      'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="60000"',
+    );
+    const close = query("button") as HTMLButtonElement;
+    close.focus();
+    application = Application.start();
+    application.register("stimeo--flash", FlashController);
+    await flush();
+    const dismissed = recordDismissals();
+
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+
+    expect(dismissed).toEqual(["limit B"]);
+    expect(document.activeElement).toBe(close);
+  });
+
+  it("holds a message that reads as hovered as it is taken on, until the pointer moves off it", async () => {
+    await mount(region("", 'data-stimeo--flash-duration-value="1000"'));
+    const incoming = document.createElement("div");
+    incoming.setAttribute("data-stimeo--flash-target", "message");
+    incoming.setAttribute("data-flash-type", "notice");
+    incoming.textContent = "A";
+    let hovered = true;
+    stubHover(incoming, () => hovered);
+
+    regionEl().append(incoming);
+    await flush();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(incoming.isConnected).toBe(true);
+
+    // The reading may date from before the message came here, so the pointer confirms it.
+    hovered = false;
+    movePointer();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(incoming.isConnected).toBe(false);
+  });
+
+  it("holds the timer of a message focused while it is being shown", async () => {
+    const onShow = (e: Event) =>
+      (e.target as HTMLElement).dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    document.addEventListener("stimeo--flash:show", onShow);
+    try {
+      await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+      const a = messageNamed("A");
+
+      // The hold lands before the timer is armed, and the timer waits for it.
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(a.isConnected).toBe(true);
+
+      focusOut(a, null);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(a.isConnected).toBe(false);
+    } finally {
+      document.removeEventListener("stimeo--flash:show", onShow);
+    }
+  });
+
+  it("lets no timer from before a reconnect dismiss a message taken on again", async () => {
+    await mount(
+      region(
+        message("notice", "A"),
+        'data-stimeo--flash-duration-value="1000" data-stimeo--flash-pause-on-hover-value="false"',
+      ),
+    );
+    const controller = application.getControllerForElementAndIdentifier(root(), "stimeo--flash");
+    if (!(controller instanceof FlashController)) throw new Error("Flash controller not connected");
+    const a = messageNamed("A");
+
+    await vi.advanceTimersByTimeAsync(500);
+    controller.disconnect();
+    root().setAttribute("data-stimeo--flash-pause-on-hover-value", "true");
+    controller.connect();
+
+    // The message is taken on again at 500ms and gets the full duration from there.
+    await vi.advanceTimersByTimeAsync(999);
+    expect(a.isConnected).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(a.isConnected).toBe(false);
+  });
+
+  it("gives a message put back after its dismissal the deadline of its new life", async () => {
+    await mount(
+      region(
+        `<div data-stimeo--flash-target="message" data-flash-type="notice">A
+           <button data-action="stimeo--flash#dismiss">x</button>
+         </div>`,
+        'data-stimeo--flash-duration-value="1000" data-stimeo--flash-pause-on-hover-value="false"',
+      ),
+    );
+    const a = messageNamed("A");
+
+    await vi.advanceTimersByTimeAsync(100);
+    (query("button", a) as HTMLButtonElement).click();
+    expect(a.isConnected).toBe(false);
+    root().setAttribute("data-stimeo--flash-pause-on-hover-value", "true");
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(100);
+    regionEl().appendChild(a);
+    await flush();
+
+    // Taken on again at 200ms: the deadline is 1200ms, whatever its first life armed.
+    await vi.advanceTimersByTimeAsync(999);
+    expect(a.isConnected).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(a.isConnected).toBe(false);
+  });
+
+  // --- a message that moves within the region -------------------------------
+
+  /** The connected controller, for the target callbacks a DOM-only environment may not deliver. */
+  const flashController = (): FlashController => {
+    const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--flash");
+    if (!(instance instanceof FlashController)) throw new Error("Flash controller not connected");
+    return instance;
+  };
+
+  /**
+   * Holds every requested animation frame until a test paints, the way an engine runs
+   * them once per frame; cancelling one drops it.
+   */
+  const stubFrames = () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextHandle = 1;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const handle = nextHandle++;
+      frames.set(handle, callback);
+      return handle;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (handle: number) => frames.delete(handle));
+    return {
+      paint: () => {
+        const due = [...frames.values()];
+        frames.clear();
+        for (const callback of due) callback(0);
+      },
+    };
+  };
+
+  /**
+   * Answers `:hover` for `element` from `hovered`. This DOM-only environment has no
+   * pointer, so the engine's answer is modelled. After a move an engine can go on
+   * answering from before the move until the pointer moves again.
+   */
+  const stubHover = (element: HTMLElement, hovered: () => boolean) => {
+    const matches = element.matches.bind(element);
+    vi.spyOn(element, "matches").mockImplementation((selector: string) =>
+      selector === ":hover" ? hovered() : matches(selector),
+    );
+  };
+
+  /** Moves the pointer somewhere on the page, the way a person does. */
+  const movePointer = () =>
+    document.body.dispatchEvent(new PointerEvent("pointermove", { bubbles: true }));
+
+  /**
+   * Reports whether the controller is listening for the pointer to move: every
+   * `pointermove` registration it makes on the document from here on, and whether one of
+   * them is still live.
+   */
+  const watchPointerListener = () => {
+    const signals: AbortSignal[] = [];
+    const add = document.addEventListener.bind(document);
+    vi.spyOn(document, "addEventListener").mockImplementation((type, listener, options) => {
+      if (type === "pointermove" && typeof options === "object" && options.signal) {
+        signals.push(options.signal);
+      }
+      add(type, listener, options);
+    });
+    return { listening: () => signals.some((signal) => !signal.aborted) };
+  };
+
+  it("keeps a hover hold a move leaves until the pointer moves, however many frames run", async () => {
+    const frames = stubFrames();
+    await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+    const a = messageNamed("A");
+    a.dispatchEvent(new Event("mouseenter"));
+    stubHover(a, () => false);
+
+    // A move fires no `mouseleave`, and `:hover` may still answer from before it: the
+    // reading says nothing about where the pointer is now.
+    regionEl().appendChild(a);
+    flashController().messageTargetDisconnected(a);
+    frames.paint();
+    frames.paint();
+    frames.paint();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(a.isConnected).toBe(true);
+  });
+
+  it("lets a hover hold go once the pointer moves and the moved message is not under it", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    const a = messageNamed("A");
+    a.dispatchEvent(new Event("mouseenter"));
+    messageNamed("B").dispatchEvent(new Event("mouseenter"));
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+    let hovered = true;
+    stubHover(a, () => hovered);
+
+    flashController().messageTargetDisconnected(a);
+    hovered = false;
+    movePointer();
+    await flush();
+
+    // The release applies the cap again, and A is the oldest message nothing holds.
+    expect(dismissed).toEqual(["limit A"]);
+  });
+
+  it("keeps the hover hold once the pointer moves over the moved message", async () => {
+    await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+    const a = messageNamed("A");
+    a.dispatchEvent(new Event("mouseenter"));
+    stubHover(a, () => true);
+
+    flashController().messageTargetDisconnected(a);
+    movePointer();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(a.isConnected).toBe(true);
+  });
+
+  it("reads hover on the first pointer movement for every message moved before it", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const [a, b] = [messageNamed("A"), messageNamed("B")];
+    a.dispatchEvent(new Event("mouseenter"));
+    b.dispatchEvent(new Event("mouseenter"));
+    stubHover(a, () => false);
+    stubHover(b, () => false);
+
+    flashController().messageTargetDisconnected(a);
+    flashController().messageTargetDisconnected(b);
+    movePointer();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect([a.isConnected, b.isConnected]).toEqual([false, false]);
+  });
+
+  it("reads a moved message's hover on the first pointer movement only", async () => {
+    await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+    const watch = watchPointerListener();
+    const a = messageNamed("A");
+    a.dispatchEvent(new Event("mouseenter"));
+    let hovered = true;
+    stubHover(a, () => hovered);
+
+    flashController().messageTargetDisconnected(a);
+    expect(watch.listening()).toBe(true);
+    movePointer();
+    expect(watch.listening()).toBe(false);
+
+    // Past the first movement the message's own `mouseleave` says when the pointer leaves.
+    hovered = false;
+    movePointer();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(a.isConnected).toBe(true);
+  });
+
+  it("reads a moved message's hover on the first pointer movement after its move only", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const [a, b] = [messageNamed("A"), messageNamed("B")];
+    a.dispatchEvent(new Event("mouseenter"));
+    b.dispatchEvent(new Event("mouseenter"));
+    let aHovered = true;
+    stubHover(a, () => aHovered);
+    stubHover(b, () => true);
+    flashController().messageTargetDisconnected(a);
+    movePointer();
+
+    // B moves later. The movement after that reads B; A is left to its own `mouseleave`.
+    aHovered = false;
+    flashController().messageTargetDisconnected(b);
+    movePointer();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(a.isConnected).toBe(true);
+  });
+
+  it("stops listening for the pointer when the controller disconnects", async () => {
+    await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+    const watch = watchPointerListener();
+    const a = messageNamed("A");
+    a.dispatchEvent(new Event("mouseenter"));
+
+    flashController().messageTargetDisconnected(a);
+    expect(watch.listening()).toBe(true);
+    flashController().disconnect();
+
+    expect(watch.listening()).toBe(false);
+  });
+
+  it("stops listening for the pointer once no moved message is left to read", async () => {
+    await mount(
+      region(
+        closableMessage("A") + closableMessage("B"),
+        'data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const watch = watchPointerListener();
+    const [a, b] = [messageNamed("A"), messageNamed("B")];
+    a.dispatchEvent(new Event("mouseenter"));
+    b.dispatchEvent(new Event("mouseenter"));
+    flashController().messageTargetDisconnected(a);
+    flashController().messageTargetDisconnected(b);
+
+    closeButtonOf(a).click();
+    expect(watch.listening()).toBe(true);
+    b.remove();
+    flashController().messageTargetDisconnected(b);
+
+    expect(watch.listening()).toBe(false);
+  });
+
+  it("forgets moves from before a reconnect", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const [a, b] = [messageNamed("A"), messageNamed("B")];
+    const controller = flashController();
+    a.dispatchEvent(new Event("mouseenter"));
+    controller.messageTargetDisconnected(a);
+    controller.disconnect();
+    controller.connect();
+    a.dispatchEvent(new Event("mouseenter"));
+    stubHover(a, () => false);
+
+    // Only B moves on this connection, so the pointer movement reads A's hover no more.
+    b.dispatchEvent(new Event("mouseenter"));
+    controller.messageTargetDisconnected(b);
+    movePointer();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(a.isConnected).toBe(true);
+  });
+
+  it("keeps the hold of a focused message that moves within the region", async () => {
+    await mount(
+      region(
+        messageWithControls("A") + messageWithControls("B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    const close = controlOf("A", "close");
+    close.focus();
+
+    // The node keeps its place and focus, as a morph that moves it with `moveBefore` leaves it.
+    flashController().messageTargetDisconnected(messageNamed("A"));
+    regionEl().insertAdjacentHTML("beforeend", messageWithControls("C"));
+    await flush();
+
+    expect(dismissed).toEqual(["limit B"]);
+    expect(document.activeElement).toBe(close);
+  });
+
+  it("lets go of a focus hold once focus is no longer in a moved message", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "B"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="1000"',
+      ),
+    );
+    const dismissed = recordDismissals();
+    // Held by a focusin while focus itself rests elsewhere: an engine that ends focus
+    // on removal without a focusout leaves exactly this behind.
+    const a = messageNamed("A");
+    a.dispatchEvent(new Event("focusin"));
+
+    flashController().messageTargetDisconnected(a);
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+
+    expect(dismissed).toEqual(["limit A"]);
+  });
+
+  it("applies a duration changed at runtime to the messages taken on after it", async () => {
+    await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+    root().setAttribute("data-stimeo--flash-duration-value", "3000");
+    await flush();
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "B"));
+    await flush();
+    const [first, second] = Array.from(regionEl().children);
+
+    // The message on screen keeps the deadline it was taken on with.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect([first?.isConnected, second?.isConnected]).toEqual([false, true]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(second?.isConnected).toBe(false);
+  });
+
+  it("applies a pauseOnHover changed at runtime to the messages taken on after it", async () => {
+    await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+    root().setAttribute("data-stimeo--flash-pause-on-hover-value", "false");
+    await flush();
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "B"));
+    await flush();
+    const [first, second] = Array.from(regionEl().children);
+
+    // The message on screen still pauses under the pointer; the one taken on after the
+    // change does not.
+    first?.dispatchEvent(new Event("mouseenter"));
+    second?.dispatchEvent(new Event("mouseenter"));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect([first?.isConnected, second?.isConnected]).toEqual([true, false]);
   });
 
   // --- values and type mapping ----------------------------------------------

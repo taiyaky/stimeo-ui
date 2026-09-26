@@ -2,6 +2,10 @@ import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { isRtl } from "../utils/logical_scroll";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { TransientHooks } from "../utils/transient_hooks";
+
+/** The hook a connection may find written by an earlier, now-gone one. */
+const TRANSIENT = new TransientHooks({ attributes: ["data-sortable-dragging"] });
 
 /** The four steps a consumer can give wording to. */
 type AnnounceKey = "grabbed" | "moved" | "dropped" | "canceled";
@@ -109,7 +113,7 @@ export class SortableController extends Controller<HTMLElement> {
   override connect(): void {
     // A drag cannot survive a navigation: drop the hook a Turbo cache snapshot
     // may have preserved mid-drag (idempotent reconnect).
-    this.element.removeAttribute("data-sortable-dragging");
+    TRANSIENT.reset(this.element);
     this.#settle.activate();
     this.element.addEventListener("stimeo--pointer-drag:start", this.#onDragStart);
     this.element.addEventListener("stimeo--pointer-drag:move", this.#onDragMove);
@@ -375,6 +379,8 @@ export class SortableController extends Controller<HTMLElement> {
    * Only transitions reach here — the pickup, a step that actually changed the
    * landing slot, and the single end of the session — so a pointer crossing the
    * same slot twice or an arrow clamped at an end stays silent.
+   *
+   * @stimeoRuntimeOnly The texts word the steps of one reorder, spoken as they happen.
    */
   #announce(key: AnnounceKey, item: HTMLElement): void {
     const template = this.#announceTemplate(key);
@@ -405,7 +411,7 @@ export class SortableController extends Controller<HTMLElement> {
 
   /** The announced item name: the authored override, else its collapsed text. */
   #nameOf(item: HTMLElement): string {
-    const authored = item.getAttribute("data-stimeo--sortable-name");
+    const authored = item.getAttribute(`data-${this.identifier}-name`);
     if (authored) return authored;
     return (item.textContent ?? "").replace(/\s+/g, " ").trim();
   }

@@ -2,8 +2,9 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PasswordRevealController } from "../src/controllers/password_reveal_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
-import { query } from "./helpers/dom";
+import { byId, query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay, tick } from "./helpers/timing";
 
@@ -418,6 +419,161 @@ describe("PasswordRevealController", () => {
     document.dispatchEvent(new Event("turbo:before-cache"));
 
     expect(input().type).toBe("text");
+  });
+
+  // --- The label pair inside the toggle -------------------------------------------
+
+  /** Mounts the button contents an author wrote, around a field in the given state. */
+  const startWithLabels = async (
+    buttonContents: string,
+    fieldType: "password" | "text" = "password",
+  ) => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--password-reveal">
+        <input type="${fieldType}" aria-label="Password" value="s3cret"
+               data-stimeo--password-reveal-target="input">
+        <button type="button" aria-pressed="false" aria-label="Show password"
+                data-stimeo--password-reveal-target="toggle"
+                data-action="stimeo--password-reveal#toggle">${buttonContents}</button>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--password-reveal", PasswordRevealController);
+    await tick();
+  };
+
+  /** A pair spelled the way a resting, masked field would be served. */
+  const LABEL_PAIR = `
+    <span data-stimeo--password-reveal-target="onLabel" hidden>Hide password</span>
+    <span data-stimeo--password-reveal-target="offLabel">Show password</span>`;
+
+  const onLabel = (root: ParentNode = document) =>
+    query("[data-stimeo--password-reveal-target='onLabel']", root);
+  const offLabel = (root: ParentNode = document) =>
+    query("[data-stimeo--password-reveal-target='offLabel']", root);
+
+  it("swaps the label pair as the field is revealed and masked again", async () => {
+    // Which half shows is a pure function of the revealed state: the pressed half
+    // is on screen exactly while the field is.
+    await startWithLabels(LABEL_PAIR);
+    expect(onLabel().hidden).toBe(true);
+    expect(offLabel().hidden).toBe(false);
+
+    toggle().click();
+    expect(onLabel().hidden).toBe(false);
+    expect(offLabel().hidden).toBe(true);
+
+    toggle().click();
+    expect(onLabel().hidden).toBe(true);
+    expect(offLabel().hidden).toBe(false);
+  });
+
+  it("corrects a label pair authored against the state it mounts onto", async () => {
+    // The authored `hidden` is not read back: the first reflection settles which
+    // half shows, so a restored DOM cannot leave a label contradicting the field.
+    await startWithLabels(`
+      <span data-stimeo--password-reveal-target="onLabel">Hide password</span>
+      <span data-stimeo--password-reveal-target="offLabel" hidden>Show password</span>`);
+
+    expect(input().type).toBe("password");
+    expect(onLabel().hidden).toBe(true);
+    expect(offLabel().hidden).toBe(false);
+  });
+
+  it("hides the resting half of a pair mounted over a revealed field", async () => {
+    // Neither half carries an authored `hidden`; the connection still leaves only
+    // the half the state owns on screen, and says nothing while it does. The
+    // capture has to predate the mount, so it listens on the document and is
+    // detached here rather than dying with the element.
+    const capture = captureStateEvents("stimeo--password-reveal", ["toggle"]);
+    try {
+      await startWithLabels(
+        `
+      <span data-stimeo--password-reveal-target="onLabel">Hide password</span>
+      <span data-stimeo--password-reveal-target="offLabel">Show password</span>`,
+        "text",
+      );
+
+      expect(onLabel().hidden).toBe(false);
+      expect(offLabel().hidden).toBe(true);
+      expect(capture.names()).toEqual([]);
+    } finally {
+      capture.stop();
+    }
+  });
+
+  it("leaves a lone label half as the author wrote it", async () => {
+    // A half whose counterpart is missing inside the same button is not a pair:
+    // hiding it would take the button's only visible label with it. The pair next
+    // to it still moves, so the silence belongs to the lone half alone.
+    document.body.innerHTML = `
+      <div data-controller="stimeo--password-reveal" id="lone">
+        <input type="password" aria-label="Password" value="s3cret"
+               data-stimeo--password-reveal-target="input">
+        <button type="button" aria-pressed="false" aria-label="Show password"
+                data-stimeo--password-reveal-target="toggle"
+                data-action="stimeo--password-reveal#toggle">
+          <span data-stimeo--password-reveal-target="onLabel">Reveal</span>
+        </button>
+      </div>
+      <div data-controller="stimeo--password-reveal" id="paired">
+        <input type="password" aria-label="Confirm password" value="s3cret"
+               data-stimeo--password-reveal-target="input">
+        <button type="button" aria-pressed="false" aria-label="Show password"
+                data-stimeo--password-reveal-target="toggle"
+                data-action="stimeo--password-reveal#toggle">${LABEL_PAIR}</button>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--password-reveal", PasswordRevealController);
+    await tick();
+
+    const lone = byId("lone");
+    const paired = byId("paired");
+    const toggleIn = (root: ParentNode) =>
+      query<HTMLButtonElement>("[data-stimeo--password-reveal-target='toggle']", root);
+
+    expect(onLabel(lone).hidden).toBe(false);
+    expect(onLabel(paired).hidden).toBe(true);
+    expect(offLabel(paired).hidden).toBe(false);
+
+    toggleIn(lone).click();
+    toggleIn(paired).click();
+
+    expect(onLabel(lone).hidden).toBe(false);
+    expect(onLabel(paired).hidden).toBe(false);
+    expect(offLabel(paired).hidden).toBe(true);
+  });
+
+  it("syncs a label pair that arrives after connect", async () => {
+    // A button re-rendered with its labels joins a field that is already revealed,
+    // so the halves describe the state they find rather than the resting markup.
+    await startWithLabels("");
+    toggle().click();
+    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+
+    const label = (name: "onLabel" | "offLabel", text: string) => {
+      const span = document.createElement("span");
+      span.textContent = text;
+      span.setAttribute("data-stimeo--password-reveal-target", name);
+      return span;
+    };
+    toggle().append(label("onLabel", "Hide password"), label("offLabel", "Show password"));
+    await tick();
+
+    expect(onLabel().hidden).toBe(false);
+    expect(offLabel().hidden).toBe(true);
+  });
+
+  it("returns the label pair to masked before the page is cached", async () => {
+    // The snapshot carries a masked field, so the button frozen with it must not
+    // offer to hide what is already hidden.
+    await startWithLabels(LABEL_PAIR);
+    toggle().click();
+    expect(onLabel().hidden).toBe(false);
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(onLabel().hidden).toBe(true);
+    expect(offLabel().hidden).toBe(false);
   });
 
   it("has no machine-detectable a11y violations in either state", async () => {

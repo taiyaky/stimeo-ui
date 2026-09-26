@@ -42,7 +42,11 @@
         data-action="click->stimeo--combobox#selectByClick">Cherry</li>
   </ul>
 
-  <%# Empty state shown when there are no matches. CSS reacts to
-      data-stimeo--combobox-empty (set on the root by the library) to reveal it. Copy via i18n. %>
-  <div class="combobox__empty"><%= t("components.combobox.empty") %></div>
+  <%# The no-results message is a region of the empty state: the library shows it while the
+      open listbox has no match and hides it otherwise, so it is authored hidden. Copy via
+      i18n. %>
+  <div
+    class="combobox__empty"
+    data-stimeo--combobox-target="empty"
+    hidden><%= t("components.combobox.demo.empty") %></div>
 </div>

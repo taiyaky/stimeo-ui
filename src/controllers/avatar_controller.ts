@@ -173,7 +173,7 @@ export class AvatarController extends Controller<HTMLElement> {
 
   /** Applies Value precedence and returns the effective raw `src` attribute. */
   #applySource(image: HTMLImageElement): string | null {
-    if (!this.element.hasAttribute("data-stimeo--avatar-src-value")) {
+    if (!this.element.hasAttribute(`data-${this.identifier}-src-value`)) {
       this.#src.return(image);
       return image.getAttribute("src");
     }

@@ -3,13 +3,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RadioGroupController } from "../src/controllers/radio_group_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link RadioGroupController}: the APG Radio Group contract
  * for custom radios — single selection via `aria-checked`, roving `tabindex`,
- * arrow navigation with selection-follows-focus, and the hidden-field mirror.
+ * arrow navigation with selection-follows-focus, the hidden-field mirror, and the
+ * `change` / `reconcile` notifications.
  */
 
 describe("RadioGroupController", () => {
@@ -472,11 +474,15 @@ describe("RadioGroupController", () => {
     expect(repairs).toEqual([]);
   });
 
-  it("silently reconciles retained radio state and submitted values after a morph", async () => {
+  it("reports a morph that moves the selection or its submitted value as reconcile, never as change", async () => {
     const customChanges: CustomEvent[] = [];
+    const repairs: Array<{ value: string; radio: HTMLElement | null }> = [];
     const nativeChanges: Event[] = [];
     root().addEventListener("stimeo--radio-group:change", (event) => {
       customChanges.push(event as CustomEvent);
+    });
+    root().addEventListener("stimeo--radio-group:reconcile", (event) => {
+      repairs.push((event as CustomEvent).detail);
     });
     field().addEventListener("change", (event) => nativeChanges.push(event));
 
@@ -488,11 +494,132 @@ describe("RadioGroupController", () => {
     expect(tabindexes()).toEqual([-1, -1, 0]);
     expect(field().value).toBe("max");
 
+    // The selected radio keeps its identity while the value it submits changes.
     radios()[2]?.setAttribute("data-value", "ultimate");
     await tick();
     expect(field().value).toBe("ultimate");
+    expect(repairs).toEqual([
+      { value: "max", radio: radios()[2] },
+      { value: "ultimate", radio: radios()[2] },
+    ]);
     expect(customChanges).toEqual([]);
     expect(nativeChanges).toEqual([]);
+  });
+
+  it("reports a value a reconcile listener rewrites with a second reconcile", async () => {
+    const events = captureStateEvents("stimeo--radio-group", ["change", "reconcile"]);
+    let spent = false;
+    // Registered after the capture, so the recording keeps dispatch order. The
+    // listener writes the attribute the way a page script does, so only
+    // observation can bring it to a pass.
+    const rewrite = (): void => {
+      if (spent) return;
+      spent = true;
+      radios()[2]?.setAttribute("data-value", "max-2");
+    };
+    document.addEventListener("stimeo--radio-group:reconcile", rewrite);
+
+    radios()[0]?.setAttribute("aria-checked", "false");
+    radios()[2]?.setAttribute("aria-checked", "true");
+    await tick();
+    await tick();
+    document.removeEventListener("stimeo--radio-group:reconcile", rewrite);
+
+    // Observation resumes before the report, so the listener's write is a page
+    // change of its own: the next pass reports it and the field follows it.
+    expect(events.seen.map(({ name, detail }) => ({ name, detail }))).toEqual([
+      { name: "reconcile", detail: { value: "max", radio: radios()[2] } },
+      { name: "reconcile", detail: { value: "max-2", radio: radios()[2] } },
+    ]);
+    expect(field().value).toBe("max-2");
+    events.stop();
+  });
+
+  it("does not report a new value on a radio that is not selected", async () => {
+    const events = captureStateEvents("stimeo--radio-group", ["change", "reconcile"]);
+
+    radios()[1]?.setAttribute("data-value", "pro-2");
+    await tick();
+    radios()[0]?.setAttribute("data-value", "basic");
+    await tick();
+
+    expect(events.names()).toEqual([]);
+    expect(field().value).toBe("basic");
+    events.stop();
+  });
+
+  it("reports a page move the user activates again before it is reconciled", async () => {
+    const events = captureStateEvents("stimeo--radio-group", ["change", "reconcile"]);
+
+    // The page moves the selection and the user activates the radio it moved to
+    // in the same task: the user changed nothing, the page did.
+    radios()[0]?.setAttribute("aria-checked", "false");
+    radios()[2]?.setAttribute("aria-checked", "true");
+    radios()[2]?.click();
+    await tick();
+
+    expect(events.seen.map(({ name, detail }) => ({ name, detail }))).toEqual([
+      { name: "reconcile", detail: { value: "max", radio: radios()[2] } },
+    ]);
+    events.stop();
+  });
+
+  it("reports nothing on connect, or when it connects again to a value moved while away", async () => {
+    const events = captureStateEvents("stimeo--radio-group", ["change", "reconcile"]);
+    const group = root();
+
+    group.removeAttribute("data-controller");
+    await tick();
+    radios()[0]?.setAttribute("data-value", "starter");
+    group.setAttribute("data-controller", "stimeo--radio-group");
+    await tick();
+
+    expect(field().value).toBe("starter");
+    expect(events.names()).toEqual([]);
+
+    // The value read on connect is the one the next move is measured from.
+    radios()[0]?.setAttribute("data-value", "basic");
+    await tick();
+    expect(events.seen.map(({ name, detail }) => ({ name, detail }))).toEqual([
+      { name: "reconcile", detail: { value: "basic", radio: radios()[0] } },
+    ]);
+    events.stop();
+  });
+
+  it("measures a later repair from a selection made inside a native change listener", async () => {
+    const events = captureStateEvents("stimeo--radio-group", ["change", "reconcile"]);
+    let spent = false;
+    // happy-dom removes a `once` listener only after it returns, so a flag keeps
+    // this listener from answering the change its own selection fires.
+    field().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      radios()[2]?.click();
+    });
+
+    radios()[1]?.click();
+    await tick();
+    // An unrelated repair runs a pass; the selection has not moved since the user made it.
+    radios()[0]?.remove();
+    await tick();
+
+    expect(events.names()).toEqual(["change", "change"]);
+    expect(field().value).toBe("max");
+    events.stop();
+  });
+
+  it("reports nothing once a focus listener disconnects the group during its repair", async () => {
+    const events = captureStateEvents("stimeo--radio-group", ["change", "reconcile"]);
+    radios()[1]?.focus();
+    root().addEventListener("focusin", () => application.unload("stimeo--radio-group"));
+
+    // Removing the focused radio moves focus inside the repair pass, and the
+    // listener disconnects the group before the pass would report.
+    radios()[1]?.remove();
+    await tick();
+
+    expect(events.names()).toEqual([]);
+    events.stop();
   });
 
   it("synchronizes a field target added or replaced at runtime", async () => {

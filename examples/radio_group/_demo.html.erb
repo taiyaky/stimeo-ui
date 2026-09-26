@@ -32,6 +32,8 @@
 
   <p class="radio-group-demo__status" aria-live="polite">
     <%= t("components.radio_group.demo.selected") %>
-    <span data-radio-value><%= t("components.radio_group.demo.none") %></span>
+    <span data-radio-value data-empty-text="<%= t("components.radio_group.demo.none") %>">
+      <%= t("components.radio_group.demo.none") %>
+    </span>
   </p>
 </div>

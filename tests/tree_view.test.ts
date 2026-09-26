@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TreeViewController } from "../src/controllers/tree_view_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
@@ -1293,6 +1294,542 @@ describe("TreeViewController", () => {
       const ghost = document.querySelector("#ghost") as HTMLElement;
       expect(ghost.hasAttribute("tabindex")).toBe(false);
       expect(document.activeElement).toBe(parent);
+    });
+  });
+
+  // --- Hidden form field ---
+
+  describe("hidden form field", () => {
+    let commits: ReturnType<typeof captureFieldCommits>;
+
+    const withField = (selectedLabel: string | null = null) =>
+      `<ul data-controller="stimeo--tree-view" role="tree" aria-label="Files">
+        <input type="hidden" name="path" data-stimeo--tree-view-target="field" />
+        ${item("src", `data-value="src" aria-selected="${selectedLabel === "src"}" tabindex="0"`)}
+        ${item("readme.md", 'data-value="readme.md" aria-selected="false" tabindex="-1"')}
+        ${item("no-value", 'aria-selected="false" tabindex="-1"')}
+      </ul>`;
+
+    const field = () =>
+      document.querySelector<HTMLInputElement>(
+        "[data-stimeo--tree-view-target='field']",
+      ) as HTMLInputElement;
+
+    beforeEach(() => {
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      commits.stop();
+    });
+
+    it("seeds the authored selection without reporting a commit", async () => {
+      await mount(withField("src"));
+
+      expect(field().value).toBe("src");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("submits an empty value while nothing is selected", async () => {
+      await mount(withField());
+
+      expect(field().value).toBe("");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("writes and reports once per selection the user made", async () => {
+      await mount(withField());
+      commits.clear();
+
+      click(byLabel("readme.md"));
+
+      expect(field().value).toBe("readme.md");
+      expect(commits.seen).toEqual([field()]);
+    });
+
+    it("submits an empty value for a selected item that carries none", async () => {
+      await mount(withField());
+      commits.clear();
+
+      click(byLabel("no-value"));
+
+      expect(field().value).toBe("");
+      expect(commits.seen).toEqual([]);
+    });
+  });
+
+  // --- A selection the page moves ---
+
+  describe("a selection the page moves", () => {
+    /** A flat tree of `values`, each item carrying `data-value` and its label. */
+    const flat = (values: readonly string[], selected: string | null) =>
+      tree(`
+        <input type="hidden" name="path" data-stimeo--tree-view-target="field" />
+        ${values
+          .map((value, index) =>
+            item(
+              value,
+              `data-value="${value}" aria-selected="${value === selected}" tabindex="${
+                index === 0 ? 0 : -1
+              }"`,
+            ),
+          )
+          .join("")}`);
+
+    const field = () =>
+      document.querySelector<HTMLInputElement>(
+        "[data-stimeo--tree-view-target='field']",
+      ) as HTMLInputElement;
+    const selectedValues = () =>
+      items()
+        .filter((element) => element.getAttribute("aria-selected") === "true")
+        .map((element) => element.dataset.value);
+
+    /**
+     * Records what the tree reports, in order: `select:<value>`,
+     * `reconcile:<value>` (`none` for a `null` item) and `native` for the
+     * field's bubbling `change`.
+     */
+    const record = (target: HTMLElement = root()) => {
+      const seen: string[] = [];
+      const value = (event: Event) =>
+        (event as CustomEvent<{ item: HTMLElement | null }>).detail.item?.dataset.value ?? "none";
+      target.addEventListener("stimeo--tree-view:select", (event) => {
+        seen.push(`select:${value(event)}`);
+      });
+      target.addEventListener("stimeo--tree-view:reconcile", (event) => {
+        seen.push(`reconcile:${value(event)}`);
+      });
+      target.addEventListener("change", () => seen.push("native"));
+      return seen;
+    };
+
+    /** Collects, from here on, the values of the items whose `aria-selected` is written. */
+    const itemWrites = () => {
+      const writes: string[] = [];
+      const probe = new MutationObserver((records) => {
+        for (const entry of records) {
+          const element = entry.target as HTMLElement;
+          if (element.getAttribute("role") === "treeitem") writes.push(element.dataset.value ?? "");
+        }
+      });
+      probe.observe(root(), {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["aria-selected"],
+      });
+      return writes;
+    };
+
+    /** What {@link witnessNoPass} writes into the field. */
+    const UNTOUCHED = "untouched";
+
+    /**
+     * Writes over the field behind the tree's back. Only a pass or the user's
+     * selection writes the field, so the value still being there after an await
+     * shows that no pass ran in between.
+     */
+    const witnessNoPass = () => {
+      field().value = UNTOUCHED;
+    };
+
+    it("writes only the items whose state a pass changes", async () => {
+      await mount(flat(["a", "b", "c", "d", "e", "f"], "a"));
+      const writes = itemWrites();
+
+      byLabel("a").setAttribute("aria-selected", "false");
+      byLabel("b").setAttribute("aria-selected", "true");
+      await tick();
+
+      // The two writes are the page's own; the pass settles on `b` without
+      // rewriting the items it leaves as they are.
+      expect(field().value).toBe("b");
+      expect(writes).toEqual(["a", "b"]);
+    });
+
+    it("writes only the items a user selection changes", async () => {
+      await mount(flat(["a", "b", "c", "d", "e", "f"], "a"));
+      const writes = itemWrites();
+
+      click(byLabel("d"));
+      await tick();
+
+      // The selection moves from `a` to `d`; the items that stay unselected are
+      // not rewritten.
+      expect(field().value).toBe("d");
+      expect(writes).toEqual(["a", "d"]);
+    });
+
+    it("runs no second pass for the writes a pass makes", async () => {
+      await mount(flat(["a", "b", "c"], "a"));
+      root().addEventListener("stimeo--tree-view:reconcile", witnessNoPass, { once: true });
+
+      byLabel("a").setAttribute("aria-selected", "false");
+      byLabel("b").setAttribute("aria-selected", "true");
+      byLabel("c").setAttribute("aria-selected", "true"); // the pass writes it back
+      await tick();
+
+      expect(selectedValues()).toEqual(["b"]);
+      expect(field().value).toBe(UNTOUCHED);
+    });
+
+    /**
+     * A tree of `a` (selected), `b` and `c`, where `c` holds a listbox: its options
+     * `n1` and `n2` carry the attributes the tree watches, but they are not the
+     * tree's items.
+     */
+    const treeWithNestedWidget = () =>
+      tree(`
+        <input type="hidden" name="path" data-stimeo--tree-view-target="field" />
+        ${item("a", 'data-value="a" aria-selected="true" tabindex="0"')}
+        ${item("b", 'data-value="b" aria-selected="false" tabindex="-1"')}
+        ${item(
+          "c",
+          'data-value="c" aria-selected="false" tabindex="-1"',
+          `<ul role="listbox" aria-label="Nested">
+             <li id="n1" role="option" aria-selected="true">One</li>
+             <li id="n2" role="option" aria-selected="false">Two</li>
+           </ul>`,
+        )}`);
+
+    it("leaves a widget nested in an item to itself", async () => {
+      await mount(treeWithNestedWidget());
+      const seen = record();
+      const writes = itemWrites();
+      witnessNoPass();
+
+      for (let turn = 0; turn < 10; turn += 1) {
+        document.getElementById("n1")?.setAttribute("aria-selected", turn % 2 ? "true" : "false");
+        document.getElementById("n2")?.setAttribute("aria-selected", turn % 2 ? "false" : "true");
+        await tick();
+      }
+
+      // The nested options are not the tree's items: no pass runs, and no item is written.
+      expect(field().value).toBe(UNTOUCHED);
+      expect(writes).toEqual([]);
+
+      // A move on one of the tree's own items is still reconciled.
+      move("a", "b");
+      await tick();
+      expect(seen).toEqual(["reconcile:b"]);
+      expect(field().value).toBe("b");
+    });
+
+    it("reconciles an item move that shares a batch with a nested widget's write", async () => {
+      await mount(treeWithNestedWidget());
+      const seen = record();
+
+      document.getElementById("n1")?.setAttribute("aria-selected", "false");
+      move("a", "b");
+      document.getElementById("n2")?.setAttribute("aria-selected", "true");
+      await tick();
+
+      // The items' records sit between the nested options' in one batch, and they
+      // still start the pass.
+      expect(field().value).toBe("b");
+      expect(seen).toEqual(["reconcile:b"]);
+    });
+
+    it("reports an in-place morph that moves the selection as reconcile", async () => {
+      await mount(flat(["a", "b", "c"], "a"));
+      const seen = record();
+
+      byLabel("a").setAttribute("aria-selected", "false");
+      byLabel("b").setAttribute("aria-selected", "true");
+      await tick();
+
+      expect(field().value).toBe("b");
+      expect(seen).toEqual(["reconcile:b"]);
+    });
+
+    it("reports the removal of the selected item as a reconcile with no item", async () => {
+      await mount(flat(["a", "b", "c"], "b"));
+      const details: Array<{ item: HTMLElement | null }> = [];
+      root().addEventListener("stimeo--tree-view:reconcile", (event) => {
+        details.push((event as CustomEvent<{ item: HTMLElement | null }>).detail);
+      });
+      const seen = record();
+
+      removeItem(byLabel("b"));
+      await tick();
+
+      expect(field().value).toBe("");
+      expect(seen).toEqual(["reconcile:none"]);
+      expect(details).toEqual([{ item: null }]);
+    });
+
+    it("hands the selection to a selected item that arrives ahead of it", async () => {
+      await mount(flat(["a", "b", "c"], "b"));
+      const seen = record();
+
+      byLabel("a").insertAdjacentHTML(
+        "afterend",
+        item("z", 'data-value="z" aria-selected="true" tabindex="-1"'),
+      );
+      controller().itemTargetConnected();
+      await tick();
+
+      expect(selectedValues()).toEqual(["z"]);
+      expect(field().value).toBe("z");
+      expect(seen).toEqual(["reconcile:z"]);
+    });
+
+    it("follows a morph of the selected item's value", async () => {
+      await mount(flat(["a", "b"], "a"));
+      const seen = record();
+
+      byLabel("a").setAttribute("data-value", "a2");
+      await tick();
+
+      expect(field().value).toBe("a2");
+      expect(seen).toEqual(["reconcile:a2"]);
+    });
+
+    it("keeps one selected item after an in-place morph adds a second", async () => {
+      await mount(flat(["a", "b"], "a"));
+      const seen = record();
+
+      byLabel("b").setAttribute("aria-selected", "true");
+      await tick();
+
+      expect(selectedValues()).toEqual(["a"]);
+      expect(field().value).toBe("a");
+      expect(seen).toEqual([]);
+    });
+
+    it("reports nothing when the page leaves the selection where it was", async () => {
+      await mount(flat(["a", "b", "c"], "a"));
+      const seen = record();
+
+      removeItem(byLabel("c"));
+      root().insertAdjacentHTML("beforeend", item("d", 'data-value="d" aria-selected="false"'));
+      controller().itemTargetConnected();
+      await tick();
+
+      expect(field().value).toBe("a");
+      expect(seen).toEqual([]);
+    });
+
+    it("seeds a replaced field without reporting", async () => {
+      await mount(flat(["a", "b"], "b"));
+      const seen = record();
+
+      const replacement = document.createElement("input");
+      replacement.type = "hidden";
+      replacement.name = "path";
+      replacement.setAttribute("data-stimeo--tree-view-target", "field");
+      field().replaceWith(replacement);
+      controller().fieldTargetConnected();
+      await tick();
+
+      expect(replacement.value).toBe("b");
+      expect(seen).toEqual([]);
+    });
+
+    it("reports nothing on connect, whatever the authored selection", async () => {
+      document.body.innerHTML = flat(["a", "b"], null).replace(
+        'data-value="b" aria-selected="false"',
+        'data-value="b" aria-selected="true"',
+      );
+      const seen = record();
+      application = Application.start();
+      application.register("stimeo--tree-view", TreeViewController);
+      await tick();
+
+      expect(field().value).toBe("b");
+      expect(seen).toEqual([]);
+    });
+
+    it("reports a user selection as select alone", async () => {
+      await mount(flat(["a", "b"], "a"));
+      const seen = record();
+
+      click(byLabel("b"));
+      await tick();
+
+      expect(seen).toEqual(["native", "select:b"]);
+    });
+
+    it("reports one batch of page changes once, with the settled selection", async () => {
+      await mount(flat(["a", "b", "c"], "a"));
+      const seen = record();
+
+      byLabel("a").setAttribute("aria-selected", "false");
+      removeItem(byLabel("c"));
+      byLabel("b").setAttribute("aria-selected", "true");
+      await tick();
+
+      expect(field().value).toBe("b");
+      expect(seen).toEqual(["reconcile:b"]);
+    });
+
+    it("reports what a select subscriber moves right away as reconcile", async () => {
+      await mount(flat(["a", "b", "c"], "a"));
+      const seen = record();
+      root().addEventListener(
+        "stimeo--tree-view:select",
+        () => {
+          byLabel("b").setAttribute("aria-selected", "false");
+          byLabel("c").setAttribute("aria-selected", "true");
+        },
+        { once: true },
+      );
+
+      click(byLabel("b"));
+      await tick();
+
+      expect(field().value).toBe("c");
+      expect(seen).toEqual(["native", "select:b", "reconcile:c"]);
+    });
+
+    /** Moves the selection from `from` to `to` the way a morph does, in place. */
+    const move = (from: string, to: string) => {
+      byLabel(from).setAttribute("aria-selected", "false");
+      byLabel(to).setAttribute("aria-selected", "true");
+    };
+
+    /** Rewrites an unselected item's state unchanged: a pass that moves nothing. */
+    const unrelatedPass = (value: string) => {
+      byLabel(value).setAttribute("aria-selected", "false");
+    };
+
+    it("measures page moves against the selection the user made", async () => {
+      await mount(flat(["a", "b", "c"], "a"));
+      const seen = record();
+
+      click(byLabel("b"));
+      await tick();
+      unrelatedPass("c");
+      await tick();
+      move("b", "a"); // the page puts back the item the user left
+      await tick();
+
+      expect(field().value).toBe("a");
+      expect(seen).toEqual(["native", "select:b", "reconcile:a"]);
+    });
+
+    it("measures page moves against the last reconcile", async () => {
+      await mount(flat(["a", "b", "c"], "a"));
+      const seen = record();
+
+      move("a", "b");
+      await tick();
+      unrelatedPass("c");
+      await tick();
+      move("b", "a");
+      await tick();
+
+      expect(field().value).toBe("a");
+      expect(seen).toEqual(["reconcile:b", "reconcile:a"]);
+    });
+
+    it("reports and mirrors what a reconcile subscriber moves right away", async () => {
+      await mount(flat(["a", "b", "c"], "a"));
+      const seen = record();
+      root().addEventListener("stimeo--tree-view:reconcile", () => move("b", "c"), {
+        once: true,
+      });
+
+      move("a", "b");
+      await tick();
+
+      // The subscriber's move comes after the report, so the next pass settles it.
+      expect(field().value).toBe("c");
+      expect(seen).toEqual(["reconcile:b", "reconcile:c"]);
+    });
+
+    it("measures later passes against a selection a reconcile subscriber makes", async () => {
+      await mount(flat(["a", "b", "c", "d"], "a"));
+      const seen = record();
+      root().addEventListener("stimeo--tree-view:reconcile", () => click(byLabel("d")), {
+        once: true,
+      });
+
+      move("a", "b");
+      await tick();
+      unrelatedPass("c");
+      await tick();
+
+      // The report settled `b` before the subscriber selected `d`, so `d` stays settled.
+      expect(field().value).toBe("d");
+      expect(seen).toEqual(["reconcile:b", "native", "select:d"]);
+    });
+
+    it("mirrors the field before a reconcile subscriber reads it", async () => {
+      await mount(flat(["a", "b"], "a"));
+      const read: string[] = [];
+      root().addEventListener("stimeo--tree-view:reconcile", () => read.push(field().value));
+
+      move("a", "b");
+      await tick();
+
+      expect(read).toEqual(["b"]);
+    });
+
+    it("never takes its own writes for the page's", async () => {
+      await mount(flat(["a", "b"], "a"));
+      const writes = itemWrites();
+
+      click(byLabel("b"));
+      witnessNoPass();
+      await tick();
+
+      // The selection writes the two items it changes, once each, and its own
+      // writes start no pass.
+      expect(writes).toEqual(["a", "b"]);
+      expect(field().value).toBe(UNTOUCHED);
+    });
+
+    it("drops a queued pass when disconnected", async () => {
+      await mount(flat(["a", "b"], "a"));
+      const seen = record();
+
+      byLabel("a").setAttribute("aria-selected", "false");
+      byLabel("b").setAttribute("aria-selected", "true");
+      controller().itemTargetConnected(); // queues the selection pass
+      controller().disconnect();
+      await tick();
+
+      expect(field().value).toBe("a");
+      expect(seen).toEqual([]);
+    });
+
+    it("lets go of the items when disconnected, so a reconnect starts quiet", async () => {
+      await mount(flat(["a", "b"], "a"));
+      const instance = controller();
+      const probe = new MutationObserver(() => {});
+      probe.observe(root(), {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["aria-selected"],
+      });
+
+      instance.disconnect();
+      byLabel("a").setAttribute("aria-selected", "false");
+      byLabel("b").setAttribute("aria-selected", "true");
+      instance.connect();
+      probe.takeRecords();
+      expect(field().value).toBe("b");
+      witnessNoPass();
+      for (let turn = 0; turn < 10; turn += 1) await flushMicrotasks();
+
+      // Nothing watched the items while disconnected, so no pass runs for those writes.
+      expect(probe.takeRecords()).toEqual([]);
+      expect(field().value).toBe(UNTOUCHED);
+      probe.disconnect();
+    });
+
+    it("stops watching the items once disconnected", async () => {
+      await mount(flat(["a", "b"], "a"));
+      const seen = record();
+
+      controller().disconnect();
+      byLabel("a").setAttribute("aria-selected", "false");
+      byLabel("b").setAttribute("aria-selected", "true");
+      await tick();
+
+      expect(field().value).toBe("a");
+      expect(seen).toEqual([]);
     });
   });
 });

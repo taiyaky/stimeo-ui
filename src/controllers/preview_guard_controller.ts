@@ -1,6 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { StylePropertyLease } from "../utils/style_property_lease";
+import { TransientHooks } from "../utils/transient_hooks";
+
+/** The hook a connection may find written by an earlier, now-gone one. */
+const TRANSIENT = new TransientHooks({ attributes: ["data-preview-hidden"] });
 
 /**
  * Headless **preview guard** (Hotwire-specific): hides or placeholders a volatile element
@@ -66,7 +70,7 @@ export class PreviewGuardController extends Controller<HTMLElement> {
     // instead — against the `placeholder` as it stands now, since a morph can swap it
     // while the element is detached, where the value callback has no connection to act on.
     if (this.#hidden) this.#reguard();
-    else this.element.removeAttribute("data-preview-hidden");
+    else TRANSIENT.reset(this.element);
     this.#beforeCache.activate();
     if (typeof MutationObserver !== "undefined") {
       this.#observer = new MutationObserver(() => this.#sync());
@@ -133,6 +137,8 @@ export class PreviewGuardController extends Controller<HTMLElement> {
    * first would reconnect the whole subtree for an instant. Only a change of *form* —
    * to or from the empty placeholder — has to revert, and the focus the guard is holding
    * carries across it rather than being handed back and taken again.
+   *
+   * @stimeoRenderRoot
    */
   #reguard(): void {
     if (this.#savedNodes && this.placeholderValue !== "") {

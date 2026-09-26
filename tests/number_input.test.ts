@@ -9,7 +9,8 @@ import { flushMicrotasks, tick } from "./helpers/timing";
 /**
  * Behavioral tests for {@link NumberInputController}: the APG Spinbutton contract
  * — step increment/decrement, range clamping and step snapping, PageUp/PageDown,
- * Home/End, bound-disabled buttons, focus retention, and the `change` event.
+ * Home/End, bound-disabled buttons, focus retention, the `change` event, and the
+ * `reconcile` event for a number the page moves.
  */
 
 describe("NumberInputController", () => {
@@ -63,6 +64,98 @@ describe("NumberInputController", () => {
       root(),
       "stimeo--number-input",
     ) as NumberInputController;
+
+  /** Native form events seen on the input, in dispatch order. */
+  const nativeEvents = (): string[] => {
+    const seen: string[] = [];
+    for (const type of ["input", "change"]) {
+      input().addEventListener(type, () => seen.push(type));
+    }
+    return seen;
+  };
+
+  /** The controller's own `change` detail values, in dispatch order. */
+  const customChanges = (): unknown[] => {
+    const seen: unknown[] = [];
+    root().addEventListener("stimeo--number-input:change", (event) => {
+      seen.push((event as CustomEvent).detail.value);
+    });
+    return seen;
+  };
+
+  // A native `<input type="number">` reports arrow and spinner edits as `input`
+  // then `change`. This widget owns that stepping, so it owes the same pair on
+  // the same element — a form listening for either otherwise never hears the edit.
+  it("reports a button step the way the browser reports its own", () => {
+    const native = nativeEvents();
+    const custom = customChanges();
+
+    incrementBtn().click();
+
+    expect(input().value).toBe("10");
+    expect(native).toEqual(["input", "change"]);
+    expect(custom).toEqual([10]);
+  });
+
+  it("reports an arrow-key step the same way", () => {
+    const native = nativeEvents();
+
+    press("ArrowUp");
+
+    expect(input().value).toBe("10");
+    expect(native).toEqual(["input", "change"]);
+  });
+
+  it("stays silent on a step the bounds refuse", () => {
+    const native = nativeEvents();
+
+    press("ArrowDown"); // already at the minimum
+
+    expect(input().value).toBe("0");
+    expect(native).toEqual([]);
+  });
+
+  // The synthesized `change` re-enters the widget through its own markup
+  // contract; the committed value is settled before it is dispatched, so the
+  // re-entry finds nothing to commit and stops there.
+  it("does not commit twice when its own change re-enters", () => {
+    const custom = customChanges();
+
+    incrementBtn().click();
+
+    expect(custom).toEqual([10]);
+    expect(input().value).toBe("10");
+  });
+
+  // The browser reports what its control shows. Typing leaves an entry the widget
+  // has not accepted yet, and a step from there still moves the control's value —
+  // so the form has to hear it, even though the committed number did not move and
+  // `change` (which means "the user settled on a number") stays quiet.
+  it("reports a step that moves the field away from an unconfirmed entry", () => {
+    press("ArrowUp"); // settle on 10 so the step below lands back on it
+    const native = nativeEvents();
+    const custom = customChanges();
+
+    input().value = "15"; // typed, never confirmed: no native `change` yet
+    press("ArrowDown"); // steps from 15 back down to 10
+
+    expect(input().value).toBe("10");
+    expect(native).toEqual(["input", "change"]);
+    // The settled number never moved, so this is not a value the user chose.
+    expect(custom).toEqual([]);
+  });
+
+  // Typing is bound to the native `change`, so the browser has already reported
+  // this edit; adding another pair would double every keystroke a form sees.
+  it("adds nothing to an edit the browser already reported", () => {
+    const native = nativeEvents();
+
+    input().value = "40";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(input().value).toBe("40");
+    expect(native).toEqual(["change"]);
+  });
 
   it("disables the decrement button at the minimum on connect", () => {
     expect(input().value).toBe("0");
@@ -279,7 +372,7 @@ describe("NumberInputController", () => {
     expect(input().value).toBe("5");
   });
 
-  it("silently reconciles a morphed range without dispatching change", async () => {
+  it("reconciles a morphed range without dispatching change", async () => {
     const changes = vi.fn();
     root().addEventListener("stimeo--number-input:change", changes);
     input().value = "90";
@@ -352,6 +445,22 @@ describe("NumberInputController", () => {
     expect(changes).not.toHaveBeenCalled();
   });
 
+  it("leaves a native number field's text to the engine, which never holds full-width digits", () => {
+    const changes = vi.fn();
+    root().addEventListener("stimeo--number-input:change", changes);
+    input().value = "30";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(changes).toHaveBeenCalledOnce();
+
+    // A number field's value is a valid floating-point number or empty, so the
+    // engine drops full-width text before the controller reads anything.
+    input().value = "３４";
+    expect(input().value).toBe("");
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(input().value).toBe("");
+    expect(changes).toHaveBeenCalledOnce();
+  });
+
   it("uses the finite minimum to derive button state for a blank input", async () => {
     root().setAttribute("data-stimeo--number-input-min-value", "-10");
     input().value = "";
@@ -391,32 +500,235 @@ describe("NumberInputController", () => {
     expect(disabledStatesAtFocus).toEqual([false]);
   });
 
-  it("silently reconciles a replaced input and seeds its event baseline", async () => {
-    const changes = vi.fn();
-    root().addEventListener("stimeo--number-input:change", changes);
-    const replacement = input().cloneNode(true) as HTMLInputElement;
-    replacement.value = "23";
+  /** Every `change` and `reconcile` value the root dispatches, in order. */
+  const reports = () => {
+    const seen: string[] = [];
+    for (const type of ["change", "reconcile"]) {
+      root().addEventListener(`stimeo--number-input:${type}`, (event) => {
+        seen.push(`${type}:${(event as CustomEvent<{ value: number }>).detail.value}`);
+      });
+    }
+    return seen;
+  };
 
+  /** Swaps the input for a copy holding `value`, the way a morph replaces it. */
+  const replaceInput = (value: string) => {
+    const replacement = input().cloneNode(true) as HTMLInputElement;
+    replacement.value = value;
     input().replaceWith(replacement);
+    return replacement;
+  };
+
+  it("reports a replaced input whose value moved as reconcile, and seeds its event baseline", async () => {
+    const seen = reports();
+    const replacement = replaceInput("23");
     await tick();
 
     expect(input()).toBe(replacement);
     expect(input().value).toBe("20");
     expect(decrementBtn().disabled).toBe(false);
-    expect(changes).not.toHaveBeenCalled();
+    expect(seen).toEqual(["reconcile:20"]);
 
     input().dispatchEvent(new Event("change", { bubbles: true }));
-    expect(changes).not.toHaveBeenCalled();
+    expect(seen).toEqual(["reconcile:20"]);
     press("ArrowUp");
     expect(input().value).toBe("30");
-    expect(changes).toHaveBeenCalledOnce();
+    expect(seen).toEqual(["reconcile:20", "change:30"]);
 
-    const atMaximum = input().cloneNode(true) as HTMLInputElement;
-    atMaximum.value = "100";
-    input().replaceWith(atMaximum);
+    replaceInput("100");
     await tick();
     expect(incrementBtn().disabled).toBe(true);
-    expect(changes).toHaveBeenCalledOnce();
+    expect(seen).toEqual(["reconcile:20", "change:30", "reconcile:100"]);
+  });
+
+  it("stays silent when a replaced input shows the value already committed", async () => {
+    const seen = reports();
+
+    replaceInput("0");
+    await tick();
+
+    expect(input().value).toBe("0");
+    expect(seen).toEqual([]);
+  });
+
+  it("reports a replaced input that brings a number into a blank field", async () => {
+    input().value = "";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    const seen = reports();
+
+    replaceInput("40");
+    await tick();
+
+    expect(seen).toEqual(["reconcile:40"]);
+  });
+
+  it("reports nothing when the page empties the field, as a user emptying it does", async () => {
+    press("ArrowUp");
+    const seen = reports();
+
+    replaceInput("");
+    await tick();
+    expect(input().value).toBe("");
+    expect(seen).toEqual([]);
+
+    // A user emptying the field reports nothing either.
+    replaceInput("30");
+    await tick();
+    input().value = "";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(seen).toEqual(["reconcile:30"]);
+
+    replaceInput("40");
+    await tick();
+    expect(seen).toEqual(["reconcile:30", "reconcile:40"]);
+  });
+
+  it("keeps the value shown as the baseline while no input is present", async () => {
+    const seen = reports();
+    const removed = input();
+    const container = removed.parentElement as HTMLElement;
+
+    removed.remove();
+    await tick();
+    const same = removed.cloneNode(true) as HTMLInputElement;
+    same.value = "0";
+    container.insertBefore(same, incrementBtn());
+    await tick();
+    expect(seen).toEqual([]);
+
+    same.remove();
+    await tick();
+    const moved = removed.cloneNode(true) as HTMLInputElement;
+    moved.value = "30";
+    container.insertBefore(moved, incrementBtn());
+    await tick();
+
+    expect(seen).toEqual(["reconcile:30"]);
+  });
+
+  /** Takes the root out of the page and puts it back, which connects the same instance again. */
+  const moveRoot = async () => {
+    const el = root();
+    el.remove();
+    await tick();
+    document.body.append(el);
+    await tick();
+  };
+
+  it("reports nothing when the same instance connects again, even for a value it normalizes", async () => {
+    const seen = reports();
+    const instance = controller();
+    input().value = "23";
+
+    await moveRoot();
+
+    expect(controller()).toBe(instance);
+    expect(input().value).toBe("20");
+    expect(seen).toEqual([]);
+  });
+
+  it("keeps the number shown as the baseline when the same instance connects again without an input", async () => {
+    const seen = reports();
+    const instance = controller();
+    const removed = input();
+    const container = removed.parentElement as HTMLElement;
+
+    removed.remove();
+    await tick();
+    await moveRoot();
+    const same = removed.cloneNode(true) as HTMLInputElement;
+    same.value = "0";
+    container.insertBefore(same, incrementBtn());
+    await tick();
+
+    expect(controller()).toBe(instance);
+    expect(seen).toEqual([]);
+  });
+
+  it("reports another number that arrives after the same instance connected again without an input", async () => {
+    const seen = reports();
+    const removed = input();
+    const container = removed.parentElement as HTMLElement;
+
+    removed.remove();
+    await tick();
+    await moveRoot();
+    const moved = removed.cloneNode(true) as HTMLInputElement;
+    moved.value = "30";
+    container.insertBefore(moved, incrementBtn());
+    await tick();
+
+    expect(seen).toEqual(["reconcile:30"]);
+  });
+
+  it("reports the first input's number when a new instance connected without one", async () => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = `
+      <div data-controller="stimeo--number-input" data-stimeo--number-input-step-value="10"></div>`;
+    application = Application.start();
+    application.register("stimeo--number-input", NumberInputController);
+    await tick();
+    const seen = reports();
+
+    root().insertAdjacentHTML(
+      "beforeend",
+      `<input type="number" value="20" aria-label="Quantity"
+              data-stimeo--number-input-target="input" />`,
+    );
+    await tick();
+
+    expect(seen).toEqual(["reconcile:20"]);
+  });
+
+  it("reports one batch of range and step changes once", async () => {
+    const seen = reports();
+
+    root().setAttribute("data-stimeo--number-input-max-value", "54");
+    root().setAttribute("data-stimeo--number-input-min-value", "10");
+    root().setAttribute("data-stimeo--number-input-step-value", "5");
+    await tick();
+
+    expect(input().value).toBe("10");
+    expect(seen).toEqual(["reconcile:10"]);
+  });
+
+  it("reports nothing on connect, even for a value it normalizes", async () => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = `
+      <div data-controller="stimeo--number-input" data-stimeo--number-input-step-value="10">
+        <input type="number" value="23" aria-label="Quantity"
+               data-stimeo--number-input-target="input" />
+      </div>`;
+    const seen: string[] = [];
+    const listening = new AbortController();
+    for (const type of ["change", "reconcile"]) {
+      document.addEventListener(`stimeo--number-input:${type}`, () => seen.push(type), {
+        signal: listening.signal,
+      });
+    }
+    application = Application.start();
+    application.register("stimeo--number-input", NumberInputController);
+    await tick();
+    listening.abort();
+
+    expect(input().value).toBe("20");
+    expect(seen).toEqual([]);
+  });
+
+  it("measures a step a reconcile listener takes from the value just reported", async () => {
+    const seen = reports();
+    let answered = false;
+    root().addEventListener("stimeo--number-input:reconcile", () => {
+      if (answered) return;
+      answered = true;
+      press("ArrowUp");
+    });
+
+    replaceInput("23");
+    await tick();
+
+    expect(input().value).toBe("30");
+    expect(seen).toEqual(["reconcile:20", "change:30"]);
   });
 
   it("rebinds pointer focus guards when a step button is replaced", async () => {
@@ -587,6 +899,80 @@ describe("NumberInputController on a custom spinbutton host", () => {
     expect(input().getAttribute("aria-valuemax")).toBe("99");
   });
 
+  it("holds a range reconciliation while the field is composing, and runs it once the composition ends", async () => {
+    const repairs: unknown[] = [];
+    root().addEventListener("stimeo--number-input:reconcile", (event) => {
+      repairs.push((event as CustomEvent).detail);
+    });
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    input().value = "3４";
+    root().setAttribute("data-stimeo--number-input-max-value", "2");
+    controller().maxValueChanged();
+    await flushMicrotasks();
+
+    // The uncommitted text is the IME's, so the clamp waits for it.
+    expect(input().value).toBe("3４");
+    expect(repairs).toEqual([]);
+
+    // A cancelled conversion leaves the field with the text it started from.
+    input().value = "3";
+    input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    await flushMicrotasks();
+
+    expect(input().value).toBe("2");
+    expect(repairs).toEqual([{ value: 2 }]);
+  });
+
+  it("runs a held reconciliation once, not again at the next composition's end", async () => {
+    const repairs: unknown[] = [];
+    root().addEventListener("stimeo--number-input:reconcile", (event) => {
+      repairs.push((event as CustomEvent).detail);
+    });
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    root().setAttribute("data-stimeo--number-input-max-value", "2");
+    controller().maxValueChanged();
+    await flushMicrotasks();
+    input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    await flushMicrotasks();
+    expect(repairs).toEqual([{ value: 2 }]);
+
+    // Typed text waits for the user's own `change`; only a held pass reads it early.
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    input().value = "5";
+    input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    await flushMicrotasks();
+
+    expect(input().value).toBe("5");
+    expect(repairs).toEqual([{ value: 2 }]);
+  });
+
+  it("reconciles a replacement at once when the composing input itself is replaced", async () => {
+    const old = input();
+    old.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    root().setAttribute("data-stimeo--number-input-max-value", "2");
+    controller().maxValueChanged();
+    await flushMicrotasks();
+    expect(old.value).toBe("3");
+
+    const replacement = old.cloneNode(true) as HTMLInputElement;
+    replacement.value = "3";
+    old.replaceWith(replacement);
+    await tick();
+
+    // The composition was the old field's and left with it, so nothing holds the
+    // replacement back; the old field's text is neither read nor rewritten.
+    expect(input()).toBe(replacement);
+    expect(replacement.value).toBe("2");
+    expect(old.value).toBe("3");
+
+    // The old field's composition ending reaches nothing: text typed into the
+    // replacement since then still waits for the user's own commit.
+    replacement.value = "5";
+    old.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    await flushMicrotasks();
+    expect(replacement.value).toBe("5");
+  });
+
   it("yields arrow keys throughout IME composition", () => {
     const perEvent = new KeyboardEvent("keydown", {
       key: "ArrowUp",
@@ -611,6 +997,99 @@ describe("NumberInputController on a custom spinbutton host", () => {
     input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
     input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
     expect(input().value).toBe("4");
+  });
+});
+
+/**
+ * A text-type spinbutton shows the text an IME confirms, full-width digits and
+ * signs included, and the controller reads that text on every path: a commit, a
+ * step, a connection, and a reconciliation the composition held back.
+ */
+describe("NumberInputController with full-width input on a text field", () => {
+  let application: Application;
+
+  const mount = async (value: string) => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--number-input"
+           data-stimeo--number-input-min-value="-100"
+           data-stimeo--number-input-max-value="100"
+           data-stimeo--number-input-step-value="1">
+        <input type="text" role="spinbutton" inputmode="numeric" value="${value}"
+               aria-label="Offset" data-stimeo--number-input-target="input"
+               data-action="change->stimeo--number-input#onInput
+                            keydown->stimeo--number-input#onKeydown" />
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--number-input", NumberInputController);
+    await tick();
+  };
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const root = () =>
+    document.querySelector<HTMLElement>("[data-controller='stimeo--number-input']") as HTMLElement;
+  const input = () =>
+    document.querySelector<HTMLInputElement>(
+      "[data-stimeo--number-input-target='input']",
+    ) as HTMLInputElement;
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--number-input",
+    ) as NumberInputController;
+  const commit = (text: string) => {
+    input().value = text;
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  it("commits full-width digits and a full-width minus as the number they show", async () => {
+    await mount("0");
+    const changes: unknown[] = [];
+    root().addEventListener("stimeo--number-input:change", (event) => {
+      changes.push((event as CustomEvent).detail.value);
+    });
+
+    commit("３４");
+    expect(input().value).toBe("34");
+    expect(input().getAttribute("aria-valuenow")).toBe("34");
+    commit("－５");
+    expect(input().value).toBe("-5");
+    expect(changes).toEqual([34, -5]);
+  });
+
+  it("steps from full-width text the field holds", async () => {
+    await mount("0");
+    input().value = "３４";
+    input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    expect(input().value).toBe("35");
+  });
+
+  it("reads a full-width value the markup brings when it connects", async () => {
+    await mount("３４");
+    expect(input().value).toBe("34");
+    expect(input().getAttribute("aria-valuenow")).toBe("34");
+  });
+
+  it("reads full-width digits an IME confirmed when the held reconciliation runs", async () => {
+    await mount("0");
+    const repairs: unknown[] = [];
+    root().addEventListener("stimeo--number-input:reconcile", (event) => {
+      repairs.push((event as CustomEvent).detail);
+    });
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    input().value = "３４";
+    root().setAttribute("data-stimeo--number-input-max-value", "20");
+    controller().maxValueChanged();
+    await flushMicrotasks();
+    expect(input().value).toBe("３４");
+
+    input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    await flushMicrotasks();
+    expect(input().value).toBe("20");
+    expect(repairs).toEqual([{ value: 20 }]);
   });
 });
 
@@ -865,6 +1344,30 @@ describe("NumberInputController press-and-hold", () => {
     controller().connect();
     incrementBtn().click(); // the first click after reconnect must step
     expect(input().value).toBe("30");
+  });
+
+  it("reports every repeat step the way the browser reports its own", () => {
+    const seen: string[] = [];
+    for (const type of ["input", "change"]) {
+      input().addEventListener(type, () => seen.push(type));
+    }
+
+    pointerdown(incrementBtn());
+    vi.advanceTimersByTime(400); // first repeat -> 10
+    vi.advanceTimersByTime(80 * 3); // -> 20, 30, 40
+    releaseOutside();
+
+    expect(input().value).toBe("40");
+    expect(seen).toEqual([
+      "input",
+      "change",
+      "input",
+      "change",
+      "input",
+      "change",
+      "input",
+      "change",
+    ]);
   });
 
   it("dispatches change once per committed repeat step", () => {

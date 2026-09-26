@@ -24,9 +24,9 @@ export interface ParsedAttr {
   readonly column: number;
   /**
    * Length of the token at {@link column} **as the source spells it**, when
-   * that differs from {@link name} — the Ruby key a `data:` hash entry was
-   * written as, whose rendered attribute name appears nowhere in the file.
-   * `undefined` on parsed markup, where the two are the same text.
+   * that differs from {@link ParsedAttr.name | name} — the Ruby key a `data:` hash
+   * entry was written as, whose rendered attribute name appears nowhere in the
+   * file. `undefined` on parsed markup, where the two are the same text.
    */
   readonly sourceLength?: number;
   /**

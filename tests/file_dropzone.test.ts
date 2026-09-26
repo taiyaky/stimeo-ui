@@ -83,6 +83,16 @@ describe("FileDropzoneController", () => {
     announcements.push((event as CustomEvent<{ message: string }>).detail.message);
   };
 
+  /** A row that names itself `item name` and holds the button and thumb inside it. */
+  const NESTED_NAME_TEMPLATE = `
+    <template data-stimeo--file-dropzone-target="itemTemplate">
+      <li data-stimeo--file-dropzone-target="item name">
+        <img data-stimeo--file-dropzone-target="thumb" alt="" hidden />
+        <button type="button" aria-label="Remove {name}"
+                data-stimeo--file-dropzone-target="remove">×</button>
+      </li>
+    </template>`;
+
   const mount = async (attrs = "", inputAttrs?: string, template?: string) => {
     document.body.innerHTML = markup(attrs, inputAttrs, template);
     application = Application.start();
@@ -191,6 +201,24 @@ describe("FileDropzoneController", () => {
     return seen;
   };
 
+  it("keeps the nested button and thumbnail when a row is its own name", async () => {
+    // A row may name itself `item name`. Writing the file name over the whole
+    // subtree takes the remove button and the thumbnail with it, leaving a row
+    // that is rendered but cannot be removed.
+    await mount("", undefined, NESTED_NAME_TEMPLATE);
+
+    drop(file("a.jpg", "image/jpeg"));
+    await tick();
+
+    // The helper matches the exact attribute value, which a token list is not.
+    const row = document.querySelector(
+      "[data-stimeo--file-dropzone-target~='item']",
+    ) as HTMLElement;
+    expect(row.textContent).toContain("a.jpg");
+    expect(row.querySelector("button")).not.toBeNull();
+    expect(row.querySelector("img")).not.toBeNull();
+  });
+
   it("opens the native dialog when the trigger is activated", async () => {
     await mount();
     const clicked = vi.spyOn(input(), "click").mockImplementation(() => {});
@@ -228,6 +256,21 @@ describe("FileDropzoneController", () => {
     await mount("", undefined, template);
     drop(file("photo.jpg", "image/jpeg"));
     expect(removeButtons()[0]?.getAttribute("aria-label")).toBe("photo.jpg を削除");
+  });
+
+  // The list holds exactly the preview items: a template is authored across lines,
+  // so anything cloned beyond its first element would settle in the list as the
+  // author adds and removes files, and only the item itself is taken back.
+  it("leaves nothing behind in the list across repeated add/remove cycles", async () => {
+    await mount();
+
+    for (let round = 0; round < 100; round++) {
+      drop(file(`f${round}.png`, "image/png"));
+      removeButtons()[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }
+
+    expect(list().children).toHaveLength(0);
+    expect(list().childNodes).toHaveLength(0);
   });
 
   it("mirrors the accepted files onto the native input and back out again", async () => {
@@ -399,6 +442,31 @@ describe("FileDropzoneController", () => {
     expect(revokedUrls).toEqual([createdUrls[0]]);
     expect(document.activeElement).toBe(removeButtons()[0]);
     expect(changes[0]?.map((f) => f.name)).toEqual(["b.jpg"]);
+  });
+
+  it("keeps focus on a neighbouring row when the row is its own remove button", async () => {
+    // One element carries the row, its name and its button. Focus management reads
+    // the declared buttons, so it has to find the row itself among them.
+    const selfRemove = `
+    <template data-stimeo--file-dropzone-target="itemTemplate">
+      <button type="button" aria-label="Remove {name}"
+              data-stimeo--file-dropzone-target="item name remove"></button>
+    </template>`;
+    const rows = () =>
+      Array.from(
+        document.querySelectorAll<HTMLButtonElement>(
+          '[data-stimeo--file-dropzone-target~="remove"]',
+        ),
+      );
+    await mount("", undefined, selfRemove);
+    drop(file("a.jpg", "image/jpeg"), file("b.jpg", "image/jpeg"));
+    expect(rows()).toHaveLength(2);
+
+    rows()[0]?.click();
+
+    // The row is its own name element, so the remaining row reads as the file left.
+    expect(rows().map((row) => row.textContent)).toEqual(["b.jpg"]);
+    expect(document.activeElement).toBe(rows()[0]);
   });
 
   it("falls back to the previous remove button, then to the trigger", async () => {
@@ -655,7 +723,7 @@ describe("FileDropzoneController", () => {
 
   it.each([
     ["item", without("item"), '"item" root'],
-    ["name", without("name"), '"name" element'],
+    ["name", without("name"), '"name" target'],
     ["a labelled remove button", without("label"), "non-empty aria-label"],
     ["the template itself", "", '"itemTemplate" target'],
   ])("names %s when the item template lacks it", async (_part, template, expected) => {

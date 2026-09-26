@@ -1,6 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { DetachGate } from "../utils/detach_gate";
 import { ListenerSet } from "../utils/listener_set";
+import { TransientHooks } from "../utils/transient_hooks";
+
+/** The hook a connection may find written by an earlier, now-gone one. */
+const TRANSIENT = new TransientHooks({ attributes: ["data-optimistic"] });
 
 /** Records that this controller wrote `hidden`, and the authored value to put back. */
 const HIDDEN_MARKER = "data-optimistic-toggled";
@@ -200,7 +204,7 @@ export class OptimisticController extends Controller<HTMLElement> {
    * received.
    */
   #revert(): void {
-    this.element.removeAttribute("data-optimistic");
+    TRANSIENT.reset(this.element);
     this.#restore(this.element, "aria-busy", BUSY_MARKER, "true");
     const hidden = new Set(this.hideTargets);
     for (const target of new Set([...this.showTargets, ...this.hideTargets])) {

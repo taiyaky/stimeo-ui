@@ -166,7 +166,11 @@ export class SpinnerController extends Controller<HTMLElement> {
     this.#floor.schedule(this.minDurationValue, () => this.#hide());
   }
 
-  /** Reveals the indicator, marks the moment shown, and announces via the live region. */
+  /**
+   * Reveals the indicator, marks the moment shown, and announces via the live region.
+   *
+   * @stimeoRuntimeOnly `announceText` is the wording of the one announcement this show makes.
+   */
   #show(): void {
     this.#floor.begin();
     // A visible spinner always means a busy region. Re-asserting it costs nothing on
@@ -181,7 +185,11 @@ export class SpinnerController extends Controller<HTMLElement> {
     announce(fillTemplate(this.announceTextValue, {}));
   }
 
-  /** Hides the indicator and returns to the idle state. */
+  /**
+   * Hides the indicator and returns to the idle state.
+   *
+   * @stimeoRuntimeOnly `announceReadyText` is the wording of the one announcement this hide makes.
+   */
   #hide(): void {
     if (this.hasIndicatorTarget) this.indicatorTarget.hidden = true;
     this.element.setAttribute("data-state", "idle");

@@ -77,7 +77,7 @@ const OVERFLOW_EPSILON = 1;
  *   because that DOM is what Turbo caches and restores.
  *
  * A consumer that also wants to own `hidden` on the same element (for a reason of
- * its own) is not supported: `#measureOverflow` clears it on every measurement to
+ * its own) is not supported: the overflow measurement clears it on every pass to
  * read the expanded width.
  *
  * Focus safety: hiding the element the user is standing on would drop focus to
@@ -159,24 +159,27 @@ export class BreadcrumbController extends Controller<HTMLElement> {
   }
 
   /**
-   * Re-measures when the disclosure set gains or loses a member. The set is a
-   * precondition for collapsing at all, so it needs the same watching the list
-   * and items get: without these callbacks a swap that breaks or completes the
-   * set would only take effect at the next resize or list mutation, which may
-   * never come.
+   * Re-measures when an `ellipsis` target arrives. The `ellipsis` and `trigger`
+   * targets form the disclosure set, a precondition for collapsing at all, so they
+   * need the same watching the list and items get: without their callbacks a swap
+   * that breaks or completes the set would only take effect at the next resize or
+   * list mutation, which may never come.
    */
   ellipsisTargetConnected(): void {
     this.#resync();
   }
 
+  /** Re-measures when an `ellipsis` target leaves the disclosure set. */
   ellipsisTargetDisconnected(): void {
     this.#resync();
   }
 
+  /** Re-measures when a `trigger` target joins the disclosure set. */
   triggerTargetConnected(): void {
     this.#resync();
   }
 
+  /** Re-measures when a `trigger` target leaves the disclosure set. */
   triggerTargetDisconnected(): void {
     this.#resync();
   }
@@ -186,7 +189,7 @@ export class BreadcrumbController extends Controller<HTMLElement> {
    *
    * The marker is the source of truth for what may be collapsed, so an element
    * that loses it while the controller is live is an always-visible item again —
-   * and `#render` only walks the *current* targets, so nothing else would ever
+   * and rendering only walks the *current* targets, so nothing else would ever
    * clear the `hidden` this controller put there.
    *
    * The `#connected` guard is load-bearing, not defensive. Stimulus fires this
@@ -302,8 +305,6 @@ export class BreadcrumbController extends Controller<HTMLElement> {
 
   /**
    * Applies the collapsed/expanded state to the items, ellipsis, and trigger.
-   *
-   * @stimeoRenderRoot
    */
   #render(): void {
     const collapsed = this.#overflowing && !this.#expanded;

@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
 import { ownerOf } from "../utils/event_owner";
+import { commitField, writeField } from "../utils/field_mirror";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { isInteractiveHost } from "../utils/interactive_host";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
@@ -16,6 +17,15 @@ interface InternalWrite {
   value: string | null;
   count: number;
 }
+
+/** A selection as the group publishes it: the checked radio and the value it submits. */
+interface Selection {
+  readonly radio: HTMLElement | null;
+  readonly value: string;
+}
+
+/** The selection of a group with no radio checked. */
+const NO_SELECTION: Selection = { radio: null, value: "" };
 
 /** Radio and field attributes whose retained-element changes alter group state. */
 const OBSERVED_ATTRIBUTES = [
@@ -77,10 +87,12 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  * - The selected radio's `data-value` is mirrored to the optional hidden field.
  *   `stimeo--radio-group:change` is dispatched only when selection identity
  *   changes through user interaction.
- * - `stimeo--radio-group:reconcile` reports a selection this controller decided
- *   on its own — a removed selection, or first-wins over duplicate checked state
- *   — carrying the same detail as `change`. The hidden field's native `change`
- *   stays reserved for user edits, so form automation never sees a repair as one.
+ * - `stimeo--radio-group:reconcile` reports a selection the page moved instead —
+ *   a removed selection, first-wins over duplicate checked state, a morph that
+ *   checks another radio, or a new `data-value` on the selected radio that moves
+ *   the submitted value — carrying the same detail as `change`, once per batch
+ *   and never on connect. The hidden field's native `change` stays reserved for
+ *   user edits, so form automation never sees a repair as one.
  */
 export class RadioGroupController extends Controller<HTMLElement> {
   static override targets = ["radio", "field"];
@@ -100,7 +112,8 @@ export class RadioGroupController extends Controller<HTMLElement> {
   readonly #internalCheckedValues = new Map<HTMLElement, InternalWrite>();
   readonly #internalTabindexValues = new Map<HTMLElement, InternalWrite>();
   #observer: MutationObserver | null = null;
-  #committedRadio: HTMLElement | null = null;
+  /** The selection last published: read on connect, then committed or reported. */
+  #committed: Selection = NO_SELECTION;
   #connected = false;
   #lastOrder: HTMLElement[] = [];
   #focusedRadio: HTMLElement | null = null;
@@ -120,7 +133,7 @@ export class RadioGroupController extends Controller<HTMLElement> {
     this.#normalizeSelection();
     this.#ensureTabStop(true);
     this.#reflectField(this.#selectedRadio, { silent: true });
-    this.#committedRadio = this.#selectedRadio ?? null;
+    this.#committed = this.#settled;
     this.#lastOrder = this.#managedTargets;
 
     this.element.addEventListener("click", this.#onClickCapture, true);
@@ -153,7 +166,7 @@ export class RadioGroupController extends Controller<HTMLElement> {
     this.#internalTabindexValues.clear();
     this.#focusedRadio = null;
     this.#pendingFocusIndex = null;
-    this.#committedRadio = null;
+    this.#committed = NO_SELECTION;
     this.#preferChecked = false;
   }
 
@@ -302,17 +315,23 @@ export class RadioGroupController extends Controller<HTMLElement> {
     else this.#selectRadio(destination, { focus: true });
   }
 
-  /** Applies one user selection and emits only when selected identity changes. */
+  /**
+   * Applies one user selection and emits only when selected identity changes. A
+   * new selection is taken as published before either report goes out, so a
+   * listener that selects again is measured from it. Activating the radio that is
+   * already checked publishes nothing: if the page checked it, the next pass
+   * reports that move.
+   */
   #selectRadio(radio: HTMLElement, { focus }: { focus: boolean }): void {
     if (!this.#isSupportedHost(radio) || this.#isActivationDisabled(radio)) return;
     const previous = this.#selectedRadio;
     const changed = previous !== radio;
     if (changed) {
       for (const item of this.#managedTargets) this.#setChecked(item, item === radio);
+      this.#committed = { radio, value: this.#radioValue(radio) };
     }
     this.#setActive(radio, focus);
     this.#reflectField(radio, { silent: !changed });
-    this.#committedRadio = radio;
     if (changed) {
       this.dispatch("change", { detail: { value: this.#radioValue(radio), radio } });
     }
@@ -345,16 +364,19 @@ export class RadioGroupController extends Controller<HTMLElement> {
   }
 
   /**
-   * Announces a selection this pass decided rather than the user. Dispatched after
-   * observation resumes so a consumer's own DOM edits are seen by the next pass.
+   * Announces a selection that moved since the one this group last published —
+   * another radio, or the same radio submitting another value. Dispatched after
+   * observation resumes so a consumer's own DOM edits are seen by the next pass,
+   * and only while connected: moving focus inside the pass runs listeners that
+   * can disconnect the group.
    */
   #reportReconciledSelection(): void {
-    const settled = this.#selectedRadio ?? null;
-    if (settled === this.#committedRadio) return;
-    this.#committedRadio = settled;
-    this.dispatch("reconcile", {
-      detail: { value: settled ? this.#radioValue(settled) : "", radio: settled },
-    });
+    if (!this.#connected) return;
+    const settled = this.#settled;
+    const committed = this.#committed;
+    if (settled.radio === committed.radio && settled.value === committed.value) return;
+    this.#committed = settled;
+    this.dispatch("reconcile", { detail: { value: settled.value, radio: settled.radio } });
   }
 
   /** Begins or ends ownership according to a radio's current host semantics. */
@@ -479,7 +501,7 @@ export class RadioGroupController extends Controller<HTMLElement> {
   #ownsEventTarget(target: EventTarget | null): boolean {
     return (
       target instanceof Element &&
-      target.closest('[data-controller~="stimeo--radio-group"]') === this.element
+      target.closest(`[data-controller~="${this.identifier}"]`) === this.element
     );
   }
 
@@ -611,6 +633,12 @@ export class RadioGroupController extends Controller<HTMLElement> {
     return this.#managedTargets.find((radio) => this.#isChecked(radio));
   }
 
+  /** The current selection as the group publishes it. */
+  get #settled(): Selection {
+    const radio = this.#selectedRadio;
+    return radio ? { radio, value: this.#radioValue(radio) } : NO_SELECTION;
+  }
+
   /** Whether a radio is currently checked. */
   #isChecked(radio: HTMLElement): boolean {
     return radio.getAttribute("aria-checked") === "true";
@@ -638,9 +666,8 @@ export class RadioGroupController extends Controller<HTMLElement> {
   ): void {
     if (!this.hasFieldTarget) return;
     const value = radio ? this.#radioValue(radio) : "";
-    if (this.fieldTarget.value === value) return;
-    this.fieldTarget.value = value;
-    if (!silent) this.fieldTarget.dispatchEvent(new Event("change", { bubbles: true }));
+    if (!writeField(this.fieldTarget, value)) return;
+    if (!silent) commitField(this.fieldTarget);
   }
 
   /** A radio's submitted value (`data-value`, defaulting to empty). */

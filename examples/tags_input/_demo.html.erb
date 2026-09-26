@@ -8,6 +8,10 @@
 <% announce_added = t("components.tags_input.demo.announce_added") %>
 <% announce_removed = t("components.tags_input.demo.announce_removed") %>
 <% remove_label = t("components.tags_input.demo.remove_label") %>
+<%# Tags the demo starts with, so the list is not empty on arrival and the hidden
+    fields already carry a value. Framework names are product names, not copy, so
+    they are written here rather than in the locales. %>
+<% initial_tags = %w[Rails Hotwire] %>
 <div class="tags-input" data-controller="stimeo--tags-input"
      data-stimeo--tags-input-delimiter-value=","
      data-stimeo--tags-input-name-value="frameworks[]"
@@ -17,12 +21,28 @@
     class="tags-input__tags"
     role="list"
     aria-label="<%= t("components.tags_input.demo.tags_label") %>"
-    data-stimeo--tags-input-target="tags"></ul>
+    data-stimeo--tags-input-target="tags">
+    <%# Same shape the tagTemplate clones; the controller reads data-value and
+        seeds the roving tabindex from these on connect. %>
+    <% initial_tags.each do |tag| %>
+      <li class="tags-input__tag" role="listitem"
+          data-stimeo--tags-input-target="tag" data-value="<%= tag %>">
+        <span data-stimeo--tags-input-target="label"><%= tag %></span>
+        <button
+          type="button"
+          class="tags-input__remove"
+          tabindex="-1"
+          aria-label="<%= remove_label.sub("{label}", tag) %>"
+          data-stimeo--tags-input-target="remove">×</button>
+      </li>
+    <% end %>
+  </ul>
 
   <input
     type="text"
     class="tags-input__input"
     aria-label="<%= t("components.tags_input.demo.input_label") %>"
+    placeholder="<%= t("components.tags_input.demo.input_label") %>"
     aria-describedby="tags-input-help"
     data-stimeo--tags-input-target="input"
     data-action="keydown->stimeo--tags-input#onKeydown" />
@@ -49,3 +69,13 @@
     </li>
   </template>
 </div>
+
+<%# Readout: what the component just reported. Purely visual — the component
+    already announces what a screen reader needs, so this line is aria-hidden to
+    keep it from being read twice. The value is a code fragment (API identifiers
+    and values), so only the label is translated. %>
+<p class="demo-readout" aria-hidden="true">
+  <span><%= t("catalog.readout.field") %></span>
+  <span class="demo-readout__value" data-readout
+        data-empty-text="<%= t("catalog.readout.empty") %>">—</span>
+</p>

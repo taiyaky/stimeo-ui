@@ -2,6 +2,13 @@ import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { DetachGate } from "../utils/detach_gate";
 import { ownerOf } from "../utils/event_owner";
+import { OwnedPointerSession, type OwnedPointerSessionEnd } from "../utils/owned_pointer_session";
+import { TransientHooks } from "../utils/transient_hooks";
+
+/** The drag hook a connection may find written by an earlier, now-gone one. */
+const TRANSIENT_DRAG = new TransientHooks({ attributes: ["data-dragging"] });
+/** The grab hook, dropped under its own condition, so its own declaration. */
+const TRANSIENT_GRAB = new TransientHooks({ attributes: ["data-grabbed"] });
 
 /**
  * Elements whose own default action owns a key press. The browser never signals
@@ -14,7 +21,8 @@ type DragPointerType = "mouse" | "touch" | "pen" | "keyboard";
 
 /** A pointer drag in flight (from `pointerdown` until up/cancel). */
 interface PointerSession {
-  pointerId: number;
+  /** Owns the initiating pointer; assigned as soon as the session is armed. */
+  pointer: OwnedPointerSession | null;
   handle: HTMLElement;
   originX: number;
   originY: number;
@@ -113,8 +121,6 @@ export class PointerDragController extends Controller<HTMLElement> {
   #keyboard: KeyboardSession | null = null;
   /** Committed follow offset from past drops; a new drag's deltas add onto it. */
   #followBase = { x: 0, y: 0 };
-  /** Aborts in-progress pointer-drag listeners on drag end / teardown. */
-  #dragAbort: AbortController | null = null;
   /** Decides whether a mid-session disconnect() is an in-page move or a detach. */
   readonly #gate = new DetachGate();
 
@@ -125,8 +131,8 @@ export class PointerDragController extends Controller<HTMLElement> {
     // Transient drag state cannot survive a navigation: clear hooks a Turbo
     // cache restore may have snapshotted mid-drag (idempotent reconnect). But a
     // session preserved across an in-page move keeps its hooks.
-    if (!this.#pointer) this.element.removeAttribute("data-dragging");
-    if (!this.#keyboard) this.element.removeAttribute("data-grabbed");
+    if (!this.#pointer) TRANSIENT_DRAG.reset(this.element);
+    if (!this.#keyboard) TRANSIENT_GRAB.reset(this.element);
     // Follow mode owns the element's inline `translate`: re-read a committed
     // offset so reconnects (Turbo cache restore included) keep accumulating from
     // where the element visually sits. A session surviving an in-page move keeps
@@ -256,7 +262,11 @@ export class PointerDragController extends Controller<HTMLElement> {
     this.#teardownSessions();
   }
 
-  /** Arms a pointer drag on a handle; `start` waits for the threshold. */
+  /**
+   * Arms a pointer drag on a handle; `start` waits for the threshold.
+   *
+   * @stimeoRuntimeOnly `disabled` decides whether this one pointer press starts a gesture.
+   */
   readonly #onPointerDown = (event: PointerEvent): void => {
     // One session at a time: ignore a second pointerdown (multi-touch, an
     // errant tap, a grabbed keyboard session) so an in-flight drag is never
@@ -271,8 +281,8 @@ export class PointerDragController extends Controller<HTMLElement> {
     event.preventDefault();
     handle.focus();
 
-    this.#pointer = {
-      pointerId: event.pointerId,
+    const session: PointerSession = {
+      pointer: null,
       handle,
       originX: event.clientX,
       originY: event.clientY,
@@ -281,26 +291,22 @@ export class PointerDragController extends Controller<HTMLElement> {
       dy: 0,
       pointerType: this.#pointerTypeOf(event),
     };
-
-    // Pointer capture keeps fast drags delivering to the handle even when the
-    // pointer strays outside it — but a consumer may re-insert the dragged
-    // element mid-drag (sortable's live reorder), which silently releases the
-    // capture. Tracking listeners therefore live on the DOCUMENT (captured
-    // events bubble there; uncaptured ones fire there anyway), and the
-    // AbortController releases them on drag end and disconnect() (Turbo included).
-    handle.setPointerCapture(event.pointerId);
-    this.#dragAbort?.abort();
-    const abort = new AbortController();
-    this.#dragAbort = abort;
-    document.addEventListener("pointermove", this.#onPointerMove, { signal: abort.signal });
-    document.addEventListener("pointerup", this.#onPointerUp, { signal: abort.signal });
-    document.addEventListener("pointercancel", this.#onPointerCancel, { signal: abort.signal });
+    // The session tracks the pointer on the handle's document, so a consumer
+    // re-inserting the dragged element mid-drag (sortable's live reorder) keeps
+    // steering the same finger, and every listener falls with one signal.
+    session.pointer = new OwnedPointerSession(event, handle, {
+      move: (move) => this.#trackMove(session, move),
+      end: (kind) => this.#finishPointer(session, kind),
+    });
+    this.#pointer = session;
   };
 
-  readonly #onPointerMove = (event: PointerEvent): void => {
-    const session = this.#pointer;
-    if (!session || event.pointerId !== session.pointerId) return;
-
+  /**
+   * Applies one tracked move: threshold, hooks, follow offset, events.
+   *
+   * @stimeoRuntimeOnly `threshold` decides when this one pointer move starts the drag.
+   */
+  #trackMove(session: PointerSession, event: PointerEvent): void {
     const [dx, dy] = this.#filterAxis(
       event.clientX - session.originX,
       event.clientY - session.originY,
@@ -320,29 +326,34 @@ export class PointerDragController extends Controller<HTMLElement> {
     this.dispatch("move", {
       detail: { dx, dy, x: event.clientX, y: event.clientY, pointerType: session.pointerType },
     });
-  };
+  }
 
-  readonly #onPointerUp = (event: PointerEvent): void => {
-    const session = this.#pointer;
-    if (!session || event.pointerId !== session.pointerId) return;
+  /**
+   * Closes the session and reports only the outcome the caller does not own.
+   *
+   * A teardown (detach, Escape, mid-drag disable, `reset`) is announced by the
+   * path that asked for it, so this one stays silent; `pointerup` below the
+   * threshold was a plain click, and `pointercancel` is an OS gesture takeover.
+   */
+  #finishPointer(session: PointerSession, kind: OwnedPointerSessionEnd): void {
     const { started, dx, dy, pointerType } = session;
-    this.#endPointerSession();
-    // Below the threshold the gesture was a plain click, not a drag: stay silent.
-    if (!started) return;
-    this.#followCommit(dx, dy);
-    this.dispatch("end", { detail: { dx, dy, pointerType } });
-  };
+    this.#pointer = null;
+    this.element.removeAttribute("data-dragging");
+    if (kind === "teardown" || !started) return;
+    if (kind === "up") {
+      this.#followCommit(dx, dy);
+      this.dispatch("end", { detail: { dx, dy, pointerType } });
+      return;
+    }
+    this.#dispatchCancel(pointerType);
+  }
 
-  /** OS gesture / scroll takeover interrupted the drag: cancel, don't drop. */
-  readonly #onPointerCancel = (event: PointerEvent): void => {
-    const session = this.#pointer;
-    if (!session || event.pointerId !== session.pointerId) return;
-    const { started, pointerType } = session;
-    this.#endPointerSession();
-    if (started) this.#dispatchCancel(pointerType);
-  };
-
-  /** Keyboard alternative: Space/Enter grab & drop, arrows move, Escape cancels. */
+  /**
+   * Keyboard alternative: Space/Enter grab & drop, arrows move, Escape cancels.
+   *
+   * @stimeoRuntimeOnly `disabled` decides whether this one key is taken and `keyboardStep` is the
+   *   distance of one keyboard move.
+   */
   readonly #onKeydown = (event: KeyboardEvent): void => {
     if (this.disabledValue) return;
     const handle = this.#handleFor(event.target);
@@ -452,28 +463,20 @@ export class PointerDragController extends Controller<HTMLElement> {
     }
   }
 
-  /** Zeroes the delta on the locked axis (`axis` = x | y | both). */
+  /**
+   * Zeroes the delta on the locked axis (`axis` = x | y | both).
+   *
+   * @stimeoRuntimeOnly `axis` filters the offset of one move to the allowed direction.
+   */
   #filterAxis(dx: number, dy: number): [number, number] {
     if (this.axisValue === "x") return [dx, 0];
     if (this.axisValue === "y") return [0, dy];
     return [dx, dy];
   }
 
-  /** Releases capture + listeners and clears the pointer session and its hook. */
+  /** Silently closes a live pointer session; the caller announces the outcome. */
   #endPointerSession(): void {
-    this.#releasePointerCapture();
-    this.#pointer = null;
-    this.#dragAbort?.abort();
-    this.#dragAbort = null;
-    this.element.removeAttribute("data-dragging");
-  }
-
-  /** Releases the pointer capture the active session set (idempotent, safe). */
-  #releasePointerCapture(): void {
-    const session = this.#pointer;
-    if (session?.handle.hasPointerCapture(session.pointerId)) {
-      session.handle.releasePointerCapture(session.pointerId);
-    }
+    this.#pointer?.pointer?.end();
   }
 
   #clearKeyboardSession(): void {
@@ -526,20 +529,35 @@ export class PointerDragController extends Controller<HTMLElement> {
     this.dispatch("cancel", { detail: { pointerType } });
   }
 
-  /** Applies the in-flight offset to the element's `translate` (follow only). */
+  /**
+   * Applies the in-flight offset to the element's `translate` (follow only).
+   *
+   * @stimeoRuntimeOnly `follow` decides whether this one move writes the offset as a translate; the
+   *   offset itself comes from the gesture.
+   */
   #followMove(dx: number, dy: number): void {
     if (!this.followValue) return;
     this.#applyFollow(this.#followBase.x + dx, this.#followBase.y + dy);
   }
 
-  /** Folds a drop's deltas into the committed base offset (follow only). */
+  /**
+   * Folds a drop's deltas into the committed base offset (follow only).
+   *
+   * @stimeoRuntimeOnly `follow` decides whether the end of this one gesture keeps the offset as a
+   *   translate.
+   */
   #followCommit(dx: number, dy: number): void {
     if (!this.followValue) return;
     this.#followBase = { x: this.#followBase.x + dx, y: this.#followBase.y + dy };
     this.#applyFollow(this.#followBase.x, this.#followBase.y);
   }
 
-  /** Snaps back to the committed position (follow only) — the cancel contract. */
+  /**
+   * Snaps back to the committed position (follow only) — the cancel contract.
+   *
+   * @stimeoRuntimeOnly `follow` decides whether cancelling this one gesture clears the translate it
+   *   wrote.
+   */
   #followReset(): void {
     if (!this.followValue) return;
     this.#applyFollow(this.#followBase.x, this.#followBase.y);
@@ -602,6 +620,8 @@ export class PointerDragController extends Controller<HTMLElement> {
    * idempotent) and focusability for the keyboard path (`tabindex="0"` only when
    * the author supplied none — prefer a real `<button>` handle). Both additions
    * are marker-owned so `#restoreHandle` reverts them symmetrically on teardown.
+   *
+   * @stimeoRenderRoot
    */
   #prepareHandle(handle: HTMLElement): void {
     const lent = this.#touchActionForAxis();

@@ -2,10 +2,13 @@
     The toggle-group owns the chips' pressed state + roving focus; stimeo--filter
     reads the pressed tokens (data-value) and shows/hides items by their
     data-stimeo--filter-tokens. match="all" means an item must carry every active
-    token. The empty element appears when nothing matches; Clear resets the chips. %>
+    token. The empty element appears when nothing matches; Clear resets the chips.
+    Both toggle-group events re-filter: change for a chip the user presses, and
+    reconcile for a pressed set the page moves (a morph, a script). %>
 <div class="filter-demo" data-controller="stimeo--filter"
      data-stimeo--filter-match-value="all"
-     data-action="stimeo--toggle-group:change->stimeo--filter#apply">
+     data-action="stimeo--toggle-group:change->stimeo--filter#apply
+                  stimeo--toggle-group:reconcile->stimeo--filter#apply">
   <div class="filter-demo__bar">
     <div class="filter-demo__chips" role="group"
          aria-label="<%= t('components.filter.demo.legend') %>"

@@ -88,6 +88,9 @@ export class NetworkStatusController extends Controller<HTMLElement> {
    *
    * The event goes out last, so a listener reading `data-state` or a banner's
    * visibility sees the state the transition landed on rather than the previous one.
+   *
+   * @stimeoRuntimeOnly The texts word the one announcement of this transition; the state it shows
+   *   comes from the browser.
    */
   #update(online: boolean): void {
     if (online === this.#online) return;
@@ -113,7 +116,12 @@ export class NetworkStatusController extends Controller<HTMLElement> {
     if (this.hasOfflineTarget) this.offlineTarget.hidden = false;
   }
 
-  /** Shows the recovery banner, optionally auto-hiding it after `onlineAutoHide`. */
+  /**
+   * Shows the recovery banner, optionally auto-hiding it after `onlineAutoHide`.
+   *
+   * @stimeoRuntimeOnly `onlineAutoHide` is the delay of the one timer that hides the banner this
+   *   transition shows.
+   */
   #showOnline(): void {
     if (this.hasOfflineTarget) this.offlineTarget.hidden = true;
     if (!this.hasOnlineTarget) return;

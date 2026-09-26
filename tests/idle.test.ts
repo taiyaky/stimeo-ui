@@ -15,12 +15,24 @@ import { tick } from "./helpers/timing";
 describe("IdleController", () => {
   let application: Application | undefined;
 
-  const mount = async (attrs = "") => {
-    document.body.innerHTML = `<div data-controller="stimeo--idle" ${attrs}></div>`;
+  const mount = async (attrs = "", inner = "") => {
+    document.body.innerHTML = `<div data-controller="stimeo--idle" ${attrs}>${inner}</div>`;
     application = Application.start();
     application.register("stimeo--idle", IdleController);
     await vi.advanceTimersByTimeAsync(0);
   };
+
+  /** The declared regions of a session-timeout widget, authored for a fresh cycle. */
+  const HIDDEN_REGIONS = `
+    <p data-stimeo--idle-target="prompt" hidden>Your session expires in a minute.</p>
+    <p data-stimeo--idle-target="idle" hidden>You have been signed out.</p>
+  `;
+
+  /** The same regions authored visible, which contradicts the phase a connection starts in. */
+  const VISIBLE_REGIONS = `
+    <p data-stimeo--idle-target="prompt">Your session expires in a minute.</p>
+    <p data-stimeo--idle-target="idle">You have been signed out.</p>
+  `;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -45,6 +57,29 @@ describe("IdleController", () => {
     const events: CustomEvent[] = [];
     root().addEventListener(`stimeo--idle:${type}`, (e) => events.push(e as CustomEvent));
     return events;
+  };
+
+  const promptRegion = () => query("[data-stimeo--idle-target='prompt']");
+  const idleRegion = () => query("[data-stimeo--idle-target='idle']");
+
+  /**
+   * Records the public events as they bubble to `document`, which outlives the element
+   * a case mounts — the only vantage point that covers the connection itself.
+   */
+  const collectOnDocument = () => {
+    const types: string[] = [];
+    const bound = (["prompt", "idle", "active"] as const).map((type) => {
+      const name = `stimeo--idle:${type}`;
+      const listener = () => types.push(type);
+      document.addEventListener(name, listener);
+      return { name, listener };
+    });
+    return {
+      types,
+      stop: () => {
+        for (const { name, listener } of bound) document.removeEventListener(name, listener);
+      },
+    };
   };
 
   /**
@@ -243,6 +278,28 @@ describe("IdleController", () => {
 
     vi.advanceTimersByTime(300); // full timeout
     expect(idle).toHaveLength(1);
+  });
+
+  it("does not warn once the timeout has already lapsed", async () => {
+    // Narrowing the warning window while the cycle runs moves the warning onto the
+    // idle deadline itself. Idle is the later phase, so the window the warning
+    // belongs to is over by the time it arrives.
+    await mount(
+      'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-prompt-before-value="300"',
+      HIDDEN_REGIONS,
+    );
+    const prompt = collect("prompt");
+    const idle = collect("idle");
+
+    vi.advanceTimersByTime(600);
+    root().setAttribute("data-stimeo--idle-prompt-before-value", "0");
+    vi.advanceTimersByTime(400); // 1000 overall: the idle deadline
+
+    expect(idle).toHaveLength(1);
+    expect(prompt).toHaveLength(0);
+    expect(root().hasAttribute("data-prompt")).toBe(false);
+    expect(promptRegion().hidden).toBe(true);
+    expect(idleRegion().hidden).toBe(false);
   });
 
   it("pushes the prompt back when activity resets the clock", async () => {
@@ -487,6 +544,82 @@ describe("IdleController", () => {
     // The re-armed cycle still warns on its own schedule, measured from the move.
     vi.advanceTimersByTime(700);
     expect(prompt).toHaveLength(2);
+  });
+
+  it("reveals the idle region while idle and takes it away on return", async () => {
+    // The region belongs to the idle phase, so it moves with `data-idle` in both
+    // directions rather than being toggled by the application.
+    await mount('data-stimeo--idle-timeout-value="1000"', HIDDEN_REGIONS);
+    expect(idleRegion().hidden).toBe(true);
+
+    vi.advanceTimersByTime(1000);
+    expect(root().getAttribute("data-idle")).toBe("true");
+    expect(idleRegion().hidden).toBe(false);
+
+    activity();
+    expect(root().hasAttribute("data-idle")).toBe(false);
+    expect(idleRegion().hidden).toBe(true);
+  });
+
+  it("settles the authored visibility of both regions on connection, silently", async () => {
+    // A restored snapshot carries a phase this instance is not in, regions included.
+    // The connection normalizes them from the fresh cycle, and normalizing is not a
+    // transition: nothing is announced.
+    const events = collectOnDocument();
+    try {
+      await mount('data-stimeo--idle-timeout-value="1000" data-idle="true"', VISIBLE_REGIONS);
+
+      expect(root().hasAttribute("data-idle")).toBe(false);
+      expect(root().hasAttribute("data-prompt")).toBe(false);
+      expect(promptRegion().hidden).toBe(true);
+      expect(idleRegion().hidden).toBe(true);
+      expect(events.types).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  it("syncs a region inserted after the connection", async () => {
+    await mount('data-stimeo--idle-timeout-value="1000"');
+    vi.advanceTimersByTime(1000);
+    expect(root().getAttribute("data-idle")).toBe("true");
+
+    // The application renders its notice mid-phase, each region authored for the cycle
+    // start; both are corrected to the phase that holds when they arrive.
+    root().insertAdjacentHTML(
+      "beforeend",
+      `<p data-stimeo--idle-target="prompt">Your session expires in a minute.</p>
+       <p data-stimeo--idle-target="idle" hidden>You have been signed out.</p>`,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(promptRegion().hidden).toBe(true);
+    expect(idleRegion().hidden).toBe(false);
+  });
+
+  it("keeps the warning, the timeout and the return exclusive", async () => {
+    await mount(
+      'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-prompt-before-value="300"',
+      HIDDEN_REGIONS,
+    );
+
+    vi.advanceTimersByTime(700); // warning window: prompted, not idle
+    expect(root().getAttribute("data-prompt")).toBe("true");
+    expect(root().hasAttribute("data-idle")).toBe(false);
+    expect(promptRegion().hidden).toBe(false);
+    expect(idleRegion().hidden).toBe(true);
+
+    vi.advanceTimersByTime(300); // the timeout itself supersedes the warning
+    expect(root().hasAttribute("data-prompt")).toBe(false);
+    expect(root().getAttribute("data-idle")).toBe("true");
+    expect(promptRegion().hidden).toBe(true);
+    expect(idleRegion().hidden).toBe(false);
+
+    activity(); // the return leaves neither phase standing
+    expect(root().hasAttribute("data-prompt")).toBe(false);
+    expect(root().hasAttribute("data-idle")).toBe(false);
+    expect(promptRegion().hidden).toBe(true);
+    expect(idleRegion().hidden).toBe(true);
   });
 
   it("declares the three public events the Inspector manifest reflects", () => {

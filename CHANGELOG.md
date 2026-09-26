@@ -7,6 +7,183 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.16.0] - 2026-09-26
+
+Minor release with no new components. Widgets now report their own state
+changes — `open` / `close`, and `reconcile` when the page rather than the user
+moves committed state — mirror their value into hidden form fields that fire a
+native `change`, and no longer write normalized values back to their Values.
+Several event, detail, action, and Value names were unified, so read Changed and
+Removed before upgrading. The Inspector manifest moves to schema v14, and
+**`stimeo check` can report errors on views that passed under 0.15.0** (row
+templates, action params, event names, submit-once's `idle` / `busy` pairs), so
+run it before deploying.
+
+### Added
+
+- accordion, collapsible, context-menu, dialog, drawer, dropdown, hover-card,
+  menu, menubar, navigation-menu, popover, read-more, sidebar, and tooltip:
+  `open` / `close` events whose `detail.reason` says why the state moved, typed
+  by the new `StateReason` type export. accordion also carries
+  `{ index, trigger, panel }`, menubar `{ index, menu }`, navigation-menu
+  `{ index, panel }`, and sidebar `{ mode }`.
+- tabs: a `change` event with `{ index, total, previous }`.
+- A `reconcile` event, once per batch and never on connect, when the page — code
+  writing a Value or an attribute, or a morph — rather than the user moves
+  committed state: calendar `{ date }`, currency-input `{ value, formatted }`,
+  data-grid `{ rows }`, date-range-picker `{ start, end }`, listbox
+  `{ value, option }`, pagination `{ page, total, previous }`, range-slider
+  `{ start, end }`, resizable `{ value, fraction }`, separator and slider
+  `{ value }`, stepper `{ index, previous, total, step }`, switch `{ checked }`,
+  theme `{ mode, resolved }`, toggle-group `{ values }`, and tree-view
+  `{ item }`. sidebar reports `reconcile` `{ mode, open }` when crossing its
+  breakpoint switches the mode.
+- Hidden form fields that fire a native `change` on a user commit and stay
+  silent on connect, morphs, and Value writes: calendar `field` / `monthField`,
+  range-slider `startField` / `endField`, and a `field` on slider, switch
+  (`"true"` / `"false"`), and tree-view (the selected item's `data-value`).
+  toggle-group and data-grid mirror into a `fields` container with `name`
+  (`values[]` / `rows[]`) and `form` Values, data-grid from the selected rows'
+  `data-value`. tags-input gains the `form` Value multi-select already has.
+- Label pairs the controller swaps with the state: `expandedLabel` /
+  `collapsedLabel` on accordion, collapsible, and read-more, and `onLabel` /
+  `offLabel` on carousel's play toggle and password-reveal. Regions it shows
+  only in their state: `empty` on combobox and multi-select, `hasNew` on
+  stick-to-bottom, and `prompt` / `idle` on idle, which also sets `data-prompt`
+  while the warning stands.
+- listbox: a `placeholder` Value the trigger shows while nothing is selected.
+- clipboard: `copy` carries `message`, the `copiedLabel` or `errorLabel` for the
+  outcome, so `stimeo--clipboard:copy->stimeo--toast#show` needs no script.
+- stepper: `change` also carries `total`, so it wires straight into
+  step-indicator's `setIndex`.
+- Inspector: `unknown-action-event`, `invalid-template-root`, and action-param
+  checks (`missing-action-param`, `invalid-action-param`, and the warning
+  `confusable-action-param`) for overflow-indicator's `direction`, stepper's
+  `index`, toast's `type`, and announcer's `assertive`.
+
+### Changed
+
+- **Breaking** switch: the event is `change` (was `changed`).
+- **Breaking** step-indicator: the `current` Value is `index`, `setCurrent` is
+  `setIndex` and reads `detail.index`, and `change` carries
+  `{ index, previous, total }`.
+- **Breaking** toast: `body` → `message` (param, detail, and
+  `data-toast-slot`).
+- **Breaking** toast, tags-input, multi-select, and file-dropzone: the row
+  `<template>` must hold exactly one element, and that element carries the
+  `item` / `tag` target itself. A wrapped row or a second element adds nothing;
+  tags-input, multi-select, and file-dropzone say so on the console once per
+  connection, and `stimeo check` reports `invalid-template-root`.
+- **Breaking** detail keys: filter `visible` → `visibleCount`, overflow-menu
+  `{ visible, hidden }` → `{ overflowCount, total }`, portal `mount`
+  `target` → `destination`.
+- **Breaking** slider, range-slider, separator, resizable, rating, color-picker,
+  stepper, pagination, bulk-select, carousel (`autoplay`), and calendar (`month`)
+  no longer write a normalized value back to their Values: the attribute keeps
+  what the page wrote, only a user move writes it, and a declared value takes
+  effect again once the bounds allow it. Read the published state
+  from ARIA, the hidden field, or the events. theme still writes a stored choice
+  back to `mode`.
+- **Breaking** a page-driven move reports `reconcile`, not `change`:
+  currency-input on a `locale`, `currency`, or `precision` change, a swapped-in
+  display, or a reconnect that re-rounds; otp on a native form reset or a
+  `pattern` change that drops entered characters, with no `complete` either.
+  rating's `reconcile` reports every move of the shown rating the page causes, an
+  in-range `value` write included, and nothing for a clamp that leaves it where
+  it was.
+- **Breaking** color-picker, date-range-picker, multi-select, rating, and
+  tags-input fire a native `change` on a user commit — from the hidden `field`,
+  or from the `fields` container on multi-select and tags-input — so a form with
+  `stimeo--auto-submit` or a `change` listener now reacts to it.
+- **Breaking** number-input: a step from the buttons, the arrow and Page keys,
+  Home and End, or press-and-hold fires the native `input` and `change` a typed
+  value does, ahead of `stimeo--number-input:change`, so a form with
+  `stimeo--auto-submit` or a `change` listener now reacts to each step.
+- **Breaking** calendar: without a `month`, the grid opens on the selected day's
+  month instead of today's and leaves `month` empty (read the shown month from
+  `monthField`). A `selected` day outside `min` / `max` is withheld — no
+  `aria-selected`, an empty `field` — and published again once the bounds allow
+  it; the `selected` Value is never rewritten. Focus inside the grid follows a
+  `month` change that moves the painted month to the new month's tab stop.
+- **Breaking** date-range-picker: a confirmed range whose ends `min`, `max`, or
+  `disabledDates` exclude narrows to the nearest selectable days, or clears when
+  none remain, and reports `reconcile`; `connect()` narrows a range read from its
+  fields the same way, silently.
+- **Breaking** flash and toast never evict a hovered or focused notification for
+  `max`: the stack stays over the cap until that hold ends, then the oldest
+  unheld ones go. toast evicts with reason `limit` (was `timeout`), and a `max`
+  of `0` or less, or not a finite number, means no limit (toast used to remove
+  every toast).
+- **Breaking** carousel: the `autoplay` Value is no longer switched off at the
+  end of a non-looping set or under reduced motion. The declared rotation
+  resumes once a slide lies ahead again; reduced motion holds it until the user
+  presses play or the page changes `autoplay`.
+- **Breaking** resizable and filter dispatch `change` only when the outcome
+  moved: resizable's position, filter's `{ active, visibleCount, total }`.
+- **Breaking** slider, range-slider, and separator decide a user move's
+  `change` against the last published value; toggle-group, calendar, and
+  date-range-picker skip a `change` or `select` that a listener superseded.
+- Components follow more runtime changes: calendar repaints on `min`, `max`, and
+  `weekStart`, and a consumer's `aria-disabled` moves with its date to the cell
+  that shows it; countdown follows `completeLabel`; clipboard rewrites a shown
+  result on `copiedLabel` / `errorLabel`; flash applies a changed `max` at once;
+  theme applies a `mode` declaration, reported as `reconcile`, while a stored
+  choice still wins; overflow-menu relabels its More trigger on `moreLabel`;
+  stepper re-derives every step when steps are added or removed.
+- countdown: the completion text it wrote, marked
+  `data-stimeo--countdown-owns-status`, is taken back when the timer leaves
+  `complete`, and a `deadline` moved forward returns it to `paused`.
+  overflow-menu marks the More label it wrote the same way
+  (`data-stimeo--overflow-menu-owns-label`) and leaves alone a trigger the
+  consumer put elements or a name into.
+- listbox: with nothing selected the trigger shows `placeholder`, else the text
+  it held before the first selection, instead of keeping the last selected
+  option's text.
+- number-input: a text-type spinbutton reads full-width digits and signs
+  (`３４`, `－５`) as numbers.
+- color-picker: a repaint that does not move the color no longer overwrites text
+  being typed into the hex input.
+- carousel: an in-page move keeps a running rotation without a new `play`, and a
+  real detach while the element stays in the document emits `pause`.
+- Target attributes are read as a token list: calendar, date-range-picker,
+  flash, nested-form, and toast find a target that also carries other names, and
+  `stimeo check` resolves them the same way.
+- currency-input, input-mask, number-input, and otp hold a page write that
+  arrives during IME composition until the composition ends.
+- Inspector: submit-once's `idle` / `busy` pair is checked per submit control,
+  so a button holding one half is reported (`missing-conditional-target`) even
+  when another button holds both.
+
+### Removed
+
+- **Breaking** overflow-indicator: the `update` action. The controller listens
+  to its viewport's `scroll` itself, and `stimeo check` reports a leftover
+  `scroll->stimeo--overflow-indicator#update` as `unknown-action-method`.
+- **Breaking** calendar: the public `render()` method; the grid repaints itself
+  when `min`, `max`, or `weekStart` change.
+
+### Fixed
+
+- A user-clicked form reset re-derives checkbox, conditional-fields, and otp
+  state.
+- pointer-drag: a `setPointerCapture()` that throws no longer locks the handle
+  out of both pointer and keyboard dragging. slider, range-slider, and
+  color-picker: another element taking the pointer capture mid-drag no longer
+  ends the drag.
+- otp: an edit that reaches a field right after an IME confirmation without a
+  keystroke — dictation, autofill, a drop — is taken instead of dropped.
+- otp: the authored `aria-invalid`, `aria-errormessage`, and `aria-describedby`
+  come back even when a page cached while an error showed is restored under
+  another connection; while the error shows, each field carries a
+  `data-otp-*-lease` marker holding them.
+- tags-input, multi-select, and file-dropzone: a row whose root is itself the
+  `remove` button or the `label` can be removed, focused, and relabelled.
+- stepper: `goto` stays put on an `index` param that is empty or that Stimulus
+  reads as a boolean, `null`, or an array (`"true"`, `"null"`, `"[1]"`), instead
+  of jumping to a step; `stimeo check` already reports these params.
+- The type declarations link `open`, `close`, `confirm`, and `scrollTo` to the
+  component's own method instead of the DOM global of the same name.
+
 ## [0.15.0] - 2026-09-20
 
 Minor release with no new components. Shared internals were consolidated across
@@ -1101,6 +1278,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.16.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.16.0
 [0.15.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.15.0
 [0.14.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.14.0
 [0.13.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.13.0

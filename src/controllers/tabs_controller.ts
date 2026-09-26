@@ -35,14 +35,24 @@ import { isRtl } from "../utils/logical_scroll";
  * - Click a tab to select it.
  * - `ArrowRight`/`ArrowLeft` move to and select the next/previous tab (wrapping);
  *   `Home`/`End` select the first/last tab.
+ * - Every selection move is reported: `stimeo--tabs:change` dispatches
+ *   `{ index: number, total: number, previous: number }`, after
+ *   `aria-selected`, the roving `tabindex` and the panels' `hidden` are written
+ *   and before focus moves. It is informational, so it is not cancelable.
+ *   Reselecting the tab that is already selected, the normalization in
+ *   {@link connect}, and {@link disconnect} are all silent.
  */
 export class TabsController extends Controller<HTMLElement> {
   static override targets = ["tab", "panel", "list"];
   static actions = ["onKeydown", "select"] as const;
+  static events = ["change"] as const;
 
   declare readonly listTarget: HTMLElement;
   declare readonly tabTargets: HTMLButtonElement[];
   declare readonly panelTargets: HTMLElement[];
+
+  /** Whether selection moves are reported: set once `connect()` settled the baseline. */
+  #reporting = false;
 
   /**
    * Selects the initially active tab: the pre-selected one, else the first.
@@ -57,6 +67,15 @@ export class TabsController extends Controller<HTMLElement> {
       (tab) => tab.getAttribute("aria-selected") === "true",
     );
     this.#selectIndex(preselected === -1 ? 0 : preselected, { focus: false });
+    this.#reporting = true;
+  }
+
+  /**
+   * Stops reporting until the next `connect()` has settled its baseline, so that
+   * normalization stays silent.
+   */
+  override disconnect(): void {
+    this.#reporting = false;
   }
 
   /** Selects the clicked tab. Bound via `data-action` (click). */
@@ -109,7 +128,9 @@ export class TabsController extends Controller<HTMLElement> {
    * `tabindex`, and panel visibility. Optionally moves focus to the new tab.
    */
   #selectIndex(index: number, { focus }: { focus: boolean }): void {
-    this.tabTargets.forEach((tab, i) => {
+    const tabs = this.tabTargets;
+    const previous = tabs.findIndex((tab) => tab.getAttribute("aria-selected") === "true");
+    tabs.forEach((tab, i) => {
       const selected = i === index;
       tab.setAttribute("aria-selected", selected ? "true" : "false");
       tab.tabIndex = selected ? 0 : -1;
@@ -117,6 +138,14 @@ export class TabsController extends Controller<HTMLElement> {
     this.panelTargets.forEach((panel, i) => {
       panel.hidden = i !== index;
     });
-    if (focus) this.tabTargets[index]?.focus();
+    if (previous !== index && this.#reporting) {
+      this.dispatch("change", {
+        detail: { index, total: tabs.length, previous },
+        cancelable: false,
+      });
+    }
+    // A subscriber may select a different tab from the handler above; focusing
+    // then leaves the caret on a tab that is no longer the selected one.
+    if (focus && tabs[index]?.getAttribute("aria-selected") === "true") tabs[index]?.focus();
   }
 }

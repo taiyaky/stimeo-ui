@@ -5,6 +5,7 @@ import { EscapeLayer } from "../src/utils/escape_layer";
 import { auditA11y, expectNoA11yViolations } from "./helpers/a11y";
 import { press, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -537,6 +538,158 @@ describe("MenubarController", () => {
       "menuitem, Save, position 3, set size 3",
       "end of menu, File, orientated vertically",
     ]);
+  });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--menubar");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a top click with the menu that moved, after the attributes", () => {
+      const states: string[] = [];
+      byId("file")
+        .closest("[data-controller]")
+        ?.addEventListener("stimeo--menubar:open", () => {
+          states.push(`${menuHidden("m-file")} ${expanded("file")}`);
+        });
+
+      byId("file").click();
+
+      expect(capture.names()).toEqual(["open"]);
+      expect(capture.seen[0]?.detail).toEqual({ reason: "user", index: 0, menu: byId("m-file") });
+      expect(states).toEqual(["false true"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+    });
+
+    it("reports the outgoing close before the incoming open on an adjacent move", () => {
+      byId("file").click();
+      capture.clear();
+
+      press(byId("new"), "ArrowRight");
+
+      expect(capture.names()).toEqual(["close", "open"]);
+      expect(capture.seen[0]?.detail).toEqual({ reason: "user", index: 0, menu: byId("m-file") });
+      expect(capture.seen[1]?.detail).toEqual({ reason: "user", index: 1, menu: byId("m-edit") });
+    });
+
+    it("reports activating an item as select", () => {
+      byId("file").click();
+      capture.clear();
+
+      byId("new").click();
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["select"]);
+    });
+
+    it("reports Escape as escape and an outside click as outside", () => {
+      byId("file").click();
+      capture.clear();
+      press(byId("new"), "Escape");
+
+      expect(capture.reasons()).toEqual(["escape"]);
+
+      byId("file").click();
+      capture.clear();
+      document.body.click();
+
+      expect(capture.reasons()).toEqual(["outside"]);
+    });
+
+    it("reports the deferred Tab close as focus", async () => {
+      byId("file").click();
+      capture.clear();
+
+      press(byId("new"), "Tab");
+      expect(capture.seen).toEqual([]);
+      await tick();
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["focus"]);
+    });
+
+    it("stays silent when the menu that is already open is reopened", () => {
+      byId("file").click();
+      capture.clear();
+
+      press(byId("file"), "ArrowDown");
+
+      expect(menuHidden("m-file")).toBe(false);
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("stays silent while a removed menu target is reconciled away", async () => {
+      byId("file").click();
+      capture.clear();
+
+      byId("m-file").remove();
+      await tick();
+
+      expect(expanded("file")).toBe("false");
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("stays silent while connect normalizes an authored-open menu", async () => {
+      disconnectAndStopApplication(application);
+      const authored = markup
+        .replace(
+          'aria-expanded="false" aria-controls="m-file"',
+          'aria-expanded="true" aria-controls="m-file"',
+        )
+        .replace(
+          'id="m-file" role="menu" aria-label="File" hidden',
+          'id="m-file" role="menu" aria-label="File"',
+        );
+      const fresh = captureStateEvents("stimeo--menubar");
+      application = await mount(authored);
+
+      expect(menuHidden("m-file")).toBe(true);
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+    });
+
+    it("stays silent through a disconnect and a Turbo-style reconnect", async () => {
+      byId("file").click();
+      capture.clear();
+
+      const element = document.querySelector("[data-controller='stimeo--menubar']") as HTMLElement;
+      element.remove();
+      await tick();
+      document.body.append(element);
+      await tick();
+
+      expect(menuHidden("m-file")).toBe(true);
+      expect(capture.seen).toEqual([]);
+    });
+  });
+
+  // --- Re-entry from a subscriber ---
+
+  describe("re-entry from a subscriber", () => {
+    it("leaves no focus inside the menu when the open handler closes it again", () => {
+      const host = byId("file").closest("[data-controller]") as HTMLElement;
+      const instance = application.getControllerForElementAndIdentifier(host, "stimeo--menubar");
+      if (!(instance instanceof MenubarController)) throw new Error("menubar controller not found");
+      host.addEventListener("stimeo--menubar:open", () =>
+        instance.activate({
+          currentTarget: byId("new"),
+        } as unknown as Event),
+      );
+
+      byId("file").click();
+
+      expect(menuHidden("m-file")).toBe(true);
+      expect(byId("m-file").contains(document.activeElement)).toBe(false);
+    });
   });
 });
 

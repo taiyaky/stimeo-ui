@@ -112,6 +112,10 @@ export class TransitionController extends Controller<HTMLElement> {
     else this.enter();
   }
 
+  /**
+   * @stimeoRuntimeOnly The class lists and `timeout` shape this one transition; `#finish` strips
+   *   the classes, so none of them stays at rest.
+   */
   #run(kind: "enter" | "leave"): void {
     this.#cancel();
     const isEnter = kind === "enter";

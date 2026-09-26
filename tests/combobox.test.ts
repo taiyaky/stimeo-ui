@@ -2,7 +2,9 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComboboxController } from "../src/controllers/combobox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -860,6 +862,118 @@ describe("ComboboxController", () => {
       expect(input().getAttribute("aria-activedescendant")).toBe(active);
       press("Enter");
       expect(input().value).toBe("apricot");
+    });
+  });
+
+  describe("the declared empty-state region", () => {
+    // The region is a declared target that sits OUTSIDE the listbox: it is what the
+    // page shows in place of options, so `role="listbox"` never owns it.
+    // Both recordings cover everything this controller can report — the events it
+    // declares and the native commit it mirrors into the field — so a test can say
+    // "nothing was announced" about the whole surface rather than one name of it.
+    let events: ReturnType<typeof captureStateEvents>;
+    let commits: ReturnType<typeof captureFieldCommits>;
+
+    beforeEach(() => {
+      events = captureStateEvents("stimeo--combobox", ComboboxController.events);
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      events.stop();
+      commits.stop();
+    });
+
+    const mountWithRegion = async (regionMarkup: string): Promise<HTMLElement> => {
+      const host = document.createElement("div");
+      host.setAttribute("data-controller", "stimeo--combobox");
+      host.innerHTML = `
+        <input type="text" role="combobox" aria-expanded="false"
+               aria-autocomplete="list" aria-controls="listbox-berry" aria-label="Berry"
+               data-stimeo--combobox-target="input"
+               data-action="input->stimeo--combobox#filter keydown->stimeo--combobox#onKeydown click->stimeo--combobox#open" />
+        <ul id="listbox-berry" role="listbox" data-stimeo--combobox-target="list" hidden>
+          <li role="option" id="opt-berry" data-value="berry"
+              data-stimeo--combobox-target="option"
+              data-action="click->stimeo--combobox#selectByClick">Berry</li>
+        </ul>
+        ${regionMarkup}`;
+      document.body.appendChild(host);
+      await tick();
+      return host;
+    };
+    const field = (host: HTMLElement) => host.querySelector("input") as HTMLInputElement;
+    const emptyRegion = (host: HTMLElement) =>
+      host.querySelector("[data-stimeo--combobox-target='empty']") as HTMLElement;
+    const berryList = (host: HTMLElement) => host.querySelector("#listbox-berry") as HTMLElement;
+    const typeInto = (host: HTMLElement, value: string) => {
+      field(host).value = value;
+      field(host).dispatchEvent(new Event("input", { bubbles: true }));
+    };
+
+    it("shows the region while nothing matches and hides it once an option does", async () => {
+      // Which side the region is on is a pure function of the empty state, so it
+      // follows the state hook in both directions.
+      const host = await mountWithRegion(
+        `<p hidden data-stimeo--combobox-target="empty">No fruit matches.</p>`,
+      );
+
+      typeInto(host, "zz");
+      expect(host.hasAttribute("data-stimeo--combobox-empty")).toBe(true);
+      expect(emptyRegion(host).hidden).toBe(false);
+
+      typeInto(host, "be");
+      expect(host.hasAttribute("data-stimeo--combobox-empty")).toBe(false);
+      expect(emptyRegion(host).hidden).toBe(true);
+    });
+
+    it("hides the region when the popup closes over an empty result", async () => {
+      // Closing ends the empty state, so the region comes down with the popup
+      // instead of surviving as a "no results" message over a closed listbox.
+      const host = await mountWithRegion(
+        `<p hidden data-stimeo--combobox-target="empty">No fruit matches.</p>`,
+      );
+
+      typeInto(host, "zz");
+      expect(emptyRegion(host).hidden).toBe(false);
+
+      field(host).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+      expect(berryList(host).hidden).toBe(true);
+      expect(host.hasAttribute("data-stimeo--combobox-empty")).toBe(false);
+      expect(emptyRegion(host).hidden).toBe(true);
+    });
+
+    it("corrects a region authored on the wrong side at the first connection", async () => {
+      // A restored snapshot can bring the region back visible while the widget
+      // starts closed. The authored visibility is never read back: the first
+      // reflection settles it. Normalizing a fresh connection is not a
+      // transition, so nothing is announced and no commit is reported.
+      const host = await mountWithRegion(
+        `<p data-stimeo--combobox-target="empty">No fruit matches.</p>`,
+      );
+
+      expect(host.hasAttribute("data-stimeo--combobox-empty")).toBe(false);
+      expect(emptyRegion(host).hidden).toBe(true);
+      expect(events.seen).toEqual([]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("settles a region inserted after connect on the side the state is on", async () => {
+      // A region delivered by a Turbo Stream lands on the current state the same
+      // way one present at connect does.
+      const host = await mountWithRegion("");
+      typeInto(host, "zz");
+      expect(host.hasAttribute("data-stimeo--combobox-empty")).toBe(true);
+
+      const late = document.createElement("p");
+      late.hidden = true;
+      late.setAttribute("data-stimeo--combobox-target", "empty");
+      late.textContent = "No fruit matches.";
+      host.appendChild(late);
+      await tick();
+
+      expect(late.hidden).toBe(false);
     });
   });
 });

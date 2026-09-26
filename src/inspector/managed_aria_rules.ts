@@ -39,15 +39,16 @@ export function removeActivedescendantSuggestion(target: string, popup = "listbo
  */
 export const managedAriaRules: ManagedAriaRules = {
   // The carousel derives every one of these from state it already owns — the
-  // rotation intent lives in the `autoplay` Value, and reachability follows from
-  // `loop` and the slide count — so each is recomputed on connect and on every
-  // move. None of them has a server-rendered initial an author could get right.
+  // rotation intent comes from the `autoplay` Value and the reduced-motion
+  // preference, and reachability follows from `loop` and the slide count — so
+  // each is recomputed on connect and on every move. None of them has a
+  // server-rendered initial an author could get right.
   "stimeo--carousel": [
     {
       target: "playToggle",
       attrs: ["aria-pressed"],
       suggestion:
-        "Remove aria-pressed from the playToggle target — the controller mirrors the autoplay Value onto it. Set data-stimeo--carousel-autoplay-value to choose the initial state.",
+        "Remove aria-pressed from the playToggle target — the controller derives it from the autoplay Value, whether a slide is left to rotate to, and the reduced-motion preference. Set data-stimeo--carousel-autoplay-value to declare the rotation intent.",
     },
     {
       target: "playToggle",

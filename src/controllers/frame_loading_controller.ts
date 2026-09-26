@@ -92,6 +92,10 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     if (!this.#loading) this.#begin();
   };
 
+  /**
+   * @stimeoRuntimeOnly `minDuration` holds the loading state at least this long for the one load
+   *   that ended.
+   */
   readonly #onEnd = (): void => {
     if (!this.#loading) return;
     // The newest end signal owns the finish: the floor replaces whatever it was
@@ -208,7 +212,12 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     this.overlayTarget.hidden = false;
   }
 
-  /** Enters the loading state: hooks, skeleton/overlay, inert content, focus retreat. */
+  /**
+   * Enters the loading state: hooks, skeleton/overlay, inert content, focus retreat.
+   *
+   * @stimeoRuntimeOnly `announceText` words the one announcement of this load and `restoreFocus`
+   *   decides whether focus leaves the frame it covers.
+   */
   #begin(): void {
     this.#loading = true;
     this.#floor.begin();
@@ -222,7 +231,12 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     announce(fillTemplate(this.announceTextValue, {}));
   }
 
-  /** Leaves the loading state: restore hooks, hide skeleton/overlay, restore focus. */
+  /**
+   * Leaves the loading state: restore hooks, hide skeleton/overlay, restore focus.
+   *
+   * @stimeoRuntimeOnly `announceReadyText` words the one announcement of this finished load and
+   *   `restoreFocus` decides whether focus goes back.
+   */
   #finish(): void {
     this.#loading = false;
     this.#rewindHooks();

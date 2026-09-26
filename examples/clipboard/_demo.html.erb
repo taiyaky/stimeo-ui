@@ -34,3 +34,49 @@
   </button>
   <span class="clipboard__feedback" data-stimeo--clipboard-target="feedback"></span>
 </div>
+
+<%# Second form: hand the result straight to a toast. The copy event carries the
+    wording, so `stimeo--clipboard:copy->stimeo--toast#show` is the whole wire — no
+    feedback slot and no consumer JS. The announce-* Values are left empty on
+    purpose: the toast's message slot is a role="status" live region, so wiring the
+    shared announcer as well would read the same result twice. %>
+<h3 class="clipboard-toast__heading"><%= t("components.clipboard.demo.toast_heading") %></h3>
+
+<div
+  class="clipboard-toast"
+  data-controller="stimeo--toast"
+  data-stimeo--toast-duration-value="4000"
+  data-action="stimeo--clipboard:copy->stimeo--toast#show">
+  <div
+    class="clipboard"
+    data-controller="stimeo--clipboard"
+    data-stimeo--clipboard-copied-label-value="<%= t('components.clipboard.demo.copied') %>"
+    data-stimeo--clipboard-error-label-value="<%= t('components.clipboard.demo.error') %>">
+    <input
+      class="clipboard__source"
+      type="text"
+      readonly
+      aria-label="<%= t('components.clipboard.demo.source_label') %>"
+      value="https://stimeo.example/share/xyz789"
+      data-stimeo--clipboard-target="source">
+    <button
+      class="clipboard__button"
+      type="button"
+      data-stimeo--clipboard-target="button"
+      data-action="click->stimeo--clipboard#copy">
+      <%= t("components.clipboard.demo.button") %>
+    </button>
+  </div>
+
+  <div
+    role="region"
+    aria-label="<%= t("components.clipboard.demo.toast_region_label") %>"
+    class="clipboard-toast__region">
+    <ol class="clipboard-toast__list" data-stimeo--toast-target="list"></ol>
+    <template data-stimeo--toast-target="template">
+      <li class="clipboard-toast__item" data-stimeo--toast-target="item" tabindex="0">
+        <span role="status" data-toast-slot="message"></span>
+      </li>
+    </template>
+  </div>
+</div>

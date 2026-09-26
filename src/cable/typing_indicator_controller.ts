@@ -2,11 +2,17 @@ import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { KeyedTimers } from "../utils/keyed_timers";
 import { MAX_TIMER_DELAY_MS, SafeTimeout } from "../utils/safe_timeout";
+import { TransientHooks } from "../utils/transient_hooks";
 import {
   type ConfirmedCableSubscription,
   createConfirmedSubscription,
   parseSubscriptionParams,
 } from "./consumer";
+
+/** The hooks a connection may find written by an earlier, now-gone one. */
+const TRANSIENT = new TransientHooks({
+  attributes: ["data-typing", "data-typing-indicator-rejected"],
+});
 
 /** Milliseconds of silence after which a typer is dropped. */
 const DEFAULT_TIMEOUT = 3000;
@@ -150,8 +156,7 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
     // Typing state is transient: a Turbo cache snapshot must not resurrect a
     // stale indicator, and the live stream re-populates naturally. Rejection is
     // transient server state too — the fresh subscription re-decides the hook.
-    this.element.removeAttribute("data-typing");
-    this.element.removeAttribute("data-typing-indicator-rejected");
+    TRANSIENT.reset(this.element);
     if (this.hasStatusTarget) this.statusTarget.textContent = "";
 
     // Delegated on the container so the composer needs no per-input data-action
@@ -183,8 +188,7 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
     this.#expiry.clearAll();
     this.#announceId = null;
     this.#typers.clear();
-    this.element.removeAttribute("data-typing");
-    this.element.removeAttribute("data-typing-indicator-rejected");
+    TRANSIENT.reset(this.element);
     if (this.hasStatusTarget) this.statusTarget.textContent = "";
     this.#lastSentAt = 0;
   }
@@ -205,6 +209,9 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
    * Tracks a broadcast typer. The own echo is dropped (same `name`); every
    * further signal from a name restarts its auto-clear timer, so the indicator
    * survives continuous typing and clears `timeout` ms after the last signal.
+   *
+   * @stimeoRuntimeOnly `name` filters this client's own echo and `timeout` arms one typer's expiry;
+   *   the typers shown come from what is received.
    */
   #onReceived(data: unknown): void {
     const name = (data as { name?: unknown } | null)?.name;
@@ -248,7 +255,9 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
     this.#render();
   }
 
-  /** Reflects the typer set onto the display, announces it, and emits `change`. */
+  /**
+   * Reflects the typer set onto the display, announces it, and emits `change`.
+   */
   #render(): void {
     const names = this.#paint();
     this.#announce(names);
@@ -263,6 +272,9 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
    * a reader for, and the visible copy already clears. Wording comes from the
    * consumer, and {@link announce} drops an empty message, so an undeclared template
    * announces nothing at all.
+   *
+   * @stimeoRuntimeOnly The wording Values are read to compose one announcement; the
+   * visible typer list is rendered from the set, not from them.
    */
   #announce(names: string[]): void {
     if (this.#announceId !== null) this.#timers.clear(this.#announceId);

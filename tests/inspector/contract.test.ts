@@ -31,16 +31,16 @@ function sourceFor(identifier: string): string {
  * These are genuine public methods that are *not* user-wired actions, so they
  * must not appear in `static actions`, yet legitimately remain public.
  *
- * - `stimeo--calendar` `render` / `selectDayElement`: internal grid mechanics
- *   kept public as a deterministic test seam — happy-dom does not reliably fire
- *   Stimulus's async value-changed / delegated-click paths, so the calendar
- *   specs drive these directly instead of synthesizing unreliable DOM events.
+ * - `stimeo--calendar` `selectDayElement`: internal grid mechanics kept public
+ *   as a deterministic test seam — happy-dom does not reliably fire Stimulus's
+ *   delegated-click path, so the calendar specs drive it directly instead of
+ *   synthesizing unreliable DOM events.
  * - `stimeo--toast` `enforceMaxLimit`: enforcement normally runs from
  *   `itemTargetConnected` (a MutationObserver-driven Stimulus callback happy-dom
  *   does not reliably fire), so the toast spec invokes it directly.
  */
 const NON_ACTION_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
-  "stimeo--calendar": ["render", "selectDayElement"],
+  "stimeo--calendar": ["selectDayElement"],
   "stimeo--toast": ["enforceMaxLimit"],
 };
 

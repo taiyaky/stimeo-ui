@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { FocusTrap } from "../utils/focus_trap";
 import { readLocalStorage, writeLocalStorage } from "../utils/safe_storage";
+import { type StateReason, stateReasonFor } from "../utils/state_reason";
 import { TransitionCompletion } from "../utils/transition_completion";
 
 /** Current responsive mode, driven by a `min-width` media query. */
@@ -51,6 +52,22 @@ type Mode = "inline" | "overlay";
  * The collapsed preference persists across Turbo navigations and full reloads;
  * the transient overlay-open state never persists, so "back/forward" never
  * restores a stuck-open menu.
+ *
+ * Each move of the panel's expanded state is reported: `stimeo--sidebar:open`
+ * and `stimeo--sidebar:close` dispatch
+ * `{ reason: StateReason, mode: "inline" | "overlay" }` — `mode` tells an
+ * inline expand/collapse from an overlay open/close — as soon as `data-state`
+ * and `aria-expanded` are written, without waiting for the exit transition. A
+ * responsive mode change re-derives the state instead of the user moving it, so
+ * it reports `stimeo--sidebar:reconcile` with
+ * `{ mode: "inline" | "overlay", open: boolean }` and no reason. All three are
+ * informational, so none is cancelable. A call that leaves the state where it
+ * already was, the normalization in {@link connect}, the reconciliation that
+ * follows panel churn, the `turbo:before-cache` sanitization, and
+ * {@link disconnect} are all silent. A close the backdrop asked for reports
+ * `"outside"`: the backdrop carries no action of its own, so
+ * {@link SidebarController.close | close} is what the consumer wires onto it and it
+ * recognises that target.
  */
 export class SidebarController extends Controller<HTMLElement> {
   static override targets = ["trigger", "panel", "backdrop"];
@@ -60,6 +77,7 @@ export class SidebarController extends Controller<HTMLElement> {
     collapsed: { type: Boolean, default: false },
   };
   static actions = ["close", "open", "toggle"] as const;
+  static events = ["close", "open", "reconcile"] as const;
 
   declare readonly triggerTarget: HTMLElement;
   declare readonly panelTarget: HTMLElement;
@@ -77,7 +95,7 @@ export class SidebarController extends Controller<HTMLElement> {
 
   /** Owns the overlay modal side effects; Escape closes, focus falls to trigger. */
   readonly #trap = new FocusTrap(() => this.#activePanel ?? this.panelTarget, {
-    onEscape: () => this.close(),
+    onEscape: () => this.#closeOverlay("escape"),
     fallbackFocus: () => (this.hasTriggerTarget ? this.triggerTarget : null),
   });
 
@@ -94,6 +112,9 @@ export class SidebarController extends Controller<HTMLElement> {
   /** Distinguishes dynamic target churn from callbacks around controller teardown. */
   #connected = false;
 
+  /** Whether state moves are reported: set once `connect()` settled the baseline. */
+  #reporting = false;
+
   override connect(): void {
     this.#connected = true;
     this.#beforeCache.activate();
@@ -102,11 +123,13 @@ export class SidebarController extends Controller<HTMLElement> {
     this.#mqlQuery = this.#breakpointQuery;
     this.#mql = this.#matchBreakpoint(this.#mqlQuery);
     this.#mql?.addEventListener("change", this.#onMediaChange);
-    this.#applyMode(this.#computeMode());
+    this.#applyMode(this.#computeMode(), false);
+    this.#reporting = true;
   }
 
   override disconnect(): void {
     this.#connected = false;
+    this.#reporting = false;
     this.#beforeCache.deactivate();
     this.#mql?.removeEventListener("change", this.#onMediaChange);
     this.#mql = null;
@@ -157,7 +180,7 @@ export class SidebarController extends Controller<HTMLElement> {
     this.#mql = this.#matchBreakpoint(query);
     this.#mql?.addEventListener("change", this.#onMediaChange);
     const next = this.#computeMode();
-    if (next !== this.#mode) this.#applyMode(next);
+    if (next !== this.#mode) this.#applyMode(next, true);
   }
 
   /**
@@ -176,30 +199,49 @@ export class SidebarController extends Controller<HTMLElement> {
   });
 
   /** Toggles the panel: inline flips collapsed/expanded, overlay flips open/closed. */
-  toggle(): void {
+  toggle(event?: Event): void {
+    const reason = stateReasonFor(event);
     if (this.#isOverlay) {
-      this.#isOverlayOpen ? this.#closeOverlay() : this.#openOverlay();
+      this.#isOverlayOpen ? this.#closeOverlay(reason) : this.#openOverlay(reason);
     } else {
-      this.#setCollapsed(!this.#collapsed);
+      this.#setCollapsed(!this.#collapsed, reason);
     }
   }
 
   /** Shows the panel (inline: expand; overlay: open). */
-  open(): void {
-    if (this.#isOverlay) this.#openOverlay();
-    else this.#setCollapsed(false);
+  open(event?: Event): void {
+    const reason = stateReasonFor(event);
+    if (this.#isOverlay) this.#openOverlay(reason);
+    else this.#setCollapsed(false, reason);
   }
 
   /** Hides the panel (inline: collapse; overlay: close). */
-  close(): void {
-    if (this.#isOverlay) this.#closeOverlay();
-    else this.#setCollapsed(true);
+  close(event?: Event): void {
+    const reason = this.#closeReason(event);
+    if (this.#isOverlay) this.#closeOverlay(reason);
+    else this.#setCollapsed(true, reason);
+  }
+
+  /**
+   * Reads why a close happened. The backdrop has no action of its own — the
+   * consumer wires this one onto it — so the shared `"outside"` vocabulary is
+   * only reachable by recognising that target here.
+   */
+  #closeReason(event?: Event): StateReason {
+    if (this.hasBackdropTarget && event?.currentTarget === this.backdropTarget) return "outside";
+    return stateReasonFor(event);
   }
 
   // --- Mode handling ---------------------------------------------------------
 
-  /** Re-renders the closed/default state for `mode` and records it. */
-  #applyMode(mode: Mode): void {
+  /**
+   * Re-renders the closed/default state for `mode` and records it.
+   *
+   * @param report - Whether the mode change is one the consumer can observe: a
+   *   viewport change re-derives the state under them, the connect-time baseline
+   *   does not.
+   */
+  #applyMode(mode: Mode, report: boolean): void {
     this.#mode = mode;
     if (this.hasPanelTarget) this.panelTarget.setAttribute("data-mode", mode);
     if (mode === "inline") {
@@ -214,6 +256,12 @@ export class SidebarController extends Controller<HTMLElement> {
       this.#transition.cancel();
       this.#trap.deactivate({ restoreFocus: false });
       this.#setOverlayClosedImmediate();
+    }
+    if (report && this.#reporting) {
+      this.dispatch("reconcile", {
+        detail: { mode, open: this.#isExpanded },
+        cancelable: false,
+      });
     }
   }
 
@@ -253,7 +301,7 @@ export class SidebarController extends Controller<HTMLElement> {
 
   readonly #onMediaChange = (event: MediaQueryListEvent): void => {
     const next: Mode = event.matches ? "inline" : "overlay";
-    if (next !== this.#mode) this.#applyMode(next);
+    if (next !== this.#mode) this.#applyMode(next, true);
   };
 
   #computeMode(): Mode {
@@ -268,10 +316,11 @@ export class SidebarController extends Controller<HTMLElement> {
   // --- Inline (rail) ---------------------------------------------------------
 
   /** Sets, reflects, and persists the inline collapsed preference. */
-  #setCollapsed(collapsed: boolean): void {
+  #setCollapsed(collapsed: boolean, reason: StateReason): void {
     if (collapsed === this.#collapsed) return;
     this.#collapsed = collapsed;
     this.#applyInlineState(collapsed);
+    this.#report(!collapsed, reason);
     this.#persistCollapsed(collapsed);
   }
 
@@ -286,7 +335,7 @@ export class SidebarController extends Controller<HTMLElement> {
   // --- Overlay (off-canvas modal) -------------------------------------------
 
   /** Opens the overlay: reveal it, commit a starting frame, then trap focus. */
-  #openOverlay(): void {
+  #openOverlay(reason: StateReason): void {
     if (!this.hasPanelTarget || this.#isOverlayOpen) return;
     this.#transition.cancel();
     this.#activePanel = this.panelTarget;
@@ -297,14 +346,23 @@ export class SidebarController extends Controller<HTMLElement> {
     void this.panelTarget.offsetWidth;
     this.#setOverlayState("open");
     this.#setExpandedAttr(true);
+    this.#report(true, reason);
+    // A subscriber may close it again from the handler above. Everything below
+    // applies to a panel that is open; run it against a closed one and the modal
+    // side effects have no path back — the later `close()` returns early.
+    if (!this.#isOverlayOpen) return;
     this.#trap.activate();
   }
 
   /** Closes the overlay: start the exit transition, defer hide + trap teardown. */
-  #closeOverlay(): void {
+  #closeOverlay(reason: StateReason): void {
     if (!this.hasPanelTarget || !this.#isOverlayOpen) return;
     this.#setOverlayState("closed");
     this.#setExpandedAttr(false);
+    this.#report(false, reason);
+    // A subscriber may reopen it from the handler above; hiding after the exit
+    // transition would then apply `hidden` to a panel that is on screen.
+    if (this.#isOverlayOpen) return;
     this.#hideAfterTransition();
   }
 
@@ -355,6 +413,19 @@ export class SidebarController extends Controller<HTMLElement> {
     }
   }
 
+  /** Reports a move of the expanded state, naming the mode it happened in. */
+  #report(open: boolean, reason: StateReason): void {
+    if (!this.#reporting) return;
+    const detail = { reason, mode: this.#mode };
+    if (open) this.dispatch("open", { detail, cancelable: false });
+    else this.dispatch("close", { detail, cancelable: false });
+  }
+
+  /** Whether the panel currently counts as expanded in the mode it is in. */
+  get #isExpanded(): boolean {
+    return this.#isOverlay ? this.#isOverlayOpen : !this.#collapsed;
+  }
+
   /**
    * Resolves the inline collapsed preference, in priority order:
    *   1. the persisted value (when a `key` is set and storage is readable),
@@ -382,6 +453,10 @@ export class SidebarController extends Controller<HTMLElement> {
     writeLocalStorage(key, collapsed ? "1" : "0");
   }
 
+  /**
+   * @stimeoRuntimeOnly `key` names the storage slot the collapsed state is saved under; the state
+   *   itself comes from the user.
+   */
   get #storageKey(): string {
     return this.keyValue ? `stimeo--sidebar:${this.keyValue}` : "";
   }

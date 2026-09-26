@@ -23,14 +23,10 @@ const CONSTRAINT_MESSAGE_KEYS: ReadonlyArray<readonly [keyof ValidityState, stri
   ["badInput", "bad-input"],
 ];
 
-/** Attribute prefix for a per-constraint message override, authored on the control. */
-const MESSAGE_ATTR_PREFIX = "data-stimeo--form-validation-message-";
-/** Attribute for a generic message override applied to any failing constraint. */
-const MESSAGE_ATTR_GENERIC = "data-stimeo--form-validation-message";
-/** Attribute opting a control into a declarative custom rule (`"whitespace"`). */
-const DISALLOW_ATTR = "data-stimeo--form-validation-disallow";
-/** Message override dedicated to the declarative whitespace rule. */
-const DISALLOW_WHITESPACE_MESSAGE = `${MESSAGE_ATTR_PREFIX}whitespace`;
+/** Suffix of a generic message override applied to any failing constraint. */
+const MESSAGE_PART = "message";
+/** Suffix opting a control into a declarative custom rule (`"whitespace"`). */
+const DISALLOW_PART = "disallow";
 /** Default message when `disallow="whitespace"` fails and no override is given. */
 const DISALLOW_WHITESPACE_DEFAULT = "Please enter a value that is not only whitespace.";
 
@@ -137,6 +133,16 @@ interface ValidationSnapshot {
  * an author-set attribute) so the submission reaches the server's validation.
  */
 export class FormValidationController extends Controller<HTMLFormElement> {
+  /** The generic message override, in the namespace this controller is registered under. */
+  get #messageAttribute(): string {
+    return `data-${this.identifier}-${MESSAGE_PART}`;
+  }
+
+  /** Marks the `novalidate` this controller applied, so an authored one is left alone. */
+  get #novalidateMarker(): string {
+    return `data-${this.identifier}-${FormValidationController.#NOVALIDATE_PART}`;
+  }
+
   static override outlets = ["stimeo--form-field"];
   static override values = {
     validateOnBlur: { type: Boolean, default: true },
@@ -155,8 +161,8 @@ export class FormValidationController extends Controller<HTMLFormElement> {
   declare revalidateOnInputValue: boolean;
   declare focusInvalidValue: boolean;
 
-  /** Marker recording that we added `novalidate`, so we only remove our own. */
-  static readonly #NOVALIDATE_MARKER = "data-stimeo--form-validation-novalidate";
+  /** Suffix of the marker recording that we added `novalidate`, so we only remove our own. */
+  static readonly #NOVALIDATE_PART = "novalidate";
 
   /** Object-backed groups already interacted with — the input revalidation gate. */
   readonly #touchedGroups = new WeakSet<FormFieldController | ValidatableControl>();
@@ -231,7 +237,7 @@ export class FormValidationController extends Controller<HTMLFormElement> {
   /** Suppresses native bubbles and binds the submit / blur / input listeners. */
   override connect(): void {
     if (setDefaultAttribute(this.element, "novalidate", "")) {
-      this.element.setAttribute(FormValidationController.#NOVALIDATE_MARKER, "");
+      this.element.setAttribute(this.#novalidateMarker, "");
     }
     // Capture submit before form-bound actions. The other bubbling events live on
     // the same document so controls associated through `form="id"` participate too;
@@ -255,9 +261,9 @@ export class FormValidationController extends Controller<HTMLFormElement> {
     }
     this.#ownedCustomErrors.clear();
     this.#touchedRadioGroups.clear();
-    if (this.element.hasAttribute(FormValidationController.#NOVALIDATE_MARKER)) {
+    if (this.element.hasAttribute(this.#novalidateMarker)) {
       this.element.removeAttribute("novalidate");
-      this.element.removeAttribute(FormValidationController.#NOVALIDATE_MARKER);
+      this.element.removeAttribute(this.#novalidateMarker);
     }
   }
 
@@ -370,13 +376,15 @@ export class FormValidationController extends Controller<HTMLFormElement> {
     for (const [flag, key] of CONSTRAINT_MESSAGE_KEYS) {
       if (control.validity[flag]) {
         return (
-          this.#authoredMessage(control, `${MESSAGE_ATTR_PREFIX}${key}`) ??
-          this.#authoredMessage(control, MESSAGE_ATTR_GENERIC) ??
+          this.#authoredMessage(control, `${this.#messageAttribute}-${key}`) ??
+          this.#authoredMessage(control, this.#messageAttribute) ??
           control.validationMessage
         );
       }
     }
-    return control.validationMessage || this.#authoredMessage(control, MESSAGE_ATTR_GENERIC) || "";
+    return (
+      control.validationMessage || this.#authoredMessage(control, this.#messageAttribute) || ""
+    );
   }
 
   /**
@@ -395,7 +403,7 @@ export class FormValidationController extends Controller<HTMLFormElement> {
     const ownsCurrent = recorded !== undefined && control.validationMessage === recorded;
 
     const violates =
-      control.getAttribute(DISALLOW_ATTR) === "whitespace" &&
+      control.getAttribute(`data-${this.identifier}-${DISALLOW_PART}`) === "whitespace" &&
       control.value.length > 0 &&
       control.value.trim() === "";
     if (!violates) {
@@ -409,8 +417,8 @@ export class FormValidationController extends Controller<HTMLFormElement> {
     if (control.validity.customError && !ownsCurrent) return;
 
     const message =
-      this.#authoredMessage(control, DISALLOW_WHITESPACE_MESSAGE) ??
-      this.#authoredMessage(control, MESSAGE_ATTR_GENERIC) ??
+      this.#authoredMessage(control, `${this.#messageAttribute}-whitespace`) ??
+      this.#authoredMessage(control, this.#messageAttribute) ??
       DISALLOW_WHITESPACE_DEFAULT;
     if (!ownsCurrent || recorded !== message) control.setCustomValidity(message);
     this.#ownedCustomErrors.set(control, message);

@@ -1,11 +1,31 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
+import { commitField, writeField } from "../utils/field_mirror";
 import { canTakeFocus } from "../utils/focus_candidate";
 import { INTERACTIVE_HOST_SELECTOR, isInteractiveHost } from "../utils/interactive_host";
 import { isRtl } from "../utils/logical_scroll";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { RovingTabindex } from "../utils/roving_tabindex";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { findTypeaheadMatch, isTypeaheadKey, Typeahead, typeaheadLabel } from "../utils/typeahead";
+
+/** Item attributes a page can rewrite in place that move the published selection. */
+const OBSERVED_ATTRIBUTES = ["aria-selected", "data-value"];
+
+/**
+ * Sets `name` on `element` only when its value differs. A same-value write still
+ * queues a mutation record for every observer on the page, so an unchanged state
+ * writes nothing.
+ */
+function setAttributeIfChanged(element: Element, name: string, value: string): void {
+  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+}
+
+/** The published selection: the selected item and the value its field submits. */
+interface Selection {
+  readonly item: HTMLElement | null;
+  readonly value: string;
+}
 
 /**
  * Interactive descendants a `treeitem` may legitimately contain (inline rename
@@ -24,7 +44,9 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  *
  * Markup contract (identifier: `stimeo--tree-view`):
  *   <ul data-controller="stimeo--tree-view" role="tree" aria-label="Files">
+ *     <input type="hidden" name="path" data-stimeo--tree-view-target="field" />
  *     <li role="treeitem" aria-expanded="false" aria-selected="false" tabindex="0"
+ *         data-value="src"
  *         data-stimeo--tree-view-target="item"
  *         data-action="keydown->stimeo--tree-view#onKeydown
  *                      click->stimeo--tree-view#onClick">
@@ -56,6 +78,21 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  *   `stimeo--tree-view:toggle`; selection dispatches `stimeo--tree-view:select`.
  * - The optional `toggle` action expands / collapses the nearest item, so a
  *   chevron gives pointer users the reach that `ArrowRight` gives the keyboard.
+ * - The optional `field` target mirrors the selected item's `data-value` so the
+ *   selection can be submitted and read server-side; an item without one, and
+ *   an empty selection, both mirror `""`. A selection the user made emits a
+ *   native bubbling `change` from that field, the way a form control does, so
+ *   `stimeo--auto-submit` and form-level validation hear it. The mirror is
+ *   refreshed silently on connect, on a replacement field, and whenever the
+ *   authored selection is normalized.
+ * - A selection the page moves — the selected item removed, a morph or a script
+ *   writing an item's `aria-selected` or the selected item's `data-value`, a
+ *   selected item that arrives ahead of the selection — dispatches
+ *   `stimeo--tree-view:reconcile` instead of `select`: once per batch, and only
+ *   when the selected item or its value differs from the selection last settled
+ *   (on connect, by the user, or by the previous `reconcile`). Connecting
+ *   reports nothing. While connected a `MutationObserver` watches the items'
+ *   `aria-selected` and `data-value`; `disconnect()` releases it.
  *
  * Contract notes:
  * - A child container is resolved by `role="group"`, not by the target: the
@@ -90,17 +127,31 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  *   `defaultPrevented` yield covers widgets no selector can name.
  * `select` dispatches `{ item: HTMLElement }`.
  * `toggle` dispatches `{ item: HTMLElement, expanded: boolean }`.
+ * `reconcile` dispatches `{ item: HTMLElement | null }` — the shape of `select`,
+ * with `null` once nothing is selected.
  */
 export class TreeViewController extends Controller<HTMLElement> {
-  static override targets = ["item", "group"];
+  static override targets = ["item", "group", "field"];
   static actions = ["onClick", "onKeydown", "toggle"] as const;
-  static events = ["select", "toggle"] as const;
+  static events = ["select", "toggle", "reconcile"] as const;
 
   declare readonly itemTargets: HTMLElement[];
+  declare readonly fieldTarget: HTMLInputElement;
+  declare readonly hasFieldTarget: boolean;
 
   readonly #roving = new RovingTabindex(() => this.itemTargets);
   readonly #typeahead = new Typeahead();
   readonly #timers = new SafeTimeout();
+  /**
+   * Collapses the item and field callbacks and observed item writes of one DOM
+   * mutation into a single selection pass; refused before `connect()` and after
+   * `disconnect()`.
+   */
+  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileSelection());
+  /** Watches the item attributes a page can rewrite in place; set while connected. */
+  #observer: MutationObserver | null = null;
+  /** The selection last settled: on connect, by the user, or by a reported pass. */
+  #settled: Selection = { item: null, value: "" };
   #connected = false;
   /**
    * Item targets in DOM order as of the last connect / target change. A removed
@@ -148,9 +199,10 @@ export class TreeViewController extends Controller<HTMLElement> {
   };
 
   /**
-   * Reconciles authored expansion state and establishes the single tab stop.
-   * Idempotent, so a Turbo cache restore / morph re-runs it safely (re-adding
-   * the same listener reference is a no-op per the DOM spec).
+   * Reconciles authored expansion state, establishes the single tab stop, and
+   * settles the selection without reporting it. Idempotent, so a Turbo cache
+   * restore / morph re-runs it safely (re-adding the same listener reference is a
+   * no-op per the DOM spec).
    */
   override connect(): void {
     this.element.addEventListener("focusin", this.#onFocusIn);
@@ -159,15 +211,30 @@ export class TreeViewController extends Controller<HTMLElement> {
     this.#reconcileExpansion();
     this.#normalizeSelection();
     this.#normalizeTabStop();
+    this.#mirrorField(false);
     this.#order = [...this.itemTargets];
+    this.#settled = this.#selection();
     this.#connected = true;
+    this.#reconcile.activate();
+    this.#observeItems();
   }
 
-  /** Detaches the focus trackers, drops the typeahead buffer and its timer. */
+  /** Fills a form field inserted or replaced at runtime with the current selection. */
+  fieldTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /**
+   * Detaches the focus trackers and the item observer, drops a queued selection
+   * pass, the typeahead buffer and its timer.
+   */
   override disconnect(): void {
     this.element.removeEventListener("focusin", this.#onFocusIn);
     this.element.removeEventListener("focusout", this.#onFocusOut);
     this.#connected = false;
+    this.#reconcile.cancel();
+    this.#observer?.disconnect();
+    this.#observer = null;
     this.#typeahead.reset();
     this.#timers.clearAll();
     this.#order = [];
@@ -191,14 +258,15 @@ export class TreeViewController extends Controller<HTMLElement> {
   /**
    * Re-normalizes the tab stop when a `treeitem` is added at runtime, so an
    * appended item carrying `tabindex="0"` cannot turn the tree into two Tab
-   * stops. Skipped before `connect()`: Stimulus registers the initial targets
-   * first, and `connect()` owns the initial tab-stop policy.
+   * stops, and settles the selection once the batch is in. Skipped before
+   * `connect()`: Stimulus registers the initial targets first, and `connect()`
+   * owns the initial tab-stop policy.
    */
   itemTargetConnected(): void {
     if (!this.#connected) return;
-    this.#normalizeSelection();
     this.#normalizeTabStop();
     this.#trackOrder();
+    this.#reconcile.schedule();
   }
 
   /**
@@ -207,17 +275,99 @@ export class TreeViewController extends Controller<HTMLElement> {
    *
    * Every item gets an explicit value — an absent `aria-selected` means "not
    * selectable" in ARIA, so a forgotten attribute hides a selectable row — and a
-   * single-select tree keeps at most one `true`, first in DOM order. `connect()`
-   * reconciles authored expansion the same way. The scan is the `item` target
-   * set: a `role="treeitem"` without the target is outside the contract and is
-   * neither counted nor written.
+   * single-select tree keeps at most one `true`, first in DOM order: an item the
+   * page inserts ahead of the selection, already selected, takes it over.
+   * `connect()` reconciles authored expansion the same way. The scan is the
+   * `item` target set: a `role="treeitem"` without the target is outside the
+   * contract and is neither counted nor written.
    */
   #normalizeSelection(): void {
     const items = this.itemTargets;
     const selected = items.find((item) => item.getAttribute("aria-selected") === "true");
     for (const item of items) {
-      item.setAttribute("aria-selected", item === selected ? "true" : "false");
+      setAttributeIfChanged(item, "aria-selected", item === selected ? "true" : "false");
     }
+  }
+
+  /**
+   * Mirrors the selected item's `data-value` into the optional form field.
+   * Nothing selected, and an item that carries no value, both submit `""`.
+   */
+  #mirrorField(notify: boolean): void {
+    if (!this.hasFieldTarget) return;
+    const moved = writeField(this.fieldTarget, this.#selection().value);
+    if (moved && notify) commitField(this.fieldTarget);
+  }
+
+  /** The selected item target, if any, and the value its field submits. */
+  #selection(): Selection {
+    const item =
+      this.itemTargets.find((candidate) => candidate.getAttribute("aria-selected") === "true") ??
+      null;
+    return { item, value: item?.dataset.value ?? "" };
+  }
+
+  /**
+   * The pass the page's changes run: the selection is normalized and mirrored,
+   * then reported if it moved. The report comes last, so items a subscriber
+   * rewrites are the next pass's to settle.
+   */
+  #reconcileSelection(): void {
+    this.#normalizeSelection();
+    this.#dropOwnRecords();
+    this.#mirrorField(false);
+    this.#reportMove();
+  }
+
+  /**
+   * Reports the selection as `reconcile` when its item or value differs from the
+   * selection last settled. The settled selection is replaced before dispatching,
+   * so a move a subscriber makes is measured against what it was told.
+   */
+  #reportMove(): void {
+    const selection = this.#selection();
+    if (selection.item === this.#settled.item && selection.value === this.#settled.value) return;
+    this.#settled = selection;
+    this.dispatch("reconcile", { detail: { item: selection.item } });
+  }
+
+  /**
+   * Watches the items' `aria-selected` and `data-value`. The tree's own writes to
+   * them are dropped from the queue as they happen, so each record the callback
+   * receives is the page's, and only a record on one of the tree's own items
+   * schedules a pass.
+   */
+  #observeItems(): void {
+    const observer = new MutationObserver((records) => {
+      if (this.#concernsItems(records)) this.#reconcile.schedule();
+    });
+    observer.observe(this.element, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: OBSERVED_ATTRIBUTES,
+    });
+    this.#observer = observer;
+  }
+
+  /**
+   * Whether any record is about one of this tree's own items. A widget nested in a
+   * row writes the same attributes on its own elements, and those are no reason to
+   * reconcile the tree.
+   */
+  #concernsItems(records: readonly MutationRecord[]): boolean {
+    const items = new Set<Node>(this.itemTargets);
+    return records.some((record) => items.has(record.target));
+  }
+
+  /**
+   * Drops the records the tree's own writes just queued, so the observer never
+   * takes them for the page's. A page write queued just before goes with them and
+   * owes nothing: every such write leaves every item's `aria-selected` at the value
+   * the selection gives it, and the selection is then read back from the DOM, so it
+   * already holds what the page wrote.
+   */
+  #dropOwnRecords(): void {
+    this.#observer?.takeRecords();
   }
 
   /**
@@ -235,7 +385,10 @@ export class TreeViewController extends Controller<HTMLElement> {
    * state.
    *
    * Focus is only *restored*, never *stolen*: DOM focus moves solely when it was
-   * inside the removed subtree and the document has nowhere left to put it.
+   * inside the removed subtree and the document has nowhere left to put it. The
+   * roving recovery runs here, while the pre-removal order is still on record;
+   * the selection is settled once the batch is in, and a selected item that left
+   * is reported as `reconcile` with no item.
    */
   itemTargetDisconnected(item: HTMLElement): void {
     // Stimulus drains the target callbacks for a removed *tree* before calling
@@ -248,6 +401,7 @@ export class TreeViewController extends Controller<HTMLElement> {
       const next = this.#neighborOf(item);
       if (next) this.#roving.setActive(this.itemTargets.indexOf(next), { focus: stranded });
     }
+    this.#reconcile.schedule();
     // Drop only the item just reported. One DOM mutation batch arrives as
     // several callbacks, so rebuilding from `itemTargets` here would also erase
     // the recorded position of every sibling whose callback has yet to run.
@@ -508,8 +662,13 @@ export class TreeViewController extends Controller<HTMLElement> {
   #select(item: HTMLElement): void {
     if (this.#isDisabled(item)) return;
     for (const candidate of this.itemTargets) {
-      candidate.setAttribute("aria-selected", candidate === item ? "true" : "false");
+      setAttributeIfChanged(candidate, "aria-selected", candidate === item ? "true" : "false");
     }
+    this.#dropOwnRecords();
+    // Settled before anything is reported, so a listener that moves the selection
+    // again is measured against this one.
+    this.#settled = this.#selection();
+    this.#mirrorField(true);
     this.dispatch("select", { detail: { item } });
   }
 

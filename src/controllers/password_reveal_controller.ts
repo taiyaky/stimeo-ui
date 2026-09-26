@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { StateRegions } from "../utils/state_regions";
 
 /** The longest delay `setTimeout` can hold; past it a delay folds to zero. */
 const MAX_DELAY = 2 ** 31 - 1;
@@ -14,12 +15,20 @@ const MAX_DELAY = 2 ** 31 - 1;
  *            data-stimeo--password-reveal-target="input">
  *     <button type="button" aria-pressed="false" aria-label="Show password"
  *             data-stimeo--password-reveal-target="toggle"
- *             data-action="click->stimeo--password-reveal#toggle"></button>
+ *             data-action="click->stimeo--password-reveal#toggle">
+ *       <span data-stimeo--password-reveal-target="offLabel">Show</span>
+ *       <span data-stimeo--password-reveal-target="onLabel" hidden>Hide</span>
+ *     </button>
  *   </div>
  *
  * No dedicated APG pattern; this follows the toggle **Button** practice. The
  * accessible name stays state-independent ("Show password") while the pressed
  * state is conveyed by `aria-pressed`.
+ *
+ * The button may carry an optional label pair — `onLabel` while the field is
+ * revealed, `offLabel` while it is masked. The name comes from `aria-label`, so the
+ * pair is a visual affordance: which half shows follows the state, and where only
+ * one of the two is declared inside the button the author's own visibility stands.
  *
  * `toggle` dispatches `{ visible: boolean }`.
  *
@@ -42,7 +51,7 @@ const MAX_DELAY = 2 ** 31 - 1;
  * returning to it does not put a credential back on screen.
  */
 export class PasswordRevealController extends Controller<HTMLElement> {
-  static override targets = ["input", "toggle"];
+  static override targets = ["input", "toggle", "onLabel", "offLabel"];
   static override values = {
     autoHide: { type: Number, default: 0 },
   };
@@ -51,6 +60,8 @@ export class PasswordRevealController extends Controller<HTMLElement> {
 
   declare readonly inputTarget: HTMLInputElement;
   declare readonly toggleTarget: HTMLElement;
+  declare readonly onLabelTargets: HTMLElement[];
+  declare readonly offLabelTargets: HTMLElement[];
   declare readonly hasInputTarget: boolean;
   declare readonly hasToggleTarget: boolean;
 
@@ -69,6 +80,12 @@ export class PasswordRevealController extends Controller<HTMLElement> {
    * document does not answer this — unloading the controller leaves it there.
    */
   #connected = false;
+
+  /** Owns `hidden` on the label pair the toggle button carries. */
+  readonly #labels = new StateRegions({
+    whenTrue: () => this.onLabelTargets,
+    whenFalse: () => this.offLabelTargets,
+  });
 
   /** Masks the field before Turbo copies the page into its snapshot. */
   readonly #beforeCache = new BeforeCacheReset(() => this.#rewindToMasked());
@@ -114,6 +131,16 @@ export class PasswordRevealController extends Controller<HTMLElement> {
 
   /** Re-derives the pressed state for a button swapped in after connect. */
   toggleTargetConnected(): void {
+    this.#reflect(this.#isVisible);
+  }
+
+  /** Describes the state to a revealed-side label that arrives after connect. */
+  onLabelTargetConnected(): void {
+    this.#reflect(this.#isVisible);
+  }
+
+  /** Describes the state to a masked-side label that arrives after connect. */
+  offLabelTargetConnected(): void {
     this.#reflect(this.#isVisible);
   }
 
@@ -173,6 +200,8 @@ export class PasswordRevealController extends Controller<HTMLElement> {
    * the opposite of what the declaration asked for. A value that is no delay at
    * all stays out of the positive range {@link PasswordRevealController.#arm}
    * requires, so it schedules nothing.
+   *
+   * @stimeoRuntimeOnly `autoHide` is the delay of the one re-masking timer it arms.
    */
   get #autoHideDelay(): number {
     return Math.min(this.autoHideValue, MAX_DELAY);
@@ -190,10 +219,11 @@ export class PasswordRevealController extends Controller<HTMLElement> {
     this.#reflect(false);
   }
 
-  /** Reflects the visible state onto `aria-pressed` and `data-state`. */
+  /** Reflects the visible state onto `aria-pressed`, `data-state` and the labels. */
   #reflect(visible: boolean): void {
     if (this.hasToggleTarget) {
       this.toggleTarget.setAttribute("aria-pressed", visible ? "true" : "false");
+      this.#labels.reflect(this.toggleTarget, visible);
     }
     this.element.setAttribute("data-state", visible ? "visible" : "hidden");
   }

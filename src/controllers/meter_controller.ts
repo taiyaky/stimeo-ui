@@ -22,12 +22,13 @@ type MeterState = "low" | "medium" | "high";
 type MeterReading = { value: number; ratio: number; state: MeterState };
 
 /**
- * Marks an `aria-valuetext` this controller wrote, so a render takes back only
- * its own text. `aria-valuetext` is shared: a consumer may author it instead of
- * supplying a template, and that text is what carries the threshold segment to
- * readers who cannot see the colour — clearing it would take the segment with it.
+ * Suffix of the marker on an `aria-valuetext` this controller wrote, so a render
+ * takes back only its own text. `aria-valuetext` is shared: a consumer may author
+ * it instead of supplying a template, and that text is what carries the threshold
+ * segment to readers who cannot see the colour — clearing it would take the segment
+ * with it.
  */
-const OWNED_VALUE_TEXT = "data-stimeo--meter-owns-valuetext";
+const OWNED_VALUE_TEXT = "owns-valuetext";
 
 /**
  * Headless meter behavior backed by the WAI-ARIA `meter` role.
@@ -56,6 +57,11 @@ const OWNED_VALUE_TEXT = "data-stimeo--meter-owns-valuetext";
  * *attributes* (an absent attribute means "no threshold"), not from a sentinel value.
  */
 export class MeterController extends Controller<HTMLElement> {
+  /** The marker above, in the namespace this controller is registered under. */
+  get #ownedValueText(): string {
+    return `data-${this.identifier}-${OWNED_VALUE_TEXT}`;
+  }
+
   static override targets = ["bar"];
   static override values = {
     announceText: { type: String, default: "" },
@@ -162,7 +168,7 @@ export class MeterController extends Controller<HTMLElement> {
 
   /** Whether a threshold attribute is present (absent = no threshold). */
   #hasThreshold(name: "low" | "high"): boolean {
-    return this.element.hasAttribute(`data-stimeo--meter-${name}-value`);
+    return this.element.hasAttribute(`data-${this.identifier}-${name}-value`);
   }
 
   /**
@@ -207,9 +213,9 @@ export class MeterController extends Controller<HTMLElement> {
    */
   #applyValueText({ value, ratio, state }: MeterReading): void {
     if (this.valueTextValue.length === 0) {
-      if (this.element.hasAttribute(OWNED_VALUE_TEXT)) {
+      if (this.element.hasAttribute(this.#ownedValueText)) {
         this.element.removeAttribute("aria-valuetext");
-        this.element.removeAttribute(OWNED_VALUE_TEXT);
+        this.element.removeAttribute(this.#ownedValueText);
       }
       return;
     }
@@ -219,6 +225,6 @@ export class MeterController extends Controller<HTMLElement> {
       .replaceAll("{percent}", String(percent))
       .replaceAll("{state}", state);
     this.element.setAttribute("aria-valuetext", text);
-    this.element.setAttribute(OWNED_VALUE_TEXT, "");
+    this.element.setAttribute(this.#ownedValueText, "");
   }
 }

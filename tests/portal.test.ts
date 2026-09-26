@@ -110,7 +110,7 @@ describe("PortalController", () => {
     );
     const mounts: Array<EventTarget | null> = [];
     document.addEventListener("stimeo--portal:mount", (e) =>
-      mounts.push((e as CustomEvent).detail.target),
+      mounts.push((e as CustomEvent).detail.destination),
     );
     await start();
     expect(mounts).toEqual([query("#dest")]);

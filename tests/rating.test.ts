@@ -1,7 +1,8 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RatingController } from "../src/controllers/rating_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
@@ -94,6 +95,30 @@ describe("RatingController", () => {
     });
     symbols()[index]?.dispatchEvent(event);
     return event;
+  };
+  const declared = () => root().getAttribute("data-stimeo--rating-value-value");
+
+  /** Every `change` and `reconcile` the root dispatches, in order, with its detail. */
+  const reports = () => {
+    const seen: Array<{ type: string; value: number }> = [];
+    for (const type of ["change", "reconcile"]) {
+      root().addEventListener(`stimeo--rating:${type}`, (event) => {
+        seen.push({ type, value: (event as CustomEvent<{ value: number }>).detail.value });
+      });
+    }
+    return seen;
+  };
+
+  /** A symbol built the way a Turbo Stream or a morph inserts one. */
+  const buildSymbol = (ordinal: number) => {
+    const symbol = document.createElement("span");
+    symbol.setAttribute("role", "radio");
+    symbol.setAttribute("aria-checked", "false");
+    symbol.setAttribute("aria-label", `${ordinal} stars`);
+    symbol.setAttribute("data-stimeo--rating-target", "symbol");
+    symbol.setAttribute("data-action", actions);
+    symbol.tabIndex = -1;
+    return symbol;
   };
 
   it("declares the public actions, events, and three render Values", () => {
@@ -331,18 +356,166 @@ describe("RatingController", () => {
     expect(field().value).toBe("3");
   });
 
-  it("follows a valid value morph without presenting it as a user or repair event", async () => {
+  it("reports a value the page moves to as reconcile, never as change", async () => {
     await start();
-    const events: string[] = [];
-    root().addEventListener("stimeo--rating:change", (event) => events.push(event.type));
-    root().addEventListener("stimeo--rating:reconcile", (event) => events.push(event.type));
+    const seen = reports();
 
     root().setAttribute("data-stimeo--rating-value-value", "3");
     await tick();
 
     expect(checked()).toEqual(["false", "false", "true"]);
     expect(field().value).toBe("3");
-    expect(events).toEqual([]);
+    expect(seen).toEqual([{ type: "reconcile", value: 3 }]);
+  });
+
+  it("stays silent when the page writes the value already on screen", async () => {
+    await start({ value: "2" });
+    const seen = reports();
+
+    root().setAttribute("data-stimeo--rating-value-value", "2.2");
+    await tick();
+
+    expect(checked()).toEqual(["false", "true", "false"]);
+    expect(seen).toEqual([]);
+  });
+
+  it("normalizes for display only, leaving the value Value as the page wrote it", async () => {
+    await start({ value: "9" });
+    expect(field().value).toBe("3");
+    expect(declared()).toBe("9");
+    const seen = reports();
+
+    root().setAttribute("data-stimeo--rating-value-value", "-4");
+    await tick();
+
+    expect(field().value).toBe("0");
+    expect(checked()).toEqual(["false", "false", "false"]);
+    expect(declared()).toBe("-4");
+    expect(seen).toEqual([{ type: "reconcile", value: 0 }]);
+  });
+
+  it("reports a normalized value once, not again on a later pass that leaves it", async () => {
+    await start({ count: 5, value: "1" });
+    const seen = reports();
+
+    root().setAttribute("data-stimeo--rating-value-value", "9");
+    await tick();
+    expect(seen).toEqual([{ type: "reconcile", value: 5 }]);
+
+    root().setAttribute("data-stimeo--rating-clearable-value", "false");
+    await tick();
+    root().setAttribute("data-stimeo--rating-readonly-value", "true");
+    await tick();
+    root().setAttribute("data-stimeo--rating-readonly-value", "false");
+    await tick();
+
+    expect(field().value).toBe("5");
+    expect(seen).toEqual([{ type: "reconcile", value: 5 }]);
+  });
+
+  it("reports one batch that moves value and clearable together once", async () => {
+    await start({ value: "2" });
+    const seen = reports();
+
+    root().setAttribute("data-stimeo--rating-value-value", "1");
+    root().setAttribute("data-stimeo--rating-clearable-value", "false");
+    await tick();
+
+    expect(field().value).toBe("1");
+    expect(seen).toEqual([{ type: "reconcile", value: 1 }]);
+  });
+
+  it("gives a clamped value back once the scale reaches it again", async () => {
+    await start({ count: 5, value: "5" });
+    const seen = reports();
+
+    symbols()[4]?.remove();
+    await tick();
+    expect(field().value).toBe("4");
+
+    root().insertBefore(buildSymbol(5), field());
+    await tick();
+
+    expect(field().value).toBe("5");
+    expect(checked()).toEqual(["false", "false", "false", "false", "true"]);
+    expect(declared()).toBe("5");
+    expect(seen).toEqual([
+      { type: "reconcile", value: 4 },
+      { type: "reconcile", value: 5 },
+    ]);
+  });
+
+  it("gives value zero back once clearable allows it again", async () => {
+    await start({ value: "0" });
+    const seen = reports();
+
+    root().setAttribute("data-stimeo--rating-clearable-value", "false");
+    await tick();
+    root().setAttribute("data-stimeo--rating-clearable-value", "true");
+    await tick();
+
+    expect(field().value).toBe("0");
+    expect(declared()).toBe("0");
+    expect(seen).toEqual([
+      { type: "reconcile", value: 1 },
+      { type: "reconcile", value: 0 },
+    ]);
+  });
+
+  it("writes the value Value for a user move, and the pass it starts reports nothing", async () => {
+    await start({ value: "1" });
+    const seen = reports();
+
+    symbols()[2]?.click();
+    await tick();
+
+    expect(declared()).toBe("3");
+    expect(seen).toEqual([{ type: "change", value: 3 }]);
+  });
+
+  it("writes the user's value into the value Value before the field's native change and change report it", async () => {
+    await start({ value: "1" });
+    const readings: string[] = [];
+    field().addEventListener("change", () => readings.push(`native ${declared()}`));
+    root().addEventListener("stimeo--rating:change", () => readings.push(`change ${declared()}`));
+
+    symbols()[2]?.click();
+
+    expect(readings).toEqual(["native 3", "change 3"]);
+  });
+
+  it("measures a user move from the value on screen when the page wrote another in the same task", async () => {
+    await start({ value: "1" });
+    const seen = reports();
+
+    // The page's write has not been painted when the key lands on the third symbol.
+    root().setAttribute("data-stimeo--rating-value-value", "3");
+    key(2, "Enter");
+    await tick();
+
+    expect(field().value).toBe("3");
+    expect(seen).toEqual([{ type: "change", value: 3 }]);
+  });
+
+  it("measures a move a reconcile listener makes from the value just reported", async () => {
+    await start({ value: "2" });
+    const seen = reports();
+    let answered = false;
+    root().addEventListener("stimeo--rating:reconcile", () => {
+      if (answered) return;
+      answered = true;
+      key(2, "ArrowLeft");
+    });
+
+    root().setAttribute("data-stimeo--rating-value-value", "9");
+    await tick();
+
+    expect(field().value).toBe("2");
+    expect(declared()).toBe("2");
+    expect(seen).toEqual([
+      { type: "reconcile", value: 3 },
+      { type: "change", value: 2 },
+    ]);
   });
 
   it("normalizes fractional and non-finite initial values without an event", async () => {
@@ -751,5 +924,57 @@ describe("RatingController", () => {
 
     await start({ rootAttributes: 'data-stimeo--rating-readonly-value="true"' });
     await expectNoA11yViolations(root());
+  });
+
+  // --- Hidden form field ---
+
+  describe("hidden form field", () => {
+    let commits: ReturnType<typeof captureFieldCommits>;
+
+    beforeEach(() => {
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      commits.stop();
+    });
+
+    it("seeds the field without reporting a commit", async () => {
+      await start({ value: "3" });
+
+      expect(field().value).toBe("3");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("writes and reports once per rating the user set", async () => {
+      await start({ value: "3" });
+      commits.clear();
+
+      symbols()[0]?.click();
+
+      expect(field().value).toBe("1");
+      expect(commits.seen).toEqual([field()]);
+    });
+
+    it("stays silent when the same rating is set again", async () => {
+      await start({ value: "3", rootAttributes: 'data-stimeo--rating-clearable-value="false"' });
+      commits.clear();
+
+      symbols()[2]?.click();
+
+      expect(field().value).toBe("3");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("writes a value changed by application code without reporting a commit", async () => {
+      await start({ value: "3" });
+      commits.clear();
+
+      controller().valueValue = 2;
+      await tick();
+
+      expect(field().value).toBe("2");
+      expect(commits.seen).toEqual([]);
+    });
   });
 });

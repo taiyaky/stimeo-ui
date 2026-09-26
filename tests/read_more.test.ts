@@ -1,9 +1,10 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ReadMoreController } from "../src/controllers/read_more_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { byId, query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -34,6 +35,7 @@ describe("ReadMoreController", () => {
       state?: "collapsed" | "expanded" | null;
       collapsedValue?: boolean;
       contentHtml?: string;
+      triggerHtml?: string;
     } = {},
   ) => {
     const state = options.state === undefined ? "collapsed" : options.state;
@@ -50,7 +52,9 @@ describe("ReadMoreController", () => {
         </p>
         <button data-stimeo--read-more-target="trigger"
                 data-action="stimeo--read-more#toggle"
-                aria-expanded="${ariaExpanded}" aria-controls="bio" hidden>Read more</button>
+                aria-expanded="${ariaExpanded}" aria-controls="bio" hidden>${
+                  options.triggerHtml ?? "Read more"
+                }</button>
       </div>`;
     stubOverflow(byId("bio"), overflowing);
     application = Application.start();
@@ -333,5 +337,178 @@ describe("ReadMoreController", () => {
       "stimeo--read-more",
     ) as ReadMoreController;
     expect(() => instance.toggle()).not.toThrow();
+  });
+
+  // --- Trigger labels ---
+
+  describe("trigger labels", () => {
+    const expandedLabel = (root: ParentNode = document) =>
+      query("[data-stimeo--read-more-target='expandedLabel']", root);
+    const collapsedLabel = (root: ParentNode = document) =>
+      query("[data-stimeo--read-more-target='collapsedLabel']", root);
+    /** The visibility of both halves of the pair inside the single trigger. */
+    const labelVisibility = () => ({
+      expanded: expandedLabel().hidden,
+      collapsed: collapsedLabel().hidden,
+    });
+
+    it("shows the half that belongs to the state and hides the other, both ways", async () => {
+      await start(true, {
+        triggerHtml: `
+          <span data-stimeo--read-more-target="collapsedLabel">Read more</span>
+          <span data-stimeo--read-more-target="expandedLabel" hidden>Read less</span>`,
+      });
+
+      expect(labelVisibility()).toEqual({ expanded: true, collapsed: false });
+
+      trigger().click();
+      expect(labelVisibility()).toEqual({ expanded: false, collapsed: true });
+
+      trigger().click();
+      expect(labelVisibility()).toEqual({ expanded: true, collapsed: false });
+    });
+
+    it("overrides the authored visibility that contradicts the state, silently", async () => {
+      // Which half shows is a pure function of the state, so the first reflection
+      // settles it rather than reading the authored `hidden` back. Settling the
+      // halves is not a move of the state, so the baseline connection says nothing.
+      const capture = captureStateEvents("stimeo--read-more");
+      await start(true, {
+        state: "collapsed",
+        triggerHtml: `
+          <span data-stimeo--read-more-target="collapsedLabel" hidden>Read more</span>
+          <span data-stimeo--read-more-target="expandedLabel">Read less</span>`,
+      });
+
+      expect(labelVisibility()).toEqual({ expanded: true, collapsed: false });
+      expect(capture.seen).toEqual([]);
+      capture.stop();
+    });
+
+    it("leaves a lone half as authored while a complete pair elsewhere moves", async () => {
+      document.body.innerHTML = `
+        <div data-controller="stimeo--read-more">
+          <p id="paired-bio" data-stimeo--read-more-target="content" data-state="collapsed">
+            A long biography that exceeds its clamp.
+          </p>
+          <button id="paired" data-stimeo--read-more-target="trigger"
+                  data-action="stimeo--read-more#toggle"
+                  aria-expanded="false" aria-controls="paired-bio">
+            <span data-stimeo--read-more-target="collapsedLabel" hidden>Read more</span>
+            <span data-stimeo--read-more-target="expandedLabel">Read less</span>
+          </button>
+        </div>
+        <div data-controller="stimeo--read-more">
+          <p id="lone-bio" data-stimeo--read-more-target="content" data-state="collapsed">
+            Another long biography that exceeds its clamp.
+          </p>
+          <button id="lone" data-stimeo--read-more-target="trigger"
+                  data-action="stimeo--read-more#toggle"
+                  aria-expanded="false" aria-controls="lone-bio">
+            <span data-stimeo--read-more-target="expandedLabel">Read less</span>
+          </button>
+        </div>`;
+      stubOverflow(byId("paired-bio"), true);
+      stubOverflow(byId("lone-bio"), true);
+      application = Application.start();
+      application.register("stimeo--read-more", ReadMoreController);
+      await tick();
+
+      expect(expandedLabel(byId("paired")).hidden).toBe(true);
+      expect(collapsedLabel(byId("paired")).hidden).toBe(false);
+      // A half with no counterpart inside its own trigger keeps what the author wrote:
+      // hiding it would take the trigger's only label with it.
+      expect(expandedLabel(byId("lone")).hidden).toBe(false);
+    });
+
+    it("reflects a half that arrives after connect", async () => {
+      await start(true, {
+        triggerHtml: `<span data-stimeo--read-more-target="collapsedLabel" hidden>Read more</span>`,
+      });
+      expect(collapsedLabel().hidden).toBe(true);
+
+      const late = document.createElement("span");
+      late.setAttribute("data-stimeo--read-more-target", "expandedLabel");
+      late.textContent = "Read less";
+      trigger().append(late);
+      await tick();
+
+      expect(labelVisibility()).toEqual({ expanded: true, collapsed: false });
+    });
+
+    it("settles the pair when the collapsed half arrives after connect", async () => {
+      await start(true, {
+        triggerHtml: `<span data-stimeo--read-more-target="expandedLabel">Read less</span>`,
+      });
+      // The pair is incomplete, so the lone half keeps what the author wrote.
+      expect(expandedLabel().hidden).toBe(false);
+
+      const late = document.createElement("span");
+      late.setAttribute("data-stimeo--read-more-target", "collapsedLabel");
+      late.hidden = true;
+      late.textContent = "Read more";
+      trigger().append(late);
+      await tick();
+
+      expect(labelVisibility()).toEqual({ expanded: true, collapsed: false });
+    });
+  });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--read-more");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a trigger click as user, after the state attributes are written", async () => {
+      await start(true);
+      const states: string[] = [];
+      query("[data-controller='stimeo--read-more']").addEventListener(
+        "stimeo--read-more:open",
+        () => {
+          states.push(
+            `${content().getAttribute("data-state")} ${trigger().getAttribute("aria-expanded")}`,
+          );
+        },
+      );
+
+      trigger().click();
+
+      expect(capture.names()).toEqual(["open"]);
+      expect(capture.reasons()).toEqual(["user"]);
+      expect(states).toEqual(["expanded true"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+
+      trigger().click();
+      expect(capture.names()).toEqual(["open", "close"]);
+    });
+
+    it("stays silent while connect establishes the baseline", async () => {
+      const fresh = captureStateEvents("stimeo--read-more");
+      await start(true, { state: "expanded" });
+
+      expect(content().getAttribute("data-state")).toBe("expanded");
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+    });
+
+    it("stays silent while a resize re-evaluates the overflow", async () => {
+      await start(true);
+      trigger().click();
+      capture.clear();
+
+      window.dispatchEvent(new Event("resize"));
+      await tick();
+
+      expect(capture.seen).toEqual([]);
+    });
   });
 });

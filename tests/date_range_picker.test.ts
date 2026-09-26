@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DateRangePickerController } from "../src/controllers/date_range_picker_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -445,6 +446,27 @@ describe("DateRangePickerController", () => {
     expect(status().textContent).toBe("2026-06-05 – 2026-06-08");
   });
 
+  it.each([
+    ["is padded with whitespace", " cell "],
+    ["lists a second name", "cell day"],
+  ])("selects through a cell whose target declaration %s", async (_label, declaration) => {
+    // The target attribute is a space-separated token list, so an element is a
+    // cell whenever the name is one of its tokens — not only when it is the
+    // whole attribute value.
+    await mount();
+    const detail: Array<{ start: string; end: string }> = [];
+    root().addEventListener("stimeo--date-range-picker:change", (e) => {
+      detail.push((e as CustomEvent).detail);
+    });
+    cell("2026-06-05").setAttribute("data-stimeo--date-range-picker-target", declaration);
+
+    click("2026-06-05"); // the pending start comes from the multi-token cell
+    expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(true);
+
+    click("2026-06-08"); // confirmed from a cell that declares the name alone
+    expect(detail).toEqual([{ start: "2026-06-05", end: "2026-06-08" }]);
+  });
+
   it("moves the roving stop to the first endpoint selected by click", async () => {
     await mount();
 
@@ -669,6 +691,38 @@ describe("DateRangePickerController", () => {
         "[data-stimeo--date-range-picker-target='startField']",
       )?.value,
     ).toBe("");
+  });
+
+  // The hidden fields are what the form reads, so a confirmed range has to
+  // report itself the way a form control does — once per field that moved, and
+  // never for the seed a fresh connection writes.
+  it("reports a confirmed range from each hidden field that moved", async () => {
+    await mount();
+    const seen: string[] = [];
+    for (const name of ["startField", "endField"]) {
+      document
+        .querySelector<HTMLInputElement>(`[data-stimeo--date-range-picker-target='${name}']`)
+        ?.addEventListener("change", (event) => {
+          seen.push((event.target as HTMLInputElement).value);
+        });
+    }
+
+    click("2026-06-12");
+    click("2026-06-18");
+
+    expect(seen).toEqual(["2026-06-12", "2026-06-18"]);
+  });
+
+  it("stays silent while a fresh connection seeds the fields", async () => {
+    const seen: string[] = [];
+    document.addEventListener("change", (event) => {
+      const target = event.target as HTMLElement;
+      if (target.hasAttribute("data-stimeo--date-range-picker-target")) seen.push("change");
+    });
+
+    await mount({ start: "2026-06-10", end: "2026-06-20" });
+
+    expect(seen).toEqual([]);
   });
 
   it("disables out-of-bounds cells", async () => {
@@ -1039,7 +1093,9 @@ describe("DateRangePickerController", () => {
   });
 
   it("ignores a preset that has no overlap with the selectable interval", async () => {
-    await mount({ max: "2000-01-01" });
+    // The confirmed range lies inside the bounds, so it is still there to keep;
+    // the presets count from today, which lies far past `max`.
+    await mount({ start: "1999-06-10", end: "1999-06-20", max: "2000-01-01" });
     const detail: unknown[] = [];
     root().addEventListener("stimeo--date-range-picker:change", (event) => {
       detail.push((event as CustomEvent).detail);
@@ -1048,8 +1104,8 @@ describe("DateRangePickerController", () => {
     preset("last7").dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
     expect(detail).toEqual([]);
-    expect(field("start").value).toBe("2026-06-10");
-    expect(field("end").value).toBe("2026-06-20");
+    expect(field("start").value).toBe("1999-06-10");
+    expect(field("end").value).toBe("1999-06-20");
   });
 
   it("applies the this-month preset spanning the whole current month", async () => {
@@ -1212,5 +1268,549 @@ describe("DateRangePickerController", () => {
     picker.setAttribute("data-stimeo--date-range-picker-min-value", "2026-06-10");
     await tick();
     expect(cell("2026-06-05").getAttribute("aria-disabled")).toBe("true");
+  });
+
+  // --- Hidden form fields ---
+
+  describe("hidden form fields", () => {
+    let commits: ReturnType<typeof captureFieldCommits>;
+
+    beforeEach(() => {
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      commits.stop();
+    });
+
+    it("seeds both fields from the authored range without reporting a commit", async () => {
+      await mount({ start: "2026-05-04", end: "2026-05-08" });
+
+      expect([field("start").value, field("end").value]).toEqual(["2026-05-04", "2026-05-08"]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("reports both fields once the user confirms a range", async () => {
+      await mount({ start: "2026-05-04", end: "2026-05-08" });
+      commits.clear();
+
+      click("2026-05-11");
+      expect(commits.seen).toEqual([]);
+
+      click("2026-05-14");
+
+      expect([field("start").value, field("end").value]).toEqual(["2026-05-11", "2026-05-14"]);
+      expect(commits.seen).toEqual([field("start"), field("end")]);
+    });
+  });
+
+  // The confirmed range is the controller's own state, not a Value, so when the
+  // bounds or the unavailable days move under it there is no request to keep:
+  // each end moves inward to the nearest day that can still be chosen, and a
+  // range with none left is cleared. The fields follow without a native
+  // `change`, and the repair is reported as `reconcile`, never as `change`.
+  describe("a confirmed range the availability moves under", () => {
+    let commits: ReturnType<typeof captureFieldCommits>;
+    let heard: Array<{ type: string; detail: unknown }>;
+
+    const record = (event: Event) => {
+      heard.push({ type: event.type, detail: (event as CustomEvent).detail });
+    };
+    const EVENTS = ["stimeo--date-range-picker:change", "stimeo--date-range-picker:reconcile"];
+
+    beforeEach(() => {
+      heard = [];
+      commits = captureFieldCommits();
+      // On the document, so a report made while the picker connects is heard.
+      for (const type of EVENTS) document.addEventListener(type, record);
+    });
+
+    afterEach(() => {
+      for (const type of EVENTS) document.removeEventListener(type, record);
+      commits.stop();
+    });
+
+    const fields = () => [field("start").value, field("end").value];
+    const selectedDates = () =>
+      Array.from(
+        root().querySelectorAll<HTMLElement>("[aria-selected='true']"),
+        (el) => el.dataset.date,
+      );
+    const reconciled = (start: string, end: string) => ({
+      type: "stimeo--date-range-picker:reconcile",
+      detail: { start, end },
+    });
+    const setValue = (name: string, value: string) => {
+      root().setAttribute(`data-stimeo--date-range-picker-${name}-value`, value);
+    };
+
+    it("trims the start to a min that moves inside the range", async () => {
+      await mount();
+
+      setValue("min", "2026-06-15");
+      await tick();
+
+      expect(fields()).toEqual(["2026-06-15", "2026-06-20"]);
+      expect(selectedDates()).toEqual(["2026-06-15", "2026-06-20"]);
+      expect(cell("2026-06-15").hasAttribute("data-range-start")).toBe(true);
+      expect(cell("2026-06-10").hasAttribute("data-range-start")).toBe(false);
+      expect(heard).toEqual([reconciled("2026-06-15", "2026-06-20")]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("trims the end to a max that moves inside the range", async () => {
+      await mount();
+
+      setValue("max", "2026-06-14");
+      await tick();
+
+      expect(fields()).toEqual(["2026-06-10", "2026-06-14"]);
+      expect(selectedDates()).toEqual(["2026-06-10", "2026-06-14"]);
+      expect(heard).toEqual([reconciled("2026-06-10", "2026-06-14")]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("steps each end past the days disabled-dates takes away", async () => {
+      await mount();
+
+      setValue("disabled-dates", JSON.stringify(["2026-06-10", "2026-06-11", "2026-06-20"]));
+      await tick();
+
+      expect(fields()).toEqual(["2026-06-12", "2026-06-19"]);
+      expect(heard).toEqual([reconciled("2026-06-12", "2026-06-19")]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("clears a range with no day left that can be chosen", async () => {
+      await mount();
+
+      setValue("max", "2026-06-05");
+      await tick();
+
+      expect(fields()).toEqual(["", ""]);
+      expect(selectedDates()).toEqual([]);
+      expect(root().querySelector("[data-range-start], [data-in-range], [data-range-end]")).toBe(
+        null,
+      );
+      expect(heard).toEqual([reconciled("", "")]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("stays silent while the availability moves without reaching an end", async () => {
+      await mount();
+
+      setValue("min", "2026-06-01");
+      setValue("disabled-dates", JSON.stringify(["2026-06-15"]));
+      await tick();
+
+      expect(fields()).toEqual(["2026-06-10", "2026-06-20"]);
+      expect(heard).toEqual([]);
+    });
+
+    it("narrows the authored range it connects with, silently", async () => {
+      await mount({ min: "2026-06-12", disabledDates: ["2026-06-20"] });
+
+      expect(fields()).toEqual(["2026-06-12", "2026-06-19"]);
+      expect(selectedDates()).toEqual(["2026-06-12", "2026-06-19"]);
+      expect(heard).toEqual([]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("clears an authored range the bounds exclude, silently", async () => {
+      await mount({ min: "2026-07-01", max: "2026-07-31" });
+
+      expect(fields()).toEqual(["", ""]);
+      expect(selectedDates()).toEqual([]);
+      expect(heard).toEqual([]);
+    });
+
+    it("keeps a lone authored start that can be chosen, and clears it once it cannot", async () => {
+      await mount({ start: "2026-06-10", end: "" });
+      expect(fields()).toEqual(["2026-06-10", ""]);
+
+      setValue("min", "2026-06-11");
+      await tick();
+
+      expect(fields()).toEqual(["", ""]);
+      expect(heard).toEqual([reconciled("", "")]);
+    });
+
+    it("keeps a lone authored end that can be chosen, and clears it once it cannot", async () => {
+      await mount({ start: "", end: "2026-06-20" });
+      expect(fields()).toEqual(["", "2026-06-20"]);
+
+      setValue("max", "2026-06-19");
+      await tick();
+
+      expect(fields()).toEqual(["", ""]);
+      expect(heard).toEqual([reconciled("", "")]);
+    });
+
+    it("drops a selection in progress whose start the availability takes away", async () => {
+      await mount();
+      click("2026-06-05");
+      hover("2026-06-08");
+
+      setValue("min", "2026-06-06");
+      await tick();
+
+      // The confirmed range is painted again, and nothing begins on the
+      // unavailable day any more.
+      expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(false);
+      expect(cell("2026-06-10").hasAttribute("data-range-start")).toBe(true);
+      expect(cell("2026-06-20").hasAttribute("data-range-end")).toBe(true);
+
+      // The next pick starts a new selection instead of confirming one.
+      click("2026-06-12");
+      expect(heard).toEqual([]);
+      expect(cell("2026-06-12").hasAttribute("data-range-start")).toBe(true);
+    });
+
+    it("reports a range the user confirms with change alone", async () => {
+      await mount();
+
+      click("2026-06-12");
+      click("2026-06-18");
+
+      expect(heard).toEqual([
+        {
+          type: "stimeo--date-range-picker:change",
+          detail: { start: "2026-06-12", end: "2026-06-18" },
+        },
+      ]);
+    });
+  });
+
+  // A range the user confirms is painted first — the cells, both fields and the
+  // status — and only then reported: each field that moved, then the month when
+  // it moved, then `change` with the range the picker holds. A bound a listener
+  // moves meanwhile is applied by the repaint its Value callback runs, after
+  // `change`, as `reconcile`. A report still pending for a range a listener has
+  // already replaced is not sent: the range that replaced it reports itself.
+  describe("the reports a confirmed range makes", () => {
+    /** One report, with what the picker showed as it went out. */
+    interface Report {
+      type: string;
+      detail: unknown;
+      fields: string[];
+      status: string;
+      selected: string[];
+    }
+
+    let reports: Report[];
+
+    const TYPES = [
+      "change",
+      "stimeo--date-range-picker:change",
+      "stimeo--date-range-picker:monthchange",
+      "stimeo--date-range-picker:reconcile",
+    ];
+
+    // Captured on the document ahead of every other listener, so each entry is
+    // the state the report was sent with, before a listener could move it.
+    const record = (event: Event) => {
+      const entry = (type: string, detail: unknown): Report => ({
+        type,
+        detail,
+        fields: [field("start").value, field("end").value],
+        status: status().textContent ?? "",
+        selected: Array.from(
+          root().querySelectorAll<HTMLElement>("[aria-selected='true']"),
+          (el) => el.dataset.date ?? "",
+        ),
+      });
+      if (event instanceof CustomEvent) {
+        reports.push(entry(event.type.replace("stimeo--date-range-picker:", ""), event.detail));
+        return;
+      }
+      const name = (event.target as HTMLElement).getAttribute(
+        "data-stimeo--date-range-picker-target",
+      );
+      if (name) reports.push(entry(`${name}:change`, (event.target as HTMLInputElement).value));
+    };
+
+    /** What the picker shows while it holds `start`–`end`, the status announcing `announced`. */
+    const holding = (start: string, end: string, announced = `${start} – ${end}`) => ({
+      fields: [start, end],
+      status: announced,
+      selected: start === end ? [start] : [start, end],
+    });
+
+    const setValue = (name: string, value: string) => {
+      root().setAttribute(`data-stimeo--date-range-picker-${name}-value`, value);
+    };
+    const press = (el: HTMLElement) => el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    /**
+     * Runs `listener` for the first event only. happy-dom calls a `once`
+     * listener again from a dispatch nested in its own callback, which a
+     * listener that confirms another range makes.
+     */
+    const firstOnly = (listener: () => void) => {
+      let done = false;
+      return () => {
+        if (done) return;
+        done = true;
+        listener();
+      };
+    };
+
+    /** Pins today to Wednesday 2026-09-23, so the presets land on known days. */
+    const pinToday = () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(2026, 8, 23));
+    };
+
+    beforeEach(() => {
+      reports = [];
+      for (const type of TYPES) document.addEventListener(type, record, true);
+    });
+
+    afterEach(() => {
+      for (const type of TYPES) document.removeEventListener(type, record, true);
+      vi.useRealTimers();
+    });
+
+    it("reports a range the user confirms after painting it, and a bound tightened meanwhile after change", async () => {
+      await mount();
+      field("start").addEventListener(
+        "change",
+        firstOnly(() => setValue("max", "2026-06-06")),
+      );
+
+      click("2026-06-05");
+      click("2026-06-08");
+
+      const confirmed = holding("2026-06-05", "2026-06-08");
+      expect(reports).toEqual([
+        { type: "startField:change", detail: "2026-06-05", ...confirmed },
+        { type: "endField:change", detail: "2026-06-08", ...confirmed },
+        { type: "change", detail: { start: "2026-06-05", end: "2026-06-08" }, ...confirmed },
+      ]);
+
+      await tick();
+
+      // The status keeps announcing what the user confirmed.
+      expect(reports.slice(3)).toEqual([
+        {
+          type: "reconcile",
+          detail: { start: "2026-06-05", end: "2026-06-06" },
+          ...holding("2026-06-05", "2026-06-06", "2026-06-05 – 2026-06-08"),
+        },
+      ]);
+    });
+
+    it("reports a preset the same way", async () => {
+      pinToday();
+      await mount({ start: "2026-09-01", end: "2026-09-05" });
+      field("start").addEventListener(
+        "change",
+        firstOnly(() => setValue("max", "2026-09-21")),
+      );
+
+      press(preset("last7"));
+
+      const confirmed = holding("2026-09-17", "2026-09-23");
+      expect(reports).toEqual([
+        { type: "startField:change", detail: "2026-09-17", ...confirmed },
+        { type: "endField:change", detail: "2026-09-23", ...confirmed },
+        { type: "change", detail: { start: "2026-09-17", end: "2026-09-23" }, ...confirmed },
+      ]);
+
+      await tick();
+
+      expect(reports.slice(3)).toEqual([
+        {
+          type: "reconcile",
+          detail: { start: "2026-09-17", end: "2026-09-21" },
+          ...holding("2026-09-17", "2026-09-21", "2026-09-17 – 2026-09-23"),
+        },
+      ]);
+    });
+
+    it("reports the fields, then the month, then change for a preset that moves the month", async () => {
+      pinToday();
+      await mount();
+
+      press(preset("last7"));
+
+      const confirmed = holding("2026-09-17", "2026-09-23");
+      expect(reports).toEqual([
+        { type: "startField:change", detail: "2026-09-17", ...confirmed },
+        { type: "endField:change", detail: "2026-09-23", ...confirmed },
+        { type: "monthchange", detail: { month: "2026-09" }, ...confirmed },
+        { type: "change", detail: { start: "2026-09-17", end: "2026-09-23" }, ...confirmed },
+      ]);
+    });
+
+    it("paints first and keeps the order when a listener takes the end away through disabled-dates", async () => {
+      await mount();
+      field("start").addEventListener(
+        "change",
+        firstOnly(() => setValue("disabled-dates", JSON.stringify(["2026-06-08"]))),
+      );
+
+      click("2026-06-05");
+      click("2026-06-08");
+      await tick();
+
+      const confirmed = holding("2026-06-05", "2026-06-08");
+      expect(reports).toEqual([
+        { type: "startField:change", detail: "2026-06-05", ...confirmed },
+        { type: "endField:change", detail: "2026-06-08", ...confirmed },
+        { type: "change", detail: { start: "2026-06-05", end: "2026-06-08" }, ...confirmed },
+        {
+          type: "reconcile",
+          detail: { start: "2026-06-05", end: "2026-06-07" },
+          ...holding("2026-06-05", "2026-06-07", "2026-06-05 – 2026-06-08"),
+        },
+      ]);
+    });
+
+    it("leaves a commit a monthchange listener replaced to the range that replaced it", async () => {
+      pinToday();
+      await mount();
+      root().addEventListener(
+        "stimeo--date-range-picker:monthchange",
+        firstOnly(() => press(preset("today"))),
+      );
+
+      press(preset("thisMonth"));
+      await tick();
+
+      const month = holding("2026-09-01", "2026-09-30");
+      const today = holding("2026-09-23", "2026-09-23");
+      expect(reports).toEqual([
+        { type: "startField:change", detail: "2026-09-01", ...month },
+        { type: "endField:change", detail: "2026-09-30", ...month },
+        { type: "monthchange", detail: { month: "2026-09" }, ...month },
+        { type: "startField:change", detail: "2026-09-23", ...today },
+        { type: "endField:change", detail: "2026-09-23", ...today },
+        { type: "change", detail: { start: "2026-09-23", end: "2026-09-23" }, ...today },
+      ]);
+      // Focus stays where the replacing preset put it.
+      expect(document.activeElement).toBe(cell("2026-09-23"));
+    });
+
+    it("leaves the fields a replacing commit moved to that commit's reports", async () => {
+      await mount();
+      field("start").addEventListener(
+        "change",
+        firstOnly(() => {
+          click("2026-06-15");
+          click("2026-06-17");
+        }),
+      );
+
+      click("2026-06-05");
+      click("2026-06-08");
+
+      const replacing = holding("2026-06-15", "2026-06-17");
+      expect(reports).toEqual([
+        { type: "startField:change", detail: "2026-06-05", ...holding("2026-06-05", "2026-06-08") },
+        { type: "startField:change", detail: "2026-06-15", ...replacing },
+        { type: "endField:change", detail: "2026-06-17", ...replacing },
+        { type: "change", detail: { start: "2026-06-15", end: "2026-06-17" }, ...replacing },
+      ]);
+    });
+
+    it("still reports a field a replaced commit moved and the replacing one kept", async () => {
+      await mount();
+      field("start").addEventListener(
+        "change",
+        firstOnly(() => {
+          click("2026-06-06");
+          click("2026-06-08");
+        }),
+      );
+
+      click("2026-06-05");
+      click("2026-06-08");
+
+      const replacing = holding("2026-06-06", "2026-06-08");
+      expect(reports).toEqual([
+        { type: "startField:change", detail: "2026-06-05", ...holding("2026-06-05", "2026-06-08") },
+        { type: "startField:change", detail: "2026-06-06", ...replacing },
+        { type: "change", detail: { start: "2026-06-06", end: "2026-06-08" }, ...replacing },
+        { type: "endField:change", detail: "2026-06-08", ...replacing },
+      ]);
+    });
+
+    it("sends no change for a commit a listener's own repaint narrowed", async () => {
+      await mount();
+      field("end").addEventListener(
+        "change",
+        firstOnly(() => {
+          setValue("max", "2026-06-06");
+          press(navButton("next"));
+        }),
+      );
+
+      click("2026-06-05");
+      click("2026-06-08");
+      await tick();
+
+      // The July grid shows neither end, and the status keeps what the user confirmed.
+      const narrowed = { fields: ["2026-06-05", "2026-06-06"], status: "2026-06-05 – 2026-06-08" };
+      const confirmed = holding("2026-06-05", "2026-06-08");
+      expect(reports).toEqual([
+        { type: "startField:change", detail: "2026-06-05", ...confirmed },
+        { type: "endField:change", detail: "2026-06-08", ...confirmed },
+        { type: "monthchange", detail: { month: "2026-07" }, ...narrowed, selected: [] },
+        {
+          type: "reconcile",
+          detail: { start: "2026-06-05", end: "2026-06-06" },
+          ...narrowed,
+          selected: [],
+        },
+      ]);
+    });
+
+    it("sends no reconcile for a narrowing a monthchange listener's commit replaced", async () => {
+      await mount();
+      root().addEventListener(
+        "stimeo--date-range-picker:monthchange",
+        firstOnly(() => {
+          click("2026-07-02");
+          click("2026-07-04");
+        }),
+      );
+
+      // In one task, so the navigation's paint reads the bound before its callback runs.
+      setValue("min", "2026-06-15");
+      press(navButton("next"));
+      await tick();
+
+      const replacing = holding("2026-07-02", "2026-07-04");
+      expect(reports).toEqual([
+        {
+          type: "monthchange",
+          detail: { month: "2026-07" },
+          fields: ["2026-06-15", "2026-06-20"],
+          status: "",
+          selected: [],
+        },
+        { type: "startField:change", detail: "2026-07-02", ...replacing },
+        { type: "endField:change", detail: "2026-07-04", ...replacing },
+        { type: "change", detail: { start: "2026-07-02", end: "2026-07-04" }, ...replacing },
+      ]);
+    });
+
+    it("starts over when the pending start became unselectable in the task of the second pick", async () => {
+      await mount();
+      click("2026-06-05");
+
+      setValue("min", "2026-06-06");
+      click("2026-06-08");
+
+      expect(reports).toEqual([]);
+      expect(cell("2026-06-08").hasAttribute("data-range-start")).toBe(true);
+      expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(false);
+
+      await tick();
+
+      expect(reports).toEqual([]);
+      expect([field("start").value, field("end").value]).toEqual(["2026-06-10", "2026-06-20"]);
+    });
   });
 });

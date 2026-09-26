@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MultiSelectController } from "../src/controllers/multi_select_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -315,6 +316,24 @@ describe("MultiSelectController", () => {
     expect(changes).toEqual([["apple"], []]);
   });
 
+  // The chip row holds exactly the chips: a template is authored across lines, so
+  // anything cloned beyond its first element would settle in the row as the author
+  // selects and deselects, and only the chip itself is taken back.
+  it("leaves nothing behind in the chip row across repeated select/deselect cycles", async () => {
+    await mount();
+
+    for (let round = 0; round < 100; round++) {
+      options()[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      options()[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }
+
+    const row = document.querySelector<HTMLElement>(
+      "[data-stimeo--multi-select-target='tags']",
+    ) as HTMLElement;
+    expect(row.children).toHaveLength(0);
+    expect(row.childNodes).toHaveLength(0);
+  });
+
   it("announces selection and removal with localized state and count templates", async () => {
     await mount(
       'data-stimeo--multi-select-announce-text-value="Selected {label} ({value}); {count} total" ' +
@@ -379,6 +398,27 @@ describe("MultiSelectController", () => {
 
     key("Enter");
     expect(selected()).toEqual(["false", "false", "true"]);
+  });
+
+  it("filters a keyless edit that lands right after a commit", async () => {
+    // Dictation, autofill and a drop arrive with no key before them, so the
+    // window that absorbs the browser's echo has to read the kind the engine
+    // reports rather than assume the next event is the echo.
+    await mount();
+    const queries: string[] = [];
+    root().addEventListener("stimeo--multi-select:filter", (event) => {
+      queries.push((event as CustomEvent).detail.query);
+    });
+
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    input().value = "ch";
+    input().dispatchEvent(new InputEvent("input", { bubbles: true }));
+    input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+
+    input().value = "che";
+    input().dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+
+    expect(queries).toEqual(["ch", "che"]);
   });
 
   it("clears composition state across disconnect and reconnect", async () => {
@@ -887,7 +927,7 @@ describe("MultiSelectController", () => {
     expect(selected()).toEqual(["false", "false", "false"]);
     expect(tags()).toEqual([]);
     expect(changes).toEqual([]);
-    expect(warn.mock.calls[0]?.[0]).toContain('"tag" target');
+    expect(warn.mock.calls[0]?.[0]).toContain('"tag" root');
     warn.mockRestore();
   });
 
@@ -1985,6 +2025,131 @@ describe("MultiSelectController", () => {
       },
     );
 
+    it("relabels a chip whose row is its own label and button", async () => {
+      // The row names every part it plays. A relabel reads the label and the button
+      // off the chip, so both have to resolve to the chip itself.
+      document.body.innerHTML = `
+  <div data-controller="stimeo--multi-select">
+    <div data-stimeo--multi-select-target="tags" aria-label="Selected"></div>
+    <input type="text" role="combobox" aria-expanded="false" aria-autocomplete="list"
+           aria-controls="ms-list" aria-label="Fruits"
+           data-stimeo--multi-select-target="input"
+           data-action="input->stimeo--multi-select#filter
+                        keydown->stimeo--multi-select#onKeydown
+                        focus->stimeo--multi-select#open" />
+    <ul id="ms-list" role="listbox" aria-multiselectable="true" aria-label="Options" hidden
+        data-stimeo--multi-select-target="list">
+      <li id="ms-apple" role="option" aria-selected="false" data-value="apple"
+          data-stimeo--multi-select-target="option"
+          data-action="click->stimeo--multi-select#toggleOption">Apple</li>
+    </ul>
+    <template data-stimeo--multi-select-target="tagTemplate">
+      <button type="button" aria-label="Remove {label}"
+              data-stimeo--multi-select-target="tag label remove"></button>
+    </template>
+  </div>`;
+      application = Application.start();
+      application.register("stimeo--multi-select", MultiSelectController);
+      await tick();
+      const chips = () =>
+        Array.from(
+          document.querySelectorAll<HTMLButtonElement>(
+            '[data-stimeo--multi-select-target="tags"] button',
+          ),
+        );
+      document.querySelector<HTMLElement>("#ms-apple")?.click();
+      expect(chips()[0]?.textContent).toBe("Apple");
+
+      (document.getElementById("ms-list") as HTMLElement).innerHTML = `
+        <li id="ms-apple" role="option" aria-selected="true" data-value="apple"
+            data-stimeo--multi-select-target="option">Green Apple</li>`;
+      await tick();
+
+      expect(chips()[0]?.textContent).toBe("Green Apple");
+      expect(chips()[0]?.getAttribute("aria-label")).toBe("Remove Green Apple");
+    });
+
+    /** A row that names itself `tag label` and holds the remove button inside it. */
+    const mountNestedLabel = async () => {
+      document.body.innerHTML = `
+  <div data-controller="stimeo--multi-select"
+       data-stimeo--multi-select-announce-removed-text-value="Removed {label} ({value}); {count} total">
+    <ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>
+    <input type="text" role="combobox" aria-expanded="false" aria-autocomplete="list"
+           aria-controls="ms-list" aria-label="Fruits"
+           data-stimeo--multi-select-target="input"
+           data-action="input->stimeo--multi-select#filter
+                        keydown->stimeo--multi-select#onKeydown
+                        focus->stimeo--multi-select#open" />
+    <ul id="ms-list" role="listbox" aria-multiselectable="true" aria-label="Options" hidden
+        data-stimeo--multi-select-target="list">
+      <li id="ms-apple" role="option" aria-selected="false" data-value="apple"
+          data-stimeo--multi-select-target="option"
+          data-action="click->stimeo--multi-select#toggleOption">Apple</li>
+    </ul>
+    <template data-stimeo--multi-select-target="tagTemplate">
+      <li data-stimeo--multi-select-target="tag label">
+        <button type="button" tabindex="-1" aria-label="Remove {label}"
+                data-stimeo--multi-select-target="remove">×</button>
+      </li>
+    </template>
+  </div>`;
+      application = Application.start();
+      application.register("stimeo--multi-select", MultiSelectController);
+      await tick();
+    };
+
+    const chip = () =>
+      document.querySelector<HTMLElement>('[data-stimeo--multi-select-target~="tag"]');
+
+    it("keeps the nested remove button when a row that is its own label is relabelled", async () => {
+      // A row may name itself `tag label` and hold the remove button inside it.
+      // Replacing the whole subtree to write the text takes the button with it
+      // and leaves a chip that is rendered but has nothing to press.
+      await mountNestedLabel();
+      document.querySelector<HTMLElement>("#ms-apple")?.click();
+      expect(chip()?.querySelector("button")).not.toBeNull();
+
+      (document.getElementById("ms-list") as HTMLElement).innerHTML = `
+        <li id="ms-apple" role="option" aria-selected="true" data-value="apple"
+            data-stimeo--multi-select-target="option">Green Apple</li>`;
+      await tick();
+
+      expect(chip()?.textContent).toContain("Green Apple");
+      expect(chip()?.querySelector("button")).not.toBeNull();
+      expect(chip()?.querySelector("button")?.getAttribute("aria-label")).toBe(
+        "Remove Green Apple",
+      );
+    });
+
+    it("keeps the nested remove button through a reconciliation that changes no selection", async () => {
+      // The row's own text reads as "Apple×" with the button's glyph in it, so the
+      // label is compared without the nested button's text; a pass that changes no
+      // selection finds the label unchanged and leaves the button in place.
+      await mountNestedLabel();
+      document.querySelector<HTMLElement>("#ms-apple")?.click();
+
+      (document.getElementById("ms-list") as HTMLElement).insertAdjacentHTML(
+        "beforeend",
+        `<li id="ms-cherry" role="option" aria-selected="false" data-value="cherry"
+             data-stimeo--multi-select-target="option">Cherry</li>`,
+      );
+      await tick();
+
+      expect(chip()?.querySelector("button")).not.toBeNull();
+    });
+
+    it("announces the removed chip without the remove button's glyph", async () => {
+      await mountNestedLabel();
+      document.querySelector<HTMLElement>("#ms-apple")?.click();
+      announcements.length = 0;
+
+      (document.getElementById("ms-list") as HTMLElement).innerHTML = "";
+      await tick();
+
+      expect(announcements.map((a) => a.message)).toEqual(["Removed Apple (apple); 0 total"]);
+    });
+
     it("relabels the chip that owns the value when the selection is out of DOM order", async () => {
       // Pairing the two lists by position would push the renamed option's label
       // onto whichever chip happens to sit at the same index.
@@ -2043,6 +2208,190 @@ describe("MultiSelectController", () => {
       // Re-derived from the swapped list, so `change` stays silent.
       expect(repairs).toEqual([["apple", "cherry"]]);
       expect(changes).toEqual([]);
+    });
+  });
+
+  describe("the declared empty-state region", () => {
+    /**
+     * The region sits outside the listbox, whose children are its options, and
+     * holds the message the widget shows while nothing matches.
+     */
+    const emptyMarkup = (regionAttrs: string) => `
+      <div data-controller="stimeo--multi-select">
+        <ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>
+        <input type="text" role="combobox" aria-expanded="false" aria-autocomplete="list"
+               aria-controls="ms-empty-list" aria-label="Fruits"
+               data-stimeo--multi-select-target="input"
+               data-action="input->stimeo--multi-select#filter
+                            keydown->stimeo--multi-select#onKeydown
+                            focus->stimeo--multi-select#open" />
+        <ul id="ms-empty-list" role="listbox" aria-multiselectable="true" aria-label="Options"
+            hidden data-stimeo--multi-select-target="list">
+          <li id="ms-empty-apple" role="option" aria-selected="false" data-value="apple"
+              data-stimeo--multi-select-target="option"
+              data-action="click->stimeo--multi-select#toggleOption">Apple</li>
+          <li id="ms-empty-banana" role="option" aria-selected="false" data-value="banana"
+              data-stimeo--multi-select-target="option"
+              data-action="click->stimeo--multi-select#toggleOption">Banana</li>
+        </ul>
+        <p data-stimeo--multi-select-target="empty" ${regionAttrs}>No fruits match</p>
+        <template data-stimeo--multi-select-target="tagTemplate">
+          <li data-stimeo--multi-select-target="tag">
+            <span data-stimeo--multi-select-target="label"></span>
+            <button type="button" tabindex="-1" aria-label="Remove {label}"
+                    data-stimeo--multi-select-target="remove">×</button>
+          </li>
+        </template>
+      </div>`;
+
+    const mountEmpty = async (regionAttrs = "hidden") => {
+      document.body.innerHTML = emptyMarkup(regionAttrs);
+      application = Application.start();
+      application.register("stimeo--multi-select", MultiSelectController);
+      await tick();
+    };
+
+    const emptyRegion = () =>
+      document.querySelector<HTMLElement>(
+        "[data-stimeo--multi-select-target='empty']",
+      ) as HTMLElement;
+
+    it("follows the empty result state in both directions", async () => {
+      // The region belongs to the state the root reports as `data-…-empty`: a
+      // query nothing matches shows it, and one that matches again hides it.
+      await mountEmpty();
+
+      filterTo("zzz");
+      expect(emptyRegion().hidden).toBe(false);
+      expect(root().hasAttribute("data-stimeo--multi-select-empty")).toBe(true);
+
+      filterTo("an"); // matches Banana
+      expect(emptyRegion().hidden).toBe(true);
+      expect(root().hasAttribute("data-stimeo--multi-select-empty")).toBe(false);
+    });
+
+    it("hides a region the author left visible, and dispatches nothing for it", async () => {
+      // The widget starts closed, so the region belongs to the hidden side of the
+      // state whatever the markup says, and the first reflection settles it. That
+      // correction is derived DOM, not a selection anyone changed.
+      const dispatched: string[] = [];
+      const record = (event: Event) => dispatched.push(event.type);
+      document.addEventListener("stimeo--multi-select:change", record);
+      document.addEventListener("stimeo--multi-select:reconcile", record);
+
+      await mountEmpty("");
+      document.removeEventListener("stimeo--multi-select:change", record);
+      document.removeEventListener("stimeo--multi-select:reconcile", record);
+
+      expect(emptyRegion().hidden).toBe(true);
+      expect(dispatched).toEqual([]);
+    });
+
+    it("shows the region when runtime churn empties an open list", async () => {
+      // Option churn writes the state through the reconciliation pass, which is a
+      // sync point of its own.
+      await mountEmpty();
+      key("ArrowDown"); // opens the list over the authored candidates
+      expect(emptyRegion().hidden).toBe(true);
+
+      (document.getElementById("ms-empty-list") as HTMLElement).innerHTML = "";
+      await tick();
+
+      expect(emptyRegion().hidden).toBe(false);
+    });
+
+    it("reflects a region that connects while the state already holds", async () => {
+      // The region's `hidden` belongs to the state, so one swapped in while the
+      // open list has nothing to offer shows itself, whatever it was authored as.
+      await mountEmpty();
+
+      filterTo("zzz");
+      expect(emptyRegion().hidden).toBe(false);
+
+      emptyRegion().remove();
+      const replacement = document.createElement("p");
+      replacement.setAttribute("data-stimeo--multi-select-target", "empty");
+      replacement.hidden = true;
+      replacement.textContent = "No fruits match";
+      root().appendChild(replacement);
+      await tick();
+
+      expect(emptyRegion()).toBe(replacement);
+      expect(replacement.hidden).toBe(false);
+    });
+
+    it("connects a resting region without writing `hidden` at all", async () => {
+      // A list authored open while its candidates are still to come settles
+      // closed, and the region belongs to that resting state. Writing `hidden`
+      // on the way there would report an empty result the widget never had to a
+      // consumer watching the message for itself.
+      document.body.innerHTML = `
+        <div data-controller="stimeo--multi-select">
+          <ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>
+          <input type="text" role="combobox" aria-expanded="true" aria-autocomplete="list"
+                 aria-controls="ms-pending-list" aria-label="Fruits"
+                 data-stimeo--multi-select-target="input"
+                 data-action="input->stimeo--multi-select#filter
+                              keydown->stimeo--multi-select#onKeydown
+                              focus->stimeo--multi-select#open" />
+          <ul id="ms-pending-list" role="listbox" aria-multiselectable="true"
+              aria-label="Options" data-stimeo--multi-select-target="list"></ul>
+          <p data-stimeo--multi-select-target="empty" hidden>No fruits match</p>
+        </div>`;
+      let writes = 0;
+      const observer = new MutationObserver((records) => {
+        writes += records.length;
+      });
+      observer.observe(emptyRegion(), { attributes: true, attributeFilter: ["hidden"] });
+
+      application = Application.start();
+      application.register("stimeo--multi-select", MultiSelectController);
+      await tick();
+      observer.disconnect();
+
+      expect(writes).toBe(0);
+      expect(emptyRegion().hidden).toBe(true);
+      expect(root().hasAttribute("data-stimeo--multi-select-empty")).toBe(false);
+    });
+  });
+
+  // --- Hidden form fields ---
+
+  describe("hidden form fields", () => {
+    let commits: ReturnType<typeof captureFieldCommits>;
+
+    const container = () =>
+      document.querySelector<HTMLElement>(
+        "[data-stimeo--multi-select-target='fields']",
+      ) as HTMLElement;
+
+    beforeEach(() => {
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      commits.stop();
+    });
+
+    it("seeds the preselected values without reporting a commit", async () => {
+      await mountFields("", "apple");
+
+      expect(fields().map((input) => input.value)).toEqual(["apple"]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("reports once per option the user toggled", async () => {
+      await mountFields();
+      commits.clear();
+
+      options()[0]?.click();
+
+      expect(fields().map((input) => input.value)).toEqual(["apple"]);
+      expect(commits.seen).toEqual([container()]);
+
+      options()[0]?.click();
+      expect(fields()).toEqual([]);
+      expect(commits.seen).toEqual([container(), container()]);
     });
   });
 });

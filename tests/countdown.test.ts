@@ -518,6 +518,604 @@ describe("CountdownController", () => {
     expect(slot("seconds").textContent).toBe("03");
   });
 
+  it("follows a completion label swapped in place after completion", async () => {
+    const spoken = await captureAnnouncements(async () => {
+      await start(
+        'data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" ' +
+          'data-stimeo--countdown-complete-label-value="Time up" ' +
+          'data-stimeo--countdown-announce-text-value="Time is up"',
+      );
+      vi.advanceTimersByTime(2000);
+    });
+    expect(spoken).toEqual(["Time is up"]);
+    expect(slot("status").textContent).toBe("Time up");
+
+    const events: string[] = [];
+    for (const type of ["stimeo--countdown:tick", "stimeo--countdown:complete"]) {
+      root().addEventListener(type, () => events.push(type));
+    }
+    // A morph keeps the completed element and swaps the attribute, so `connect()` never
+    // runs again: without following the Value the slot keeps the old wording.
+    const later = await captureAnnouncements(async () => {
+      root().setAttribute("data-stimeo--countdown-complete-label-value", "Finished");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(slot("status").textContent).toBe("Finished");
+    // Following the label is a repaint: the milestone is neither dispatched nor read
+    // out a second time, and the countdown stays complete.
+    expect(events).toEqual([]);
+    expect(later).toEqual([]);
+    expect(root().getAttribute("data-state")).toBe("complete");
+  });
+
+  it("takes back a completion label swapped after completion on reset", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" data-stimeo--countdown-complete-label-value="Time up"',
+    );
+    vi.advanceTimersByTime(2000);
+    root().setAttribute("data-stimeo--countdown-complete-label-value", "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    // The slot shows the label now in force, so reset() still recognizes it as its own.
+    instance().reset();
+    expect(slot("status").textContent).toBe("");
+  });
+
+  it("withdraws its label when the completion label is removed after completion", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" data-stimeo--countdown-complete-label-value="Time up"',
+    );
+    vi.advanceTimersByTime(2000);
+    expect(slot("status").textContent).toBe("Time up");
+    root().removeAttribute("data-stimeo--countdown-complete-label-value");
+    await vi.advanceTimersByTimeAsync(0);
+    // Completion writes nothing for an empty label, so the wording on screen is withdrawn.
+    expect(slot("status").textContent).toBe("");
+  });
+
+  it("writes no label ahead of completion when the label changes", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z"');
+    root().setAttribute("data-stimeo--countdown-complete-label-value", "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    // The status holds completion wording only, and a running timer has none to show.
+    expect(slot("status").textContent).toBe("");
+    const events: string[] = [];
+    root().addEventListener("stimeo--countdown:complete", () => events.push("complete"));
+    vi.advanceTimersByTime(2000);
+    // Completion writes the label in force when it happens.
+    expect(events).toEqual(["complete"]);
+    expect(slot("status").textContent).toBe("Finished");
+  });
+
+  it("leaves a status the consumer rewrote after completion alone", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" data-stimeo--countdown-complete-label-value="Time up"',
+    );
+    vi.advanceTimersByTime(2000);
+    slot("status").textContent = "Doors open at 7";
+    root().setAttribute("data-stimeo--countdown-complete-label-value", "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    // Only the label this controller wrote is followed; the consumer's text stays.
+    expect(slot("status").textContent).toBe("Doors open at 7");
+  });
+
+  it("follows a label set after completing with an empty one", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z"');
+    vi.advanceTimersByTime(2000);
+    expect(root().getAttribute("data-state")).toBe("complete");
+    expect(slot("status").textContent).toBe("");
+    root().setAttribute("data-stimeo--countdown-complete-label-value", "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    // Completing with the empty label wrote no text but held the empty slot with an
+    // empty marker, so the label set later reaches it.
+    expect(slot("status").textContent).toBe("Finished");
+  });
+
+  it("leaves a status the consumer emptied alone when the label changes while detached", async () => {
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" data-stimeo--countdown-complete-label-value="Time up"',
+    );
+    vi.advanceTimersByTime(2000);
+    slot("status").textContent = "";
+    const element = root();
+    element.remove();
+    await vi.advanceTimersByTimeAsync(0);
+    element.setAttribute("data-stimeo--countdown-complete-label-value", "Finished");
+    document.body.append(element);
+    await vi.advanceTimersByTimeAsync(0);
+    // Reconnecting delivers the swapped label ahead of connect(), which leaves it to
+    // connect(); the marker still holds "Time up", which the emptied slot does not
+    // show, so the slot is the consumer's and stays empty.
+    expect(root().getAttribute("data-state")).toBe("complete");
+    expect(slot("status").textContent).toBe("");
+  });
+
+  it("keeps the status of a restored completion as it is when connecting", async () => {
+    // Stimulus delivers the label callback ahead of connect(), with the default as the
+    // previous label. A completion restored from markup keeps its status as authored,
+    // exactly as connect() keeps the state.
+    await start(
+      'data-stimeo--countdown-deadline-value="2026-06-05T23:59:59Z" ' +
+        'data-stimeo--countdown-complete-label-value="Time up" data-state="complete"',
+    );
+    expect(root().getAttribute("data-state")).toBe("complete");
+    expect(slot("status").textContent).toBe("");
+  });
+
+  it("follows a completion label without a status target present", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--countdown" role="timer" aria-live="off"
+           data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z"
+           data-stimeo--countdown-complete-label-value="Time up">
+        <span data-stimeo--countdown-target="seconds">00</span>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--countdown", CountdownController);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(2000);
+    expect(root().getAttribute("data-state")).toBe("complete");
+    // `status` is optional, so a label swapped after completion has nowhere to go and
+    // must not throw on the missing target.
+    expect(() => instance().completeLabelValueChanged()).not.toThrow();
+    expect(root().getAttribute("data-state")).toBe("complete");
+  });
+
+  /** The attribute on the status recording the text this controller wrote there. */
+  const OWNS_STATUS = "data-stimeo--countdown-owns-status";
+  const LABEL = "data-stimeo--countdown-complete-label-value";
+
+  /**
+   * Takes the timer out of the document, runs `change` on it there, and puts it
+   * back. Stimulus stops delivering Value callbacks while the element is out, and on
+   * the way back it replays the changed ones ahead of `connect()`.
+   */
+  const whileDetached = async (change: (element: HTMLElement) => void): Promise<void> => {
+    const element = root();
+    element.remove();
+    await vi.advanceTimersByTimeAsync(0);
+    change(element);
+    document.body.append(element);
+    await vi.advanceTimersByTimeAsync(0);
+  };
+
+  it("marks the status it writes on completion as its own", async () => {
+    await start(`data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    expect(slot("status").textContent).toBe("Time up");
+    // The marker holds the text itself: the slot is this controller's only while
+    // the two still agree.
+    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Time up");
+    instance().reset();
+    expect(slot("status").hasAttribute(OWNS_STATUS)).toBe(false);
+  });
+
+  it("follows a label changed while detached once it reconnects", async () => {
+    await start(`data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    const events: string[] = [];
+    for (const type of ["stimeo--countdown:tick", "stimeo--countdown:complete"]) {
+      root().addEventListener(type, () => events.push(type));
+    }
+    const spoken = await captureAnnouncements(() =>
+      whileDetached((element) => element.setAttribute(LABEL, "Finished")),
+    );
+    // The callback runs ahead of connect() with the default as the previous label,
+    // so connect() is what brings the status it wrote up to the label in force.
+    expect(root().getAttribute("data-state")).toBe("complete");
+    expect(slot("status").textContent).toBe("Finished");
+    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Finished");
+    // Following the label is a repaint, never a second milestone.
+    expect(events).toEqual([]);
+    expect(spoken).toEqual([]);
+  });
+
+  it("takes back a label changed while detached on reset", async () => {
+    await start(`data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    await whileDetached((element) => element.setAttribute(LABEL, "Finished"));
+    instance().reset();
+    expect(slot("status").textContent).toBe("");
+    expect(slot("status").hasAttribute(OWNS_STATUS)).toBe(false);
+  });
+
+  it("withdraws a label emptied while detached and shows a later one again", async () => {
+    await start(`data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    await whileDetached((element) => element.removeAttribute(LABEL));
+    expect(slot("status").textContent).toBe("");
+    // The emptied slot is still this controller's, so the next label reaches it.
+    root().setAttribute(LABEL, "Again");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slot("status").textContent).toBe("Again");
+  });
+
+  it("follows a label set while detached after completing with an empty one", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z"');
+    vi.advanceTimersByTime(2000);
+    await whileDetached((element) => element.setAttribute(LABEL, "Finished"));
+    // Completing with an empty label wrote no text but claimed the empty slot, so the
+    // label set later reaches it.
+    expect(slot("status").textContent).toBe("Finished");
+  });
+
+  it("clears its own completion label when a restored completion re-arms", async () => {
+    await start(`data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    await whileDetached((element) =>
+      element.setAttribute("data-stimeo--countdown-deadline-value", "2026-06-06T00:00:10Z"),
+    );
+    // A deadline moved forward hands the timer back paused, and a paused timer has no
+    // completion to show.
+    expect(root().getAttribute("data-state")).toBe("paused");
+    expect(slot("status").textContent).toBe("");
+    expect(slot("status").hasAttribute(OWNS_STATUS)).toBe(false);
+  });
+
+  const DEADLINE = "data-stimeo--countdown-deadline-value";
+
+  it("hands a completion back paused when its deadline moves forward in place", async () => {
+    await start(`${DEADLINE}="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    expect(root().getAttribute("data-state")).toBe("complete");
+    const events: string[] = [];
+    for (const type of ["stimeo--countdown:tick", "stimeo--countdown:complete"]) {
+      root().addEventListener(type, () => events.push(type));
+    }
+    // A morph keeps the element and swaps the attribute, so connect() never runs again:
+    // the live element has to leave the completion the new deadline undoes.
+    const spoken = await captureAnnouncements(async () => {
+      root().setAttribute(DEADLINE, "2026-06-06T00:00:10Z");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(slot("seconds").textContent).toBe("08");
+    expect(root().getAttribute("data-state")).toBe("paused");
+    expect(slot("status").textContent).toBe("");
+    expect(slot("status").hasAttribute(OWNS_STATUS)).toBe(false);
+    // Leaving the completion is a repaint: nothing is dispatched or read out.
+    expect(events).toEqual([]);
+    expect(spoken).toEqual([]);
+    // Paused, not complete, so resume() counts down from the new reading again.
+    instance().resume();
+    expect(root().getAttribute("data-state")).toBe("running");
+    vi.advanceTimersByTime(1000);
+    expect(slot("seconds").textContent).toBe("07");
+  });
+
+  it("leaves the consumer's status alone when a completion's deadline moves forward in place", async () => {
+    await start(`${DEADLINE}="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    slot("status").textContent = "Doors open at 7";
+    root().setAttribute(DEADLINE, "2026-06-06T00:00:10Z");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(root().getAttribute("data-state")).toBe("paused");
+    expect(slot("status").textContent).toBe("Doors open at 7");
+  });
+
+  it("hands a completion back paused when the count flips to up in place", async () => {
+    await start(`${DEADLINE}="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    root().setAttribute("data-stimeo--countdown-direction-value", "up");
+    await vi.advanceTimersByTimeAsync(0);
+    // Only a countdown settles, exactly as connect() reads a restored completion.
+    expect(root().getAttribute("data-state")).toBe("paused");
+    expect(slot("status").textContent).toBe("");
+    instance().resume();
+    vi.advanceTimersByTime(1000);
+    expect(slot("seconds").textContent).toBe("01");
+  });
+
+  it("takes its completion text back when start() counts on from the completion", async () => {
+    await start(`${DEADLINE}="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    expect(root().getAttribute("data-state")).toBe("complete");
+    // Flipping the count to `up` and starting in the same task: start() runs ahead of
+    // the direction callback, on a completion nothing has handed back yet.
+    root().setAttribute("data-stimeo--countdown-direction-value", "up");
+    instance().start();
+    expect(root().getAttribute("data-state")).toBe("running");
+    expect(slot("status").textContent).toBe("");
+    expect(slot("status").hasAttribute(OWNS_STATUS)).toBe(false);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(1000);
+    expect(root().getAttribute("data-state")).toBe("running");
+    expect(slot("seconds").textContent).toBe("01");
+    expect(slot("status").textContent).toBe("");
+  });
+
+  it("leaves the consumer's status alone when start() counts on from the completion", async () => {
+    await start(`${DEADLINE}="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    slot("status").textContent = "Doors open at 7";
+    root().setAttribute("data-stimeo--countdown-direction-value", "up");
+    instance().start();
+    expect(root().getAttribute("data-state")).toBe("running");
+    expect(slot("status").textContent).toBe("Doors open at 7");
+    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Time up");
+  });
+
+  it("keeps a completion whose deadline moves but stays past", async () => {
+    await start(`${DEADLINE}="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    const events: string[] = [];
+    root().addEventListener("stimeo--countdown:complete", () => events.push("complete"));
+    root().setAttribute(DEADLINE, "2026-06-06T00:00:01Z");
+    await vi.advanceTimersByTimeAsync(0);
+    // Still at zero, so the milestone stands and the status keeps its label.
+    expect(root().getAttribute("data-state")).toBe("complete");
+    expect(slot("status").textContent).toBe("Time up");
+    expect(events).toEqual([]);
+  });
+
+  it("leaves a status the consumer rewrote alone across a detached label change and reset", async () => {
+    await start(`data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    slot("status").textContent = "Doors open at 7";
+    await whileDetached((element) => element.setAttribute(LABEL, "Finished"));
+    expect(slot("status").textContent).toBe("Doors open at 7");
+    instance().reset();
+    expect(slot("status").textContent).toBe("Doors open at 7");
+  });
+
+  it("leaves the consumer's status alone when completing with an empty label", async () => {
+    await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z"');
+    slot("status").textContent = "Bring your ticket";
+    vi.advanceTimersByTime(2000);
+    expect(root().getAttribute("data-state")).toBe("complete");
+    // An empty label writes nothing, so it takes nothing over either.
+    expect(slot("status").textContent).toBe("Bring your ticket");
+    expect(slot("status").hasAttribute(OWNS_STATUS)).toBe(false);
+    root().setAttribute(LABEL, "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slot("status").textContent).toBe("Bring your ticket");
+  });
+
+  it("owns the empty slot with an empty marker, even after the consumer empties it again", async () => {
+    await start(`${DEADLINE}="2026-06-06T00:00:02Z"`);
+    vi.advanceTimersByTime(2000);
+    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("");
+    // While the slot shows the consumer's text, the text is theirs.
+    slot("status").textContent = "Doors open at 7";
+    root().setAttribute(LABEL, "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slot("status").textContent).toBe("Doors open at 7");
+    // Emptied again, it is the empty slot the empty marker holds, so the next label
+    // reaches it.
+    slot("status").textContent = "";
+    root().setAttribute(LABEL, "Time up");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slot("status").textContent).toBe("Time up");
+  });
+
+  it("leaves a slot the consumer rewrote and then emptied alone while the marker holds text", async () => {
+    await start(`${DEADLINE}="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    slot("status").textContent = "Doors open at 7";
+    slot("status").textContent = "";
+    root().setAttribute(LABEL, "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    // The marker still holds "Time up", which the emptied slot does not show.
+    expect(slot("status").textContent).toBe("");
+    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Time up");
+  });
+
+  it("leaves the status a restored completion brings alone on reset", async () => {
+    // The markup arrives complete with the label already in the slot: that text is
+    // the page's, whatever it reads, because this controller never wrote it.
+    document.body.innerHTML = `
+      <div data-controller="stimeo--countdown" role="timer" aria-live="off"
+           data-state="complete"
+           data-stimeo--countdown-deadline-value="2026-06-05T23:59:59Z"
+           ${LABEL}="Time up">
+        <span data-stimeo--countdown-target="seconds">00</span>
+        <span data-stimeo--countdown-target="status">Time up</span>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--countdown", CountdownController);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(root().getAttribute("data-state")).toBe("complete");
+    instance().reset();
+    expect(slot("status").textContent).toBe("Time up");
+  });
+
+  it("marks the status under the identifier it is registered with", async () => {
+    const alias = "event--timer";
+    document.body.innerHTML = `
+      <div data-controller="${alias}" role="timer" aria-live="off"
+           data-${alias}-deadline-value="2026-06-06T00:00:02Z"
+           data-${alias}-complete-label-value="Time up">
+        <span data-${alias}-target="status"></span>
+      </div>`;
+    application = Application.start();
+    application.register(alias, CountdownController);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(2000);
+    const status = query(`[data-${alias}-target='status']`);
+    expect(status.textContent).toBe("Time up");
+    expect(status.getAttribute(`data-${alias}-owns-status`)).toBe("Time up");
+    expect(status.hasAttribute(OWNS_STATUS)).toBe(false);
+  });
+
+  // ---- A status the consumer adds an element to is theirs, even with the text unchanged ----
+
+  /** A text-less element: adding it leaves the status text, and so the marker's match, as is. */
+  const ICON = '<svg aria-hidden="true"><circle r="1"></circle></svg>';
+
+  /** Empties the completion label in place. */
+  const unlabel = async (): Promise<void> => {
+    root().removeAttribute(LABEL);
+    await vi.advanceTimersByTimeAsync(0);
+  };
+
+  /** Every path that brings a status holding this controller's text up to date. */
+  const RESYNCS: ReadonlyArray<readonly [string, () => void | Promise<void>]> = [
+    [
+      "the completion label changes",
+      async () => {
+        root().setAttribute(LABEL, "Finished");
+        await vi.advanceTimersByTimeAsync(0);
+      },
+    ],
+    ["the completion label empties", unlabel],
+    [
+      "the label changes while detached",
+      () => whileDetached((element) => element.setAttribute(LABEL, "Finished")),
+    ],
+    ["reset runs", () => instance().reset()],
+    [
+      "the deadline moves forward in place",
+      async () => {
+        root().setAttribute(DEADLINE, "2026-06-06T00:00:10Z");
+        await vi.advanceTimersByTimeAsync(0);
+      },
+    ],
+    [
+      "the count turns up in place",
+      async () => {
+        root().setAttribute("data-stimeo--countdown-direction-value", "up");
+        await vi.advanceTimersByTimeAsync(0);
+      },
+    ],
+  ];
+
+  it.each(RESYNCS)(
+    "leaves a status it wrote alone once the consumer adds an element to it, when %s",
+    async (_, resync) => {
+      await start(`${DEADLINE}="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+      vi.advanceTimersByTime(2000);
+      slot("status").insertAdjacentHTML("beforeend", ICON);
+      // The text still matches the marker; the element is what makes the slot theirs.
+      expect(slot("status").getAttribute(OWNS_STATUS)).toBe(slot("status").textContent);
+      const authored = slot("status").outerHTML;
+      await resync();
+      // Neither written nor emptied, and the marker stays where it is.
+      expect(slot("status").outerHTML).toBe(authored);
+    },
+  );
+
+  // The label is already empty in these cases, so emptying it changes nothing and is left out.
+  it.each(RESYNCS.filter(([, resync]) => resync !== unlabel))(
+    "leaves an empty slot it claimed alone once the consumer adds an element to it, when %s",
+    async (_, resync) => {
+      await start(`${DEADLINE}="2026-06-06T00:00:02Z"`);
+      vi.advanceTimersByTime(2000);
+      expect(slot("status").getAttribute(OWNS_STATUS)).toBe("");
+      slot("status").insertAdjacentHTML("beforeend", ICON);
+      const authored = slot("status").outerHTML;
+      await resync();
+      expect(slot("status").outerHTML).toBe(authored);
+    },
+  );
+
+  it("does not claim a slot holding an element when completing with an empty label", async () => {
+    await start(`${DEADLINE}="2026-06-06T00:00:02Z"`);
+    slot("status").insertAdjacentHTML("beforeend", ICON);
+    const authored = slot("status").outerHTML;
+    vi.advanceTimersByTime(2000);
+    expect(root().getAttribute("data-state")).toBe("complete");
+    // A slot holding an element is not empty, so the empty label claims nothing.
+    expect(slot("status").outerHTML).toBe(authored);
+    root().setAttribute(LABEL, "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slot("status").outerHTML).toBe(authored);
+  });
+
+  it("takes the status back once the element the consumer added is gone again", async () => {
+    await start(`${DEADLINE}="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    vi.advanceTimersByTime(2000);
+    slot("status").insertAdjacentHTML("beforeend", ICON);
+    root().setAttribute(LABEL, "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slot("status").textContent).toBe("Time up");
+    // With the element gone the slot shows this controller's text alone again, so the
+    // next label and reset reach it.
+    slot("status").querySelector("svg")?.remove();
+    root().setAttribute(LABEL, "Again");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slot("status").textContent).toBe("Again");
+    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Again");
+    instance().reset();
+    expect(slot("status").textContent).toBe("");
+    expect(slot("status").hasAttribute(OWNS_STATUS)).toBe(false);
+  });
+
+  // ---- A completion writes its label; a restored page carries the claim ----
+
+  it("writes a non-empty label over whatever the status holds when it completes", async () => {
+    await start(`${DEADLINE}="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
+    slot("status").innerHTML = `Doors open at 7${ICON}`;
+    vi.advanceTimersByTime(2000);
+    expect(root().getAttribute("data-state")).toBe("complete");
+    // Completion puts the label in force into the slot, text and element alike, and
+    // claims it with the marker.
+    expect(slot("status").innerHTML).toBe("Time up");
+    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Time up");
+  });
+
+  /**
+   * Connects a new instance to the markup a completed page leaves behind, as a Turbo
+   * cache restore does: `data-state="complete"`, the label in force, and `status`
+   * exactly as given, marker included.
+   */
+  const restore = async (deadline: string, status: string): Promise<void> => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--countdown" role="timer" aria-live="off"
+           data-state="complete" ${DEADLINE}="${deadline}" ${LABEL}="Time up">
+        <span data-stimeo--countdown-target="seconds">00</span>
+        ${status}
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--countdown", CountdownController);
+    await vi.advanceTimersByTimeAsync(0);
+  };
+
+  it("owns the status a restored page marks as its own, and follows the label into it", async () => {
+    await restore(
+      "2026-06-05T23:59:59Z",
+      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}="Time up">Time up</span>`,
+    );
+    expect(root().getAttribute("data-state")).toBe("complete");
+    // Ownership is read from the marker the page carries, not from what this instance
+    // has written, so the label reaches the restored text.
+    root().setAttribute(LABEL, "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slot("status").textContent).toBe("Finished");
+    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Finished");
+  });
+
+  it("owns the empty status a restored page claims with an empty marker", async () => {
+    await restore(
+      "2026-06-05T23:59:59Z",
+      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}=""></span>`,
+    );
+    root().setAttribute(LABEL, "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slot("status").textContent).toBe("Finished");
+    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Finished");
+  });
+
+  it("leaves a restored status whose text differs from its marker alone", async () => {
+    await restore(
+      "2026-06-05T23:59:59Z",
+      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}="Time up">Doors open at 7</span>`,
+    );
+    root().setAttribute(LABEL, "Finished");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slot("status").textContent).toBe("Doors open at 7");
+    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Time up");
+  });
+
+  it("takes back the text a restored page marks as its own once the deadline moved forward", async () => {
+    await restore(
+      "2026-06-06T00:00:10Z",
+      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}="Time up">Time up</span>`,
+    );
+    // The deadline is ahead of now, so the completion is handed back paused, and the
+    // text the marker claims goes with it.
+    expect(root().getAttribute("data-state")).toBe("paused");
+    expect(slot("seconds").textContent).toBe("10");
+    expect(slot("status").textContent).toBe("");
+    expect(slot("status").hasAttribute(OWNS_STATUS)).toBe(false);
+  });
+
   it("ignores pause once the countdown has completed", async () => {
     await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z"');
     vi.advanceTimersByTime(2000);

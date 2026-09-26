@@ -39,6 +39,8 @@ export interface ControllerManifest {
   readonly valueSyntaxConstraints?: readonly StringSyntaxConstraint[];
   /** Statically decidable relationships between literal Stimulus Values. */
   readonly valueRelations: readonly ValueRelation[];
+  /** What each action reads out of `event.params`. */
+  readonly actionParams: readonly ActionParamRule[];
   /**
    * Public action method names declared via `static actions`, wired by
    * consumers as `data-action="…-><identifier>#<action>"`.
@@ -56,6 +58,11 @@ export interface ControllerManifest {
    * {@link ConditionalTargetRule}.
    */
   readonly conditionalTargets: readonly ConditionalTargetRule[];
+  /**
+   * `<template>` targets whose content must be exactly one row. See
+   * {@link TemplateRootRule}.
+   */
+  readonly templateRoots: readonly TemplateRootRule[];
   /**
    * Actions required on a particular element in one Value configuration. See
    * {@link RequiredActionRule}.
@@ -609,6 +616,37 @@ export interface ForbiddenAriaRule {
 }
 
 /**
+ * One `event.params` entry an action reads, written as the author writes it.
+ *
+ * Stimulus builds `event.params` from `data-<identifier>-<param>-param` attributes
+ * on the element carrying the `data-action`. Nothing about that spelling is
+ * reflected, so a name that never arrives is indistinguishable at runtime from one
+ * the author never meant to pass: the action runs and returns, and the control is
+ * dead with no diagnostic anywhere.
+ *
+ * `required` is reserved for an action that has **no other way** to reach the value.
+ * Where the reader falls back to `event.detail` or to an attribute, the param is
+ * genuinely optional and a page driving the action that way is correct.
+ */
+export interface ActionParamRule {
+  /** The action method the param belongs to; must appear in `actions`. */
+  readonly action: string;
+  /** The param name, camelCase, as `event.params` reads it. */
+  readonly param: string;
+  /** Whether the action can reach the value no other way. */
+  readonly required?: boolean;
+  /** The literal values the reader accepts, when it accepts a fixed set. */
+  readonly allowedValues?: readonly string[];
+  /** Whether the reader takes a whole number and returns on anything else. */
+  readonly integer?: boolean;
+  /** Human-readable fix suggestion shown by the CLI. */
+  readonly suggestion: string;
+}
+
+/** Action-param rules by controller identifier. */
+export type ActionParamRules = Readonly<Record<string, readonly ActionParamRule[]>>;
+
+/**
  * The bundled manifest. `schemaVersion` tracks the manifest *format*;
  * `packageVersion` tracks the `stimeo-ui` release it was generated from so a
  * consumer can confirm the check matches their installed version.
@@ -618,6 +656,25 @@ export interface Manifest {
   readonly packageVersion: string;
   /** Keyed by controller identifier, e.g. `stimeo--menu`. */
   readonly controllers: Readonly<Record<string, ControllerManifest>>;
+}
+
+/**
+ * The shape a `<template>` target's content has to have: **exactly one element**,
+ * which is the row the controller clones.
+ *
+ * A row is cloned on its own so that the node appended is the node a later
+ * removal takes back. Content the row does not cover — a second element, a
+ * wrapper around it — is therefore never rendered, and the widget silently adds
+ * nothing. A controller that reports it names it on the console once per
+ * connection; this rule says so before the page is served.
+ */
+export interface TemplateRootRule {
+  /** Target name of the `<template>`. */
+  readonly template: string;
+  /** Target name its one element must carry, when the row is a declared part. */
+  readonly rootTarget?: string;
+  /** What to write instead. */
+  readonly suggestion: string;
 }
 
 /**
@@ -642,8 +699,8 @@ export interface ConditionalTargetRule {
   /** Targets that become required once {@link whenPresent} appears. */
   readonly require: readonly string[];
   /**
-   * Require each {@link require} entry to sit **inside** the `whenPresent`
-   * element rather than anywhere in the scope.
+   * Require each {@link ConditionalTargetRule.require | require} entry to sit
+   * **inside** the `whenPresent` element rather than anywhere in the scope.
    *
    * A `<template>` is cloned at runtime, so a part declared outside it never
    * reaches the clone. Without this the presence check passes on markup the
@@ -651,9 +708,9 @@ export interface ConditionalTargetRule {
    */
   readonly requireInside?: boolean;
   /**
-   * Require each {@link require} entry to share its nearest enclosing host —
-   * the closest ancestor matching one of these selectors — with the
-   * `whenPresent` element.
+   * Require each {@link ConditionalTargetRule.require | require} entry to share its
+   * nearest enclosing host — the closest ancestor matching one of these selectors —
+   * with the `whenPresent` element.
    *
    * Neither presence nor {@link requireInside} can express a pair that must sit
    * in the *same* container without being nested in one another. A controller
@@ -667,6 +724,21 @@ export interface ConditionalTargetRule {
    * generated — reporting either would be a guess, and the check stays quiet.
    */
   readonly requireSameHost?: readonly HostSelector[];
+  /**
+   * Require each {@link ConditionalTargetRule.require | require} entry to sit
+   * inside the same element carrying this controller's target of this name as the
+   * {@link whenPresent} entry does.
+   *
+   * Where {@link requireSameHost} describes the host by tag, this names it: the host
+   * is a declared target of the same controller, so a pair resolved per trigger can
+   * say so directly. Halves split across two of those hosts leave both incomplete,
+   * and neither swaps.
+   *
+   * A scope whose hosts are all generated leaves the question undecidable, so nothing
+   * is reported there.
+   */
+  readonly requireSameTargetHost?: string;
+
   /**
    * What to call the shared host in the diagnostic (e.g. `submit control`).
    * The selectors' tag names read as a disjunction of element names, which
@@ -832,6 +904,7 @@ export type StructureRules = Readonly<
     {
       readonly requiredTargets?: readonly string[];
       readonly conditionalTargets?: readonly ConditionalTargetRule[];
+      readonly templateRoots?: readonly TemplateRootRule[];
       readonly requiredActions?: readonly RequiredActionRule[];
       readonly actionCompletion?: readonly ActionCompletionRule[];
     }
@@ -891,9 +964,11 @@ export const DIAGNOSTIC_CODES = [
   "invalid-value",
   "unknown-action-controller",
   "unknown-action-method",
+  "unknown-action-event",
   "orphan-target",
   "missing-required-target",
   "missing-conditional-target",
+  "invalid-template-root",
   "missing-required-action",
   "missing-action-completion",
   "missing-action-event",
@@ -909,6 +984,9 @@ export const DIAGNOSTIC_CODES = [
   "cardinality-violation",
   "forbidden-aria",
   "missing-announcer",
+  "missing-action-param",
+  "invalid-action-param",
+  "confusable-action-param",
   "unknown-ignore-code",
 ] as const;
 

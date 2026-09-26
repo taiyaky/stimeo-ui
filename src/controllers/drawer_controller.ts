@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { FocusTrap } from "../utils/focus_trap";
+import { type StateReason, stateReasonFor } from "../utils/state_reason";
 import { TransitionCompletion } from "../utils/transition_completion";
 
 /** Edge a drawer slides from; reflected as `data-placement` for the consumer CSS. */
@@ -36,10 +37,18 @@ type Placement = "left" | "right" | "top" | "bottom";
  * consumer's CSS — `data-placement` is merely a flag.
  *
  * Behavior provided:
- * - {@link open}/{@link close} toggle `data-state` and (deferred) `hidden`.
+ * - {@link DrawerController.open | open}/{@link DrawerController.close | close}
+ *   toggle `data-state` and (deferred) `hidden`.
  * - On open, focus moves to the first focusable element in the panel.
  * - `Tab`/`Shift+Tab` cycle focus within the panel; `Escape` closes.
  * - {@link closeOnBackdrop} closes only when the overlay *itself* is clicked.
+ * - Each move of the open state is reported: `stimeo--drawer:open` and
+ *   `stimeo--drawer:close` dispatch `{ reason: StateReason }`, as soon as
+ *   `data-state` is written — the deferred `hidden` and the exit transition are
+ *   not waited for. Both are informational, so neither is cancelable. A call
+ *   that leaves the state where it already was, the normalization in
+ *   {@link connect}, the reconciliation that follows panel churn, and
+ *   {@link disconnect} are all silent.
  */
 export class DrawerController extends Controller<HTMLElement> {
   static override targets = ["trigger", "overlay", "panel"];
@@ -48,6 +57,7 @@ export class DrawerController extends Controller<HTMLElement> {
     open: { type: Boolean, default: false },
   };
   static actions = ["close", "closeOnBackdrop", "open"] as const;
+  static events = ["close", "open"] as const;
 
   declare readonly triggerTarget: HTMLElement;
   declare readonly overlayTarget: HTMLElement;
@@ -64,7 +74,7 @@ export class DrawerController extends Controller<HTMLElement> {
 
   /** Owns the modal side effects; Escape closes, focus falls back to the trigger. */
   readonly #trap = new FocusTrap(() => this.#activePanel ?? this.panelTarget, {
-    onEscape: () => this.close(),
+    onEscape: () => this.#close("escape"),
     fallbackFocus: () => (this.hasTriggerTarget ? this.triggerTarget : null),
   });
 
@@ -73,6 +83,9 @@ export class DrawerController extends Controller<HTMLElement> {
   /** Distinguishes dynamic target churn from callbacks around controller teardown. */
   #connected = false;
 
+  /** Whether state moves are reported: set once `connect()` settled the baseline. */
+  #reporting = false;
+
   /**
    * Reflects placement and establishes the initial open/closed state.
    *
@@ -80,9 +93,9 @@ export class DrawerController extends Controller<HTMLElement> {
    * restored snapshot whose panel is already `data-state="open"` stays open
    * rather than being re-derived from the declarative `open` Value (which would
    * close a user-opened drawer). The `open` Value only seeds a genuinely fresh
-   * render. We normalize to a clean closed baseline first so {@link open} runs its
-   * full reveal + trap activation — the `FocusTrap` is inactive after a
-   * disconnect and must be re-activated.
+   * render. We normalize to a clean closed baseline first so
+   * {@link DrawerController.open | open} runs its full reveal + trap activation —
+   * the `FocusTrap` is inactive after a disconnect and must be re-activated.
    */
   override connect(): void {
     this.#connected = true;
@@ -90,12 +103,14 @@ export class DrawerController extends Controller<HTMLElement> {
     this.#reflectPlacement();
     const shouldOpen = this.#isOpen || this.openValue;
     this.#applyClosedState();
-    if (shouldOpen) this.open();
+    if (shouldOpen) this.#open("api");
+    this.#reporting = true;
   }
 
   /** Reverts the modal side effects and pending hide if torn down while open. */
   override disconnect(): void {
     this.#connected = false;
+    this.#reporting = false;
     this.#transition.cancel();
     this.#trap.deactivate({ restoreFocus: false });
     this.#activePanel = null;
@@ -134,7 +149,12 @@ export class DrawerController extends Controller<HTMLElement> {
   }
 
   /** Opens the drawer: reveals it, syncs `data-state`, traps focus. */
-  open(): void {
+  open(event?: Event): void {
+    this.#open(stateReasonFor(event));
+  }
+
+  /** Reveals the drawer, syncs `data-state`, reports a move, then traps focus. */
+  #open(reason: StateReason): void {
     if (!this.hasPanelTarget || this.#isOpen) return;
     this.#transition.cancel();
     this.#activePanel = this.panelTarget;
@@ -149,35 +169,56 @@ export class DrawerController extends Controller<HTMLElement> {
     void this.panelTarget.offsetWidth;
     this.#setState("open");
     this.openValue = true;
+    if (this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
+    // A subscriber may close it again from the handler above. Everything below
+    // applies to an element that is open; run it against a closed one and the
+    // side effects have no path back — the later `close()` returns early.
+    if (!this.#isOpen) return;
     this.#trap.activate();
   }
 
   /**
    * Closes the drawer: syncs `data-state` to start the exit transition, then
    * defers both `hidden` *and* the modal teardown (scroll lock / background
-   * `inert` / focus restore) until the transition finishes — see
-   * `#applyHidden`. This keeps the background inert and focus trapped while
-   * the drawer is still visually on screen, preserving the modal contract during
-   * the exit animation.
+   * `inert` / focus restore) until the transition finishes. This keeps the
+   * background inert and focus trapped while the drawer is still visually on
+   * screen, preserving the modal contract during the exit animation.
    */
-  close(): void {
-    if (!this.hasPanelTarget || !this.#isOpen) return;
-    this.openValue = false;
-    this.#setState("closed");
-    this.#hideAfterTransition();
+  close(event?: Event): void {
+    this.#close(stateReasonFor(event));
   }
 
   /** Closes only when the overlay itself (not its contents) is clicked. */
   closeOnBackdrop(event: MouseEvent): void {
-    if (this.hasOverlayTarget && event.target === this.overlayTarget) this.close();
+    if (this.hasOverlayTarget && event.target === this.overlayTarget) this.#close("outside");
   }
 
-  /** Writes `data-placement` from the current `placement` value. */
+  /** Starts the exit transition, reports a move, then defers `hidden` and teardown. */
+  #close(reason: StateReason): void {
+    if (!this.hasPanelTarget || !this.#isOpen) return;
+    this.openValue = false;
+    this.#setState("closed");
+    if (this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
+    // A subscriber may reopen it from the handler above; hiding after the exit
+    // transition would then apply `hidden` to a drawer that is on screen.
+    if (this.#isOpen) return;
+    this.#hideAfterTransition();
+  }
+
+  /**
+   * Writes `data-placement` from the current `placement` value.
+   *
+   * @stimeoRenderRoot
+   */
   #reflectPlacement(): void {
     if (this.hasPanelTarget) this.panelTarget.setAttribute("data-placement", this.#placement);
   }
 
-  /** Reconciles a replacement panel and companion overlay from its explicit DOM state. */
+  /**
+   * Reconciles a replacement panel and companion overlay from its explicit DOM state.
+   *
+   * @stimeoRenderRoot
+   */
   #adoptPanel(panel: HTMLElement): void {
     this.#transition.cancel();
     const trapWasActive = this.#trap.active;
@@ -239,8 +280,9 @@ export class DrawerController extends Controller<HTMLElement> {
    * Runs once the close transition has finished: applies `hidden` to the panel
    * and overlay, then reverts the modal side effects (scroll lock, background
    * `inert`, keydown listener) and restores focus to the opener. Deferring the
-   * `FocusTrap` teardown to here — rather than at {@link close} time — keeps
-   * the background unreachable and focus trapped for the whole exit animation.
+   * `FocusTrap` teardown to here — rather than at
+   * {@link DrawerController.close | close} time — keeps the background unreachable
+   * and focus trapped for the whole exit animation.
    */
   #applyHidden(panel: HTMLElement): void {
     panel.hidden = true;

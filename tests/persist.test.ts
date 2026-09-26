@@ -387,6 +387,17 @@ describe("PersistController", () => {
     expect(stored("draft")).toBeNull();
   });
 
+  it("takes the restored marker off on disconnect", async () => {
+    writeDraft("draft", { title: "kept" });
+    await mount('data-stimeo--persist-key-value="draft"', '<input name="title">');
+    expect(root().getAttribute("data-persist-restored")).toBe("true");
+
+    // The marker names this connection cycle, so nothing may carry it into the
+    // snapshot a navigation takes.
+    instance().disconnect();
+    expect(root().hasAttribute("data-persist-restored")).toBe(false);
+  });
+
   it("rebinds clearOn and removes the exact registered listener", async () => {
     await mount(
       'data-stimeo--persist-key-value="draft" data-stimeo--persist-clear-on-value="submit"',

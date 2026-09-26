@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { commitField, writeField } from "../utils/field_mirror";
 import { isRtl } from "../utils/logical_scroll";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { OwnedPointerSession } from "../utils/owned_pointer_session";
@@ -24,6 +25,8 @@ const DEFAULT_MAX = 100;
  *        data-stimeo--range-slider-step-value="1"
  *        data-stimeo--range-slider-start-value="20"
  *        data-stimeo--range-slider-end-value="80">
+ *     <input type="hidden" name="price_min" data-stimeo--range-slider-target="startField" />
+ *     <input type="hidden" name="price_max" data-stimeo--range-slider-target="endField" />
  *     <div data-stimeo--range-slider-target="track"
  *          data-action="pointerdown->stimeo--range-slider#onPointerDown">
  *       <div role="slider" tabindex="0" aria-label="Minimum"
@@ -55,13 +58,47 @@ const DEFAULT_MAX = 100;
  * - `step` must be finite and positive; invalid runtime input falls back to `1`.
  *   Finite movable endpoints remain allowed off the shared step grid.
  *
+ * `change` and `reconcile` dispatch `{ start: number, end: number }`.
+ *
+ * The Values are inputs. A declared pair that is reversed, off the step grid or
+ * outside the range stays in its attributes as the page wrote it; the thumbs'
+ * ARIA, the fractions and the fields publish the normalized, ordered pair
+ * instead, and only a move the user makes writes `start` / `end`. `change`
+ * reports a move the user made that left the pair somewhere other than the pair
+ * last published. When a Value the page changes at runtime — a Turbo morph or
+ * application code — moves the published pair, `reconcile` reports it once per
+ * batch with the same detail, so a consumer can tell its user's move from the
+ * page's. Connecting reports neither. A move handled before a page write to
+ * either end is repainted reads the written pair, so its `change` covers the
+ * write as well, and a move that ends on the pair last published reports
+ * nothing. An event dispatched from script runs every listener with no
+ * microtask between them, so a write made just before it, or by a listener
+ * that runs ahead of the range slider, is handled that way. An event the
+ * browser dispatches runs microtasks between the listeners it calls
+ * separately, so a write made by one called ahead of the range slider's — a
+ * capture listener on an ancestor or on `document`, a `:capture` action, or a
+ * listener added to a thumb or the track before the range slider's action was
+ * bound — is repainted, and reported as `reconcile`, before the move is
+ * measured from it. Stimulus calls the actions an element declares for one
+ * event and one set of listener options from a single listener, in declaration
+ * order, so a write made by an action declared before the range slider's own
+ * on a thumb or the track is handled like a write within an event dispatched
+ * from script.
+ *
+ * The optional `startField` / `endField` targets mirror the normalized pair so
+ * the range can be submitted and read server-side. An end the user moved emits
+ * a native bubbling `change` from its own field, the way a form control does,
+ * so `stimeo--auto-submit` and form-level validation hear it; the end that did
+ * not move stays quiet. Both mirrors are refreshed silently on connect, on a
+ * replacement field, and whenever a morph or application code writes a Value.
+ *
  * The fractions are value ratios, not positions, so only the consumer knows
  * whether their track mirrors under RTL. Set `logicalTrack` to declare that it
  * does: the pointer mapping and the horizontal arrow pair then follow the
  * writing direction. Left unset, nothing here reads `direction`.
  */
 export class RangeSliderController extends Controller<HTMLElement> {
-  static override targets = ["track", "startThumb", "endThumb"];
+  static override targets = ["track", "startThumb", "endThumb", "startField", "endField"];
   static override values = {
     min: { type: Number, default: DEFAULT_MIN },
     max: { type: Number, default: DEFAULT_MAX },
@@ -71,14 +108,18 @@ export class RangeSliderController extends Controller<HTMLElement> {
     logicalTrack: { type: Boolean, default: false },
   };
   static actions = ["onKeydown", "onPointerDown"] as const;
-  static events = ["change"] as const;
+  static events = ["change", "reconcile"] as const;
 
   declare readonly trackTarget: HTMLElement;
   declare readonly startThumbTarget: HTMLElement;
   declare readonly endThumbTarget: HTMLElement;
+  declare readonly startFieldTarget: HTMLInputElement;
+  declare readonly endFieldTarget: HTMLInputElement;
   declare readonly hasTrackTarget: boolean;
   declare readonly hasStartThumbTarget: boolean;
   declare readonly hasEndThumbTarget: boolean;
+  declare readonly hasStartFieldTarget: boolean;
+  declare readonly hasEndFieldTarget: boolean;
   declare minValue: number;
   declare maxValue: number;
   declare stepValue: number;
@@ -88,6 +129,12 @@ export class RangeSliderController extends Controller<HTMLElement> {
 
   /** One initiating pointer owns each live drag and its stable target snapshot. */
   #drag: RangeSliderDrag | null = null;
+
+  /**
+   * The pair last published: taken on connect, then moved by each user commit
+   * and by each repaint that reports a page-driven move.
+   */
+  #settled: RangePair = { start: DEFAULT_MIN, end: DEFAULT_MAX };
 
   /** Whether the consumer declared a mirroring track and the direction mirrors it. */
   get #mirrored(): boolean {
@@ -100,11 +147,14 @@ export class RangeSliderController extends Controller<HTMLElement> {
    */
   readonly #repaint = new MicrotaskCoalescer(() => this.#render());
 
+  /**
+   * Renders the normalized, ordered pair without writing it back, and takes it
+   * as the baseline, so connecting reports nothing.
+   */
   override connect(): void {
     this.#repaint.activate();
-    const range = this.#effectiveRange;
-    const pair = this.#currentPair(range);
-    this.#commit(pair.start, pair.end, null, false);
+    this.#settled = this.#currentPair(this.#effectiveRange);
+    this.#render();
   }
 
   /** Cancels any active pointer drag so document listeners never leak. */
@@ -166,6 +216,16 @@ export class RangeSliderController extends Controller<HTMLElement> {
       this.#drag.thumb = thumb;
       thumb.focus();
     }
+    this.#repaint.schedule();
+  }
+
+  /** Fills a start field inserted or replaced at runtime on the next repaint. */
+  startFieldTargetConnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Fills an end field inserted or replaced at runtime on the next repaint. */
+  endFieldTargetConnected(): void {
     this.#repaint.schedule();
   }
 
@@ -319,49 +379,78 @@ export class RangeSliderController extends Controller<HTMLElement> {
   #moveThumb(kind: RangeThumb, raw: number): void {
     const pair = this.#currentPair(this.#effectiveRange);
     if (kind === "start") {
-      this.#commit(raw, pair.end, "start", true);
+      this.#commit(raw, pair.end, "start");
     } else {
-      this.#commit(pair.start, raw, "end", true);
+      this.#commit(pair.start, raw, "end");
     }
   }
 
   /**
-   * Clamps and snaps `start`/`end`, enforces `start ≤ end`, stores the pair, and
-   * reflects it onto the thumbs' ARIA attributes and the range custom
-   * properties. Dispatches `stimeo--range-slider:change` only when a
-   * user-driven update changes the normalized pair, with
-   * `{ start: number, end: number }` in `detail`.
+   * Clamps and snaps the pair a user's move of the `moving` thumb produced,
+   * stops that thumb at its partner, stores the pair, and reflects it onto the
+   * thumbs' ARIA attributes and the range custom properties. The pair is
+   * reported as `change` when it differs from the pair last published — not from
+   * the pair the move started from — so a page write no repaint has published
+   * yet is reported once, as this change, and a move that ends on the pair last
+   * published reports nothing. The baseline moves before any report goes out,
+   * so the repaint the Value writes schedule — and any move a subscriber makes
+   * while the report is dispatched — is measured from this pair.
    */
-  #commit(start: number, end: number, moving: RangeThumb | null, notify: boolean): void {
+  #commit(start: number, end: number, moving: RangeThumb): void {
     const range = this.#effectiveRange;
-    const previous = this.#currentPair(range);
     let nextStart = snapSteppedValue(start, range);
     let nextEnd = snapSteppedValue(end, range);
     // Keep them ordered: a thumb pushed past its partner stops at the partner.
     if (nextStart > nextEnd) {
       if (moving === "start") nextStart = nextEnd;
-      else if (moving === "end") nextEnd = nextStart;
-      else [nextStart, nextEnd] = [nextEnd, nextStart];
+      else nextEnd = nextStart;
     }
 
+    const pair = { start: nextStart, end: nextEnd };
+    const reported = this.#settled;
+    this.#settled = pair;
     if (!Object.is(this.startValue, nextStart)) this.startValue = nextStart;
     if (!Object.is(this.endValue, nextEnd)) this.endValue = nextEnd;
-    const pair = { start: nextStart, end: nextEnd };
     this.#renderPair(pair, range);
+    this.#mirrorFields(pair, true);
 
-    if (notify && (nextStart !== previous.start || nextEnd !== previous.end)) {
+    if (nextStart !== reported.start || nextEnd !== reported.end) {
       this.dispatch("change", { detail: { start: nextStart, end: nextEnd } });
     }
   }
 
   /**
-   * Reflects morph-supplied Values without writing them back or dispatching.
+   * Reflects the Values the page supplied without writing them back. A published
+   * pair that moved from the last one is reported once as `reconcile`; the
+   * fields follow without a native `change`.
    *
    * @stimeoRenderRoot
    */
   #render(): void {
     const range = this.#effectiveRange;
-    this.#renderPair(this.#currentPair(range), range);
+    const pair = this.#currentPair(range);
+    this.#renderPair(pair, range);
+    this.#mirrorFields(pair, false);
+    const settled = this.#settled;
+    if (pair.start === settled.start && pair.end === settled.end) return;
+    this.#settled = pair;
+    this.dispatch("reconcile", { detail: { start: pair.start, end: pair.end } });
+  }
+
+  /**
+   * Mirrors the pair into the optional form fields, reporting only a user's
+   * move. Each end is compared on its own, so dragging one thumb never reports
+   * a commit from the field the other thumb owns.
+   */
+  #mirrorFields(pair: RangePair, notify: boolean): void {
+    if (this.hasStartFieldTarget) {
+      const field = this.startFieldTarget;
+      if (writeField(field, String(pair.start)) && notify) commitField(field);
+    }
+    if (this.hasEndFieldTarget) {
+      const field = this.endFieldTarget;
+      if (writeField(field, String(pair.end)) && notify) commitField(field);
+    }
   }
 
   /** Reflects one normalized pair onto both thumbs and CSS properties. */

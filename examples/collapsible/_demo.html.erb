@@ -1,7 +1,11 @@
 <%# Markup for the collapsible (APG Disclosure) demo.
     The trigger opens/closes a single region inline. The library syncs aria-expanded /
     hidden / data-state and the content's measured-height variable; the look (the
-    height transition) lives in demo.css. %>
+    height transition) lives in demo.css.
+    The trigger carries both of its wordings as a label pair, so the words live in the
+    markup where they can be translated. The library shows the half that belongs to the
+    current state and hides the other, so demo.css has nothing to do here. The chevron
+    is decoration and is kept out of the accessible name. %>
 <div class="collapsible" data-controller="stimeo--collapsible">
   <button
     class="collapsible__trigger"
@@ -11,7 +15,12 @@
     data-stimeo--collapsible-target="trigger"
     data-action="click->stimeo--collapsible#toggle">
     <span class="collapsible__chevron" aria-hidden="true"></span>
-    <%= t("components.collapsible.demo.trigger") %>
+    <span data-stimeo--collapsible-target="collapsedLabel">
+      <%= t("components.collapsible.demo.show") %>
+    </span>
+    <span data-stimeo--collapsible-target="expandedLabel" hidden>
+      <%= t("components.collapsible.demo.hide") %>
+    </span>
   </button>
   <div
     class="collapsible__content"
@@ -22,3 +31,12 @@
     <p class="collapsible__body"><%= t("components.collapsible.demo.body") %></p>
   </div>
 </div>
+
+<%# Readout: what the component just reported. Purely visual — the component
+    already announces what a screen reader needs, so this line is aria-hidden to
+    keep it from being read twice. The value is a code fragment (API identifiers
+    and values), so only the label is translated. %>
+<p class="demo-readout" aria-hidden="true">
+  <span><%= t("catalog.readout.events") %></span>
+  <span class="demo-readout__value" data-readout>—</span>
+</p>

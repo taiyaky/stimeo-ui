@@ -3,6 +3,8 @@ import { isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { CompositionTracker } from "../utils/composition_tracker";
+import { commitEdit } from "../utils/field_mirror";
+import { toHalfWidth } from "../utils/half_width";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { SafeInterval, SafeTimeout } from "../utils/safe_timeout";
 import { snapSteppedValue, stepSteppedValue } from "../utils/stepped_value";
@@ -33,9 +35,18 @@ const OWNED_DISABLED = "data-number-input-disabled";
  * Implements the WAI-ARIA APG **Spinbutton** pattern. The arrow/step logic is
  * fully owned by the controller (not delegated to the browser's native number
  * stepping) so the behavior is identical for a native `<input type="number">` and
- * a custom `role="spinbutton"` host.
+ * a custom `role="spinbutton"` host. Owning the stepping also means owning its
+ * report: a step the user takes through a button, an arrow key or a press-and-hold
+ * is written from script, which fires nothing, so the input reports it the way the
+ * browser reports its own — one bubbling `input`, then one bubbling `change`, ahead
+ * of this controller's `change`. Typing is bound to the native `change`, which the
+ * browser has already reported, and is left alone. The two reports answer to
+ * different questions: the native pair follows the *field's text*, the way a
+ * browser reports its own control, so a step away from an entry the widget never
+ * accepted is reported even though the settled number did not move; `change`
+ * follows the *number*, and means the user settled on one.
  *
- * `reconcile` dispatches `{ value: number }`.
+ * `change` dispatches `{ value: number }`; `reconcile` dispatches `{ value: number }`.
  *
  * @remarks
  * Behavior only — the consumer styles the field and buttons. The input is the
@@ -54,10 +65,20 @@ const OWNED_DISABLED = "data-number-input-disabled";
  *   never double-steps — the trailing click after a hold is swallowed.
  * - Typed input is clamped and snapped to the step grid on `change`;
  *   `stimeo--number-input:change` is dispatched once for each changed committed
- *   numeric value with `{ value: number }` detail. When a runtime `min`/`max`/
- *   `step` change pulls the committed value with it, that same detail arrives as
- *   `stimeo--number-input:reconcile` instead, so a consumer can tell its own edit
- *   from the controller's repair. Neither event fires on connect.
+ *   numeric value with `{ value: number }` detail. When a change the page makes —
+ *   a runtime `min`/`max`/`step` that pulls the committed value with it, or an
+ *   input swapped in holding another number — moves the number shown, that same
+ *   detail arrives as `stimeo--number-input:reconcile` instead, so a consumer can
+ *   tell its own edit from the page's. Both are measured from the number shown
+ *   last, which a blank field leaves empty and a missing input leaves as it was.
+ *   The same instance keeps that number when it connects again — after an
+ *   in-page move, say — and takes a new one without a report from an input that
+ *   is present, while a new instance starts with none. Neither event fires on
+ *   connect. A runtime change that arrives while the input is composing (IME)
+ *   leaves the uncommitted text alone and is applied once the composition ends.
+ * - A text-type spinbutton's text is read through the half-width mapping, so
+ *   full-width digits and signs an IME confirms (`３４`, `－５`) count as the number
+ *   they show, and the field is written back in half-width.
  * - `step` must be finite and positive; invalid runtime input falls back to `1`,
  *   while finite range endpoints remain reachable off the grid.
  */
@@ -101,15 +122,34 @@ export class NumberInputController extends Controller<HTMLElement> {
   #globalGuards: AbortController | null = null;
   /** Per-target guards allow an old button to be released without touching its replacement. */
   readonly #buttonGuards = new Map<HTMLButtonElement, AbortController>();
-  /** Tracks IME lifecycle on the current input, including confirming keys without a signal. */
-  readonly #composition = new CompositionTracker();
+  /**
+   * Tracks IME lifecycle on the current input, including confirming keys without a
+   * signal, and runs a reconciliation the composition held back once it ends.
+   */
+  readonly #composition = new CompositionTracker({
+    onEnd: () => {
+      if (this.#reconcileHeld) this.#repaint.schedule();
+    },
+  });
+  /** A reconciliation that arrived while the input was composing. */
+  #reconcileHeld = false;
   /** Restores authored custom-spinbutton ARIA when a target leaves or the controller stops. */
   readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   readonly #ariaValueNow = new AttributeLease<HTMLInputElement>("aria-valuenow");
   readonly #ariaValueMin = new AttributeLease<HTMLInputElement>("aria-valuemin");
   readonly #ariaValueMax = new AttributeLease<HTMLInputElement>("aria-valuemax");
-  /** Last reconciled or user-committed numeric value. */
+  /**
+   * The number shown last — reconciled or committed by the user — which the next
+   * move is measured from; `null` while the field is blank, and before this
+   * instance has shown one. A disconnect keeps it for the same instance
+   * connecting again.
+   */
   #lastValue: number | null = null;
+  /**
+   * Whether `connect()` has run and `disconnect()` has not since. The pass
+   * `connect()` runs takes the baseline without reporting it.
+   */
+  #connected = false;
   /** Timers for the hold delay and the suppress-reset safety net. */
   readonly #holdTimeouts = new SafeTimeout();
   /** The running auto-repeat interval (one at a time). */
@@ -141,10 +181,17 @@ export class NumberInputController extends Controller<HTMLElement> {
     window.addEventListener("pointercancel", this.#onPointerEnd, { signal });
     window.addEventListener("blur", this.#onWindowBlur, { signal });
     this.#reconcile();
+    this.#connected = true;
   }
 
-  /** Releases listeners, derived attributes, timers, and transient value state. */
+  /**
+   * Releases listeners, derived attributes, timers, and the hold state. The number
+   * shown last stays: the pass the next `connect()` runs takes a new one without a
+   * report from an input that is present, and with none it stays the number an
+   * input arriving later is compared with.
+   */
   override disconnect(): void {
+    this.#connected = false;
     this.#repaint.cancel();
     this.#composition.disconnect();
     this.#beforeCache.deactivate();
@@ -166,7 +213,6 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.#ariaValueNow.returnAll();
     this.#ariaValueMin.returnAll();
     this.#ariaValueMax.returnAll();
-    this.#lastValue = null;
   }
 
   /** Reconciles the value against a minimum changed by application code or a Turbo morph. */
@@ -190,12 +236,15 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
-  /** Releases ARIA and composition state owned by an input that left the controller. */
+  /**
+   * Releases ARIA and composition state owned by an input that left the controller.
+   * The number it showed stays the baseline, so an input swapped in holding another
+   * number is reported as `reconcile`.
+   */
   inputTargetDisconnected(input: HTMLInputElement): void {
     this.#composition.unobserve(input);
     this.#releaseInputAria(input);
     this.#stopHold(false);
-    this.#lastValue = null;
     this.#repaint.schedule();
   }
 
@@ -287,7 +336,9 @@ export class NumberInputController extends Controller<HTMLElement> {
         return;
     }
     event.preventDefault();
-    this.#commit(next);
+    // `preventDefault` stops the browser's own stepping, so the edit below is
+    // entirely this widget's and nothing else will report it.
+    this.#commit(next, true);
   }
 
   /**
@@ -406,11 +457,20 @@ export class NumberInputController extends Controller<HTMLElement> {
    *
    * @returns Whether the value changed (drives the auto-repeat's bound stop).
    */
-  #commit(raw: number): boolean {
+  #commit(raw: number, report = false): boolean {
     const value = this.#normalize(raw);
     const changed = this.#lastValue === null || value !== this.#lastValue;
+    // The two reports answer to different questions. The browser reports what its
+    // control shows, so the native pair follows the field's own text — a step away
+    // from an entry the widget never accepted moves that text even when the
+    // settled number does not. `change` means the user settled on a number, so it
+    // follows the number.
+    const shown = this.inputTarget.value;
     this.#write(value);
+    // Settled before either report, so the `change` below — which re-enters
+    // through this widget's own markup contract — finds nothing left to commit.
     this.#lastValue = value;
+    if (report && shown !== this.inputTarget.value) commitEdit(this.inputTarget);
     if (changed) this.dispatch("change", { detail: { value } });
     return changed;
   }
@@ -418,35 +478,47 @@ export class NumberInputController extends Controller<HTMLElement> {
   /** Commits an adjacent endpoint/grid value and reports whether it moved. */
   #commitStep(count: number): boolean {
     if (!this.hasInputTarget) return false;
-    return this.#commit(stepSteppedValue(this.#currentValue(), count, this.#steppedRange));
+    return this.#commit(stepSteppedValue(this.#currentValue(), count, this.#steppedRange), true);
   }
 
   /**
-   * Reflects the current value after a range or step morph, reporting a moved
-   * value as `reconcile`.
+   * Reflects the current value after a range, step or input change, reporting a
+   * number that moved from the one shown last as `reconcile`. While the input is
+   * composing, its text is the IME's: the pass waits for the composition to end
+   * instead of reading and rewriting it. With no input there is nothing to show,
+   * and the number shown last stays the baseline for the input that comes next.
    *
    * @stimeoRenderRoot
    */
   #reconcile(): void {
-    if (!this.hasInputTarget) {
-      this.#lastValue = null;
+    if (!this.hasInputTarget) return;
+    if (this.#composition.isComposing()) {
+      this.#reconcileHeld = true;
       return;
     }
+    this.#reconcileHeld = false;
+    const previous = this.#lastValue;
     if (this.inputTarget.value.trim() !== "") {
-      const previous = this.#lastValue;
       const value = this.#normalize(this.#currentValue());
       this.#write(value);
       this.#lastValue = value;
-      // A range or step the consumer moved at runtime can pull the committed
-      // number with it. That is this controller's decision, so it is reported
-      // apart from `change`, which stays reserved for user edits.
-      if (previous !== null && value !== previous) {
-        this.dispatch("reconcile", { detail: { value } });
-      }
     } else {
       this.#lastValue = null;
       this.#reflectEmpty();
     }
+    this.#reportMove(previous);
+  }
+
+  /**
+   * Reports the number shown as `reconcile` when a change the page made moved it
+   * from `previous`. The page moved it, so it is reported apart from `change`,
+   * which stays reserved for user edits. A blank field reports nothing, the way a
+   * user blanking it does: both events carry a number.
+   */
+  #reportMove(previous: number | null): void {
+    const value = this.#lastValue;
+    if (!this.#connected || value === null || value === previous) return;
+    this.dispatch("reconcile", { detail: { value } });
   }
 
   /** Reflects `value` on the input (and ARIA for non-native hosts) and the buttons. */
@@ -514,10 +586,17 @@ export class NumberInputController extends Controller<HTMLElement> {
     button.removeAttribute(OWNED_DISABLED);
   }
 
-  /** The current numeric value, falling back to a finite min (else 0) when blank. */
+  /**
+   * The current numeric value, falling back to a finite min (else 0) when blank.
+   * Every read of the field's number comes through here, and the text is read
+   * through the shared half-width mapping: a text-type spinbutton holds whatever an
+   * IME confirmed, full-width digits and signs included (`３４`, `－５`), while a
+   * native number field's value is already half-width or empty.
+   */
   #currentValue(): number {
-    const parsed = Number(this.inputTarget.value);
-    if (Number.isFinite(parsed) && this.inputTarget.value.trim() !== "") return parsed;
+    const text = toHalfWidth(this.inputTarget.value);
+    const parsed = Number(text);
+    if (Number.isFinite(parsed) && text.trim() !== "") return parsed;
     return Number.isFinite(this.minValue) ? this.minValue : 0;
   }
 

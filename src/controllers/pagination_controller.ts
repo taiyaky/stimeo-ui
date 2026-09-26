@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { canTakeFocus } from "../utils/focus_candidate";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { TabindexLoan } from "../utils/tabindex_loan";
 
 /**
@@ -27,7 +28,10 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * `prev`/`next` must be real `<button>` elements: the boundary state is applied
  * through the native `disabled` property, which a `<div>` or `<a>` does not honor.
  *
- * `change` dispatches `{ page: number, total: number, previous: number }`.
+ * `change` dispatches `{ page: number, total: number, previous: number }`, and
+ * `reconcile` dispatches the same `{ page: number, total: number, previous: number }`
+ * — `previous` is the page shown before — when a change the page made moves the
+ * current page.
  *
  * @remarks
  * Behavior only — each control is in the natural Tab order (no roving). When a
@@ -40,14 +44,19 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * - `prev`/`next` step by one, clamped to `[1, total]`.
  * - The current page button gets `aria-current="page"` (removed from the rest);
  *   `prev` is `disabled` at page 1 and `next` at `total`.
- * - `page`/`total` are normalized (`total` to a finite integer >= 1, `page` into
- *   `[1, total]`) on connect **and** on every runtime Value change, so JS-driven
- *   updates re-render. Normalization never dispatches `change`: it is a display
- *   correction, not a user navigation, and the initial render is consumer-owned.
- * - Page/boundary buttons swapped in at runtime re-render through the Stimulus
- *   target callbacks, so a consumer-regenerated button list stays in sync.
+ * - `page`/`total` are read through a clamp (`total` as a finite integer >= 1,
+ *   `page` into `[1, total]`) on connect **and** on every runtime Value change, so
+ *   JS-driven updates re-render. The clamp is for display only: the Values keep
+ *   what the page declared, so a `page` beyond the current `total` is shown as soon
+ *   as a later `total` reaches it, and only a navigation writes `page`.
+ * - Runtime Value changes and page/boundary buttons swapped in at runtime
+ *   re-render once per batch, so a consumer-regenerated button list stays in
+ *   sync. Re-rendering never dispatches `change`: it is not a user navigation.
+ *   Once connected, a batch that moves the current page away from the one shown
+ *   dispatches `stimeo--pagination:reconcile` once; the initial render reports
+ *   nothing.
  * - Every navigation dispatches `stimeo--pagination:change`, whose `detail.total`
- *   is the same normalized total the boundary state is derived from.
+ *   is the same clamped total the boundary state is derived from.
  *
  * The boundary `disabled` is **owned**: the controller marks what it disabled
  * with `data-stimeo--pagination-boundary-disabled` and releases only that. A
@@ -64,10 +73,12 @@ export class PaginationController extends Controller<HTMLElement> {
     total: { type: Number, default: 1 },
   };
   static actions = ["next", "prev", "select"] as const;
-  static events = ["change"] as const;
+  static events = ["change", "reconcile"] as const;
 
-  /** Marks a `disabled` this controller applied at a boundary (ownership flag). */
-  static readonly #BOUNDARY_ATTR = "data-stimeo--pagination-boundary-disabled";
+  /** Marks a `disabled` this controller applied at a boundary, in its own namespace. */
+  get #boundaryAttribute(): string {
+    return `data-${this.identifier}-boundary-disabled`;
+  }
 
   declare readonly pageTargets: HTMLElement[];
   declare readonly prevTarget: HTMLButtonElement;
@@ -77,50 +88,54 @@ export class PaginationController extends Controller<HTMLElement> {
   declare pageValue: number;
   declare totalValue: number;
 
-  #isConnected = false;
   /** The `tabindex` this instance lends the root for the focus fallback. */
   readonly #tabindex = new TabindexLoan();
 
-  /** Normalizes out-of-range initial values and renders the initial state. */
+  /**
+   * Collapses the Value and target callbacks of one mutation into one pass, and
+   * refuses the ones Stimulus delivers before `connect()`, which renders itself.
+   */
+  readonly #repaint = new MicrotaskCoalescer(() => this.#reconcilePage());
+
+  /** The page shown last, which the next move of the current page is measured from. */
+  #shown = 1;
+
+  /** Renders the initial state from the clamped `page` and `total`. */
   override connect(): void {
-    this.#isConnected = true;
-    this.#normalizeAndRender();
+    this.#repaint.activate();
+    this.#shown = this.#page;
+    this.#render();
   }
 
-  /** Reverts the one attribute the controller adds outside its state hooks. */
+  /** Drops a pending pass and reverts the one attribute added outside the state hooks. */
   override disconnect(): void {
-    this.#isConnected = false;
+    this.#repaint.cancel();
     this.#tabindex.returnAll();
   }
 
   /** Re-renders when application code (or a Turbo morph) changes `page` at runtime. */
   pageValueChanged(): void {
-    if (!this.#isConnected) return;
-    this.#normalizeAndRender();
+    this.#repaint.schedule();
   }
 
   /** Re-renders when application code (or a Turbo morph) changes `total` at runtime. */
   totalValueChanged(): void {
-    if (!this.#isConnected) return;
-    this.#normalizeAndRender();
+    this.#repaint.schedule();
   }
 
   /** Syncs a page button appended/replaced at runtime (the consumer owns the list). */
   pageTargetConnected(): void {
-    if (!this.#isConnected) return;
-    this.#render();
+    this.#repaint.schedule();
   }
 
   /** Syncs a `prev` button appended/replaced at runtime. */
   prevTargetConnected(): void {
-    if (!this.#isConnected) return;
-    this.#render();
+    this.#repaint.schedule();
   }
 
   /** Syncs a `next` button appended/replaced at runtime. */
   nextTargetConnected(): void {
-    if (!this.#isConnected) return;
-    this.#render();
+    this.#repaint.schedule();
   }
 
   /** Makes the clicked page button (its `data-page`) current. */
@@ -130,7 +145,7 @@ export class PaginationController extends Controller<HTMLElement> {
     if (raw === undefined || raw.trim() === "") return;
     const page = Number(raw);
     // Integer-only, matching `stimeo--stepper`: `Number("")` is 0 and `Number("2.7")`
-    // truncates, so a bare finite check would accept meaningless page numbers.
+    // is a fraction, so a bare finite check would accept meaningless page numbers.
     if (!Number.isInteger(page)) return;
     this.#goto(page);
   }
@@ -152,25 +167,34 @@ export class PaginationController extends Controller<HTMLElement> {
     const target = this.#clamp(page);
     if (target === previous) return;
     this.pageValue = target;
+    // Settled before the report, so the pass the Value write starts finds the page
+    // already shown, and a listener that navigates on is measured from this page.
+    this.#shown = target;
     this.#render();
     this.dispatch("change", {
       detail: { page: target, total: this.#total, previous },
     });
   }
 
-  /** Writes the normalized Values back (only when they differ) and renders. */
-  #normalizeAndRender(): void {
-    // Stimulus setters rewrite the data attribute unconditionally, so guard the
-    // no-op case to avoid waking consumer MutationObservers for nothing.
-    const total = this.#total;
-    if (!Object.is(total, this.totalValue)) this.totalValue = total;
+  /**
+   * Renders one settled batch of Value and target changes, and reports a current
+   * page that moved from the one shown before as `reconcile`.
+   */
+  #reconcilePage(): void {
+    const previous = this.#shown;
     const page = this.#page;
-    if (!Object.is(page, this.pageValue)) this.pageValue = page;
+    this.#shown = page;
     this.#render();
+    if (page !== previous) {
+      this.dispatch("reconcile", { detail: { page, total: this.#total, previous } });
+    }
   }
 
   /**
    * Syncs `aria-current` on the page buttons and the prev/next `disabled` state.
+   *
+   * It reads `page` and `total` through their clamps and never writes either Value,
+   * so a declaration outside the range stays in the attributes as the page wrote it.
    *
    * @stimeoRenderRoot
    */
@@ -213,7 +237,7 @@ export class PaginationController extends Controller<HTMLElement> {
   #release(button: HTMLButtonElement | null, atBoundary: boolean): void {
     if (!button || atBoundary || !this.#owns(button)) return;
     button.disabled = false;
-    button.removeAttribute(PaginationController.#BOUNDARY_ATTR);
+    button.removeAttribute(this.#boundaryAttribute);
   }
 
   /**
@@ -229,7 +253,7 @@ export class PaginationController extends Controller<HTMLElement> {
     if (button.disabled && !this.#owns(button)) return;
     if (button === document.activeElement) this.#moveFocusAwayFrom(opposite);
     button.disabled = true;
-    button.setAttribute(PaginationController.#BOUNDARY_ATTR, "");
+    button.setAttribute(this.#boundaryAttribute, "");
   }
 
   /**
@@ -283,6 +307,6 @@ export class PaginationController extends Controller<HTMLElement> {
 
   /** Whether the button's current `disabled` was applied by boundary control. */
   #owns(button: HTMLButtonElement): boolean {
-    return button.hasAttribute(PaginationController.#BOUNDARY_ATTR);
+    return button.hasAttribute(this.#boundaryAttribute);
   }
 }

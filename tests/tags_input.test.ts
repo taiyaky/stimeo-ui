@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TagsInputController } from "../src/controllers/tags_input_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
@@ -150,13 +151,13 @@ describe("TagsInputController", () => {
   it.each([
     ["tag template", "", '"tagTemplate" target'],
     [
-      "tag element",
+      "tag root",
       `<template data-stimeo--tags-input-target="tagTemplate">
         <span data-stimeo--tags-input-target="label"></span>
         <button type="button" aria-label="Remove {label}"
                 data-stimeo--tags-input-target="remove">×</button>
       </template>`,
-      '"tag" target',
+      '"tag" root',
     ],
     [
       "label slot",
@@ -238,6 +239,24 @@ describe("TagsInputController", () => {
 
     expect(warn).toHaveBeenCalledTimes(2);
     warn.mockRestore();
+  });
+
+  // The chip row holds exactly the chips: a template is authored across lines, so
+  // anything cloned beyond its first element would settle in the row as the author
+  // adds and removes chips, and only the chip itself is taken back.
+  it("leaves nothing behind in the tag row across repeated add/remove cycles", async () => {
+    await mount();
+
+    for (let round = 0; round < 100; round++) {
+      type(`Tag ${round}`, "Enter");
+      buttons()[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }
+
+    const row = document.querySelector<HTMLElement>(
+      "[data-stimeo--tags-input-target='tags']",
+    ) as HTMLElement;
+    expect(row.children).toHaveLength(0);
+    expect(row.childNodes).toHaveLength(0);
   });
 
   it("commits a tag on the configured delimiter", async () => {
@@ -716,5 +735,194 @@ describe("TagsInputController", () => {
     await mount();
     const phrases = await captureSpeech({ container: root(), steps: 1 });
     expect(phrases).toEqual(["list, Tags", "textbox, Add tag, Add a tag with Enter or comma"]);
+  });
+
+  // --- Hidden form fields ---
+
+  describe("hidden form fields", () => {
+    let commits: ReturnType<typeof captureFieldCommits>;
+
+    const container = () =>
+      document.querySelector<HTMLElement>(
+        "[data-stimeo--tags-input-target='fields']",
+      ) as HTMLElement;
+
+    beforeEach(() => {
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      commits.stop();
+    });
+
+    it("seeds the authored tags without reporting a commit", async () => {
+      await mount();
+
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("reports once per tag the user added and removed", async () => {
+      await mount();
+      commits.clear();
+
+      type("alpha", "Enter");
+
+      expect(fields().map((input) => input.value)).toContain("alpha");
+      expect(commits.seen).toEqual([container()]);
+
+      commits.clear();
+      buttons()[0]?.click();
+
+      expect(commits.seen).toEqual([container()]);
+    });
+
+    it("points the generated inputs at the form named by the form Value", async () => {
+      await mount('data-stimeo--tags-input-form-value="filters"');
+      commits.clear();
+
+      type("alpha", "Enter");
+
+      expect(fields().map((input) => input.getAttribute("form"))).toEqual(
+        fields().map(() => "filters"),
+      );
+      expect(commits.seen).toEqual([container()]);
+    });
+  });
+
+  describe("a row that is its own part", () => {
+    // The chip is one element: it carries the row target, holds the text, and is the
+    // button that removes it. The template helper resolves parts on the row itself,
+    // so the widget has to drive the same shape it agrees to build.
+    const selfRemove = `
+    <template data-stimeo--tags-input-target="tagTemplate">
+      <button type="button" aria-label="Remove {label}"
+              data-stimeo--tags-input-target="tag label remove"></button>
+    </template>`;
+
+    const mountSelfRemove = async () => {
+      document.body.innerHTML = `
+  <div data-controller="stimeo--tags-input">
+    <div data-stimeo--tags-input-target="tags"></div>
+    <input type="text" aria-label="Add tag"
+           data-stimeo--tags-input-target="input"
+           data-action="keydown->stimeo--tags-input#onKeydown" />
+    <div data-stimeo--tags-input-target="fields"></div>
+${selfRemove}
+  </div>`;
+      application = Application.start();
+      application.register("stimeo--tags-input", TagsInputController);
+      await tick();
+    };
+
+    const chips = () =>
+      Array.from(
+        document.querySelectorAll<HTMLButtonElement>(
+          '[data-stimeo--tags-input-target="tags"] button',
+        ),
+      );
+
+    it("builds the chip and names it", async () => {
+      await mountSelfRemove();
+
+      type("Rails", "Enter");
+
+      expect(chips()).toHaveLength(1);
+      expect(chips()[0]?.textContent).toBe("Rails");
+      expect(chips()[0]?.getAttribute("aria-label")).toBe("Remove Rails");
+    });
+
+    it("gives the row the single tab stop", async () => {
+      await mountSelfRemove();
+
+      type("Rails", "Enter");
+
+      expect(chips()[0]?.tabIndex).toBe(0);
+    });
+
+    it("removes the tag when the row is clicked", async () => {
+      await mountSelfRemove();
+      type("Rails", "Enter");
+      expect(chips()).toHaveLength(1);
+
+      chips()[0]?.click();
+
+      expect(chips()).toHaveLength(0);
+      expect(fields()).toHaveLength(0);
+    });
+
+    it("removes the tag on Delete from the row", async () => {
+      await mountSelfRemove();
+      type("Rails", "Enter");
+      expect(chips()).toHaveLength(1);
+
+      chips()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+
+      expect(chips()).toHaveLength(0);
+    });
+  });
+
+  describe("a row that is its own label", () => {
+    // The row carries the text itself and keeps the remove button inside it. The
+    // label is written on every commit, so a write that took the row's children
+    // with it would leave a chip with nothing to press.
+    const nestedRemove = `
+    <template data-stimeo--tags-input-target="tagTemplate">
+      <li role="listitem" data-stimeo--tags-input-target="tag label">
+        <button type="button" tabindex="-1" aria-label="Remove {label}"
+                data-stimeo--tags-input-target="remove">×</button>
+      </li>
+    </template>`;
+
+    const mountNested = async () => {
+      document.body.innerHTML = markup("", nestedRemove);
+      application = Application.start();
+      application.register("stimeo--tags-input", TagsInputController);
+      await tick();
+    };
+
+    const row = () =>
+      document.querySelector<HTMLElement>('[data-stimeo--tags-input-target~="tag"]');
+
+    it("writes the label beside the button it holds", async () => {
+      await mountNested();
+
+      type("Rails", "Enter");
+
+      expect(row()?.textContent).toContain("Rails");
+      expect(row()?.querySelector("button")).not.toBeNull();
+    });
+
+    it("gives the nested button the single tab stop", async () => {
+      await mountNested();
+
+      type("Rails", "Enter");
+
+      expect(row()?.querySelector("button")?.tabIndex).toBe(0);
+    });
+
+    it("removes the tag when the nested button is clicked", async () => {
+      await mountNested();
+      type("Rails", "Enter");
+
+      row()?.querySelector("button")?.click();
+
+      expect(document.querySelectorAll('[data-stimeo--tags-input-target~="tag"]')).toHaveLength(0);
+      expect(fields()).toHaveLength(0);
+    });
+
+    it("replaces the label rather than appending to it", async () => {
+      await mountNested();
+
+      type("Rails", "Enter");
+      type("Hotwire", "Enter");
+
+      const rows = document.querySelectorAll<HTMLElement>(
+        '[data-stimeo--tags-input-target~="tag"]',
+      );
+      expect(Array.from(rows, (el) => el.textContent?.replace("×", "").trim())).toEqual([
+        "Rails",
+        "Hotwire",
+      ]);
+    });
   });
 });

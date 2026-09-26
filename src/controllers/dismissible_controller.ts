@@ -97,6 +97,7 @@ export class DismissibleController extends Controller<HTMLElement> {
     return this.hasRootTarget ? this.rootTarget : this.element;
   }
 
+  /** @stimeoRuntimeOnly `mode` decides how this one dismissal takes the element away. */
   #performDismiss(): void {
     const root = this.#root;
     const mode = this.modeValue === "hide" ? "hide" : "remove";

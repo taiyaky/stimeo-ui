@@ -2,7 +2,8 @@ import { KeyedTimers } from "./keyed_timers";
 
 /** What a key needs to carry on: the work, when it was last armed, and who is holding it. */
 interface Entry {
-  callback: () => void;
+  /** The work to run once the time is up; `null` while the key is held with no timer. */
+  callback: (() => void) | null;
   /** Epoch ms the running timer was armed at; written only where the timer is armed. */
   startedAt: number;
   remaining: number;
@@ -28,6 +29,13 @@ interface Entry {
  * Arming a held key keeps the hold and banks the new delay for the resume, so a
  * duration that changes at runtime reaches a held notification without
  * dismissing it or releasing it.
+ *
+ * A hold is recorded whether or not the key has a timer: one that arrives before
+ * the timer is set holds that timer back, and one on a key that never
+ * auto-dismisses still answers {@link PausableTimers.isHeld}. That answer is what
+ * a consumer that removes keys for reasons of its own — a cap on how many show
+ * at once — reads to leave a held one in place. {@link PausableTimers.disarm}
+ * drops a timer and keeps its hold, and a key with neither is forgotten.
  *
  * Scope is the timer and its hold. Whether a key may be held at all, and the
  * state hook that shows it is held, stay with the consumer.
@@ -58,17 +66,21 @@ export class PausableTimers<K> {
     const reasons = this.#entries.get(key)?.reasons ?? new Set<string>();
     const entry: Entry = { callback, startedAt: 0, remaining: delay, reasons };
     this.#entries.set(key, entry);
-    if (reasons.size === 0) this.#arm(key, entry);
+    if (reasons.size === 0) this.#arm(key, entry, callback);
   }
 
   /**
    * Holds `key` for `reason` and banks the time left, with a floor of one
-   * millisecond. Reports whether this call is the one that stopped a running
-   * timer, so the caller can write its held-state hook exactly once.
+   * millisecond. A key with no timer is held all the same. Reports whether this
+   * call is the one that stopped a running timer, so the caller can write its
+   * held-state hook exactly once.
    */
   pause(key: K, reason: string): boolean {
-    const entry = this.#entries.get(key);
-    if (entry === undefined) return false;
+    let entry = this.#entries.get(key);
+    if (entry === undefined) {
+      entry = { callback: null, startedAt: 0, remaining: 0, reasons: new Set<string>() };
+      this.#entries.set(key, entry);
+    }
     entry.reasons.add(reason);
     if (!this.#timers.has(key)) return false;
     this.#timers.clear(key);
@@ -78,20 +90,42 @@ export class PausableTimers<K> {
 
   /**
    * Releases `reason` on `key`, arming the banked time again once no reason is
-   * left. Reports whether this call is the one that started the timer again.
+   * left; a key released with no timer is forgotten. Reports whether this call
+   * is the one that started the timer again.
    */
   resume(key: K, reason: string): boolean {
     const entry = this.#entries.get(key);
     if (entry === undefined) return false;
     entry.reasons.delete(reason);
     if (entry.reasons.size > 0 || this.#timers.has(key)) return false;
-    this.#arm(key, entry);
+    const { callback } = entry;
+    if (callback === null) {
+      this.#entries.delete(key);
+      return false;
+    }
+    this.#arm(key, entry, callback);
     return true;
+  }
+
+  /** Whether any reason holds `key`, with or without a timer. */
+  isHeld(key: K): boolean {
+    return (this.#entries.get(key)?.reasons.size ?? 0) > 0;
   }
 
   /** Whether `key` is armed or held — that is, whether this registry drives it at all. */
   tracks(key: K): boolean {
     return this.#entries.has(key);
+  }
+
+  /**
+   * Cancels `key`'s timer and keeps its hold, so a release arms nothing; a key
+   * nothing holds is forgotten.
+   */
+  disarm(key: K): void {
+    this.#timers.clear(key);
+    const entry = this.#entries.get(key);
+    if (entry?.reasons.size) entry.callback = null;
+    else this.#entries.delete(key);
   }
 
   /** Cancels `key`'s timer and drops its hold. */
@@ -109,14 +143,14 @@ export class PausableTimers<K> {
     this.#entries.clear();
   }
 
-  /** Starts `entry`'s banked time running for `key`, and drops it as it fires. */
-  #arm(key: K, entry: Entry): void {
+  /** Starts `entry`'s banked time running for `key`, and drops it as `callback` fires. */
+  #arm(key: K, entry: Entry, callback: () => void): void {
     entry.startedAt = Date.now();
     this.#timers.set(
       key,
       () => {
         this.#entries.delete(key);
-        entry.callback();
+        callback();
       },
       entry.remaining,
     );

@@ -5,13 +5,12 @@ import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { firstTabStop, isTabStop } from "../utils/focus_candidate";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { TabindexLoan } from "../utils/tabindex_loan";
+import { targetSelector } from "../utils/target_selector";
 
-/** Selects any nested-form root; the nearest one is an element's owning instance. */
-const ROOT_SELECTOR = '[data-controller~="stimeo--nested-form"]';
-/** Selects per-row remove buttons (resolved through delegation, never per-row wiring). */
-const REMOVE_SELECTOR = '[data-stimeo--nested-form-target="remove"]';
-/** Selects the hidden `_destroy` input a persisted row carries. */
-const DESTROY_FLAG_SELECTOR = '[data-stimeo--nested-form-target="destroyFlag"]';
+/** Target name of the per-row remove buttons. */
+const REMOVE_PART = "remove";
+/** Target name of the hidden `_destroy` input. */
+const DESTROY_FLAG_PART = "destroyFlag";
 
 /** `_destroy` values Rails treats as truthy; the flag value is the destruction truth source. */
 const DESTROYED_VALUES = new Set(["1", "true"]);
@@ -76,6 +75,21 @@ const DESTROYED_VALUES = new Set(["1", "true"]);
  * listener, the observer, and every lease are released on `disconnect()`.
  */
 export class NestedFormController extends Controller<HTMLElement> {
+  /** Selects any root of this controller; the nearest one owns an element. */
+  get #rootSelector(): string {
+    return `[data-controller~="${this.identifier}"]`;
+  }
+
+  /** Selects per-row remove buttons, in the namespace this controller is registered under. */
+  get #removeSelector(): string {
+    return targetSelector(this.identifier, REMOVE_PART);
+  }
+
+  /** Selects the hidden `_destroy` input a persisted row carries. */
+  get #destroyFlagSelector(): string {
+    return targetSelector(this.identifier, DESTROY_FLAG_PART);
+  }
+
   static override targets = ["list", "template", "add", "remove", "destroyFlag"];
   static override values = {
     min: { type: Number, default: 0 },
@@ -126,7 +140,7 @@ export class NestedFormController extends Controller<HTMLElement> {
    */
   readonly #onClick = (event: Event): void => {
     const target = event.target as HTMLElement | null;
-    const button = target?.closest<HTMLElement>(REMOVE_SELECTOR);
+    const button = target?.closest<HTMLElement>(this.#removeSelector);
     if (!button || this.#ownerOf(button) !== this.element) return;
     const row = this.#rowContaining(button);
     if (row) this.#removeRow(row);
@@ -237,6 +251,12 @@ export class NestedFormController extends Controller<HTMLElement> {
       return;
     }
     const row = added[0] as HTMLElement;
+    // A template is authored across lines, so parsing its markup also yields the
+    // whitespace around the row. Dropping it leaves the row as the whole unit the
+    // removal takes back, and adds nothing to the list but the row.
+    for (const node of Array.from(list.childNodes).slice(beforeNodes)) {
+      if (node !== row) node.remove();
+    }
 
     this.#refresh();
     firstTabStop(row)?.focus();
@@ -248,6 +268,8 @@ export class NestedFormController extends Controller<HTMLElement> {
    * Removes a row: a persisted row (one carrying its own `destroyFlag`) has the
    * flag set to `1` and is hidden so Rails destroys it on submit; an unsaved row
    * is dropped from the DOM. Returns focus to a surviving row. No-ops at `min`.
+   *
+   * @stimeoRuntimeOnly `min` decides whether this one removal is allowed.
    */
   #removeRow(row: HTMLElement): void {
     const rows = this.#effectiveRows;
@@ -312,7 +334,11 @@ export class NestedFormController extends Controller<HTMLElement> {
     this.element.focus();
   }
 
-  /** Recomputes the count and min/max hooks from the DOM and records them as published. */
+  /**
+   * Recomputes the count and min/max hooks from the DOM and records them as published.
+   *
+   * @stimeoRenderRoot
+   */
   #refresh(): void {
     if (!this.hasListTarget) return;
     const count = this.#effectiveRows.length;
@@ -348,7 +374,11 @@ export class NestedFormController extends Controller<HTMLElement> {
     if (moved) this.dispatch("reconcile", { detail: { ...current } });
   }
 
-  /** Bridges the count change to the shared announcer when configured. */
+  /**
+   * Bridges the count change to the shared announcer when configured.
+   *
+   * @stimeoRuntimeOnly `announce` and `countMessage` word the one announcement of this change.
+   */
   #announce(): void {
     if (!this.announceValue || this.countMessageValue === "") return;
     announce(fillTemplate(this.countMessageValue, { count: this.#effectiveRows.length }));
@@ -418,7 +448,7 @@ export class NestedFormController extends Controller<HTMLElement> {
 
   /** The row's own destroy flag, skipping flags owned by a nested inner form. */
   #destroyFlagOf(row: HTMLElement): HTMLInputElement | null {
-    for (const flag of row.querySelectorAll<HTMLInputElement>(DESTROY_FLAG_SELECTOR)) {
+    for (const flag of row.querySelectorAll<HTMLInputElement>(this.#destroyFlagSelector)) {
       if (this.#ownerOf(flag) === this.element) return flag;
     }
     return null;
@@ -426,7 +456,7 @@ export class NestedFormController extends Controller<HTMLElement> {
 
   /** The nearest nested-form root that owns `el`. */
   #ownerOf(el: Element): Element | null {
-    return el.closest(ROOT_SELECTOR);
+    return el.closest(this.#rootSelector);
   }
 
   /** The nearest ancestor of `el` that is a direct child of the list, else null. */

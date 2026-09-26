@@ -3,6 +3,10 @@ import { isReservedArrowChord } from "../utils/arrow_step";
 import { ownerIndex } from "../utils/event_owner";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { TabindexLoan } from "../utils/tabindex_loan";
+import { TransientHooks } from "../utils/transient_hooks";
+
+/** The hook a connection may find written by an earlier, now-gone one. */
+const TRANSIENT = new TransientHooks({ attributes: ["data-dragging"] });
 
 /** Value defaults, reused when a declaration cannot be read as a percentage. */
 const DEFAULT_MIN = 0;
@@ -40,7 +44,7 @@ const DEFAULT_STEP = 1;
  *   presentation styles.
  * - `F6` cycles focus through the panes, which the pattern lists as optional.
  *
- * `change` dispatches `{ value: number, fraction: number }`.
+ * `change` and `reconcile` dispatch `{ value: number, fraction: number }`.
  *
  * @remarks
  * Behavior only. The controller adjusts the CSS custom property on the root element,
@@ -51,6 +55,20 @@ const DEFAULT_STEP = 1;
  * onto that minimum, and a step that is not a positive finite number falls back
  * to `1` — so an unreadable declaration narrows what the widget can do without
  * ever publishing `NaN` to CSS or to assistive tech.
+ *
+ * The Values are inputs. A declared `value` outside the range stays in its
+ * attribute as the page wrote it; the separator's ARIA, the fraction and both
+ * events carry the clamped position instead, and only a move the user makes
+ * writes `value`. `change` reports a key press, drag or toggle that moved the
+ * position from the one last confirmed — a drag once, when it ends — and
+ * nothing for one that leaves it there: a key at an edge, a press released
+ * without moving, a drag released where it started. When a Value the page
+ * changes at runtime — a Turbo morph or application code — moves the position,
+ * `reconcile` reports it once per batch with the same detail, so a consumer can
+ * tell its user's move from the page's. Connecting reports neither. The
+ * position last confirmed is the one connecting published, moved by each
+ * `change` and `reconcile`; the positions a drag paints on the way do not move
+ * it.
  *
  * `aria-orientation` is the author's, and its absence means `horizontal` — the
  * value ARIA gives a separator that does not say. Reading any other default here
@@ -65,7 +83,7 @@ export class ResizableController extends Controller<HTMLElement> {
     value: { type: Number, default: DEFAULT_VALUE },
   };
   static actions = ["onKeydown", "onPointerDown", "toggle"] as const;
-  static events = ["change"] as const;
+  static events = ["change", "reconcile"] as const;
 
   declare readonly primaryTarget: HTMLElement;
   declare readonly secondaryTarget: HTMLElement;
@@ -81,6 +99,19 @@ export class ResizableController extends Controller<HTMLElement> {
 
   /** Where the divider sat before the current collapse; `null` when unknown. */
   #valueBeforeCollapse: number | null = null;
+
+  /**
+   * The position last painted: moved by each move the user makes — every step of
+   * a drag included — and by each repaint that finds a page-driven move.
+   */
+  #painted = DEFAULT_VALUE;
+
+  /**
+   * The position last confirmed: the one connecting published, then moved by
+   * each `change` and `reconcile`. A drag moves the painted position step by
+   * step and this one only when it ends.
+   */
+  #confirmed = DEFAULT_VALUE;
 
   /** Aborts in-progress pointer-drag listeners when the drag ends or on teardown. */
   #dragAbort: AbortController | null = null;
@@ -98,10 +129,13 @@ export class ResizableController extends Controller<HTMLElement> {
     // A drag cannot outlive a navigation, so a hook captured mid-drag is stale on
     // arrival. Clearing is unconditional here because disconnect() aborts the
     // drag, leaving no session that an in-page move could carry over.
-    this.element.removeAttribute("data-dragging");
+    TRANSIENT.reset(this.element);
     this.#repaint.activate();
     // Stimulus fires the value callbacks before connect, where the coalescer
-    // ignores them, so the first paint has to be asked for directly.
+    // ignores them, so the first paint has to be asked for directly. The
+    // position it publishes is taken as reported first, so connecting reports
+    // nothing.
+    this.#confirmed = this.#position;
     this.#render();
     // Bound on the root rather than the panes so the cycle continues once focus
     // has left the separator — the panes hold consumer markup and the next F6
@@ -251,9 +285,7 @@ export class ResizableController extends Controller<HTMLElement> {
 
     if (handled) {
       event.preventDefault();
-      this.valueValue = Math.max(min, Math.min(nextValue, max));
-      this.#render();
-      this.#dispatchChange();
+      this.#commit(nextValue);
     }
   }
 
@@ -262,15 +294,14 @@ export class ResizableController extends Controller<HTMLElement> {
     const { min, max } = this.#range;
     if (this.#position > min) {
       this.#valueBeforeCollapse = this.#position;
-      this.valueValue = min;
+      this.#commit(min);
     } else {
       // With nothing remembered — a controller that connected to an already
       // collapsed pane — there is no previous position, so open the pane fully.
-      this.valueValue = this.#valueBeforeCollapse ?? max;
+      const restored = this.#valueBeforeCollapse ?? max;
       this.#valueBeforeCollapse = null;
+      this.#commit(restored);
     }
-    this.#render();
-    this.#dispatchChange();
   }
 
   readonly #onPointerMove = (event: PointerEvent): void => {
@@ -284,10 +315,7 @@ export class ResizableController extends Controller<HTMLElement> {
     // A container with no extent divides by zero; treat that as the near end
     // rather than letting it reach the published fraction.
     const fraction = Number.isFinite(raw) ? Math.max(0, Math.min(raw, 1)) : 0;
-    const { min, max } = this.#range;
-
-    this.valueValue = Math.max(min, Math.min(Math.round(fraction * 100), max));
-    this.#render();
+    this.#move(Math.round(fraction * 100));
   };
 
   readonly #onPointerUp = (event: PointerEvent): void => {
@@ -301,23 +329,54 @@ export class ResizableController extends Controller<HTMLElement> {
       this.separatorTarget.releasePointerCapture(event.pointerId);
     }
 
-    this.#dispatchChange();
+    this.#confirm();
   };
 
+  /** Moves to a position the user chose and reports it if it moved. */
+  #commit(raw: number): void {
+    this.#move(raw);
+    this.#confirm();
+  }
+
   /**
-   * Publishes the position: the fraction consumer CSS multiplies a pane by, and
-   * the range assistive tech reads off the separator. The clamped position is
-   * written back to the Value so it, ARIA, CSS, and dispatched events agree.
+   * Stores the clamped position the user moved to and paints it. The painted
+   * position moves with it before anything is reported, so the repaint the Value
+   * write schedules — and any move a subscriber makes while `change` is
+   * dispatched — is measured from this position.
+   */
+  #move(raw: number): void {
+    const { min, max } = this.#range;
+    const position = Math.max(min, Math.min(raw, max));
+    this.valueValue = position;
+    this.#painted = position;
+    this.#paint();
+  }
+
+  /**
+   * Publishes the position the Values declare without writing it back. A
+   * position the user did not paint is the page's move, reported once as
+   * `reconcile` unless it lands on the position last confirmed — a drag the page
+   * puts back where it started has nothing new to report.
    *
    * @stimeoRenderRoot
    */
   #render(): void {
+    this.#paint();
+    const position = this.#position;
+    if (position === this.#painted) return;
+    this.#painted = position;
+    if (position === this.#confirmed) return;
+    this.#confirmed = position;
+    this.dispatch("reconcile", { detail: this.#detail(position) });
+  }
+
+  /**
+   * Publishes the position: the fraction consumer CSS multiplies a pane by, and
+   * the range assistive tech reads off the separator.
+   */
+  #paint(): void {
     const { min, max } = this.#range;
     const position = this.#position;
-
-    if (this.valueValue !== position) {
-      this.valueValue = position;
-    }
 
     this.element.style.setProperty("--stimeo--resizable-fraction", String(position / 100));
 
@@ -328,9 +387,21 @@ export class ResizableController extends Controller<HTMLElement> {
     }
   }
 
-  #dispatchChange(): void {
-    const fraction = this.valueValue / 100;
-    this.dispatch("change", { detail: { value: this.valueValue, fraction } });
+  /**
+   * Reports the published position as `change` when the user's operation moved
+   * it from the position last confirmed. A key at an edge, a press released
+   * without moving and a drag released where it started report nothing.
+   */
+  #confirm(): void {
+    const position = this.#position;
+    if (position === this.#confirmed) return;
+    this.#confirmed = position;
+    this.dispatch("change", { detail: this.#detail(position) });
+  }
+
+  /** The detail both events carry for `position`. */
+  #detail(position: number): { value: number; fraction: number } {
+    return { value: position, fraction: position / 100 };
   }
 
   /** The declared range after validation; an unreadable bound uses its default. */

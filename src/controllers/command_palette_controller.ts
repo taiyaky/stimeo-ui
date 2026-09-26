@@ -113,9 +113,9 @@ export class CommandPaletteController extends Controller<HTMLElement> {
    * the restored snapshot already shows the dialog open, honor that rather than
    * re-deriving from the declarative `open` Value (which would slam a user-opened
    * palette shut). The `open` Value only seeds the initial state of a genuinely
-   * fresh render. We normalize to a clean closed baseline first so {@link open}
-   * runs its full setup — the `FocusTrap` is a fresh instance after a
-   * reconnect and must be re-activated.
+   * fresh render. We normalize to a clean closed baseline first so
+   * {@link CommandPaletteController.open | open} runs its full setup — the
+   * `FocusTrap` is a fresh instance after a reconnect and must be re-activated.
    */
   override connect(): void {
     document.addEventListener("keydown", this.#onGlobalKeydown);

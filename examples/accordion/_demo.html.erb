@@ -2,16 +2,23 @@
     stimeo--accordion manages each header's aria-expanded and each panel's hidden,
     and allows multiple panels open at once. Arrow keys move focus between headers.
     Headers and panels are linked via aria-controls (= the panel's id), and each
-    panel (role="region") references its header button's id via aria-labelledby. %>
+    panel (role="region") references its header button's id via aria-labelledby.
+    Each header also carries a "+" / "−" pair, and the library hides the half that
+    does not belong to its state. The glyphs are decorative, so they are aria-hidden
+    and the accessible name stays the section title. %>
 <div class="accordion" data-controller="stimeo--accordion">
   <h3 class="accordion__header">
     <button type="button" id="acc-shipping-trigger" class="accordion__trigger"
             aria-expanded="false" aria-controls="acc-shipping"
             data-stimeo--accordion-target="trigger"
             data-action="click->stimeo--accordion#toggle
-                         keydown->stimeo--accordion#onKeydown"><%= t(
-              "components.accordion.demo.shipping_title"
-            ) %></button>
+                         keydown->stimeo--accordion#onKeydown">
+      <%= t("components.accordion.demo.shipping_title") %>
+      <span class="accordion__marker" aria-hidden="true"
+            data-stimeo--accordion-target="collapsedLabel">+</span>
+      <span class="accordion__marker" aria-hidden="true" hidden
+            data-stimeo--accordion-target="expandedLabel">−</span>
+    </button>
   </h3>
   <div class="accordion__panel" id="acc-shipping" role="region"
        aria-labelledby="acc-shipping-trigger"
@@ -24,9 +31,13 @@
             aria-expanded="false" aria-controls="acc-returns"
             data-stimeo--accordion-target="trigger"
             data-action="click->stimeo--accordion#toggle
-                         keydown->stimeo--accordion#onKeydown"><%= t(
-              "components.accordion.demo.returns_title"
-            ) %></button>
+                         keydown->stimeo--accordion#onKeydown">
+      <%= t("components.accordion.demo.returns_title") %>
+      <span class="accordion__marker" aria-hidden="true"
+            data-stimeo--accordion-target="collapsedLabel">+</span>
+      <span class="accordion__marker" aria-hidden="true" hidden
+            data-stimeo--accordion-target="expandedLabel">−</span>
+    </button>
   </h3>
   <div class="accordion__panel" id="acc-returns" role="region"
        aria-labelledby="acc-returns-trigger"
@@ -39,9 +50,13 @@
             aria-expanded="false" aria-controls="acc-warranty"
             data-stimeo--accordion-target="trigger"
             data-action="click->stimeo--accordion#toggle
-                         keydown->stimeo--accordion#onKeydown"><%= t(
-              "components.accordion.demo.warranty_title"
-            ) %></button>
+                         keydown->stimeo--accordion#onKeydown">
+      <%= t("components.accordion.demo.warranty_title") %>
+      <span class="accordion__marker" aria-hidden="true"
+            data-stimeo--accordion-target="collapsedLabel">+</span>
+      <span class="accordion__marker" aria-hidden="true" hidden
+            data-stimeo--accordion-target="expandedLabel">−</span>
+    </button>
   </h3>
   <div class="accordion__panel" id="acc-warranty" role="region"
        aria-labelledby="acc-warranty-trigger"
@@ -49,3 +64,12 @@
     <p><%= t("components.accordion.demo.warranty_desc") %></p>
   </div>
 </div>
+
+<%# Readout: what the component just reported. Purely visual — the component
+    already announces what a screen reader needs, so this line is aria-hidden to
+    keep it from being read twice. The value is a code fragment (API identifiers
+    and values), so only the label is translated. %>
+<p class="demo-readout" aria-hidden="true">
+  <span><%= t("catalog.readout.events") %></span>
+  <span class="demo-readout__value" data-readout>—</span>
+</p>

@@ -44,7 +44,10 @@ const DEFAULT_TARGET = "html";
  *   <button data-controller="stimeo--theme" data-action="click->stimeo--theme#toggle"
  *           aria-pressed="false">Dark mode</button>
  *
- * `change` dispatches `{ mode, resolved }`, and only when one of the two moved.
+ * `change` dispatches `{ mode, resolved }` when a selection or the OS preference moves
+ * one of the two. `reconcile` dispatches the same `{ mode, resolved }` when a `mode`
+ * declaration that changes after connect moves one of them — the declaration
+ * itself, or a stored choice that outranks it. Connecting is silent.
  *
  * @remarks
  * Behavior only — the actual palette is the consumer's CSS keyed off `data-theme`
@@ -54,7 +57,9 @@ const DEFAULT_TARGET = "html";
  * in sync. Arrow/Home/End move focus across the radiogroup as the APG radio pattern
  * requires; applying a theme never moves focus. The `prefers-color-scheme` listener is attached on
  * `connect()` and removed on `disconnect()` (Turbo included). FOUC avoidance for the
- * very first paint is an inline `<head>` snippet, not this controller.
+ * very first paint is an inline `<head>` snippet, not this controller. A `mode`
+ * declaration rewritten after connect is followed, but never over a stored choice
+ * ({@link ThemeController.modeValueChanged}).
  *
  * Every declaration is validated where it enters, and an unreadable one falls back
  * to that Value's default rather than taking the widget with it: a `mode` outside
@@ -76,7 +81,7 @@ export class ThemeController extends Controller<HTMLElement> {
     target: { type: String, default: DEFAULT_TARGET },
   };
   static actions = ["set", "toggle"] as const;
-  static events = ["change"] as const;
+  static events = ["change", "reconcile"] as const;
 
   declare readonly optionTargets: HTMLElement[];
   declare readonly hasOptionTarget: boolean;
@@ -88,7 +93,7 @@ export class ThemeController extends Controller<HTMLElement> {
   /** The OS dark-mode query, watched so `system` tracks live changes. */
   #media: MediaQueryList | null = null;
 
-  /** Gate for the target callbacks, which Stimulus runs before `connect()`. */
+  /** Gate for the target and `mode` callbacks, which Stimulus runs before `connect()`. */
   #connected = false;
 
   /** The `target` declaration after validation; the default when unparsable. */
@@ -98,10 +103,10 @@ export class ThemeController extends Controller<HTMLElement> {
   readonly #roving = new RovingTabindex(() => this.optionTargets);
 
   /**
-   * The pair last reported, so a move can be told from a repeat. Neither side is
-   * readable after the fact — assigning the Value updates the mode before any
-   * comparison, and the OS query has already flipped by the time it notifies —
-   * so what was reported has to be kept rather than recomputed.
+   * The pair on screen as last reported or re-seeded, so a move can be told from a
+   * repeat. Neither side is readable after the fact — assigning the Value updates the
+   * mode before any comparison, and the OS query has already flipped by the time it
+   * notifies — so what was reported has to be kept rather than recomputed.
    */
   #published: { mode: ThemeMode; resolved: ResolvedTheme } = {
     mode: DEFAULT_MODE,
@@ -183,14 +188,39 @@ export class ThemeController extends Controller<HTMLElement> {
     this.#targetSelector = validSelector(this.element, this.targetValue, DEFAULT_TARGET);
   }
 
+  /**
+   * Re-renders for a `mode` declaration changed after connect — a Turbo morph
+   * re-rendering the server's markup over the live element, or a script.
+   *
+   * A stored choice outranks the declaration: a Value that disagrees with it is written
+   * back to it, so a morph that brings the server's default never overrides what the
+   * user saved. Without one, the declaration is applied. Either way storage is left
+   * alone, and a pair on screen that moved is reported as `reconcile`, not `change` —
+   * the page moved the declaration, not a selection. The reported pair is re-seeded
+   * first, so the next selection is compared with what is on screen.
+   */
+  modeValueChanged(): void {
+    // Stimulus runs this for the initial declaration before `connect()`, which renders
+    // that declaration itself.
+    if (!this.#connected) return;
+    // A Value that already names the mode on screen is how the controller's own writes
+    // come back; resolving it against storage again would undo a selection whose save
+    // failed.
+    if (this.modeValue === this.#published.mode) return;
+    const stored = this.#readStored();
+    if (stored !== null && this.modeValue !== stored) this.modeValue = stored;
+    this.#applyTheme();
+    this.#reconcileControls();
+  }
+
   /** Re-derives the single Tab stop and ARIA for an option set that changed. */
   optionTargetConnected(): void {
-    if (this.#connected) this.#syncControls();
+    if (this.#connected) this.#reconcileControls();
   }
 
   /** Re-derives them again when an option leaves, so a Tab stop always remains. */
   optionTargetDisconnected(): void {
-    if (this.#connected) this.#syncControls();
+    if (this.#connected) this.#reconcileControls();
   }
 
   /**
@@ -226,22 +256,49 @@ export class ThemeController extends Controller<HTMLElement> {
   #commit(): void {
     this.#applyTheme();
     this.#syncControls();
+    const moved = this.#settle();
+    if (moved) this.dispatch("change", { detail: moved });
+  }
+
+  /**
+   * Re-derives the controls from the mode on screen for a change the page made — a
+   * `mode` declaration or an option set — and reports a pair that moved since the
+   * last report as `reconcile`. An option coming or going moves neither half of the
+   * pair, so of these changes only a declaration reports.
+   */
+  #reconcileControls(): void {
+    this.#syncControls();
+    const moved = this.#settle();
+    if (moved) this.dispatch("reconcile", { detail: moved });
+  }
+
+  /**
+   * Takes the pair on screen as the reported one and returns it when it differs
+   * from the one reported before, or `null` when neither half moved.
+   *
+   * The baseline moves before anything is dispatched, so a listener that selects
+   * another mode is measured from the pair it was just told about. What is
+   * returned is a copy: the baseline has to survive a listener that writes to what
+   * it was handed, or the next unchanged operation reads as a move.
+   */
+  #settle(): { mode: ThemeMode; resolved: ResolvedTheme } | null {
     const next = this.#current;
     const last = this.#published;
     this.#published = next;
-    if (last.mode !== next.mode || last.resolved !== next.resolved) {
-      // A copy: the baseline has to survive a listener that writes to what it
-      // was handed, or the next unchanged operation reads as a change.
-      this.dispatch("change", { detail: { ...next } });
-    }
+    if (last.mode === next.mode && last.resolved === next.resolved) return null;
+    return { ...next };
   }
 
-  /** The pair the `change` detail carries, read from current state. */
+  /** The pair the `change` and `reconcile` details carry, read from current state. */
   get #current(): { mode: ThemeMode; resolved: ResolvedTheme } {
     return { mode: this.#mode, resolved: this.#resolved() };
   }
 
-  /** Writes `data-theme` + `color-scheme` (the resolved theme) onto the target. */
+  /**
+   * Writes `data-theme` + `color-scheme` (the resolved theme) onto the target.
+   *
+   * @stimeoRenderRoot
+   */
   #applyTheme(): void {
     const root = this.#targetElement();
     if (!root) return;
@@ -250,7 +307,11 @@ export class ThemeController extends Controller<HTMLElement> {
     root.style.setProperty("color-scheme", resolved);
   }
 
-  /** Keeps the radiogroup (aria-checked + roving tabindex) or toggle (aria-pressed) in sync. */
+  /**
+   * Keeps the radiogroup (aria-checked + roving tabindex) or toggle (aria-pressed) in sync.
+   *
+   * @stimeoRenderRoot
+   */
   #syncControls(): void {
     const options = this.optionTargets;
     if (options.length > 0) {

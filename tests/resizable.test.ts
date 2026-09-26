@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ResizableController } from "../src/controllers/resizable_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 describe("ResizableController", () => {
   let application: Application;
@@ -499,7 +500,7 @@ describe("ResizableController", () => {
     expect(splitterEl().getAttribute("aria-valuemax")).toBe("80");
   });
 
-  it("falls back when the position itself cannot be read", async () => {
+  it("falls back when the position itself cannot be read, leaving the declaration as written", async () => {
     await remount(
       markup(
         'data-stimeo--resizable-min-value="20" data-stimeo--resizable-max-value="80" data-stimeo--resizable-value-value="abc"',
@@ -507,7 +508,7 @@ describe("ResizableController", () => {
     );
     expect(fraction()).toBe("0.5");
     expect(splitterEl().getAttribute("aria-valuenow")).toBe("50");
-    expect(controllerFor().valueValue).toBe(50);
+    expect(rootEl().getAttribute("data-stimeo--resizable-value-value")).toBe("abc");
   });
 
   it("collapses a maximum below the minimum onto that minimum", async () => {
@@ -579,6 +580,7 @@ describe("ResizableController", () => {
   // --- Runtime input changes ---------------------------------------------------
 
   it("follows a range swapped in at runtime", async () => {
+    const events = captureStateEvents("stimeo--resizable", ["change", "reconcile"]);
     rootEl().setAttribute("data-stimeo--resizable-max-value", "40");
     rootEl().setAttribute("data-stimeo--resizable-min-value", "10");
     await tick();
@@ -588,9 +590,16 @@ describe("ResizableController", () => {
     expect(splitterEl().getAttribute("aria-valuemax")).toBe("40");
     expect(splitterEl().getAttribute("aria-valuenow")).toBe("40");
     expect(fraction()).toBe("0.4");
+    // The clamp is published, not written back, and reported once for the batch.
+    expect(rootEl().getAttribute("data-stimeo--resizable-value-value")).toBe("50");
+    expect(events.seen.map(({ name, detail }) => ({ name, detail }))).toEqual([
+      { name: "reconcile", detail: { value: 40, fraction: 0.4 } },
+    ]);
+    events.stop();
   });
 
   it("follows a position swapped in at runtime", async () => {
+    const events = captureStateEvents("stimeo--resizable", ["change", "reconcile"]);
     // The range inputs have their own coverage; this one moves `value` alone so a
     // silent `valueValueChanged` cannot hide behind a sibling that repaints anyway.
     rootEl().setAttribute("data-stimeo--resizable-value-value", "70");
@@ -601,9 +610,14 @@ describe("ResizableController", () => {
     expect(fraction()).toBe("0.7");
     expect(splitterEl().getAttribute("aria-valuemin")).toBe("20");
     expect(splitterEl().getAttribute("aria-valuemax")).toBe("80");
+    expect(events.seen.map(({ name, detail }) => ({ name, detail }))).toEqual([
+      { name: "reconcile", detail: { value: 70, fraction: 0.7 } },
+    ]);
+    events.stop();
   });
 
   it("paints once for a batch that swaps several inputs", async () => {
+    const events = captureStateEvents("stimeo--resizable", ["change", "reconcile"]);
     const root = rootEl();
     let writes = 0;
     const setProperty = root.style.setProperty.bind(root.style);
@@ -624,6 +638,9 @@ describe("ResizableController", () => {
     expect(splitterEl().getAttribute("aria-valuemin")).toBe("10");
     expect(splitterEl().getAttribute("aria-valuemax")).toBe("90");
     expect(splitterEl().getAttribute("aria-valuenow")).toBe("50");
+    // A wider range leaves the position where it was, so nothing is reported.
+    expect(events.seen).toEqual([]);
+    events.stop();
   });
 
   it("re-publishes range and position onto a separator swapped in after connect", async () => {
@@ -772,7 +789,8 @@ describe("ResizableController", () => {
     expect(fraction()).toBe("0.5");
   });
 
-  it("writes the clamped value back to valueValue on initialization", async () => {
+  it("keeps an out-of-range declaration on initialization and publishes the clamped position", async () => {
+    const events = captureStateEvents("stimeo--resizable", ["change", "reconcile"]);
     document.body.innerHTML = `
       <div id="resizable" data-controller="stimeo--resizable"
            data-stimeo--resizable-min-value="20"
@@ -796,7 +814,470 @@ describe("ResizableController", () => {
       "stimeo--resizable",
     ) as ResizableController;
 
-    // value/ARIA/CSS must never diverge: the out-of-range 95 is persisted as 80.
-    expect(controller.valueValue).toBe(80);
+    // The declaration is the page's input; ARIA and CSS publish the clamped 80.
+    expect(controller.valueValue).toBe(95);
+    expect(root.getAttribute("data-stimeo--resizable-value-value")).toBe("95");
+    expect(splitterEl().getAttribute("aria-valuenow")).toBe("80");
+    expect(fraction()).toBe("0.8");
+    expect(events.seen).toEqual([]);
+    events.stop();
+  });
+
+  // --- Page-driven reconciliation ----------------------------------------------
+
+  describe("page-driven reconciliation", () => {
+    let events: StateEventCapture;
+
+    const reports = () => events.seen.map(({ name, detail }) => ({ name, detail }));
+    const declared = () => rootEl().getAttribute("data-stimeo--resizable-value-value");
+    /** Writes a Value the way a morph does and delivers its callback directly. */
+    const declare = async (name: "min" | "max" | "value", value: string) => {
+      rootEl().setAttribute(`data-stimeo--resizable-${name}-value`, value);
+      controllerFor()[`${name}ValueChanged`]();
+      await flushMicrotasks();
+    };
+    const OUT_OF_RANGE =
+      'data-stimeo--resizable-min-value="20" data-stimeo--resizable-max-value="80" data-stimeo--resizable-value-value="95"';
+
+    beforeEach(() => {
+      events = captureStateEvents("stimeo--resizable", ["change", "reconcile"]);
+    });
+
+    afterEach(() => {
+      events.stop();
+    });
+
+    it("reports a position a lowered maximum clamps, leaving the declaration as written", async () => {
+      await remount(
+        markup(
+          'data-stimeo--resizable-min-value="0" data-stimeo--resizable-max-value="100" data-stimeo--resizable-value-value="70"',
+        ),
+      );
+
+      await declare("max", "60");
+
+      expect(declared()).toBe("70");
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("60");
+      expect(fraction()).toBe("0.6");
+      expect(reports()).toEqual([{ name: "reconcile", detail: { value: 60, fraction: 0.6 } }]);
+    });
+
+    it("reports a move once, so a later pass that finds the same position stays silent", async () => {
+      await declare("value", "70");
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(reports()).toEqual([{ name: "reconcile", detail: { value: 70, fraction: 0.7 } }]);
+    });
+
+    it("takes a new baseline silently when it connects again after the declaration moved", async () => {
+      const controller = controllerFor();
+      controller.disconnect();
+      rootEl().setAttribute("data-stimeo--resizable-value-value", "70");
+      controller.connect();
+      controller.valueValueChanged();
+      await flushMicrotasks();
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("70");
+      expect(reports()).toEqual([]);
+    });
+
+    it("reports one reconcile for a batch that moves the position", async () => {
+      rootEl().setAttribute("data-stimeo--resizable-min-value", "30");
+      rootEl().setAttribute("data-stimeo--resizable-max-value", "60");
+      rootEl().setAttribute("data-stimeo--resizable-value-value", "90");
+      controllerFor().minValueChanged();
+      controllerFor().maxValueChanged();
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("60");
+      expect(reports()).toEqual([{ name: "reconcile", detail: { value: 60, fraction: 0.6 } }]);
+    });
+
+    it("reports a key the user pressed as change only, and the pass its Value write starts stays silent", async () => {
+      splitterEl().focus();
+      press(splitterEl(), "ArrowRight");
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(declared()).toBe("51");
+      expect(reports()).toEqual([{ name: "change", detail: { value: 51, fraction: 0.51 } }]);
+    });
+
+    it("reports a drag as change at its end only, and the passes its moves start stay silent", async () => {
+      rootEl().getBoundingClientRect = () =>
+        ({ left: 0, top: 0, width: 500, height: 100 }) as DOMRect;
+      startDrag(21);
+      splitterEl().dispatchEvent(
+        new PointerEvent("pointermove", { bubbles: true, clientX: 300, pointerId: 21 }),
+      );
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+      expect(reports()).toEqual([]);
+
+      splitterEl().dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 21 }));
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(declared()).toBe("60");
+      expect(reports()).toEqual([{ name: "change", detail: { value: 60, fraction: 0.6 } }]);
+    });
+
+    it("reports a page move back to where it was before the last reconcile", async () => {
+      await declare("value", "70");
+      await declare("value", "50");
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("50");
+      expect(reports()).toEqual([
+        { name: "reconcile", detail: { value: 70, fraction: 0.7 } },
+        { name: "reconcile", detail: { value: 50, fraction: 0.5 } },
+      ]);
+    });
+
+    it("steps from the published position when the declaration is out of range", async () => {
+      await remount(markup(OUT_OF_RANGE));
+      splitterEl().focus();
+
+      press(splitterEl(), "ArrowLeft");
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("79");
+      expect(declared()).toBe("79");
+      expect(reports()).toEqual([{ name: "change", detail: { value: 79, fraction: 0.79 } }]);
+    });
+
+    it("collapses from and restores to the published position of an out-of-range declaration", async () => {
+      await remount(markup(OUT_OF_RANGE));
+      const controller = controllerFor();
+
+      controller.toggle();
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("20");
+      controller.toggle();
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("80");
+      expect(declared()).toBe("80");
+      expect(reports()).toEqual([
+        { name: "change", detail: { value: 20, fraction: 0.2 } },
+        { name: "change", detail: { value: 80, fraction: 0.8 } },
+      ]);
+    });
+
+    it("restores a collapsed-from position beyond a lowered maximum to that maximum", async () => {
+      const controller = controllerFor();
+      controller.valueValue = 70;
+      await tick();
+      controller.toggle();
+      await declare("max", "60");
+      events.clear();
+
+      controller.toggle();
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("60");
+      expect(declared()).toBe("60");
+      expect(reports()).toEqual([{ name: "change", detail: { value: 60, fraction: 0.6 } }]);
+    });
+
+    it("reports a move a reconcile subscriber makes on the next pass, from the new baseline", async () => {
+      let redirected = false;
+      rootEl().addEventListener("stimeo--resizable:reconcile", () => {
+        if (redirected) return;
+        redirected = true;
+        rootEl().setAttribute("data-stimeo--resizable-value-value", "30");
+        controllerFor().valueValueChanged();
+      });
+
+      await declare("value", "70");
+      await tick();
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("30");
+      expect(reports()).toEqual([
+        { name: "reconcile", detail: { value: 70, fraction: 0.7 } },
+        { name: "reconcile", detail: { value: 30, fraction: 0.3 } },
+      ]);
+    });
+
+    it("keeps the baseline in step when a change subscriber moves again synchronously", async () => {
+      let again = true;
+      // Registered after the capture, so the capture records each report before
+      // this subscriber answers it.
+      const moveAgain = (): void => {
+        if (!again) return;
+        again = false;
+        press(splitterEl(), "ArrowRight");
+      };
+      document.addEventListener("stimeo--resizable:change", moveAgain);
+      splitterEl().focus();
+
+      press(splitterEl(), "ArrowRight");
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+      document.removeEventListener("stimeo--resizable:change", moveAgain);
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("52");
+      expect(reports()).toEqual([
+        { name: "change", detail: { value: 51, fraction: 0.51 } },
+        { name: "change", detail: { value: 52, fraction: 0.52 } },
+      ]);
+    });
+
+    it("drops a pass queued before disconnect", async () => {
+      rootEl().setAttribute("data-stimeo--resizable-value-value", "70");
+      controllerFor().valueValueChanged();
+      controllerFor().disconnect();
+      await flushMicrotasks();
+
+      expect(reports()).toEqual([]);
+    });
+
+    it("restores the published position a toggle collapsed from after the page widens the range", async () => {
+      await remount(markup(OUT_OF_RANGE));
+      const controller = controllerFor();
+
+      controller.toggle();
+      // Widening the range would publish the declared 95; the pane collapsed from 80.
+      await declare("max", "100");
+      controller.toggle();
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("80");
+      expect(reports()).toEqual([
+        { name: "change", detail: { value: 20, fraction: 0.2 } },
+        { name: "change", detail: { value: 80, fraction: 0.8 } },
+      ]);
+    });
+
+    it("keeps a key pressed inside a reconcile listener a change, and measures the next key from it", async () => {
+      let spent = false;
+      // Registered after the capture, so the recording keeps dispatch order.
+      const pressOnce = (): void => {
+        if (spent) return;
+        spent = true;
+        press(splitterEl(), "ArrowRight");
+      };
+      document.addEventListener("stimeo--resizable:reconcile", pressOnce);
+      splitterEl().focus();
+
+      await declare("value", "70");
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+      document.removeEventListener("stimeo--resizable:reconcile", pressOnce);
+      // The key inside the listener was the last report, so a key back to the
+      // page's 70 is a move of its own.
+      press(splitterEl(), "ArrowLeft");
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("70");
+      expect(reports()).toEqual([
+        { name: "reconcile", detail: { value: 70, fraction: 0.7 } },
+        { name: "change", detail: { value: 71, fraction: 0.71 } },
+        { name: "change", detail: { value: 70, fraction: 0.7 } },
+      ]);
+    });
+  });
+
+  // --- Change only for a move --------------------------------------------------
+
+  describe("change only for a move", () => {
+    let events: StateEventCapture;
+
+    const reports = () => events.seen.map(({ name, detail }) => ({ name, detail }));
+    const stubRect = () => {
+      rootEl().getBoundingClientRect = () =>
+        ({ left: 0, top: 0, width: 500, height: 100 }) as DOMRect;
+    };
+    /** Moves the pointer to `clientX` on the 500px-wide container: 5px per percent. */
+    const moveTo = (clientX: number, pointerId: number) =>
+      splitterEl().dispatchEvent(
+        new PointerEvent("pointermove", { bubbles: true, clientX, pointerId }),
+      );
+    const release = (pointerId: number) =>
+      splitterEl().dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId }));
+
+    beforeEach(() => {
+      events = captureStateEvents("stimeo--resizable", ["change", "reconcile"]);
+    });
+
+    afterEach(() => {
+      events.stop();
+    });
+
+    it("reports nothing for a key at an edge, after reporting the key that reached it", () => {
+      splitterEl().focus();
+
+      press(splitterEl(), "End");
+      press(splitterEl(), "End");
+      press(splitterEl(), "ArrowRight");
+      press(splitterEl(), "Home");
+      press(splitterEl(), "Home");
+      press(splitterEl(), "ArrowLeft");
+
+      expect(reports()).toEqual([
+        { name: "change", detail: { value: 80, fraction: 0.8 } },
+        { name: "change", detail: { value: 20, fraction: 0.2 } },
+      ]);
+    });
+
+    it("reports nothing for a key at the edge the page moved the position to", async () => {
+      rootEl().setAttribute("data-stimeo--resizable-value-value", "80");
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+      events.clear();
+      splitterEl().focus();
+
+      press(splitterEl(), "End");
+
+      expect(reports()).toEqual([]);
+    });
+
+    it("reports nothing for a press released without moving", () => {
+      stubRect();
+
+      startDrag(31);
+      release(31);
+
+      expect(reports()).toEqual([]);
+    });
+
+    it("reports nothing for a drag released where it started", () => {
+      stubRect();
+
+      startDrag(32);
+      moveTo(300, 32);
+      moveTo(250, 32);
+      release(32);
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("50");
+      expect(reports()).toEqual([]);
+    });
+
+    it("reports a drag that moved exactly once, when it ends", () => {
+      stubRect();
+
+      startDrag(33);
+      moveTo(300, 33);
+      moveTo(350, 33);
+      expect(reports()).toEqual([]);
+      release(33);
+
+      expect(reports()).toEqual([{ name: "change", detail: { value: 70, fraction: 0.7 } }]);
+    });
+
+    it("reports nothing for a toggle that cannot move the position", async () => {
+      await remount(
+        markup(
+          'data-stimeo--resizable-min-value="50" data-stimeo--resizable-max-value="50" data-stimeo--resizable-value-value="50"',
+        ),
+      );
+
+      controllerFor().toggle();
+      controllerFor().toggle();
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("50");
+      expect(reports()).toEqual([]);
+    });
+
+    it("reports only the reconcile for a drag the page clamped and that is released in place", async () => {
+      stubRect();
+      startDrag(34);
+      moveTo(350, 34);
+
+      rootEl().setAttribute("data-stimeo--resizable-max-value", "60");
+      controllerFor().maxValueChanged();
+      await flushMicrotasks();
+      release(34);
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("60");
+      expect(reports()).toEqual([{ name: "reconcile", detail: { value: 60, fraction: 0.6 } }]);
+    });
+
+    it("reports nothing when the page puts a drag back where it started and it is released in place", async () => {
+      stubRect();
+      startDrag(35);
+      moveTo(350, 35);
+
+      // The drag has only painted 70; 50 is still the position last confirmed.
+      rootEl().setAttribute("data-stimeo--resizable-value-value", "50");
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+      release(35);
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("50");
+      expect(reports()).toEqual([]);
+    });
+
+    it("reports the published position when a drag ends on a declaration the page wrote out of range", async () => {
+      stubRect();
+      startDrag(36);
+      moveTo(300, 36);
+
+      // The release lands before the Value callback, so the report reads the
+      // clamped position from the declaration itself, and the repaint that
+      // follows finds that position already reported.
+      rootEl().setAttribute("data-stimeo--resizable-value-value", "95");
+      release(36);
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("80");
+      expect(reports()).toEqual([{ name: "change", detail: { value: 80, fraction: 0.8 } }]);
+    });
+
+    it("reports a later page move to the position a drag painted, after the page put that drag back", async () => {
+      stubRect();
+      startDrag(37);
+      moveTo(350, 37);
+      rootEl().setAttribute("data-stimeo--resizable-value-value", "50");
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+      release(37);
+      expect(reports()).toEqual([]);
+
+      // The page's move back to 50 is what the separator now shows, so a page
+      // move to 70 is a move again, even though the drag had painted 70 before.
+      rootEl().setAttribute("data-stimeo--resizable-value-value", "70");
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("70");
+      expect(reports()).toEqual([{ name: "reconcile", detail: { value: 70, fraction: 0.7 } }]);
+    });
+
+    it.each([
+      ["a script writes the value just before the key", false],
+      ["a keydown listener ahead of the separator writes the value", true],
+    ] as const)(
+      "reports a page write folded into a key once, as that key's change, when %s",
+      async (_case, ahead) => {
+        const write = (): void => {
+          rootEl().setAttribute("data-stimeo--resizable-value-value", "80");
+        };
+        const writeAhead = (event: Event): void => {
+          if ((event as KeyboardEvent).key === "End") write();
+        };
+        if (ahead) document.addEventListener("keydown", writeAhead, true);
+        else write();
+        splitterEl().focus();
+
+        press(splitterEl(), "End");
+        document.removeEventListener("keydown", writeAhead, true);
+        controllerFor().valueValueChanged();
+        await flushMicrotasks();
+
+        expect(splitterEl().getAttribute("aria-valuenow")).toBe("80");
+        expect(reports()).toEqual([{ name: "change", detail: { value: 80, fraction: 0.8 } }]);
+      },
+    );
+
+    it("reports nothing when a page write and a key in one task end on the position last confirmed", async () => {
+      splitterEl().focus();
+
+      rootEl().setAttribute("data-stimeo--resizable-value-value", "51");
+      press(splitterEl(), "ArrowLeft");
+      controllerFor().valueValueChanged();
+      await flushMicrotasks();
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("50");
+      expect(reports()).toEqual([]);
+    });
   });
 });

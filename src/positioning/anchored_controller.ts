@@ -183,6 +183,8 @@ export class AnchoredController extends Controller<HTMLElement> {
    * declared last. The elements are part of the key because the engine holds the
    * pair it was handed: a swap leaves the same options behind and would otherwise
    * keep measuring the node that just left the document.
+   *
+   * @stimeoRenderRoot
    */
   #sync(): void {
     const shouldTrack =

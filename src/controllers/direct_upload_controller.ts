@@ -3,6 +3,7 @@ import { announce, fillTemplate } from "../utils/announce";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { validSelector } from "../utils/declared_value";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { cloneTemplateRoot } from "../utils/template_row";
 
 /** Detail shapes for the ActiveStorage `direct-upload:*` events. */
 interface UploadDetail {
@@ -180,7 +181,12 @@ export class DirectUploadController extends Controller<HTMLElement> {
     this.dispatch("progress", { detail: { id, percent: clamped } });
   }
 
-  /** Marks a not-yet-settled row done at 100%, announces it, and emits `done`. */
+  /**
+   * Marks a not-yet-settled row done at 100%, announces it, and emits `done`.
+   *
+   * @stimeoRuntimeOnly `announceDoneText` words the one announcement of this completion and
+   *   `removeOnDone` decides whether it arms the row's removal.
+   */
   #complete(id: string, name: string): void {
     // Resolve lazily like `#fail`/`#updateProgress` so an `end` that arrives
     // without a prior `initialize`/`progress` (no row yet) still records the
@@ -202,6 +208,8 @@ export class DirectUploadController extends Controller<HTMLElement> {
    * Returns whether the failure is rendered by this widget (used to decide the
    * `direct-upload:error` default), which also holds when the row already
    * displays an earlier failure.
+   *
+   * @stimeoRuntimeOnly `announceErrorText` words the one announcement of this failure.
    */
   #fail(id: string, error: string, name: string): boolean {
     const row = this.#rowFor(id, name);
@@ -219,7 +227,12 @@ export class DirectUploadController extends Controller<HTMLElement> {
     return state === "done" || state === "error";
   }
 
-  /** Re-arms `removeOnDone` for completed rows after a reconnect. */
+  /**
+   * Re-arms `removeOnDone` for completed rows after a reconnect.
+   *
+   * @stimeoRuntimeOnly `removeOnDone` decides whether reconnecting arms the removal of finished
+   *   rows again.
+   */
   #rescheduleRemovals(): void {
     if (!this.removeOnDoneValue) return;
     this.#prune();
@@ -246,8 +259,8 @@ export class DirectUploadController extends Controller<HTMLElement> {
       this.#rows.delete(key);
     }
     if (!this.hasRowTarget || !this.hasListTarget) return null;
-    const clone = this.rowTarget.content.firstElementChild?.cloneNode(true);
-    if (!(clone instanceof HTMLElement)) return null;
+    const clone = cloneTemplateRoot(this.rowTarget);
+    if (!clone) return null;
     this.#applyName(clone, name);
     clone.setAttribute("data-upload-state", "uploading");
     this.#applyProgress(clone, 0);

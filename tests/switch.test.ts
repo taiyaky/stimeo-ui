@@ -2,14 +2,16 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SwitchController } from "../src/controllers/switch_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link SwitchController}: host/default reconciliation,
  * click and keyboard activation, disabled semantics, Turbo retained-element
- * morphs, and `changed` notification.
+ * morphs, and the `change` / `reconcile` notifications.
  */
 describe("SwitchController", () => {
   let application: Application;
@@ -117,9 +119,9 @@ describe("SwitchController", () => {
     expect(sw().getAttribute("aria-checked")).toBe("false");
   });
 
-  it("dispatches changed with both checked states", () => {
+  it("dispatches change with both checked states", () => {
     const received: boolean[] = [];
-    sw().addEventListener("stimeo--switch:changed", (event) => {
+    sw().addEventListener("stimeo--switch:change", (event) => {
       received.push((event as CustomEvent<{ checked: boolean }>).detail.checked);
     });
 
@@ -191,7 +193,7 @@ describe("SwitchController", () => {
     const received: boolean[] = [];
     let downstreamClicks = 0;
     let downstreamKeys = 0;
-    sw().addEventListener("stimeo--switch:changed", (event) => {
+    sw().addEventListener("stimeo--switch:change", (event) => {
       received.push((event as CustomEvent<{ checked: boolean }>).detail.checked);
     });
     sw().addEventListener("click", () => {
@@ -409,10 +411,7 @@ describe("SwitchController", () => {
   });
 
   it("reconciles missing defaults after a retained-element attribute morph", async () => {
-    const changed: boolean[] = [];
-    sw().addEventListener("stimeo--switch:changed", (event) => {
-      changed.push((event as CustomEvent<{ checked: boolean }>).detail.checked);
-    });
+    const events = captureStateEvents("stimeo--switch", ["change", "reconcile"]);
 
     sw().removeAttribute("role");
     sw().removeAttribute("aria-checked");
@@ -422,7 +421,9 @@ describe("SwitchController", () => {
     expect(sw().getAttribute("role")).toBe("switch");
     expect(sw().getAttribute("aria-checked")).toBe("false");
     expect(sw().getAttribute("tabindex")).toBe("0");
-    expect(changed).toEqual([]);
+    // The switch was off and the default puts it back off: nothing moved.
+    expect(events.names()).toEqual([]);
+    events.stop();
 
     // The observer must re-arm after writing the first batch of defaults.
     sw().removeAttribute("aria-checked");
@@ -476,5 +477,382 @@ describe("SwitchController", () => {
     expect(sw().getAttribute("aria-checked")).toBe("true");
     expect(disconnectedClick.defaultPrevented).toBe(false);
     expect(downstreamClicks).toBe(1);
+  });
+
+  // --- Hidden form field ---
+
+  describe("hidden form field", () => {
+    let commits: ReturnType<typeof captureFieldCommits>;
+
+    const withField = async (checked = "false") => {
+      await mount(`
+        <button type="button" data-controller="stimeo--switch"
+                data-action="click->stimeo--switch#toggle keydown->stimeo--switch#onKeydown"
+                role="switch" aria-checked="${checked}">
+          Notifications
+          <input type="hidden" name="notify" data-stimeo--switch-target="field" />
+        </button>`);
+    };
+
+    const field = () =>
+      document.querySelector<HTMLInputElement>(
+        "[data-stimeo--switch-target='field']",
+      ) as HTMLInputElement;
+
+    beforeEach(() => {
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      commits.stop();
+    });
+
+    it("seeds the field from aria-checked without reporting a commit", async () => {
+      await withField("true");
+
+      expect(field().value).toBe("true");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("writes and reports once per toggle the user made", async () => {
+      await withField();
+      commits.clear();
+
+      sw().click();
+
+      expect(field().value).toBe("true");
+      expect(commits.seen).toEqual([field()]);
+
+      sw().click();
+      expect(field().value).toBe("false");
+      expect(commits.seen).toEqual([field(), field()]);
+    });
+
+    it("submits from inside the button host", async () => {
+      await mount(`
+        <form id="prefs">
+          <button type="button" data-controller="stimeo--switch"
+                  data-action="click->stimeo--switch#toggle keydown->stimeo--switch#onKeydown"
+                  role="switch" aria-checked="false">
+            Notifications
+            <input type="hidden" name="notify" data-stimeo--switch-target="field" />
+          </button>
+        </form>`);
+      const form = document.getElementById("prefs") as HTMLFormElement;
+
+      // The claim is that a hidden input inside a <button> is still a submitted
+      // control — reading the attributes back would only restate the fixture.
+      expect(new FormData(form).get("notify")).toBe("false");
+
+      sw().click();
+
+      expect(new FormData(form).get("notify")).toBe("true");
+    });
+  });
+
+  // --- Page-driven moves ---
+
+  /**
+   * `change` is the user's toggle; a checked state the page moves — a morph that
+   * writes or strips `aria-checked`, a host that stops supporting the switch —
+   * is `reconcile`, once per batch and never on connect.
+   */
+  describe("page-driven moves", () => {
+    let events: StateEventCapture;
+    let commits: ReturnType<typeof captureFieldCommits>;
+
+    /** A native button host; `state` is its authored `aria-checked`, if any. */
+    const withField = async (state: string | null = "false") => {
+      await mount(`
+        <button type="button" data-controller="stimeo--switch"
+                data-action="click->stimeo--switch#toggle keydown->stimeo--switch#onKeydown"
+                ${state === null ? "" : `role="switch" aria-checked="${state}"`}>
+          Notifications
+          <input type="hidden" name="notify" data-stimeo--switch-target="field" />
+        </button>`);
+    };
+
+    const field = () =>
+      document.querySelector<HTMLInputElement>(
+        "[data-stimeo--switch-target='field']",
+      ) as HTMLInputElement;
+
+    const heard = () => events.seen.map(({ name, detail }) => ({ name, detail }));
+
+    /**
+     * Wraps a listener that must act once. happy-dom removes a `once` listener
+     * only after it returns, so a listener that makes the same event fire again
+     * would be called a second time from inside the first call.
+     */
+    const firstCallOnly = (act: () => void) => {
+      let spent = false;
+      return (): void => {
+        if (spent) return;
+        spent = true;
+        act();
+      };
+    };
+
+    const detach: Array<() => void> = [];
+
+    /** Adds a document listener this block removes after the test. */
+    const listenOnDocument = (type: string, listener: () => void): void => {
+      document.addEventListener(type, listener);
+      detach.push(() => document.removeEventListener(type, listener));
+    };
+
+    beforeEach(() => {
+      events = captureStateEvents("stimeo--switch", ["change", "reconcile"]);
+      commits = captureFieldCommits();
+    });
+
+    afterEach(() => {
+      events.stop();
+      commits.stop();
+      for (const off of detach.splice(0)) off();
+    });
+
+    it("reports a morph that writes a new checked state as reconcile, never as change", async () => {
+      await withField("false");
+
+      sw().setAttribute("aria-checked", "true");
+      await tick();
+
+      expect(heard()).toEqual([{ name: "reconcile", detail: { checked: true } }]);
+      expect(field().value).toBe("true");
+      // The field follows without the native change a form reads as an edit.
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("reports a stripped checked state that falls back to the off default", async () => {
+      await withField("true");
+
+      sw().removeAttribute("aria-checked");
+      await tick();
+
+      expect(sw().getAttribute("aria-checked")).toBe("false");
+      expect(heard()).toEqual([{ name: "reconcile", detail: { checked: false } }]);
+      expect(field().value).toBe("false");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("reports a host that stops supporting the switch as reconcile to off", async () => {
+      await withField(null);
+      sw().click();
+      await tick();
+      commits.clear();
+
+      // The controller supplied `aria-checked`, so a host it stands down on
+      // takes that state away and the submitted value goes back to off.
+      sw().setAttribute("type", "submit");
+      await tick();
+
+      expect(sw().hasAttribute("aria-checked")).toBe(false);
+      expect(field().value).toBe("false");
+      expect(heard()).toEqual([
+        { name: "change", detail: { checked: true } },
+        { name: "reconcile", detail: { checked: false } },
+      ]);
+      expect(commits.seen).toEqual([]);
+
+      // Supported again, the off default describes the state it already reported.
+      sw().setAttribute("type", "button");
+      await tick();
+      expect(sw().getAttribute("aria-checked")).toBe("false");
+      expect(heard()).toHaveLength(2);
+    });
+
+    it("does not report a pass that leaves the checked state where it was", async () => {
+      await withField("true");
+
+      sw().removeAttribute("role");
+      await tick();
+      sw().setAttribute("aria-checked", "true");
+      await tick();
+      expect(heard()).toEqual([]);
+
+      sw().setAttribute("aria-checked", "false");
+      await tick();
+      events.clear();
+      // A token the switch does not read as on leaves it off.
+      sw().setAttribute("aria-checked", "mixed");
+      await tick();
+
+      expect(heard()).toEqual([]);
+      expect(field().value).toBe("false");
+    });
+
+    it("reports nothing on connect, or when it connects again to a state moved while away", async () => {
+      await withField("true");
+      expect(field().value).toBe("true");
+
+      const host = sw();
+      host.removeAttribute("data-controller");
+      await tick();
+      host.setAttribute("aria-checked", "false");
+      host.setAttribute("data-controller", "stimeo--switch");
+      await tick();
+
+      expect(field().value).toBe("false");
+      expect(heard()).toEqual([]);
+      expect(commits.seen).toEqual([]);
+
+      // The state read on connect is the one the next move is measured from.
+      host.setAttribute("aria-checked", "true");
+      await tick();
+      expect(heard()).toEqual([{ name: "reconcile", detail: { checked: true } }]);
+    });
+
+    it("reports the user's toggle as change only", async () => {
+      await withField("false");
+
+      sw().click();
+      await tick();
+
+      expect(heard()).toEqual([{ name: "change", detail: { checked: true } }]);
+      expect(commits.seen).toEqual([field()]);
+    });
+
+    it("seeds a field that replaces the old one without reporting", async () => {
+      await withField("true");
+
+      // Only the field changes, so the target callback alone brings the pass.
+      const replacement = document.createElement("input");
+      replacement.type = "hidden";
+      replacement.name = "notify";
+      replacement.setAttribute("data-stimeo--switch-target", "field");
+      field().replaceWith(replacement);
+      await tick();
+
+      expect(replacement.value).toBe("true");
+      expect(heard()).toEqual([]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("reports one batch of page changes once, with the state it settles on", async () => {
+      await withField("false");
+
+      sw().setAttribute("aria-checked", "true");
+      sw().removeAttribute("aria-checked");
+      sw().setAttribute("aria-checked", "true");
+      const replacement = document.createElement("input");
+      replacement.type = "hidden";
+      replacement.name = "notify";
+      replacement.setAttribute("data-stimeo--switch-target", "field");
+      field().replaceWith(replacement);
+      await tick();
+
+      expect(heard()).toEqual([{ name: "reconcile", detail: { checked: true } }]);
+      expect(replacement.value).toBe("true");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("keeps a toggle made inside a reconcile listener a change, and reports nothing after it", async () => {
+      await withField("false");
+      // Registered after the capture, so the recording keeps dispatch order.
+      listenOnDocument(
+        "stimeo--switch:reconcile",
+        firstCallOnly(() => instance().toggle()),
+      );
+
+      sw().setAttribute("aria-checked", "true");
+      await tick();
+      await tick();
+
+      expect(heard()).toEqual([
+        { name: "reconcile", detail: { checked: true } },
+        { name: "change", detail: { checked: false } },
+      ]);
+      expect(sw().getAttribute("aria-checked")).toBe("false");
+      expect(field().value).toBe("false");
+      expect(commits.seen).toEqual([field()]);
+    });
+
+    it("reports a state a reconcile listener writes back with a second reconcile", async () => {
+      await withField("false");
+      // The listener writes the attribute the way a page script does, not through
+      // toggle, so only observation can bring it to a pass.
+      listenOnDocument(
+        "stimeo--switch:reconcile",
+        firstCallOnly(() => sw().setAttribute("aria-checked", "false")),
+      );
+
+      sw().setAttribute("aria-checked", "true");
+      await tick();
+      await tick();
+
+      // Observation resumes before the report, so the listener's write is a page
+      // change of its own: the next pass reports it and the field follows it.
+      expect(heard()).toEqual([
+        { name: "reconcile", detail: { checked: true } },
+        { name: "reconcile", detail: { checked: false } },
+      ]);
+      expect(field().value).toBe("false");
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("reports a state a listener moves during the user's commit as reconcile", async () => {
+      await withField("false");
+      // The native change comes first; a page script that answers it by writing
+      // the attribute back has moved the state after the user did.
+      field().addEventListener(
+        "change",
+        firstCallOnly(() => sw().setAttribute("aria-checked", "false")),
+      );
+
+      sw().click();
+      await tick();
+
+      expect(heard()).toEqual([
+        { name: "change", detail: { checked: true } },
+        { name: "reconcile", detail: { checked: false } },
+      ]);
+      expect(field().value).toBe("false");
+    });
+
+    it("keeps a toggle made inside a native change listener from being reported again", async () => {
+      await withField("false");
+      field().addEventListener(
+        "change",
+        firstCallOnly(() => instance().toggle()),
+      );
+
+      sw().click();
+      await tick();
+
+      expect(events.names()).toEqual(["change", "change"]);
+      expect(sw().getAttribute("aria-checked")).toBe("false");
+    });
+
+    it("drops a pass queued before disconnect", async () => {
+      await withField("false");
+
+      instance().fieldTargetConnected();
+      sw().setAttribute("aria-checked", "true");
+      instance().disconnect();
+      await tick();
+
+      expect(heard()).toEqual([]);
+      expect(field().value).toBe("false");
+    });
+
+    it("treats a state the page writes before a queued pass runs as authored", async () => {
+      await mount(genericMarkup());
+      expect(sw().getAttribute("aria-checked")).toBe("false");
+
+      // A pass is already queued when the page writes the attribute, so the pass
+      // meets the page's record before the observer delivers it.
+      instance().fieldTargetConnected();
+      sw().setAttribute("aria-checked", "true");
+      await tick();
+      expect(heard()).toEqual([{ name: "reconcile", detail: { checked: true } }]);
+
+      // A host the switch stands down on gives back only what the controller
+      // supplied; the page's own state stays.
+      sw().setAttribute("contenteditable", "true");
+      await tick();
+      expect(sw().hasAttribute("role")).toBe(false);
+      expect(sw().getAttribute("aria-checked")).toBe("true");
+    });
   });
 });

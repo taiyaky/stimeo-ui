@@ -15,6 +15,10 @@
   ) %>"
   data-stimeo--calendar-week-start-value="0"
 >
+  <%# The hidden fields carry the selected day and the painted month into the
+      form, so a server can serve the days it is showing. Both are optional. %>
+  <input type="hidden" name="on" data-stimeo--calendar-target="field" />
+  <input type="hidden" name="month" data-stimeo--calendar-target="monthField" />
   
   <div class="calendar-demo__header">
     <button
@@ -126,3 +130,13 @@
     </tbody>
   </table>
 </div>
+
+<%# Readout: what the component just reported. Purely visual — the component
+    already announces what a screen reader needs, so this line is aria-hidden to
+    keep it from being read twice. The value is a code fragment (API identifiers
+    and values), so only the label is translated. %>
+<p class="demo-readout" aria-hidden="true">
+  <span><%= t("catalog.readout.field") %></span>
+  <span class="demo-readout__value" data-readout
+        data-empty-text="<%= t("catalog.readout.empty") %>">—</span>
+</p>

@@ -114,6 +114,126 @@ The `eslint-plugin-jsx-a11y` equivalents are
 `no-noninteractive-tabindex`. These components' real accessibility is exercised
 with axe-core and real screen readers in this project's own test suite.
 
+## Composing components
+
+Parts dispatch `stimeo--<identifier>:<event>` with a `detail`, and Stimulus can bind
+one part's event straight to another part's action. Wiring two parts is a
+`data-action`, not a `<script>`.
+
+```html
+<!-- Copy a link and say so, with nothing in between. -->
+<div data-controller="stimeo--toast"
+     data-action="stimeo--clipboard:copy->stimeo--toast#show">
+  <div data-controller="stimeo--clipboard"
+       data-stimeo--clipboard-text-value="https://example.com/share"
+       data-stimeo--clipboard-copied-label-value="Copied"
+       data-stimeo--clipboard-error-label-value="Copy failed">
+    <button type="button" data-stimeo--clipboard-target="button"
+            data-action="click->stimeo--clipboard#copy">Copy</button>
+  </div>
+  <ol data-stimeo--toast-target="list"></ol>
+  <template data-stimeo--toast-target="template">
+    <li data-stimeo--toast-target="item"><span data-toast-slot="message"></span></li>
+  </template>
+</div>
+```
+
+```html
+<!-- A wizard moves a read-only progress indicator. -->
+<div data-controller="stimeo--stepper">
+  <ol data-controller="stimeo--step-indicator"
+      data-action="stimeo--stepper:change@window->stimeo--step-indicator#setIndex">
+    <li data-stimeo--step-indicator-target="step">Cart</li>
+    <li data-stimeo--step-indicator-target="step">Shipping</li>
+  </ol>
+  <!-- the stepper's own step targets and buttons -->
+</div>
+```
+
+```html
+<!-- A value a widget stepped submits the form, through the events a browser
+     would have fired for its own control. -->
+<form data-controller="stimeo--auto-submit"
+      data-action="change->stimeo--auto-submit#submit">
+  <div data-controller="stimeo--number-input">
+    <input type="number" name="quantity" value="1" aria-label="Quantity"
+           data-stimeo--number-input-target="input"
+           data-action="change->stimeo--number-input#onInput
+                        keydown->stimeo--number-input#onKeydown" />
+    <button type="button" aria-label="Increase" tabindex="-1"
+            data-stimeo--number-input-target="increment"
+            data-action="click->stimeo--number-input#increment">+</button>
+  </div>
+</form>
+```
+
+Two things to know:
+
+- **Events bubble from the part that dispatched them.** The receiver has to be an
+  ancestor. Anywhere else — a sibling, or a receiver nested *inside* the part that
+  dispatches — needs `@window`, because bubbling only ever goes up:
+  `stimeo--clipboard:copy@window->stimeo--toast#show`.
+- **Do not say the same thing twice.** A toast's message slot is a `role="status"`
+  live region. Wiring the same result to the shared announcer as well
+  (`announce-copied-text`, …) reads it out twice. Pick one.
+
+`stimeo check` verifies both halves of a wire: the controller and action on the
+receiving side, and the event name on the emitting side.
+
+## Styling notes
+
+### `hidden` under a utility CSS layer
+
+Controllers show and hide their own declared regions with the `hidden` attribute —
+a listbox option filtered out, an "empty" row, the half of a label that does not
+belong to the current state. `hidden` only carries `display: none` from the user-agent
+stylesheet, so any rule that sets `display` wins over it.
+
+Utility-first frameworks make that collision likely. Tailwind v4 declares
+`@layer theme, base, components, utilities`, and DaisyUI puts component classes such
+as `.menu li`, `.tabs`, and `.steps` in the **last** layer. A hidden element inside one
+of them stays visible, and a `display: none` you add in `@layer components` still loses.
+
+Put the override **outside every layer** — unlayered rules beat layered ones, so no
+`!important` is needed:
+
+```css
+/* not inside @layer */
+.menu li[hidden],
+.menu [role="option"][hidden] {
+  display: none;
+}
+```
+
+Most visible with `combobox`, `listbox`, `multi-select`, `empty-state`, `filter`, and
+`command-palette`, whose options and empty rows are the ones being hidden.
+
+### State-dependent text belongs in markup
+
+It is tempting to put the words that change with a state into CSS:
+
+```css
+/* don't */
+.play::after                      { content: "Auto-advance: off"; }
+.play[aria-pressed="true"]::after { content: "Auto-advance: on"; }
+```
+
+Text in `content` never reaches a translation catalogue, and the usual "find untranslated
+strings" scan reads HTML, so it does not turn up there either. `content: attr(aria-valuetext)`
+has the same problem from the other side: the attribute is composed at runtime in one
+language. Keep the words in markup and let the controller show the half that applies:
+
+```html
+<button data-stimeo--read-more-target="trigger" aria-expanded="false">
+  <span data-stimeo--read-more-target="collapsedLabel">Read more</span>
+  <span data-stimeo--read-more-target="expandedLabel" hidden>Show less</span>
+</button>
+```
+
+Controllers that read out a composed value take the wording as an attribute instead —
+`color-picker` accepts `data-value-text`, and the announcing controllers accept
+`announce-*-text`.
+
 ## Inspector CLI & MCP server
 
 Stimeo UI bundles a zero-dependency static checker for its own markup contract

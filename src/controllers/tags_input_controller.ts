@@ -3,7 +3,10 @@ import { announce, fillTemplate } from "../utils/announce";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { ChipRow } from "../utils/chip_row";
 import { CompositionTracker } from "../utils/composition_tracker";
+import { matchingPart, writeLabel } from "../utils/element_part";
+import { commitField, writeFields } from "../utils/field_mirror";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { TemplateRow } from "../utils/template_row";
 
 /**
  * Headless, accessible free-input tags / chips field.
@@ -40,9 +43,14 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  * - Tags render transactionally from the `tagTemplate`; its author-localized
  *   remove-button `aria-label` expands `{label}` / `{value}`. The
  *   `fields` container mirrors the tag set as `name`d hidden inputs for form
- *   submission. User changes dispatch `stimeo--tags-input:change`; DOM/Turbo tag
- *   changes dispatch `stimeo--tags-input:reconcile`; authored templates route
- *   localized addition/removal text to the shared announcer.
+ *   submission; `form` associates them with a `<form>` by id when the field
+ *   sits outside it. A tag the user added or removed also emits a native
+ *   bubbling `change` from that container, the way a form control does, so
+ *   `stimeo--auto-submit` and form-level validation hear it; the rebuilds that
+ *   follow connect, a replacement container, tag churn, or a `name` / `form`
+ *   change stay silent. User changes dispatch `stimeo--tags-input:change`;
+ *   DOM/Turbo tag changes dispatch `stimeo--tags-input:reconcile`; authored
+ *   templates route localized addition/removal text to the shared announcer.
  * - The remove buttons form one roving Tab stop: `ArrowLeft`/`ArrowRight` move
  *   between them (right past the end returns to the input), `Delete`/`Backspace`
  *   delete the focused tag, and `Backspace` on an empty input deletes the last.
@@ -58,6 +66,7 @@ export class TagsInputController extends Controller<HTMLElement> {
     max: { type: Number, default: 0 },
     allowDuplicates: { type: Boolean, default: false },
     name: { type: String, default: "tags[]" },
+    form: { type: String, default: "" },
     announceText: { type: String, default: "" },
     announceRemovedText: { type: String, default: "" },
   };
@@ -80,20 +89,28 @@ export class TagsInputController extends Controller<HTMLElement> {
   declare maxValue: number;
   declare allowDuplicatesValue: boolean;
   declare nameValue: string;
+  declare formValue: string;
   declare announceTextValue: string;
   declare announceRemovedTextValue: string;
 
   /** Last reconciled tag order, separating user edits from DOM/Turbo repair. */
   #tagValues: string[] = [];
-  /** Whether this connection already reported its unusable chip template. */
-  #warnedTemplate = false;
+  /** Builds one chip from the authored template and owns its diagnostic. */
+  readonly #rows = new TemplateRow({
+    identifier: this.identifier,
+    root: "tag",
+    required: ["label"],
+    button: "remove",
+    outcome: "added no tag",
+    noun: "chip template",
+  });
   /** Collapses one target/Value mutation batch into one final-DOM repair pass. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileTags());
   readonly #chipRow = new ChipRow({
     directionElement: this.element,
     getItems: () => this.tagTargets,
     getButton: (tag) =>
-      tag.querySelector<HTMLButtonElement>('button[data-stimeo--tags-input-target~="remove"]'),
+      matchingPart<HTMLButtonElement>(tag, `button${this.#rows.selector("remove")}`),
     onRemove: (index) => this.#removeAt(index),
     focusAfterEnd: () => this.#focusInput(),
   });
@@ -102,7 +119,7 @@ export class TagsInputController extends Controller<HTMLElement> {
 
   /** Wires tag-list keyboard navigation and removal, and seeds the single Tab stop. */
   override connect(): void {
-    this.#warnedTemplate = false;
+    this.#rows.connect();
     if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
     if (this.hasTagsTarget) this.#chipRow.connect(this.tagsTarget);
     const tags = this.#values;
@@ -159,6 +176,11 @@ export class TagsInputController extends Controller<HTMLElement> {
     this.#reconcile.schedule();
   }
 
+  /** Repoints submitted fields when the owning form changes at runtime. */
+  formValueChanged(): void {
+    this.#reconcile.schedule();
+  }
+
   /** Recomputes the full hook when the cap changes at runtime. */
   maxValueChanged(): void {
     this.#reconcile.schedule();
@@ -198,7 +220,11 @@ export class TagsInputController extends Controller<HTMLElement> {
     }
   }
 
-  /** Validates and adds the current input value as a tag, then clears the input. */
+  /**
+   * Validates and adds the current input value as a tag, then clears the input.
+   *
+   * @stimeoRuntimeOnly `max` and `allowDuplicates` decide whether this one entry is taken.
+   */
   #commitInput(): void {
     const value = this.inputTarget.value.trim();
     if (value === "") {
@@ -216,55 +242,33 @@ export class TagsInputController extends Controller<HTMLElement> {
     if (!this.#appendTag(value)) return;
     this.inputTarget.value = "";
     const tags = this.#values;
-    this.#syncState(tags);
+    this.#syncState(tags, true);
     this.#tagValues = tags;
     this.#announceTransition(true, value, tags.length);
     this.dispatch("change", { detail: { tags } });
   }
 
-  /** Builds one chip from the template and appends it to the tag list. */
+  /**
+   * Builds one chip from the template and appends it to the tag list.
+   *
+   * A refused row leaves the commit a no-op — nothing about the input, the tag
+   * set, the hidden fields, the announcement, or the events changes — and the
+   * row reports why on the console once per connection.
+   */
   #appendTag(value: string): boolean {
     if (!this.hasTagsTarget) return false;
-    if (!this.hasTagTemplateTarget) return this.#warnTemplate('a "tagTemplate" target');
-    const fragment = this.tagTemplateTarget.content.cloneNode(true) as DocumentFragment;
-    const tag = fragment.querySelector<HTMLElement>('[data-stimeo--tags-input-target~="tag"]');
-    const label = fragment.querySelector<HTMLElement>('[data-stimeo--tags-input-target~="label"]');
-    const button = fragment.querySelector<HTMLButtonElement>(
-      'button[data-stimeo--tags-input-target~="remove"]',
-    );
-    const removeName = button?.getAttribute("aria-label")?.trim() ?? "";
-    if (!tag) return this.#warnTemplate('a "tag" target');
-    if (!label) return this.#warnTemplate('a "label" target');
-    if (!button) return this.#warnTemplate('a "remove" target <button>');
-    if (removeName === "") {
-      return this.#warnTemplate('a non-empty aria-label on its "remove" target');
+    if (!this.hasTagTemplateTarget) {
+      this.#rows.report('a "tagTemplate" target');
+      return false;
     }
-    tag.dataset.value = value;
-    label.textContent = value;
-    button.setAttribute("aria-label", fillTemplate(removeName, { label: value, value }));
-    button.tabIndex = -1;
-    this.tagsTarget.appendChild(fragment);
+    const row = this.#rows.instantiate(this.tagTemplateTarget, { label: value, value });
+    if (!row) return false;
+    row.root.dataset.value = value;
+    writeLabel(row.slots.label, value);
+    // Chip buttons are a single Tab stop the roving helper hands out.
+    row.button.tabIndex = -1;
+    this.tagsTarget.appendChild(row.root);
     return true;
-  }
-
-  /**
-   * Reports an unusable chip template to the author, once per connection.
-   *
-   * The commit itself stays a no-op — nothing about the input, the tag set, the
-   * hidden fields, the announcement, or the events changes. Without this line
-   * the only symptom is a field that accepts no tags at all, and the two causes
-   * the Inspector cannot see statically (a name that renders empty from a
-   * missing translation, a server-rendered template) would have no diagnostic
-   * anywhere.
-   */
-  #warnTemplate(missing: string): false {
-    if (!this.#warnedTemplate) {
-      this.#warnedTemplate = true;
-      console.warn(
-        `Stimeo UI: "${this.identifier}" added no tag because its chip template lacks ${missing}.`,
-      );
-    }
-    return false;
   }
 
   /** Removes the tag at `index`, then applies the interaction-origin focus policy. */
@@ -274,7 +278,7 @@ export class TagsInputController extends Controller<HTMLElement> {
     const value = tag.dataset.value ?? "";
     tag.remove();
     const tags = this.#values;
-    this.#syncState(tags);
+    this.#syncState(tags, true);
     this.#tagValues = tags;
     this.#announceTransition(false, value, tags.length);
     this.dispatch("change", { detail: { tags } });
@@ -290,21 +294,20 @@ export class TagsInputController extends Controller<HTMLElement> {
     if (this.hasInputTarget) this.inputTarget.focus();
   }
 
-  /** Rebuilds the hidden form fields, the `full` flag, and the roving Tab stop. */
-  #syncState(values: readonly string[]): void {
+  /**
+   * Rebuilds the hidden form fields, the `full` flag, and the roving Tab stop.
+   *
+   * @stimeoRenderRoot
+   */
+  #syncState(values: readonly string[], notify = false): void {
     if (this.hasFieldsTarget) {
-      this.fieldsTarget.replaceChildren(
-        ...values.map((value) => {
-          const input = document.createElement("input");
-          input.type = "hidden";
-          input.name = this.nameValue;
-          input.value = value;
-          return input;
-        }),
-      );
+      const options = { name: this.nameValue, form: this.formValue };
+      if (writeFields(this.fieldsTarget, values, options) && notify) {
+        commitField(this.fieldsTarget);
+      }
     }
     const full = this.maxValue > 0 && values.length >= this.maxValue;
-    this.element.toggleAttribute("data-stimeo--tags-input-full", full);
+    this.element.toggleAttribute(`data-${this.identifier}-full`, full);
     // Keep exactly one remove button tabbable so the chip list is a single stop.
     this.#chipRow.ensureTabStop();
   }
@@ -320,7 +323,11 @@ export class TagsInputController extends Controller<HTMLElement> {
     if (changed) this.dispatch("reconcile", { detail: { tags } });
   }
 
-  /** Sends one localized tag transition through the page's shared announcer. */
+  /**
+   * Sends one localized tag transition through the page's shared announcer.
+   *
+   * @stimeoRuntimeOnly The texts word the one announcement of this change.
+   */
   #announceTransition(added: boolean, value: string, count: number): void {
     const template = added ? this.announceTextValue : this.announceRemovedTextValue;
     announce(fillTemplate(template, { label: value, value, count }));

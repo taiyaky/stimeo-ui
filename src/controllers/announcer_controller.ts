@@ -32,8 +32,9 @@ type Level = (typeof LEVELS)[number];
  *     detail: { message: "12 results", assertive: false },
  *   }))
  *
- * The announcer is the shared substrate other controllers (Auto-Submit, Flash,
- * Bulk Select, …) lean on instead of each carrying their own live region.
+ * The announcer is the shared live region other controllers hand their messages
+ * to (`stimeo--auto-submit`, `stimeo--flash` and `stimeo--bulk-select` among
+ * them) instead of each carrying their own.
  *
  * @remarks
  * Behavior only, with **one deliberate exception**: when a `polite`/`assertive`
@@ -289,6 +290,9 @@ export class AnnouncerController extends Controller<HTMLElement> {
    * region (it has to be in the accessibility tree before the text arrives) and
    * emptying a region that already holds this exact text (an unchanged node is not
    * re-read, so `dedupeReannounce` clears first and writes on the following pass).
+   *
+   * @stimeoRuntimeOnly `dedupeReannounce` decides whether one queued message is spoken again; the
+   *   region's text is the message itself.
    */
   #drain(level: Level): void {
     const queue = this.#queues.get(level);
@@ -317,7 +321,11 @@ export class AnnouncerController extends Controller<HTMLElement> {
     if (queue.length > 0) this.#scheduleDrain(level);
   }
 
-  /** Clears the region after `clearAfter` ms, unless a newer message replaced it. */
+  /**
+   * Clears the region after `clearAfter` ms, unless a newer message replaced it.
+   *
+   * @stimeoRuntimeOnly `clearAfter` is the delay of the one clearing timer this call arms.
+   */
   #scheduleClear(region: HTMLElement, message: string): void {
     if (this.clearAfterValue <= 0) return;
     this.#regionTimers.set(

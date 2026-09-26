@@ -75,22 +75,61 @@ describe("extract helpers", () => {
   });
 
   it("decodes stimeo data-action descriptors into identifier + method + event", () => {
+    // The offsets locate each name inside the attribute value, which is what a fix
+    // range needs: searching the value for the name alone can land inside another
+    // descriptor that contains it. `eventStart` is the descriptor's own start,
+    // which is where the event is spelled when one is written.
     expect(
       actionDescriptors("click->stimeo--menu#toggle keydown->stimeo--menu#onItemKeydown"),
     ).toEqual([
-      { identifier: "stimeo--menu", method: "toggle", eventType: "click" },
-      { identifier: "stimeo--menu", method: "onItemKeydown", eventType: "keydown" },
+      {
+        identifier: "stimeo--menu",
+        identifierStart: 7,
+        method: "toggle",
+        methodStart: 20,
+        eventType: "click",
+        eventStart: 0,
+      },
+      {
+        identifier: "stimeo--menu",
+        identifierStart: 36,
+        method: "onItemKeydown",
+        methodStart: 49,
+        eventType: "keydown",
+        eventStart: 27,
+      },
     ]);
     // Default-event form, non-stimeo controllers skipped, options stripped.
     expect(actionDescriptors("stimeo--otp#onInput resize@window->other#x")).toEqual([
-      { identifier: "stimeo--otp", method: "onInput", eventType: "" },
+      {
+        identifier: "stimeo--otp",
+        identifierStart: 0,
+        method: "onInput",
+        methodStart: 12,
+        eventType: "",
+        eventStart: 0,
+      },
     ]);
     expect(actionDescriptors("click->stimeo--dialog#close:prevent")).toEqual([
-      { identifier: "stimeo--dialog", method: "close", eventType: "click" },
+      {
+        identifier: "stimeo--dialog",
+        identifierStart: 7,
+        method: "close",
+        methodStart: 22,
+        eventType: "click",
+        eventStart: 0,
+      },
     ]);
     // A global scope names the same event type as its element-bound spelling.
     expect(actionDescriptors("keydown@window->stimeo--dialog#close")).toEqual([
-      { identifier: "stimeo--dialog", method: "close", eventType: "keydown" },
+      {
+        identifier: "stimeo--dialog",
+        identifierStart: 16,
+        method: "close",
+        methodStart: 31,
+        eventType: "keydown",
+        eventStart: 0,
+      },
     ]);
   });
 

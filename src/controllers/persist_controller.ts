@@ -3,6 +3,10 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { readLocalStorage, removeLocalStorage, writeLocalStorage } from "../utils/safe_storage";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { parseStringList } from "../utils/string_list";
+import { TransientHooks } from "../utils/transient_hooks";
+
+/** The hook a connection may find written by an earlier, now-gone one. */
+const TRANSIENT = new TransientHooks({ attributes: ["data-persist-restored"] });
 
 /** Field controls this controller can persist. */
 type PersistField = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
@@ -166,7 +170,6 @@ export class PersistController extends Controller<HTMLElement> {
     this.#excluded = parseStringList(this.excludeValue, DEFAULT_EXCLUDE);
     this.#knownFields = new WeakSet<PersistField>();
     this.#forcedRestore.clear();
-    this.element.removeAttribute("data-persist-restored");
 
     this.element.addEventListener("input", this.#onInput);
     this.element.addEventListener("change", this.#onInput);
@@ -177,7 +180,7 @@ export class PersistController extends Controller<HTMLElement> {
       attributeFilter: [
         "checked",
         "data-controller",
-        "data-stimeo--persist-target",
+        `data-${this.identifier}-target`,
         "id",
         "multiple",
         "name",
@@ -201,7 +204,7 @@ export class PersistController extends Controller<HTMLElement> {
     this.#restoreDynamic.cancel();
     this.#forcedRestore.clear();
     this.#timeouts.clearAll();
-    this.element.removeAttribute("data-persist-restored");
+    TRANSIENT.reset(this.element);
     this.#payload = null;
   }
 
@@ -314,7 +317,7 @@ export class PersistController extends Controller<HTMLElement> {
 
   /** Reads, validates, and restores the active namespace. */
   #loadActiveDraft(): void {
-    this.element.removeAttribute("data-persist-restored");
+    TRANSIENT.reset(this.element);
     this.#payload = null;
     this.#knownFields = new WeakSet<PersistField>();
     this.#forcedRestore.clear();
@@ -491,7 +494,7 @@ export class PersistController extends Controller<HTMLElement> {
 
   /** Whether this instance, rather than a nested Persist host, owns a field. */
   #ownsField(field: PersistField): boolean {
-    return field.closest('[data-controller~="stimeo--persist"]') === this.element;
+    return field.closest(`[data-controller~="${this.identifier}"]`) === this.element;
   }
 
   /** Marks all currently eligible fields without applying a payload. */
@@ -531,7 +534,12 @@ export class PersistController extends Controller<HTMLElement> {
     return name.length > 0 && !/\s/.test(name) ? name : null;
   }
 
-  /** Collects dynamic controls and select-option changes into one restore pass. */
+  /**
+   * Collects dynamic controls and select-option changes into one restore pass.
+   *
+   * @stimeoRuntimeOnly `key` decides whether an id change moves the storage namespace; it decides
+   *   nothing shown.
+   */
   #onMutations(records: MutationRecord[]): void {
     let rootIdChanged = false;
     for (const record of records) {
@@ -583,7 +591,12 @@ export class PersistController extends Controller<HTMLElement> {
     }
   }
 
-  /** Resolves the logical key from the Value, falling back to the host id. */
+  /**
+   * Resolves the logical key from the Value, falling back to the host id.
+   *
+   * @stimeoRuntimeOnly `key` names the storage namespace; the restored fields come from what is
+   *   stored there.
+   */
   #resolveLogicalKey(): string | null {
     const key = this.keyValue || this.element.id;
     return key.length > 0 ? key : null;
@@ -594,7 +607,7 @@ export class PersistController extends Controller<HTMLElement> {
     return `${STORAGE_PREFIX}${logicalKey}`;
   }
 
-  /** Normalizes invalid debounce Values to the documented default. */
+  /** Normalizes an invalid `debounce` Value to the `debounce` default. */
   get #debounceDelay(): number {
     const value = this.debounceValue;
     return Number.isFinite(value) && value >= 0 ? value : DEFAULT_DEBOUNCE;

@@ -2,7 +2,9 @@ import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { DetachGate } from "../utils/detach_gate";
+import { matchingPart, writeLabel } from "../utils/element_part";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
+import { TemplateRow } from "../utils/template_row";
 
 /** Why one file was turned away, in the order the checks run. */
 type RejectReason = "type" | "size" | "duplicate" | "count";
@@ -10,8 +12,11 @@ type RejectReason = "type" | "size" | "duplicate" | "count";
 /** Present on the zone while a drag hovers it. */
 const DRAGOVER_ATTRIBUTE = "data-dragover";
 
-/** Present on the zone from the first rejection of a batch until the next batch. */
-const INVALID_ATTRIBUTE = "data-stimeo--file-dropzone-invalid";
+/**
+ * Suffix of the hook present on the zone from the first rejection of a batch until
+ * the next batch.
+ */
+const INVALID_ATTRIBUTE = "invalid";
 
 /** One selected file paired with its rendered item and any preview objectURL. */
 interface Entry {
@@ -107,6 +112,11 @@ interface RejectBatch {
  * that turns out to be an in-page move keeps the selection intact.
  */
 export class FileDropzoneController extends Controller<HTMLElement> {
+  /** The hook above, in the namespace this controller is registered under. */
+  get #invalidAttribute(): string {
+    return `data-${this.identifier}-${INVALID_ATTRIBUTE}`;
+  }
+
   static override targets = [
     "zone",
     "trigger",
@@ -160,15 +170,23 @@ export class FileDropzoneController extends Controller<HTMLElement> {
   readonly #entries: Entry[] = [];
   /** Whether a drag is currently over the zone; the source for `data-dragover`. */
   #dragging = false;
-  /** Whether this connection already reported its unusable item template. */
-  #warnedTemplate = false;
+  /** Builds one preview item from the authored template and owns its diagnostic. */
+  readonly #rows = new TemplateRow({
+    identifier: this.identifier,
+    root: "item",
+    required: ["name"],
+    optional: ["thumb"],
+    button: "remove",
+    outcome: "added no file",
+    noun: "item template",
+  });
   readonly #gate = new DetachGate();
   readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
 
   /** Subscribes to the Turbo cache rewind and re-arms the template diagnostic. */
   override connect(): void {
     this.#gate.cancel();
-    this.#warnedTemplate = false;
+    this.#rows.connect();
     this.#beforeCache.activate();
   }
 
@@ -271,16 +289,21 @@ export class FileDropzoneController extends Controller<HTMLElement> {
    */
   readonly #onItemClick = (event: MouseEvent): void => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
-      'button[data-stimeo--file-dropzone-target~="remove"]',
+      `button${this.#rows.selector("remove")}`,
     );
     const index = this.#entries.findIndex((entry) => entry.item.contains(button));
     if (index !== -1) this.#removeAt(index);
   };
 
-  /** Validates each incoming file, renders the accepted ones, and reports the batch. */
+  /**
+   * Validates each incoming file, renders the accepted ones, and reports the batch.
+   *
+   * @stimeoRuntimeOnly The limits decide which files of this one drop are taken, and the texts word
+   *   the announcements it makes.
+   */
   #addFiles(files: FileList): void {
     this.#rehome();
-    if (this.hasZoneTarget) this.zoneTarget.removeAttribute(INVALID_ATTRIBUTE);
+    if (this.hasZoneTarget) this.zoneTarget.removeAttribute(this.#invalidAttribute);
     const rejected = new Map<RejectReason, RejectBatch>();
     const turnedAway: Array<{ file: File; reason: RejectReason }> = [];
     let addedName = "";
@@ -288,7 +311,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
     for (const file of Array.from(files)) {
       const reason = this.#validate(file);
       if (reason !== null) {
-        if (this.hasZoneTarget) this.zoneTarget.setAttribute(INVALID_ATTRIBUTE, "");
+        if (this.hasZoneTarget) this.zoneTarget.setAttribute(this.#invalidAttribute, "");
         const batch = rejected.get(reason);
         if (batch) batch.count += 1;
         else rejected.set(reason, { name: file.name, count: 1 });
@@ -347,27 +370,26 @@ export class FileDropzoneController extends Controller<HTMLElement> {
   /**
    * Builds one preview item (name, optional thumbnail, remove button) and reports
    * whether it was rendered.
+   *
+   * A refused row leaves the addition a no-op — nothing about the selection, the
+   * native input, the announcements, or the events changes — and the row reports
+   * why on the console once per connection.
    */
   #appendFile(file: File): boolean {
-    if (!this.hasListTarget) return this.#warnTemplate('a "list" target to render into');
-    if (!this.hasItemTemplateTarget) return this.#warnTemplate('an "itemTemplate" target');
-    const fragment = this.itemTemplateTarget.content.cloneNode(true) as DocumentFragment;
-    const item = this.#slot(fragment, "item");
-    const name = this.#slot(fragment, "name");
-    const thumb = this.#slot<HTMLImageElement>(fragment, "thumb");
-    const button = fragment.querySelector<HTMLButtonElement>(
-      'button[data-stimeo--file-dropzone-target~="remove"]',
-    );
-    const removeName = button?.getAttribute("aria-label")?.trim() ?? "";
-    if (!item) return this.#warnTemplate('an "item" root');
-    if (!name) return this.#warnTemplate('a "name" element');
-    if (!button) return this.#warnTemplate('a "remove" target <button>');
-    if (removeName === "") {
-      return this.#warnTemplate('a non-empty aria-label on its "remove" target');
+    if (!this.hasListTarget) {
+      this.#rows.report('a "list" target to render into');
+      return false;
     }
-    name.textContent = file.name;
-    // The authored label owns the wording and the language; only `{name}` is filled.
-    button.setAttribute("aria-label", fillTemplate(removeName, { name: file.name }));
+    if (!this.hasItemTemplateTarget) {
+      this.#rows.report('an "itemTemplate" target');
+      return false;
+    }
+    const row = this.#rows.instantiate(this.itemTemplateTarget, { name: file.name });
+    if (!row) return false;
+    const item = row.root;
+    writeLabel(row.slots.name, file.name);
+    // A declared thumbnail is the authored `<img>`; nothing else can take a `src`.
+    const thumb = row.slots.thumb as HTMLImageElement | null;
 
     let url: string | undefined;
     if (thumb && file.type.startsWith("image/")) {
@@ -379,33 +401,9 @@ export class FileDropzoneController extends Controller<HTMLElement> {
       thumb.hidden = true;
     }
 
-    this.listTarget.appendChild(fragment);
+    this.listTarget.appendChild(item);
     this.#entries.push({ file, item, url });
     return true;
-  }
-
-  /** Resolves one declared part inside a cloned item template. */
-  #slot<T extends HTMLElement = HTMLElement>(fragment: DocumentFragment, name: string): T | null {
-    return fragment.querySelector<T>(`[data-stimeo--file-dropzone-target~="${name}"]`);
-  }
-
-  /**
-   * Reports an unusable item template to the author, once per connection.
-   *
-   * The addition itself stays a no-op — nothing about the selection, the native
-   * input, the announcements, or the events changes. Without this line the only
-   * symptom is a picker that accepts no file at all, and the causes the Inspector
-   * cannot see statically (a server-rendered template, a name that renders empty
-   * from a missing translation) would have no diagnostic anywhere.
-   */
-  #warnTemplate(missing: string): false {
-    if (!this.#warnedTemplate) {
-      this.#warnedTemplate = true;
-      console.warn(
-        `Stimeo UI: "${this.identifier}" added no file because its item template lacks ${missing}.`,
-      );
-    }
-    return false;
   }
 
   /** Removes entry `index`, revokes its preview, and re-homes focus. */
@@ -533,7 +531,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
     this.#entries.length = 0;
     this.#syncInput();
     this.#endDrag();
-    if (this.hasZoneTarget) this.zoneTarget.removeAttribute(INVALID_ATTRIBUTE);
+    if (this.hasZoneTarget) this.zoneTarget.removeAttribute(this.#invalidAttribute);
   }
 
   /** Releases the selection once the disconnect is known to be a real detach. */
@@ -557,8 +555,9 @@ export class FileDropzoneController extends Controller<HTMLElement> {
   get #removeButtons(): HTMLButtonElement[] {
     const buttons: HTMLButtonElement[] = [];
     for (const entry of this.#entries) {
-      const button = entry.item.querySelector<HTMLButtonElement>(
-        'button[data-stimeo--file-dropzone-target~="remove"]',
+      const button = matchingPart<HTMLButtonElement>(
+        entry.item,
+        `button${this.#rows.selector("remove")}`,
       );
       if (button) buttons.push(button);
     }

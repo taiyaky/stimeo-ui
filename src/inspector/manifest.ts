@@ -2,6 +2,7 @@ import { cableControllers } from "../cable";
 import { stimeoControllers } from "../index";
 import { positioningControllers } from "../positioning";
 import { a11yRules } from "./a11y_rules";
+import { actionParamRules } from "./action_param_rules";
 import { cardinalityRules } from "./cardinality_rules";
 import { companionRules } from "./companion_rules";
 import { compositionRules } from "./composition_rules";
@@ -20,7 +21,7 @@ import { valueRelationRules } from "./value_relation_rules";
  * `schemaVersion`. Bump on breaking schema changes; a reader compares it with
  * the shape its own engine knows how to consume.
  */
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 14;
 
 /**
  * Minimal structural view of a Stimulus controller class, exposing only the
@@ -74,6 +75,9 @@ export function buildManifest(packageVersion: string): Manifest {
   const allManagedAriaRules = {
     ...managedAriaRules,
   };
+  const allActionParamRules = {
+    ...actionParamRules,
+  };
   for (const [identifier, ctor] of Object.entries(allControllers)) {
     const reflect = ctor as unknown as ReflectableController;
     const rule = allStructureRules[identifier];
@@ -84,10 +88,12 @@ export function buildManifest(packageVersion: string): Manifest {
       valueConstraints: [...(valueConstraintRules[identifier] ?? [])],
       valueSyntaxConstraints: [...(valueSyntaxConstraintRules[identifier] ?? [])],
       valueRelations: [...(valueRelationRules[identifier] ?? [])],
+      actionParams: [...(allActionParamRules[identifier] ?? [])],
       actions: [...(reflect.actions ?? [])],
       events: [...(reflect.events ?? [])],
       requiredTargets: [...(rule?.requiredTargets ?? [])],
       conditionalTargets: [...(rule?.conditionalTargets ?? [])],
+      templateRoots: [...(rule?.templateRoots ?? [])],
       requiredActions: [...(rule?.requiredActions ?? [])],
       actionCompletion: [...(rule?.actionCompletion ?? [])],
       a11y: [...(allA11yRules[identifier] ?? [])],

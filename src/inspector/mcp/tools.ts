@@ -297,6 +297,34 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
       ...STRING_ARRAY,
       description: "Targets that must be present at least once inside the controller scope.",
     },
+    actionParams: {
+      type: "array",
+      description:
+        "What each action reads out of `event.params`. Stimulus builds them from " +
+        "`data-<identifier>-<param>-param` on the element carrying the `data-action`; " +
+        "a missing or misspelled one leaves the action bound and doing nothing.",
+      items: {
+        type: "object",
+        properties: {
+          action: { type: "string", description: "The action method the param belongs to." },
+          param: { type: "string", description: "The param name, as `event.params` reads it." },
+          required: {
+            type: "boolean",
+            description: "True when the action can reach the value no other way.",
+          },
+          allowedValues: {
+            ...STRING_ARRAY,
+            description: "The literal values the reader accepts, when it accepts a fixed set.",
+          },
+          integer: {
+            type: "boolean",
+            description: "True when the reader takes a whole number and returns on anything else.",
+          },
+          suggestion: { type: "string" },
+        },
+        required: ["action", "param", "suggestion"],
+      },
+    },
     conditionalTargets: {
       type: "array",
       description:
@@ -308,9 +336,34 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
         properties: {
           whenPresent: { type: "string", description: "The optional target that turns it on." },
           require: { ...STRING_ARRAY, description: "Targets required once it appears." },
+          requireSameTargetHost: {
+            type: "string",
+            description:
+              "Target name of the element each required entry must share with `whenPresent`. " +
+              "A pair resolved per host — halves split across two of them leave both incomplete.",
+          },
           suggestion: { type: "string" },
         },
         required: ["whenPresent", "require", "suggestion"],
+      },
+    },
+    templateRoots: {
+      type: "array",
+      description:
+        "`<template>` targets whose content must be exactly one element — the row the " +
+        "controller clones. A row is cloned on its own, so a wrapper around it, or a " +
+        "second element beside it, is never rendered and the widget adds nothing.",
+      items: {
+        type: "object",
+        properties: {
+          template: { type: "string", description: "Target name of the `<template>`." },
+          rootTarget: {
+            type: "string",
+            description: "Target its one element must carry, where the row is a declared part.",
+          },
+          suggestion: { type: "string" },
+        },
+        required: ["template", "suggestion"],
       },
     },
     requiredActions: {
@@ -568,10 +621,12 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
     "values",
     "valueConstraints",
     "valueRelations",
+    "actionParams",
     "actions",
     "events",
     "requiredTargets",
     "conditionalTargets",
+    "templateRoots",
     "requiredActions",
     "actionCompletion",
     "a11y",

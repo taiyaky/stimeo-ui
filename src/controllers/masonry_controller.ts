@@ -177,8 +177,6 @@ export class MasonryController extends Controller<HTMLElement> {
    * once per pass. The assignment is independent of the measurement because the
    * columns are uniform in width, so the order of the two passes does not change
    * the result.
-   *
-   * @stimeoRenderRoot
    */
   #relayout(): void {
     const items = this.itemTargets;

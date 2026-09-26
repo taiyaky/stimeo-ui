@@ -7,20 +7,37 @@ import { SafeTimeout } from "../utils/safe_timeout";
 import { TabindexLoan } from "../utils/tabindex_loan";
 import type { MenuController } from "./menu_controller";
 
-/** Marks an item that currently lives in the More menu (survives a DOM snapshot). */
-const BANKED = "data-stimeo--overflow-menu-banked";
-/** Canonical index persisted while anything is banked, so a fresh instance can re-adopt. */
-const INDEX = "data-stimeo--overflow-menu-index";
-/** Inert split point retained only while every managed item is banked. */
-const BOUNDARY = "data-stimeo--overflow-menu-boundary";
-/** Authored values saved while an item wears menu semantics ("" = attribute was absent). */
-const SAVED_ROLE = "data-stimeo--overflow-menu-role";
-const SAVED_TABINDEX = "data-stimeo--overflow-menu-tabindex";
-const SAVED_MENU_TARGET = "data-stimeo--overflow-menu-saved-menu";
+/** Suffix of the marker on an item living in the More menu (survives a DOM snapshot). */
+const BANKED = "banked";
+/**
+ * Suffix of the canonical index persisted while anything is banked, so a fresh
+ * instance can re-adopt.
+ */
+const INDEX = "index";
+/**
+ * Suffix of the marker on the inert split point retained only while every managed
+ * item is banked.
+ */
+const BOUNDARY = "boundary";
+/**
+ * Suffixes of the attributes saving an item's authored values while it wears menu
+ * semantics ("" = attribute was absent).
+ */
+const SAVED_ROLE = "role";
+const SAVED_TABINDEX = "tabindex";
+const SAVED_MENU_TARGET = "saved-menu";
 /** Menu's target attribute — set to `item` while banked so Menu drives the item. */
 const MENU_TARGET = "data-stimeo--menu-target";
 /** Everything this controller writes on an item; all removed on the way back to the bar. */
 const BOOKKEEPING = [BANKED, INDEX, SAVED_ROLE, SAVED_TABINDEX, SAVED_MENU_TARGET] as const;
+/**
+ * Suffix of the marker on the More label this controller wrote into the trigger;
+ * the marker holds that label as its value. The trigger is this controller's only
+ * while it holds that label and nothing else: text the consumer rewrites there, or
+ * an element child, an `aria-label` or an `aria-labelledby` they add, makes it
+ * theirs.
+ */
+const OWNED_LABEL = "owns-label";
 
 /** `ParentNode.moveBefore` (Chromium 133+): relocates a node without removing it first. */
 interface MovableParent {
@@ -47,7 +64,7 @@ interface MovableParent {
  *       <div role="menu" aria-labelledby="more-trigger"
  *            data-stimeo--menu-target="menu" hidden></div>
  *     </div>
- *   </div>
+ *   </nav>
  *
  * This controller does not own the root's role. It ships none: a navigation bar is
  * a named `<nav>` whose items stay in the normal Tab order. A consumer may add
@@ -67,6 +84,18 @@ interface MovableParent {
  * element, so a control that only becomes a menu item at runtime is operable the
  * moment it lands.
  *
+ * A bare More trigger — no text, no element child, no `aria-label` or
+ * `aria-labelledby` — gets `moreLabel` as its text on every pass, before the pass
+ * measures it, marked with `data-<identifier>-owns-label` whose value is that
+ * label. The trigger stays this controller's only while it holds that label and
+ * nothing else — the text still matches the marker, and it has no element child,
+ * `aria-label` or `aria-labelledby` — and only then does a `moreLabel` swapped at
+ * runtime rewrite it, or an empty one hand it back bare. Any other trigger content
+ * is the author's and is never written: a trigger the consumer has rewritten, or
+ * added an element child or a name to, is neither rewritten nor emptied, and its
+ * marker stays where it is. Once it holds the label alone again, it is this
+ * controller's again.
+ *
  * On connect (and every debounced resize) it measures the items against the container's
  * content width and, when they overflow, banks the lowest-priority ones into the More
  * menu — giving each `role="menuitem"` / `tabindex="-1"` and the menu's `item` target so
@@ -75,7 +104,7 @@ interface MovableParent {
  * `data-overflowing` / `data-overflow-count`, and a `change` event fires on connect and
  * on every later transition.
  *
- * `change` dispatches `{ visible, hidden }`.
+ * `change` dispatches `{ overflowCount, total }`.
  *
  * @remarks
  * **Measuring.** The container's width must not be derived from its content (give the bar
@@ -116,14 +145,21 @@ interface MovableParent {
  * a morph, a clone, server-rendered overflow) re-adopts them instead of orphaning them
  * inside a wrapper it would then hide. Symmetrically, `disconnect()` and
  * `turbo:before-cache` return every item to the bar, collapse the composed menu (so it
- * releases its dismissal-stack membership rather than being snapshotted mid-gesture), and
- * strip this controller's bookkeeping attributes, so a cached snapshot is always the
- * pristine authored DOM. The `ResizeObserver` and debounce timer are released on
- * `disconnect()` too.
+ * releases its dismissal-stack membership rather than being snapshotted mid-gesture),
+ * take back the More label the trigger still holds alone, and strip the items'
+ * bookkeeping attributes, so a cached snapshot is the authored DOM. A trigger the
+ * consumer added to after the label was written keeps the label and its marker:
+ * taking either off would write to content that belongs to the consumer. The
+ * `ResizeObserver` and debounce timer are released on `disconnect()` too.
  *
  * Behavior only — no styling.
  */
 export class OverflowMenuController extends Controller<HTMLElement> {
+  /** One bookkeeping attribute, in the namespace this controller is registered under. */
+  #attr(name: string): string {
+    return `data-${this.identifier}-${name}`;
+  }
+
   static override targets = ["items", "more"];
   static override values = {
     moreLabel: { type: String, default: "More" },
@@ -152,16 +188,17 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   /** The `tabindex` this instance lends the root for the focus fallback. */
   readonly #tabindex = new TabindexLoan();
 
-  /** Hands Turbo a pristine snapshot of the bar, with every item back in place. */
+  /** Hands Turbo a snapshot of the bar with every item back in place. */
   readonly #beforeCache = new BeforeCacheReset(() => this.#restoreAll());
+  /**
+   * Whether `connect()` has run for this connection. Stimulus delivers Value
+   * callbacks ahead of it, and the first pass writes the label anyway.
+   */
+  #connected = false;
 
   override connect(): void {
+    this.#connected = true;
     if (!this.hasItemsTarget || !this.hasMoreTarget) return;
-
-    const trigger = this.#trigger();
-    if (trigger !== null && this.#isBareTrigger(trigger)) {
-      trigger.textContent = this.moreLabelValue;
-    }
 
     this.#beforeCache.activate();
     this.#layout.observe(this.element);
@@ -170,6 +207,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
+    this.#connected = false;
     this.#layout.disconnect();
     this.#timers.clearAll();
     this.#beforeCache.deactivate();
@@ -177,9 +215,22 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     this.#lastHidden = null;
   }
 
+  /**
+   * Follows a More label swapped in place by a morph, on a trigger that still holds
+   * the label this controller wrote and nothing else. Render only: nothing is
+   * measured and `change` is not dispatched here; the next pass measures the bar.
+   */
+  moreLabelValueChanged(): void {
+    if (!this.#connected || !this.hasItemsTarget || !this.hasMoreTarget) return;
+    this.#syncLabel();
+  }
+
   /** Re-measures and rebalances items between the bar and the More menu. */
   update(): void {
     if (!this.hasItemsTarget || !this.hasMoreTarget) return;
+    // The label is part of the More button's width, so it is in place before the
+    // button is measured below.
+    this.#syncLabel();
     this.#syncItems();
 
     // Reveal More so its trigger is measurable, then refresh the widths of the items
@@ -277,8 +328,8 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     // emptied, also retain an inert split point: a later prepend lands before it and an
     // append after it, preserving intent when a fresh controller adopts the snapshot.
     for (const item of this.#items) {
-      if (count > 0) item.setAttribute(INDEX, String(this.#indexOf(item)));
-      else item.removeAttribute(INDEX);
+      if (count > 0) item.setAttribute(this.#attr(INDEX), String(this.#indexOf(item)));
+      else item.removeAttribute(this.#attr(INDEX));
     }
     if (count > 0 && count === this.#items.length) this.#ensureBoundary();
     else this.#removeBoundary();
@@ -303,7 +354,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
 
     if (this.#lastHidden !== count) {
       this.#lastHidden = count;
-      this.dispatch("change", { detail: { visible: this.#items.length - count, hidden: count } });
+      this.dispatch("change", { detail: { overflowCount: count, total: this.#items.length } });
     }
   }
 
@@ -338,7 +389,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     const bar: HTMLElement[] = [];
     let boundaryAt: number | undefined;
     for (const el of this.itemsTarget.children) {
-      if (el instanceof HTMLTemplateElement && el.hasAttribute(BOUNDARY)) {
+      if (el instanceof HTMLTemplateElement && el.hasAttribute(this.#attr(BOUNDARY))) {
         boundaryAt ??= bar.length;
         continue;
       }
@@ -347,7 +398,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
 
     const banked: HTMLElement[] = [];
     for (const el of this.#menuList().children) {
-      if (el instanceof HTMLElement && el.hasAttribute(BANKED)) banked.push(el);
+      if (el instanceof HTMLElement && el.hasAttribute(this.#attr(BANKED))) banked.push(el);
     }
     banked.sort((a, b) => this.#bankedIndex(a) - this.#bankedIndex(b));
 
@@ -358,7 +409,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     for (const el of previous) {
       if (!items.includes(el)) {
         this.#unbank(el);
-        el.removeAttribute(INDEX);
+        el.removeAttribute(this.#attr(INDEX));
       }
     }
 
@@ -442,7 +493,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
 
   /** A finite canonical index stored on either side of the overflow split. */
   #savedIndex(item: HTMLElement): number | undefined {
-    const raw = item.getAttribute(INDEX);
+    const raw = item.getAttribute(this.#attr(INDEX));
     if (raw === null) return undefined;
     const value = Number(raw);
     return Number.isFinite(value) ? value : undefined;
@@ -451,7 +502,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   /** The inert split point written only when every managed item lives in More. */
   #boundary(): HTMLTemplateElement | null {
     for (const el of this.itemsTarget.children) {
-      if (el instanceof HTMLTemplateElement && el.hasAttribute(BOUNDARY)) return el;
+      if (el instanceof HTMLTemplateElement && el.hasAttribute(this.#attr(BOUNDARY))) return el;
     }
     return null;
   }
@@ -459,7 +510,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   #ensureBoundary(): void {
     if (this.#boundary() !== null) return;
     const boundary = document.createElement("template");
-    boundary.setAttribute(BOUNDARY, "");
+    boundary.setAttribute(this.#attr(BOUNDARY), "");
     this.itemsTarget.appendChild(boundary);
   }
 
@@ -486,18 +537,75 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   }
 
   /**
-   * Whether the More trigger is bare enough for the label to be safe to write.
-   * Assigning `textContent` replaces *every* child node, so a trigger holding an
-   * icon would silently lose it — and the loss is permanent, since the restore
-   * pass returns items but not authored trigger content. A trigger that already
-   * carries an accessible name is left alone too: injecting visible text under a
-   * different `aria-label` would make the label and the name disagree. A trigger
-   * with neither text, nor children, nor a name has nothing to lose and gets the
-   * fallback; one that is empty *and* unnamed is the only case the label rescues.
+   * Keeps the More trigger's text on `moreLabel` wherever that text is this
+   * controller's to write: a bare trigger, or one still holding the label this
+   * controller wrote and nothing else. An empty `moreLabel` hands such a trigger
+   * back bare. A pass that finds the label already in place writes nothing, and a
+   * trigger that is neither is not written at all.
+   *
+   * @stimeoRenderRoot
+   */
+  #syncLabel(): void {
+    const trigger = this.#trigger();
+    if (trigger === null) return;
+    const owned = this.#ownsLabel(trigger);
+    if (!owned && !this.#isBareTrigger(trigger)) return;
+    const label = this.moreLabelValue;
+    if (label === "") {
+      this.#releaseLabel(trigger);
+      return;
+    }
+    if (owned && trigger.textContent === label) return;
+    trigger.textContent = label;
+    trigger.setAttribute(this.#attr(OWNED_LABEL), label);
+  }
+
+  /**
+   * Whether the trigger holds the label this controller wrote there and nothing
+   * else: the text still matches the marker, and the trigger carries nothing but
+   * text. Ownership is read afresh on every call, so a trigger the consumer adds to
+   * is theirs for as long as the addition is there.
+   */
+  #ownsLabel(trigger: HTMLElement): boolean {
+    return (
+      trigger.getAttribute(this.#attr(OWNED_LABEL)) === trigger.textContent &&
+      this.#carriesOnlyText(trigger)
+    );
+  }
+
+  /**
+   * Takes the label this controller wrote back out of the trigger, leaving it bare.
+   * A trigger that is not this controller's is left exactly as it is, marker
+   * included: taking the marker off would itself write to it.
+   */
+  #releaseLabel(trigger: HTMLElement): void {
+    if (!this.#ownsLabel(trigger)) return;
+    trigger.textContent = "";
+    trigger.removeAttribute(this.#attr(OWNED_LABEL));
+  }
+
+  /**
+   * Whether the More trigger is bare, so the label is safe to write: no text, no
+   * element child, no `aria-label` and no `aria-labelledby`. A trigger with neither
+   * text, nor children, nor a name has nothing to lose and gets the fallback; one
+   * that is empty *and* unnamed is the only case the label rescues.
    */
   #isBareTrigger(trigger: HTMLElement): boolean {
+    return (trigger.textContent ?? "").trim() === "" && this.#carriesOnlyText(trigger);
+  }
+
+  /**
+   * Whether the trigger carries nothing but text: no element child, no
+   * `aria-label` and no `aria-labelledby`. Assigning `textContent` replaces
+   * *every* child node, so a trigger holding an icon would silently lose it — and
+   * the loss is permanent, since only the label this controller wrote is ever
+   * taken back. A trigger that carries an accessible name is left alone too:
+   * visible text written under a different `aria-label` would make the label and
+   * the name disagree. Only a trigger that carries nothing but text is ever
+   * written or emptied.
+   */
+  #carriesOnlyText(trigger: HTMLElement): boolean {
     return (
-      (trigger.textContent ?? "").trim() === "" &&
       trigger.firstElementChild === null &&
       !trigger.hasAttribute("aria-label") &&
       !trigger.hasAttribute("aria-labelledby")
@@ -588,7 +696,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     this.#reorder(this.itemsTarget, this.#items);
     for (const item of this.#items) {
       this.#unbank(item);
-      item.removeAttribute(INDEX);
+      item.removeAttribute(this.#attr(INDEX));
     }
     // The wrapper is being hidden for good, so the composed menu must not stay
     // expanded behind it: an unclosed menu keeps its dismissal-stack membership
@@ -596,6 +704,8 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     // exactly where it is — this path runs at teardown, where moving it would be
     // the surprise.
     this.#closeMenu();
+    const trigger = this.#trigger();
+    if (trigger !== null) this.#releaseLabel(trigger);
     this.moreTarget.hidden = true;
     this.element.removeAttribute("data-overflowing");
     this.element.removeAttribute("data-overflow-count");
@@ -639,25 +749,25 @@ export class OverflowMenuController extends Controller<HTMLElement> {
    * saving every authored value it overwrites ("" means the attribute was absent).
    */
   #bank(item: HTMLElement): void {
-    if (!item.hasAttribute(BANKED)) {
-      item.setAttribute(BANKED, "true");
-      item.setAttribute(SAVED_ROLE, item.getAttribute("role") ?? "");
-      item.setAttribute(SAVED_TABINDEX, item.getAttribute("tabindex") ?? "");
-      item.setAttribute(SAVED_MENU_TARGET, item.getAttribute(MENU_TARGET) ?? "");
+    if (!item.hasAttribute(this.#attr(BANKED))) {
+      item.setAttribute(this.#attr(BANKED), "true");
+      item.setAttribute(this.#attr(SAVED_ROLE), item.getAttribute("role") ?? "");
+      item.setAttribute(this.#attr(SAVED_TABINDEX), item.getAttribute("tabindex") ?? "");
+      item.setAttribute(this.#attr(SAVED_MENU_TARGET), item.getAttribute(MENU_TARGET) ?? "");
       item.setAttribute("role", "menuitem");
       item.setAttribute("tabindex", "-1");
       item.setAttribute(MENU_TARGET, "item");
     }
-    item.setAttribute(INDEX, String(this.#indexOf(item)));
+    item.setAttribute(this.#attr(INDEX), String(this.#indexOf(item)));
   }
 
   /** Undoes the banking: restores every authored value and drops the bookkeeping. */
   #unbank(item: HTMLElement): void {
-    if (!item.hasAttribute(BANKED)) return;
-    this.#restoreAttr(item, "role", item.getAttribute(SAVED_ROLE));
-    this.#restoreAttr(item, "tabindex", item.getAttribute(SAVED_TABINDEX));
-    this.#restoreAttr(item, MENU_TARGET, item.getAttribute(SAVED_MENU_TARGET));
-    for (const name of BOOKKEEPING) item.removeAttribute(name);
+    if (!item.hasAttribute(this.#attr(BANKED))) return;
+    this.#restoreAttr(item, "role", item.getAttribute(this.#attr(SAVED_ROLE)));
+    this.#restoreAttr(item, "tabindex", item.getAttribute(this.#attr(SAVED_TABINDEX)));
+    this.#restoreAttr(item, MENU_TARGET, item.getAttribute(this.#attr(SAVED_MENU_TARGET)));
+    for (const name of BOOKKEEPING) item.removeAttribute(this.#attr(name));
   }
 
   /** Re-applies a saved attribute value, or removes the attribute when it was absent. */

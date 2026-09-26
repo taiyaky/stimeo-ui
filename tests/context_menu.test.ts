@@ -4,6 +4,7 @@ import { ContextMenuController } from "../src/controllers/context_menu_controlle
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -278,6 +279,149 @@ describe("ContextMenuController", () => {
     await tick();
 
     expect(menu().hidden).toBe(false);
+  });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    const openAtPointer = () =>
+      region().dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 4, clientY: 8 }),
+      );
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--context-menu");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a contextmenu open as user, after the state attributes are written", () => {
+      const states: string[] = [];
+      query("[data-controller='stimeo--context-menu']").addEventListener(
+        "stimeo--context-menu:open",
+        () => {
+          states.push(`${query("#ctx").hidden} ${region().getAttribute("data-state")}`);
+        },
+      );
+
+      openAtPointer();
+
+      expect(capture.names()).toEqual(["open"]);
+      expect(capture.reasons()).toEqual(["user"]);
+      expect(states).toEqual(["false open"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+    });
+
+    it("reports a keyboard open as user", () => {
+      region().dispatchEvent(new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true }));
+
+      expect(capture.reasons()).toEqual(["user"]);
+    });
+
+    it("reports activating an item as select", () => {
+      openAtPointer();
+      capture.clear();
+
+      query<HTMLButtonElement>("#copy").click();
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["select"]);
+    });
+
+    it("reports an outside click as outside", () => {
+      openAtPointer();
+      capture.clear();
+
+      query<HTMLButtonElement>("#outside").click();
+
+      expect(capture.reasons()).toEqual(["outside"]);
+    });
+
+    it("reports Escape as escape", () => {
+      openAtPointer();
+      capture.clear();
+
+      query("#copy").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+      expect(capture.reasons()).toEqual(["escape"]);
+    });
+
+    it("reports the deferred Tab close as focus", async () => {
+      openAtPointer();
+      capture.clear();
+
+      query("#copy").dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+      expect(capture.seen).toEqual([]);
+      await tick();
+
+      expect(capture.reasons()).toEqual(["focus"]);
+    });
+
+    it("stays silent for a repeated open at a new coordinate", () => {
+      openAtPointer();
+      capture.clear();
+
+      openAtPointer();
+
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("stays silent while connect normalizes an authored-open menu", async () => {
+      disconnectAndStopApplication(application);
+      document.body.innerHTML = `
+        <div data-controller="stimeo--context-menu">
+          <div id="region" data-stimeo--context-menu-target="region" data-state="open"></div>
+          <ul id="ctx" role="menu" data-stimeo--context-menu-target="menu"></ul>
+        </div>`;
+      const fresh = captureStateEvents("stimeo--context-menu");
+      application = Application.start();
+      application.register("stimeo--context-menu", ContextMenuController);
+      await tick();
+
+      expect(query("#ctx").hidden).toBe(true);
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+    });
+
+    it("stays silent through a disconnect and a Turbo-style reconnect", async () => {
+      openAtPointer();
+      capture.clear();
+
+      const element = query("[data-controller='stimeo--context-menu']");
+      element.remove();
+      await tick();
+      document.body.append(element);
+      await tick();
+
+      expect(query("#ctx").hidden).toBe(true);
+      expect(capture.seen).toEqual([]);
+    });
+  });
+
+  // --- Re-entry from a subscriber ---
+
+  describe("re-entry from a subscriber", () => {
+    it("leaves no focus inside the menu when the open handler closes it again", () => {
+      const host = query("[data-controller='stimeo--context-menu']");
+      const instance = application.getControllerForElementAndIdentifier(
+        host,
+        "stimeo--context-menu",
+      );
+      if (!(instance instanceof ContextMenuController)) throw new Error("controller not found");
+      host.addEventListener("stimeo--context-menu:open", () => instance.activate());
+
+      region().dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 4, clientY: 8 }),
+      );
+
+      expect(query("#ctx").hidden).toBe(true);
+      expect(query("#ctx").contains(document.activeElement)).toBe(false);
+    });
   });
 });
 

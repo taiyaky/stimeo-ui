@@ -23,7 +23,6 @@ const markup = `
             data-stimeo--overflow-indicator-direction-param="start"
             data-action="click->stimeo--overflow-indicator#scrollByPage">‹</button>
     <div data-stimeo--overflow-indicator-target="viewport"
-         data-action="scroll->stimeo--overflow-indicator#update"
          tabindex="0" role="region" aria-label="Products"
          style="overflow-x: auto;"><span>items</span></div>
     <button type="button" aria-label="Next"
@@ -320,7 +319,7 @@ describe("OverflowIndicatorController", () => {
 
   it("is a safe no-op without a viewport target", async () => {
     // The markup contract requires the viewport target, but a degraded / mid-morph
-    // DOM must not throw: update() and scrollByPage() simply do nothing.
+    // DOM must not throw: a resize and scrollByPage() simply do nothing.
     document.body.innerHTML = `
       <div data-controller="stimeo--overflow-indicator">
         <button type="button" id="lonely"
@@ -350,16 +349,6 @@ describe("OverflowIndicatorController", () => {
       { start: false, end: true },
       { start: true, end: true },
     ]);
-  });
-
-  it("updates on the viewport scroll action", async () => {
-    await start();
-    Object.defineProperty(viewport(), "scrollWidth", { configurable: true, value: 1000 });
-    Object.defineProperty(viewport(), "clientWidth", { configurable: true, value: 300 });
-    Object.defineProperty(viewport(), "scrollLeft", { configurable: true, value: 300 });
-    viewport().dispatchEvent(new Event("scroll"));
-    await tick();
-    expect(viewport().getAttribute("data-overflow-start")).toBe("true");
   });
 
   it("scrolls one page toward the requested direction", async () => {
@@ -443,7 +432,6 @@ describe("OverflowIndicatorController", () => {
                 data-stimeo--overflow-indicator-direction-param="start"
                 data-action="click->stimeo--overflow-indicator#scrollByPage">‹</button>
         <div data-stimeo--overflow-indicator-target="viewport"
-             data-action="scroll->stimeo--overflow-indicator#update"
              tabindex="0" role="region" aria-label="Products"
              style="overflow-x: auto;">items</div>
         <button type="button" aria-label="Next"
@@ -500,7 +488,6 @@ describe("OverflowIndicatorController", () => {
     const oldViewport = viewport();
     const replacement = document.createElement("div");
     replacement.setAttribute("data-stimeo--overflow-indicator-target", "viewport");
-    replacement.setAttribute("data-action", "scroll->stimeo--overflow-indicator#update");
     replacement.innerHTML = "<span>replacement</span>";
     Object.defineProperties(replacement, {
       scrollLeft: { configurable: true, value: 0 },
@@ -541,6 +528,29 @@ describe("OverflowIndicatorController", () => {
     expect(viewport().getAttribute("data-overflow-end")).toBe("true");
   });
 
+  // The two axes are read from different properties, so a runtime orientation
+  // change has to re-measure: the geometry below is at the end horizontally and at
+  // the start vertically, which is the only shape that tells the two apart.
+  it("switches which axis it measures when orientation changes at runtime", async () => {
+    await start();
+    layout({
+      scrollLeft: 700,
+      scrollWidth: 1000,
+      clientWidth: 300,
+      scrollTop: 0,
+      scrollHeight: 1000,
+      clientHeight: 300,
+    });
+    expect(viewport().getAttribute("data-overflow-start")).toBe("true");
+    expect(viewport().getAttribute("data-overflow-end")).toBe("false");
+
+    root().setAttribute("data-stimeo--overflow-indicator-orientation-value", "vertical");
+    await tick();
+
+    expect(viewport().getAttribute("data-overflow-start")).toBe("false");
+    expect(viewport().getAttribute("data-overflow-end")).toBe("true");
+  });
+
   it("ignores an invalid direction param without scrolling", async () => {
     await start();
     layout({ scrollLeft: 300, scrollWidth: 1000, clientWidth: 300 });
@@ -559,14 +569,12 @@ describe("OverflowIndicatorController", () => {
       <div id="outer" data-controller="stimeo--overflow-indicator">
         <button type="button" data-stimeo--overflow-indicator-direction-param="start"
                 data-action="click->stimeo--overflow-indicator#scrollByPage">Outer start</button>
-        <div id="outer-viewport" data-stimeo--overflow-indicator-target="viewport"
-             data-action="scroll->stimeo--overflow-indicator#update"></div>
+        <div id="outer-viewport" data-stimeo--overflow-indicator-target="viewport"></div>
         <div id="inner" data-controller="stimeo--overflow-indicator">
           <button id="inner-start" type="button"
                   data-stimeo--overflow-indicator-direction-param="start"
                   data-action="click->stimeo--overflow-indicator#scrollByPage">Inner start</button>
-          <div id="inner-viewport" data-stimeo--overflow-indicator-target="viewport"
-               data-action="scroll->stimeo--overflow-indicator#update"></div>
+          <div id="inner-viewport" data-stimeo--overflow-indicator-target="viewport"></div>
         </div>
       </div>`;
     application = Application.start();
@@ -593,7 +601,102 @@ describe("OverflowIndicatorController", () => {
     expect(innerStart.disabled).toBe(true);
   });
 
-  it("stops action, mutation, and load-driven updates after unload", async () => {
+  // The viewport's scroll is a measurement input the widget subscribes to itself,
+  // so the buttons read the scrolled state with no action wired by the consumer.
+  it("re-measures on the viewport's own scroll, without any wired action", async () => {
+    await start();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    expect(viewport().getAttribute("data-overflow-start")).toBe("false");
+
+    Object.defineProperty(viewport(), "scrollLeft", { configurable: true, value: 300 });
+    viewport().dispatchEvent(new Event("scroll"));
+    await tick();
+
+    expect(viewport().getAttribute("data-overflow-start")).toBe("true");
+    expect(button("start").disabled).toBe(false);
+  });
+
+  it("measures once per frame however many scrolls arrive in it", async () => {
+    await start();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    const writes = vi.spyOn(viewport(), "setAttribute");
+    const frames = vi.spyOn(globalThis, "requestAnimationFrame");
+
+    Object.defineProperty(viewport(), "scrollLeft", { configurable: true, value: 300 });
+    viewport().dispatchEvent(new Event("scroll"));
+    viewport().dispatchEvent(new Event("scroll"));
+    viewport().dispatchEvent(new Event("scroll"));
+    await tick();
+
+    expect(frames).toHaveBeenCalledOnce();
+    expect(
+      writes.mock.calls.filter(([attribute]) => attribute === "data-overflow-start"),
+    ).toHaveLength(1);
+  });
+
+  it("stops listening to a viewport it no longer holds", async () => {
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+    await start();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    const oldViewport = viewport();
+    const replacement = document.createElement("div");
+    replacement.setAttribute("data-stimeo--overflow-indicator-target", "viewport");
+    replacement.innerHTML = "<span>replacement</span>";
+    Object.defineProperties(replacement, {
+      scrollLeft: { configurable: true, value: 0 },
+      scrollWidth: { configurable: true, value: 1000 },
+      clientWidth: { configurable: true, value: 300 },
+    });
+    oldViewport.replaceWith(replacement);
+    await tick();
+    // The measurement, not the attributes, is what tells a released listener from
+    // a live one: a stale listener would re-measure the *current* viewport, whose
+    // geometry writes the same values the release already left behind.
+    const frames = vi.spyOn(globalThis, "requestAnimationFrame");
+
+    Object.defineProperty(oldViewport, "scrollLeft", { configurable: true, value: 300 });
+    oldViewport.dispatchEvent(new Event("scroll"));
+    await tick();
+
+    expect(frames).not.toHaveBeenCalled();
+    expect(oldViewport.getAttribute("data-overflow-start")).toBe("false");
+    expect(replacement.getAttribute("data-overflow-start")).toBe("false");
+  });
+
+  // A frame requested before the release would otherwise run afterwards and write
+  // the state hooks back onto a viewport the teardown already let go.
+  it("drops a frame it requested before letting the viewport go", async () => {
+    const pending = new Map<number, FrameRequestCallback>();
+    let nextHandle = 1;
+    const cancelled: number[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const handle = nextHandle++;
+      pending.set(handle, callback);
+      return handle;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (handle: number) => {
+      cancelled.push(handle);
+      pending.delete(handle);
+    });
+
+    await start();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    Object.defineProperty(viewport(), "scrollLeft", { configurable: true, value: 300 });
+    viewport().dispatchEvent(new Event("scroll"));
+    expect(pending.size).toBe(1);
+    const writes = vi.spyOn(viewport(), "setAttribute");
+
+    application
+      .getControllerForElementAndIdentifier(root(), "stimeo--overflow-indicator")
+      ?.disconnect();
+
+    expect(cancelled).toHaveLength(1);
+    // Running whatever the engine might still deliver must write nothing.
+    for (const callback of [...pending.values()]) callback(0);
+    expect(writes).not.toHaveBeenCalled();
+  });
+
+  it("stops scroll, mutation, and load-driven updates after unload", async () => {
     await start();
     layout({ scrollLeft: 0, scrollWidth: 300, clientWidth: 300 });
     expect(viewport().getAttribute("data-overflow-end")).toBe("false");
@@ -606,6 +709,20 @@ describe("OverflowIndicatorController", () => {
     await tick();
 
     expect(viewport().getAttribute("data-overflow-end")).toBe("false");
+  });
+
+  // Stimulus delivers the initial Value callbacks before `connect()` runs. Measuring
+  // then would report a transition from the null state that the connection is about
+  // to report again, so the very first render would announce itself twice.
+  it("reports the initial state once, not once per Value callback", async () => {
+    const changes: unknown[] = [];
+    document.addEventListener("stimeo--overflow-indicator:change", (event) => {
+      changes.push((event as CustomEvent).detail);
+    });
+
+    await start();
+
+    expect(changes).toHaveLength(1);
   });
 
   it("stops reacting to resizes after disconnect", async () => {

@@ -5,6 +5,7 @@ import { EscapeLayer } from "../src/utils/escape_layer";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -353,6 +354,85 @@ describe("HoverCardController", () => {
     vi.advanceTimersByTime(300);
     expect(query("#first-card").hidden).toBe(false);
     expect(query("#second-card").hidden).toBe(false);
+  });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--hover-card");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a pointer open after the delay, with the state already written", async () => {
+      const states: string[] = [];
+      query("[data-controller='stimeo--hover-card']").addEventListener(
+        "stimeo--hover-card:open",
+        () => {
+          states.push(`${card().hidden} ${trigger().getAttribute("aria-expanded")}`);
+        },
+      );
+
+      trigger().dispatchEvent(new MouseEvent("mouseenter"));
+      expect(capture.seen).toEqual([]);
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(capture.names()).toEqual(["open"]);
+      expect(capture.reasons()).toEqual(["pointer"]);
+      expect(states).toEqual(["false true"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+    });
+
+    it("carries the pointer reason across the close delay", async () => {
+      trigger().dispatchEvent(new MouseEvent("mouseenter"));
+      await vi.advanceTimersByTimeAsync(300);
+      capture.clear();
+
+      trigger().dispatchEvent(new MouseEvent("mouseleave"));
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["pointer"]);
+    });
+
+    it("reports a focus-driven open as focus", async () => {
+      trigger().dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(capture.reasons()).toEqual(["focus"]);
+    });
+
+    it("reports Escape as escape", async () => {
+      trigger().dispatchEvent(new MouseEvent("mouseenter"));
+      await vi.advanceTimersByTimeAsync(300);
+      capture.clear();
+
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["escape"]);
+    });
+
+    it("stays silent while connect normalizes and on a repeated open", async () => {
+      const fresh = captureStateEvents("stimeo--hover-card");
+      await start();
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+
+      trigger().dispatchEvent(new MouseEvent("mouseenter"));
+      await vi.advanceTimersByTimeAsync(300);
+      capture.clear();
+      trigger().dispatchEvent(new MouseEvent("mouseenter"));
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(capture.seen).toEqual([]);
+    });
   });
 });
 

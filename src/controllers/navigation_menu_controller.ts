@@ -4,6 +4,7 @@ import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { ownerIndex } from "../utils/event_owner";
 import { isRtl } from "../utils/logical_scroll";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { type StateReason, stateReasonFor } from "../utils/state_reason";
 
 /**
  * Headless, accessible **navigation menu** behavior (disclosure navigation).
@@ -78,6 +79,16 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * delegated to the opt-in `stimeo-ui/positioning` module (never imported here, so
  * the core stays zero-dependency). For an app command menu with arrow roving and
  * `role="menu"`, use `stimeo--menubar` instead.
+ *
+ * Each move of a panel's open state is reported: `stimeo--navigation-menu:open`
+ * and `stimeo--navigation-menu:close` dispatch
+ * `{ reason: StateReason, index: number, panel: HTMLElement }` — `index` is the
+ * trigger's position in `triggerTargets` — after the state attributes are
+ * written. Both are informational, so neither is cancelable. Switching panels
+ * reports the outgoing `close` before the incoming `open`, both with the reason
+ * that drove the switch. A call that leaves a panel where it already was, the
+ * normalization in {@link connect}, target churn, and {@link disconnect} are all
+ * silent.
  */
 export class NavigationMenuController extends Controller<HTMLElement> {
   static override targets = ["trigger", "panel", "hoverArea"];
@@ -86,6 +97,7 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     hoverDelay: { type: Number, default: 150 },
   };
   static actions = ["onTriggerKeydown", "toggle"] as const;
+  static events = ["close", "open"] as const;
 
   declare readonly triggerTargets: HTMLElement[];
   declare readonly panelTargets: HTMLElement[];
@@ -118,21 +130,26 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    */
   #connected = false;
 
+  /** Whether state moves are reported: set once `connect()` settled the baseline. */
+  #reporting = false;
+
   /** Escape-stack membership while any panel is open; the shared resolver dismisses via it. */
   readonly #escapeLayer = new EscapeLayer();
 
   /** Establishes the closed baseline and the dismissal listeners. */
   override connect(): void {
     this.#connected = true;
-    this.#closeAll();
+    this.#closeAll("api");
     document.addEventListener("click", this.#onOutsideClick, true);
     this.element.addEventListener("focusout", this.#onFocusOut);
     if (this.openOnHoverValue) this.#addHoverListeners();
+    this.#reporting = true;
   }
 
   /** Removes every listener, pending hover timer, and stack membership taken while connected. */
   override disconnect(): void {
     this.#connected = false;
+    this.#reporting = false;
     this.#escapeLayer.deactivate();
     document.removeEventListener("click", this.#onOutsideClick, true);
     this.element.removeEventListener("focusout", this.#onFocusOut);
@@ -197,13 +214,14 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    */
   toggle(event: Event): void {
     const trigger = event.currentTarget as HTMLElement;
+    const reason = stateReasonFor(event);
     this.#hoverTimers.clearAll();
     if (!this.#isExpanded(trigger)) {
-      this.#openPanel(trigger);
+      this.#openPanel(trigger, reason);
       return;
     }
     if (this.openOnHoverValue && this.#hoveredTrigger === trigger) return;
-    this.#closePanel(trigger);
+    this.#closePanel(trigger, reason);
   }
 
   /**
@@ -248,7 +266,7 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    * already-open panel only re-asserts the Escape layer: the close/open
    * round-trip would rewrite `aria-expanded` and `hidden` for no state change.
    */
-  #openPanel(trigger: HTMLElement): void {
+  #openPanel(trigger: HTMLElement, reason: StateReason): void {
     // Guarded here rather than in `toggle`, because hover reaches this method
     // without going through it. Reaching an `aria-disabled` trigger is what the
     // attribute asks for — opening its panel is the activation it forbids, and
@@ -258,19 +276,22 @@ export class NavigationMenuController extends Controller<HTMLElement> {
       this.#syncEscapeLayer();
       return;
     }
-    this.#closeAll();
+    this.#closeAll(reason);
     const panel = this.#panelFor(trigger);
     if (!panel) return;
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
+    this.#report("open", trigger, panel, reason);
     this.#syncEscapeLayer();
   }
 
-  /** Closes `trigger`'s panel and reflects the collapsed state. */
-  #closePanel(trigger: HTMLElement): void {
+  /** Closes `trigger`'s panel, reflects the collapsed state, and reports a move. */
+  #closePanel(trigger: HTMLElement, reason: StateReason): void {
+    const was = this.#isExpanded(trigger);
     const panel = this.#panelFor(trigger);
     if (panel) panel.hidden = true;
     trigger.setAttribute("aria-expanded", "false");
+    if (was && panel) this.#report("close", trigger, panel, reason);
     this.#syncEscapeLayer();
   }
 
@@ -279,8 +300,22 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    * triggers, so a trigger whose panel was hidden by other means cannot keep
    * advertising an open panel.
    */
-  #closeAll(): void {
-    for (const trigger of this.triggerTargets) this.#closePanel(trigger);
+  #closeAll(reason: StateReason): void {
+    for (const trigger of this.triggerTargets) this.#closePanel(trigger, reason);
+  }
+
+  /** Names the panel that moved, so a subscriber does not have to re-derive it. */
+  #report(
+    name: "close" | "open",
+    trigger: HTMLElement,
+    panel: HTMLElement,
+    reason: StateReason,
+  ): void {
+    if (!this.#reporting) return;
+    const index = this.triggerTargets.indexOf(trigger);
+    const detail = { reason, index, panel };
+    if (name === "open") this.dispatch("open", { detail, cancelable: false });
+    else this.dispatch("close", { detail, cancelable: false });
   }
 
   /**
@@ -325,13 +360,13 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     const open = this.#openTrigger;
     if (!open) return;
     this.#hoverTimers.clearAll();
-    this.#closePanel(open);
+    this.#closePanel(open, "escape");
     open.focus();
   }
 
   /** Closes panels when a click lands outside the nav element. */
   readonly #onOutsideClick = (event: MouseEvent): void => {
-    if (this.#isAnyOpen && !this.element.contains(event.target as Node)) this.#closeAll();
+    if (this.#isAnyOpen && !this.element.contains(event.target as Node)) this.#closeAll("outside");
   };
 
   /**
@@ -345,10 +380,14 @@ export class NavigationMenuController extends Controller<HTMLElement> {
   readonly #onFocusOut = (event: FocusEvent): void => {
     const next = event.relatedTarget;
     if (!(next instanceof Node) || this.element.contains(next)) return;
-    this.#closeAll();
+    this.#closeAll("focus");
   };
 
-  /** Opens a trigger's panel after the hover delay (hover mode). */
+  /**
+   * Opens a trigger's panel after the hover delay (hover mode).
+   *
+   * @stimeoRuntimeOnly `hoverDelay` is the delay of the one hover timer this entry arms.
+   */
   readonly #onPointerEnter = (event: Event): void => {
     const trigger = this.#triggerForHover(event.currentTarget as HTMLElement);
     if (!trigger) return;
@@ -362,6 +401,8 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    * pointer moved directly into another part of the hover region (an adjacent
    * trigger, panel, or hoverArea): crossing a shared edge must not schedule a
    * spurious close, e.g. a hoverArea whose panel sits outside it as a sibling.
+   *
+   * @stimeoRuntimeOnly `hoverDelay` is the delay of the one hover timer this exit arms.
    */
   readonly #onPointerLeave = (event: Event): void => {
     const next = event instanceof MouseEvent ? event.relatedTarget : null;
@@ -385,7 +426,7 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     if (trigger.getAttribute("aria-disabled") === "true") return;
     const open = this.#openTrigger;
     if (open && open !== trigger && this.#holdsFocus(this.#panelFor(open))) open.focus();
-    this.#openPanel(trigger);
+    this.#openPanel(trigger, "pointer");
   }
 
   /**
@@ -397,7 +438,7 @@ export class NavigationMenuController extends Controller<HTMLElement> {
   #closeFromHover(): void {
     const open = this.#openTrigger;
     if (open && this.#holdsFocus(this.#panelFor(open))) return;
-    this.#closeAll();
+    this.#closeAll("pointer");
   }
 
   /** Whether `panel` exists and currently contains the focused element. */

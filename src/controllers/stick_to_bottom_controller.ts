@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { LayoutObserver } from "../utils/layout_observer";
 import { prefersReducedMotion } from "../utils/reduced_motion";
+import { StateRegions } from "../utils/state_regions";
 
 /** Distance from the bottom, in px, that still counts as pinned. */
 const DEFAULT_THRESHOLD = 80;
@@ -24,6 +25,8 @@ const countElements = (nodes: NodeList): number => {
  *        data-stimeo--stick-to-bottom-threshold-value="80"
  *        data-stimeo--stick-to-bottom-pin-on-connect-value="true" style="overflow:auto">
  *     <ul data-stimeo--stick-to-bottom-target="content"><!-- Turbo Stream appends --></ul>
+ *     <button type="button" hidden data-stimeo--stick-to-bottom-target="hasNew"
+ *             data-action="stimeo--stick-to-bottom#scrollToBottom">New messages</button>
  *   </div>
  *
  * The container is "pinned" while it has a box to measure and its distance from the
@@ -32,6 +35,12 @@ const countElements = (nodes: NodeList): number => {
  * `data-has-new` and emits `new`. Scrolling recomputes pinned and reflects `data-pinned`,
  * emitting `pin` on change; the `scrollToBottom` action jumps back down (a "new messages"
  * button). A `threshold` changed at runtime re-derives the state at once.
+ *
+ * `data-has-new` says which state the container is in; the optional `hasNew` targets are
+ * the regions that belong to the flagged side — the affordance offering the jump back
+ * down. They are shown while the flag is up and hidden while it is down, written wherever
+ * the flag moves, so an authored `hidden` settles at the first reflection and a restored
+ * DOM cannot leave the region contradicting the flag.
  *
  * A container that already overflows renders at `scrollTop` 0 — further than
  * `threshold` from the bottom, so unpinned — and flags the first append rather
@@ -64,7 +73,7 @@ const countElements = (nodes: NodeList): number => {
  * passive scroll listener are released on `disconnect()` (Turbo navigation included).
  */
 export class StickToBottomController extends Controller<HTMLElement> {
-  static override targets = ["content"];
+  static override targets = ["content", "hasNew"];
   static override values = {
     threshold: { type: Number, default: DEFAULT_THRESHOLD },
     behavior: { type: String, default: "auto" },
@@ -75,6 +84,7 @@ export class StickToBottomController extends Controller<HTMLElement> {
 
   declare readonly contentTarget: HTMLElement;
   declare readonly hasContentTarget: boolean;
+  declare readonly hasNewTargets: HTMLElement[];
 
   declare thresholdValue: number;
   declare behaviorValue: string;
@@ -88,6 +98,9 @@ export class StickToBottomController extends Controller<HTMLElement> {
   #awaitingLayout = false;
   #connected = false;
   #pinned = false;
+  #hasNew = false;
+  /** Owns `hidden` on the regions declared for the has-new state. */
+  readonly #hasNewRegion = new StateRegions({ whenTrue: () => this.hasNewTargets });
 
   readonly #onScroll = (): void => this.#updatePinned();
 
@@ -103,7 +116,7 @@ export class StickToBottomController extends Controller<HTMLElement> {
     // flagged rather than swallowed. Both hooks are re-derived here, so a stale data-pinned
     // or data-has-new a Turbo cache restore brought back is dropped: has-new records an
     // arrival this connection has not seen, and nothing in the DOM can attest to one.
-    this.element.removeAttribute("data-has-new");
+    this.#setHasNew(false);
     this.#pinned = this.#isPinned();
     this.#reflectPinned();
 
@@ -132,6 +145,20 @@ export class StickToBottomController extends Controller<HTMLElement> {
   }
 
   /**
+   * Settles a has-new region that arrived at runtime on the side the flag is currently
+   * on, the way a region present at connect is settled by the connect-time normalization.
+   *
+   * Stimulus attaches targets before `connect()`, and a container that leaves the document
+   * and comes back keeps its controller, so in that window the flag still reads the
+   * arrival of the connection that ended. A region attached there is left to the
+   * connect-time normalization, which drops the flag and settles the region in one write.
+   */
+  hasNewTargetConnected(): void {
+    if (!this.#connected) return;
+    this.#hasNewRegion.reflect(this.element, this.#hasNew);
+  }
+
+  /**
    * Re-derives pinned when the distance that counts as the bottom is changed at runtime
    * (a morph that swaps the attribute on a retained element).
    */
@@ -153,7 +180,7 @@ export class StickToBottomController extends Controller<HTMLElement> {
    */
   scrollToBottom(): void {
     this.#scrollToBottom();
-    this.element.removeAttribute("data-has-new");
+    this.#setHasNew(false);
     this.#updatePinned();
   }
 
@@ -166,7 +193,7 @@ export class StickToBottomController extends Controller<HTMLElement> {
     if (this.#pinned) {
       this.#scrollToBottom();
     } else {
-      this.element.setAttribute("data-has-new", "true");
+      this.#setHasNew(true);
       this.dispatch("new", { detail: { count: added } });
     }
   }
@@ -188,10 +215,24 @@ export class StickToBottomController extends Controller<HTMLElement> {
   #reflectPinned(): void {
     if (this.#pinned) {
       this.element.setAttribute("data-pinned", "true");
-      this.element.removeAttribute("data-has-new"); // caught up with the bottom
+      this.#setHasNew(false); // caught up with the bottom
     } else {
       this.element.removeAttribute("data-pinned");
     }
+  }
+
+  /**
+   * Mirrors whether content has arrived that the container did not follow onto the state
+   * hook and onto the regions declared for that state.
+   */
+  #setHasNew(hasNew: boolean): void {
+    this.#hasNew = hasNew;
+    if (hasNew) {
+      this.element.setAttribute("data-has-new", "true");
+    } else {
+      this.element.removeAttribute("data-has-new");
+    }
+    this.#hasNewRegion.reflect(this.element, hasNew);
   }
 
   /** Whether the container currently sits within `threshold` of its bottom. */

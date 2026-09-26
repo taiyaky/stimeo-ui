@@ -54,6 +54,24 @@ describe("buildManifest", () => {
     expect(isCompatibleManifest(legacy)).toBe(false);
   });
 
+  it("requires the schema-v14 action-param field when loading a manifest", () => {
+    const legacy = structuredClone(manifest) as unknown as {
+      controllers: Record<string, Record<string, unknown>>;
+    };
+    const stepper = legacy.controllers["stimeo--stepper"];
+    if (stepper) delete stepper.actionParams;
+    expect(isCompatibleManifest(legacy)).toBe(false);
+  });
+
+  it("requires the schema-v13 template-root field when loading a manifest", () => {
+    const legacy = structuredClone(manifest) as unknown as {
+      controllers: Record<string, Record<string, unknown>>;
+    };
+    const tagsInput = legacy.controllers["stimeo--tags-input"];
+    if (tagsInput) delete tagsInput.templateRoots;
+    expect(isCompatibleManifest(legacy)).toBe(false);
+  });
+
   it("requires the schema-v12 required-action field when loading a manifest", () => {
     const legacy = structuredClone(manifest) as unknown as {
       controllers: Record<string, Record<string, unknown>>;
@@ -179,6 +197,7 @@ describe("buildManifest", () => {
       "label",
       "remove",
       "fields",
+      "empty",
     ]);
     expect(manifest.controllers["stimeo--multi-select"]?.values).toEqual([
       "max",
@@ -417,9 +436,9 @@ describe("buildManifest", () => {
   });
 
   it("reflects static events, defaulting to [] when undeclared", () => {
-    expect(manifest.controllers["stimeo--switch"]?.events).toEqual(["changed"]);
-    // dialog dispatches nothing, so its event surface is empty.
-    expect(manifest.controllers["stimeo--dialog"]?.events).toEqual([]);
+    expect(manifest.controllers["stimeo--switch"]?.events).toEqual(["change", "reconcile"]);
+    // aspect-ratio is passive: it dispatches nothing, so its event surface is empty.
+    expect(manifest.controllers["stimeo--aspect-ratio"]?.events).toEqual([]);
   });
 
   it("merges hand-written required targets", () => {
@@ -895,8 +914,58 @@ describe("buildManifest", () => {
           expect(entry.requiredTargets, `${id}: require must be optional`).not.toContain(target);
           expect(target, `${id}: must not require itself`).not.toBe(rule.whenPresent);
         }
+        // A named host is read as a target of the same controller, so a name the
+        // controller does not declare resolves to nothing and the pair is never
+        // judged. A half cannot host the pair it belongs to either. The three
+        // placements are read in order and the named host is read first, so
+        // declaring another one beside it leaves that one unreachable.
+        const host = rule.requireSameTargetHost;
+        if (host === undefined) continue;
+        expect(entry.targets, `${id}: requireSameTargetHost`).toContain(host);
+        expect(host, `${id}: a half cannot host its own pair`).not.toBe(rule.whenPresent);
+        expect(rule.require, `${id}: a half cannot host its own pair`).not.toContain(host);
+        expect(
+          rule.requireSameHost ?? rule.requireInside,
+          `${id}: one placement per rule`,
+        ).toBeUndefined();
       }
     }
+  });
+
+  it("declares action params that name real actions", () => {
+    // Stimulus derives the attribute from the controller's registered name and the
+    // param, so a param that is not camelCase never reaches the reader, and a rule
+    // naming an action the controller does not have can never fire.
+    for (const [id, entry] of Object.entries(manifest.controllers)) {
+      for (const rule of entry.actionParams) {
+        expect(entry.actions, `${id}: action`).toContain(rule.action);
+        expect(rule.param, `${id}: param must be camelCase`).toMatch(/^[a-z][a-zA-Z0-9]*$/);
+        expect(rule.suggestion.length, `${id}: suggestion`).toBeGreaterThan(0);
+        if (rule.allowedValues) {
+          expect(rule.allowedValues.length, `${id}: allowedValues`).toBeGreaterThan(0);
+        }
+      }
+    }
+  });
+
+  it("marks a param required only where the reader has no other way to the value", () => {
+    // A reader that falls back to `event.detail` is satisfied by a page dispatching a
+    // CustomEvent with no param attribute at all, so declaring it required reports
+    // correct markup. No reader for an entry below has a fallback branch; add one
+    // only for a reader that has none.
+    const core = new Set(Object.keys(stimeoControllers));
+    const required = Object.entries(manifest.controllers)
+      .filter(([id]) => core.has(id))
+      .flatMap(([id, entry]) =>
+        entry.actionParams
+          .filter((rule) => rule.required)
+          .map((rule) => `${id}#${rule.action}.${rule.param}`),
+      );
+
+    expect(required.sort()).toEqual([
+      "stimeo--overflow-indicator#scrollByPage.direction",
+      "stimeo--stepper#goto.index",
+    ]);
   });
 
   it("escalates only rules that start below the level they escalate to", () => {

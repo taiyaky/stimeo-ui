@@ -4,7 +4,7 @@ import { PaginationController } from "../src/controllers/pagination_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link PaginationController}: current-page state,
@@ -44,15 +44,31 @@ const SELECT_CASES: ReadonlyArray<{ raw: string; expected: number | null }> = [
 ];
 
 const BOUNDARY_ATTR = "data-stimeo--pagination-boundary-disabled";
+const PAGE_ATTR = "data-stimeo--pagination-page-value";
+const TOTAL_ATTR = "data-stimeo--pagination-total-value";
+
+/** A pagination that records every `page` / `total` callback delivery it receives. */
+const countingPagination = (deliveries: string[]) =>
+  class extends PaginationController {
+    override pageValueChanged(): void {
+      deliveries.push(`page:${this.pageValue}`);
+      super.pageValueChanged();
+    }
+
+    override totalValueChanged(): void {
+      deliveries.push(`total:${this.totalValue}`);
+      super.totalValueChanged();
+    }
+  };
 
 describe("PaginationController", () => {
   let application: Application;
 
   /** Mounts arbitrary markup and waits for Stimulus to connect. */
-  const mount = async (html: string) => {
+  const mount = async (html: string, controller = PaginationController) => {
     document.body.innerHTML = html;
     application = Application.start();
-    application.register("stimeo--pagination", PaginationController);
+    application.register("stimeo--pagination", controller);
     await tick();
   };
 
@@ -79,8 +95,25 @@ describe("PaginationController", () => {
       "[data-stimeo--pagination-target='next']",
     ) as HTMLButtonElement;
   const current = () => pages().map((p) => p.getAttribute("aria-current"));
-  const totalAttr = () => root().getAttribute("data-stimeo--pagination-total-value");
-  const pageAttr = () => root().getAttribute("data-stimeo--pagination-page-value");
+  const totalAttr = () => root().getAttribute(TOTAL_ATTR);
+  const pageAttr = () => root().getAttribute(PAGE_ATTR);
+
+  /** Records each write to the `page` / `total` attributes as `name:previous value`. */
+  const recordValueWrites = () => {
+    const writes: string[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        const name = record.attributeName === PAGE_ATTR ? "page" : "total";
+        writes.push(`${name}:${record.oldValue}`);
+      }
+    });
+    observer.observe(root(), {
+      attributes: true,
+      attributeOldValue: true,
+      attributeFilter: [PAGE_ATTR, TOTAL_ATTR],
+    });
+    return { writes, stop: () => observer.disconnect() };
+  };
 
   /** Records every `change` detail dispatched from the (first) controller root. */
   const recordChanges = () => {
@@ -91,6 +124,20 @@ describe("PaginationController", () => {
     return details;
   };
 
+  type Report = { type: string; page: number; total: number; previous: number };
+
+  /** Records every `change` and `reconcile` the (first) root dispatches, in order. */
+  const recordReports = () => {
+    const reports: Report[] = [];
+    for (const type of ["change", "reconcile"]) {
+      root().addEventListener(`stimeo--pagination:${type}`, (event) => {
+        const detail = (event as CustomEvent<Omit<Report, "type">>).detail;
+        reports.push({ type, ...detail });
+      });
+    }
+    return reports;
+  };
+
   it("marks the active page with aria-current and disables prev at the start", async () => {
     await start(1, 3);
     expect(current()).toEqual(["page", null, null]);
@@ -98,34 +145,94 @@ describe("PaginationController", () => {
     expect(next().disabled).toBe(false);
   });
 
-  it("normalizes out-of-range initial page/total on connect", async () => {
-    await start(99, 0); // total <= 0 normalizes to 1; page clamps to [1, 1]
+  it("clamps out-of-range initial page/total for display, leaving the declarations as written", async () => {
+    await start(99, 0); // total <= 0 counts as 1; page clamps to [1, 1]
     expect(current()).toEqual(["page", null, null]);
     expect(prev().disabled).toBe(true);
     expect(next().disabled).toBe(true);
+    expect(pageAttr()).toBe("99");
+    expect(totalAttr()).toBe("0");
   });
 
-  it("normalizes a non-numeric total-value on connect", async () => {
-    // `Math.trunc(NaN)` is NaN, so an unguarded normalization would leave the
-    // whole controller (and every later `change` detail) on NaN.
+  it("counts a non-numeric total-value as one page without rewriting it", async () => {
+    // `Math.trunc(NaN)` is NaN, so an unguarded clamp would leave the display (and
+    // every later `change` detail) on NaN.
     await start(2, "abc");
-    expect(totalAttr()).toBe("1");
-    expect(pageAttr()).toBe("1");
     expect(current()).toEqual(["page", null, null]);
     expect(prev().disabled).toBe(true);
     expect(next().disabled).toBe(true);
+    expect(totalAttr()).toBe("abc");
+    expect(pageAttr()).toBe("2");
   });
 
-  it("normalizes an infinite total-value on connect", async () => {
+  it("counts an infinite total-value as one page without rewriting it", async () => {
     await start(1, "Infinity");
-    expect(totalAttr()).toBe("1");
     expect(next().disabled).toBe(true);
+    expect(totalAttr()).toBe("Infinity");
   });
 
-  it("normalizes a fractional total-value on connect", async () => {
+  it("truncates a fractional total-value for display without rewriting it", async () => {
     await start(1, "2.7");
-    expect(totalAttr()).toBe("2");
     expect(next().disabled).toBe(false);
+    expect(totalAttr()).toBe("2.7");
+  });
+
+  it("writes nothing back for an out-of-range declaration, at connect or at runtime", async () => {
+    // One callback per write the page makes, and no write in reply: the display
+    // clamps the Values, the attributes keep what the page declared.
+    const deliveries: string[] = [];
+    document.body.innerHTML = markup(99, 3);
+    const connectWrites = recordValueWrites();
+    application = Application.start();
+    application.register("stimeo--pagination", countingPagination(deliveries));
+    await tick();
+    connectWrites.stop();
+    expect(connectWrites.writes).toEqual([]);
+    expect(current()).toEqual([null, null, "page"]);
+
+    const runtimeWrites = recordValueWrites();
+    deliveries.length = 0;
+    root().setAttribute(PAGE_ATTR, "-4");
+    await tick();
+    runtimeWrites.stop();
+
+    expect(deliveries).toEqual(["page:-4"]);
+    expect(runtimeWrites.writes).toEqual(["page:99"]);
+    expect(pageAttr()).toBe("-4");
+    expect(current()).toEqual(["page", null, null]);
+  });
+
+  it("shows the declared page once a later total makes it reachable", async () => {
+    await start(5, 3);
+    expect(current()).toEqual([null, null, "page"]); // clamped to the last of three
+
+    root().setAttribute(TOTAL_ATTR, "6");
+    await tick();
+    const details = recordChanges();
+
+    // Page 5 of 6: no button here carries it, and neither boundary is reached.
+    expect(current()).toEqual([null, null, null]);
+    expect(prev().disabled).toBe(false);
+    expect(next().disabled).toBe(false);
+
+    prev().click();
+    expect(details).toEqual([{ page: 4, total: 6, previous: 5 }]);
+    expect(pageAttr()).toBe("4");
+  });
+
+  it("reports the page on screen as previous when the declaration is out of range", async () => {
+    // `detail.previous` is the clamped page the reader was looking at, so choosing
+    // the page an out-of-range declaration already shows is no move at all.
+    await start(99, 3);
+    const details = recordChanges();
+
+    pages()[2]?.click(); // page 3 is the one shown
+    expect(details).toEqual([]);
+    expect(pageAttr()).toBe("99");
+
+    prev().click();
+    expect(details).toEqual([{ page: 2, total: 3, previous: 3 }]);
+    expect(pageAttr()).toBe("2");
   });
 
   it("uses the page=1 / total=1 defaults when no Value attributes are present", async () => {
@@ -141,12 +248,12 @@ describe("PaginationController", () => {
     expect(current()).toEqual(["page"]);
     expect(prev().disabled).toBe(true);
     expect(next().disabled).toBe(true);
-    // The Number defaults already satisfy the contract, so nothing is written back.
-    expect(root().hasAttribute("data-stimeo--pagination-page-value")).toBe(false);
-    expect(root().hasAttribute("data-stimeo--pagination-total-value")).toBe(false);
+    // The display reads the defaults; nothing is written to the Values.
+    expect(root().hasAttribute(PAGE_ATTR)).toBe(false);
+    expect(root().hasAttribute(TOTAL_ATTR)).toBe(false);
   });
 
-  it("does not rewrite already-normalized Values on connect", async () => {
+  it("does not rewrite in-range Values on connect", async () => {
     document.body.innerHTML = markup(2, 3);
     const rewrites: string[] = [];
     const observer = new MutationObserver((records) => {
@@ -413,16 +520,150 @@ describe("PaginationController", () => {
     expect(current()).toEqual([null, "page", null]);
   });
 
-  it("normalizes a bad Value written at runtime without dispatching change", async () => {
+  it("reflects a bad Value written at runtime without rewriting it or dispatching change", async () => {
     await start(2, 3);
     const details = recordChanges();
-    root().setAttribute("data-stimeo--pagination-total-value", "abc");
+    root().setAttribute(TOTAL_ATTR, "abc");
     await tick();
-    await tick(); // the write-back re-enters the value callback once
-    expect(totalAttr()).toBe("1");
-    expect(pageAttr()).toBe("1");
     expect(current()).toEqual(["page", null, null]);
+    expect(totalAttr()).toBe("abc");
+    expect(pageAttr()).toBe("2");
     expect(details).toEqual([]);
+  });
+
+  it("reports a total that pulls the current page down as reconcile", async () => {
+    await start(3, 3);
+    const reports = recordReports();
+
+    root().setAttribute(TOTAL_ATTR, "2");
+    await tick();
+
+    expect(current()).toEqual([null, "page", null]);
+    expect(next().disabled).toBe(true);
+    expect(reports).toEqual([{ type: "reconcile", page: 2, total: 2, previous: 3 }]);
+    expect(pageAttr()).toBe("3");
+  });
+
+  it("reports a page the page writes as reconcile, never as change", async () => {
+    await start(1, 3);
+    const reports = recordReports();
+
+    root().setAttribute(PAGE_ATTR, "3");
+    await tick();
+
+    expect(reports).toEqual([{ type: "reconcile", page: 3, total: 3, previous: 1 }]);
+  });
+
+  it("measures each page-driven move from the page the one before it showed", async () => {
+    await start(1, 3);
+    const reports = recordReports();
+
+    // Three batches: each move starts where the one before it left the pager,
+    // and the last one returns to the page shown on connect.
+    root().setAttribute(PAGE_ATTR, "3");
+    await tick();
+    root().setAttribute(PAGE_ATTR, "2");
+    await tick();
+    root().setAttribute(PAGE_ATTR, "1");
+    await tick();
+
+    expect(reports).toEqual([
+      { type: "reconcile", page: 3, total: 3, previous: 1 },
+      { type: "reconcile", page: 2, total: 3, previous: 3 },
+      { type: "reconcile", page: 1, total: 3, previous: 2 },
+    ]);
+  });
+
+  it("stays silent when a change leaves the current page where it is", async () => {
+    await start(2, 3);
+    const reports = recordReports();
+
+    root().setAttribute(TOTAL_ATTR, "5");
+    await tick();
+    root().setAttribute(PAGE_ATTR, "2.9");
+    await tick();
+
+    expect(current()).toEqual([null, "page", null]);
+    expect(reports).toEqual([]);
+  });
+
+  it("reports one batch that moves page and total together once", async () => {
+    await start(1, 3);
+    const reports = recordReports();
+
+    root().setAttribute(PAGE_ATTR, "5");
+    root().setAttribute(TOTAL_ATTR, "5");
+    await tick();
+
+    expect(prev().disabled).toBe(false);
+    expect(next().disabled).toBe(true);
+    expect(reports).toEqual([{ type: "reconcile", page: 5, total: 5, previous: 1 }]);
+  });
+
+  it("reports nothing on connect, whatever the declarations clamp to", async () => {
+    document.body.innerHTML = markup(99, 3);
+    const reports: string[] = [];
+    const listening = new AbortController();
+    for (const type of ["change", "reconcile"]) {
+      document.addEventListener(`stimeo--pagination:${type}`, () => reports.push(type), {
+        signal: listening.signal,
+      });
+    }
+    application = Application.start();
+    application.register("stimeo--pagination", PaginationController);
+    await tick();
+    listening.abort();
+
+    expect(current()).toEqual([null, null, "page"]);
+    expect(reports).toEqual([]);
+  });
+
+  it("reports a navigation as change alone, and nothing for its own Value write", async () => {
+    await start(1, 3);
+    const reports = recordReports();
+
+    next().click();
+    await tick();
+
+    expect(reports).toEqual([{ type: "change", page: 2, total: 3, previous: 1 }]);
+  });
+
+  it("measures a navigation a reconcile listener makes from the reported page", async () => {
+    await start(1, 3);
+    const reports = recordReports();
+    let answered = false;
+    root().addEventListener("stimeo--pagination:reconcile", () => {
+      if (answered) return;
+      answered = true;
+      next().click();
+    });
+
+    root().setAttribute(PAGE_ATTR, "2");
+    await tick();
+
+    expect(current()).toEqual([null, null, "page"]);
+    expect(pageAttr()).toBe("3");
+    expect(reports).toEqual([
+      { type: "reconcile", page: 2, total: 3, previous: 1 },
+      { type: "change", page: 3, total: 3, previous: 2 },
+    ]);
+  });
+
+  it("drops a pass still pending when it disconnects", async () => {
+    await start(1, 3);
+    const reports = recordReports();
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--pagination",
+    ) as PaginationController;
+
+    root().setAttribute(PAGE_ATTR, "3");
+    controller.pageValueChanged();
+    controller.disconnect();
+    await flushMicrotasks();
+
+    expect(current()).toEqual(["page", null, null]);
+    expect(reports).toEqual([]);
   });
 
   it("uses the normalized total in change.detail after a runtime total change", async () => {

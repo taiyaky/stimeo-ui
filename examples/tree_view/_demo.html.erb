@@ -12,12 +12,17 @@
     the arrow keys keep working right after a click. %>
 <ul class="tree-view" data-controller="stimeo--tree-view" role="tree"
     aria-label="<%= t('components.tree_view.demo.label') %>">
+  <%# The hidden field carries the selected item's data-value into the form; both
+      the field and the values are optional. An item without a data-value submits
+      an empty string, so give one to every item that should be selectable. %>
+  <input type="hidden" name="path" data-stimeo--tree-view-target="field" />
   <li
     class="tree-view__item"
     role="treeitem"
     aria-expanded="true"
     aria-selected="false"
     tabindex="0"
+    data-value="app"
     data-stimeo--tree-view-target="item"
     data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
     <button type="button" class="tree-view__chevron" tabindex="-1" aria-hidden="true"
@@ -30,39 +35,55 @@
         aria-expanded="false"
         aria-selected="false"
         tabindex="-1"
+        data-value="app/controllers"
         data-stimeo--tree-view-target="item"
         data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
         <button type="button" class="tree-view__chevron" tabindex="-1" aria-hidden="true"
                 data-action="click->stimeo--tree-view#toggle"></button>
         <span class="tree-view__label">controllers</span>
         <ul class="tree-view__group" role="group" data-stimeo--tree-view-target="group" hidden>
-          <li class="tree-view__item" role="treeitem" aria-selected="false" tabindex="-1"
+          <li class="tree-view__item" role="treeitem" aria-selected="false"
+              tabindex="-1" data-value="app/controllers/application_controller.rb"
               data-stimeo--tree-view-target="item"
               data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
             <span class="tree-view__label">application_controller.rb</span>
           </li>
-          <li class="tree-view__item" role="treeitem" aria-selected="false" tabindex="-1"
+          <li class="tree-view__item" role="treeitem" aria-selected="false"
+              tabindex="-1" data-value="app/controllers/components_controller.rb"
               data-stimeo--tree-view-target="item"
               data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
             <span class="tree-view__label">components_controller.rb</span>
           </li>
         </ul>
       </li>
-      <li class="tree-view__item" role="treeitem" aria-selected="false" tabindex="-1"
+      <li class="tree-view__item" role="treeitem" aria-selected="false"
+          tabindex="-1" data-value="app/application.rb"
           data-stimeo--tree-view-target="item"
           data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
         <span class="tree-view__label">application.rb</span>
       </li>
     </ul>
   </li>
-  <li class="tree-view__item" role="treeitem" aria-selected="false" tabindex="-1"
+  <li class="tree-view__item" role="treeitem" aria-selected="false"
+      tabindex="-1" data-value="README.md"
       data-stimeo--tree-view-target="item"
       data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
     <span class="tree-view__label">README.md</span>
   </li>
-  <li class="tree-view__item" role="treeitem" aria-selected="false" tabindex="-1"
+  <li class="tree-view__item" role="treeitem" aria-selected="false"
+      tabindex="-1" data-value="Gemfile"
       data-stimeo--tree-view-target="item"
       data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
     <span class="tree-view__label">Gemfile</span>
   </li>
 </ul>
+
+<%# Readout: what the component just reported. Purely visual — the component
+    already announces what a screen reader needs, so this line is aria-hidden to
+    keep it from being read twice. The value is a code fragment (API identifiers
+    and values), so only the label is translated. %>
+<p class="demo-readout" aria-hidden="true">
+  <span><%= t("catalog.readout.field") %></span>
+  <span class="demo-readout__value" data-readout
+        data-empty-text="<%= t("catalog.readout.empty") %>">—</span>
+</p>

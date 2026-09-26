@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { FormResetWatcher } from "../utils/form_reset_watcher";
 import { ListenerSet } from "../utils/listener_set";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
@@ -69,6 +70,10 @@ export class CheckboxController extends Controller<HTMLElement> {
   /** Collapses every lifecycle signal from one DOM update into one derived pass. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileFromChildren());
   readonly #listeners = new ListenerSet();
+  readonly #formReset = new FormResetWatcher(
+    (form) => this.#hasCheckboxOwnedBy(form),
+    () => this.#reconcile.schedule(),
+  );
   /** Aggregate this root last settled on, so a derived repair is reported once. */
   #committedState: CheckboxState | null = null;
   /** Watches authored checked-attribute changes on retained target elements. */
@@ -88,7 +93,7 @@ export class CheckboxController extends Controller<HTMLElement> {
       subtree: true,
     });
     this.#listeners.add(this.element, "turbo:morph-element", this.#onMorph);
-    document.addEventListener("reset", this.#onReset, true);
+    this.#formReset.observe();
   }
 
   /** Releases the observer, global reset listener, and every pending reconciliation. */
@@ -96,7 +101,7 @@ export class CheckboxController extends Controller<HTMLElement> {
     this.#reconcile.cancel();
     this.#checkedObserver.disconnect();
     this.#listeners.dispose();
-    document.removeEventListener("reset", this.#onReset, true);
+    this.#formReset.disconnect();
   }
 
   /** Reconciles the aggregate for a parent added or replaced at runtime. */
@@ -187,15 +192,6 @@ export class CheckboxController extends Controller<HTMLElement> {
   /** Reconciles retained targets after Turbo has finished morphing their live state. */
   readonly #onMorph = (): void => {
     this.#reconcile.schedule();
-  };
-
-  /** Reconciles after a non-cancelled reset restores any managed checkbox. */
-  readonly #onReset = (event: Event): void => {
-    const form = event.target;
-    if (!(form instanceof HTMLFormElement) || !this.#hasCheckboxOwnedBy(form)) return;
-    queueMicrotask(() => {
-      if (!event.defaultPrevented) this.#reconcile.schedule();
-    });
   };
 
   /** Whether a form owns at least one current parent or child target. */

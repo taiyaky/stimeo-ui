@@ -6,8 +6,8 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  *
  * Markup contract (identifier: `stimeo--step-indicator`):
  *   <ol data-controller="stimeo--step-indicator" aria-label="Checkout progress"
- *       data-stimeo--step-indicator-current-value="1"
- *       data-action="step:set->stimeo--step-indicator#setCurrent">
+ *       data-stimeo--step-indicator-index-value="1"
+ *       data-action="stimeo--stepper:change->stimeo--step-indicator#setIndex">
  *     <li data-stimeo--step-indicator-target="step">Cart</li>
  *     <li data-stimeo--step-indicator-target="step">Shipping</li>
  *     <li data-stimeo--step-indicator-target="step">Payment</li>
@@ -18,7 +18,7 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  * and the steps are not operable. For an interactive wizard whose steps are
  * `<button>`s, use {@link StepperController | Stepper}.
  *
- * `change` dispatches `{ current: number, total: number }`.
+ * `change` dispatches `{ index: number, previous: number, total: number }`.
  *
  * @remarks
  * Behavior only. Each step `<li>` gets a `data-state` (`complete`/`current`/
@@ -27,30 +27,32 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  * (0–1) custom property on the root expresses overall progress for CSS.
  *
  * Behavior provided:
- * - Reflects `current` onto each step's `data-state` and `aria-current`.
+ * - Reflects `index` onto each step's `data-state` and `aria-current`.
  * - Re-derives every step when the step set changes at runtime.
- * - `setCurrent` (bound to an event whose `detail.current` is the 0-based index)
- *   updates the current step and dispatches `stimeo--step-indicator:change`.
+ * - `setIndex` (bound to an event whose `detail.index` is the 0-based position)
+ *   moves the indicator and dispatches `stimeo--step-indicator:change`. A
+ *   {@link StepperController | Stepper} dispatches exactly that shape, so the two
+ *   compose with one `data-action` and no glue.
  */
 export class StepIndicatorController extends Controller<HTMLElement> {
   static override targets = ["step"];
   static override values = {
-    current: { type: Number, default: 0 },
+    index: { type: Number, default: 0 },
   };
-  static actions = ["setCurrent"] as const;
+  static actions = ["setIndex"] as const;
   static events = ["change"] as const;
 
   declare readonly stepTargets: HTMLElement[];
-  declare currentValue: number;
+  declare indexValue: number;
 
   /**
-   * Collapses a batch of step callbacks — and a morph that swaps `current` with
+   * Collapses a batch of step callbacks — and a morph that swaps `index` with
    * them — into one repaint. Replacing a list of N steps delivers N callbacks, and
    * each one would otherwise rewrite every step's state.
    */
   readonly #repaint = new MicrotaskCoalescer(() => this.#render());
 
-  /** Renders the initial state from the `current` value. */
+  /** Renders the initial state from the `index` value. */
   override connect(): void {
     this.#repaint.activate();
     this.#render();
@@ -71,38 +73,39 @@ export class StepIndicatorController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
-  /** Repaints when application code (or a Turbo morph) changes `current` at runtime. */
-  currentValueChanged(): void {
+  /** Repaints when application code (or a Turbo morph) changes `index` at runtime. */
+  indexValueChanged(): void {
     this.#repaint.schedule();
   }
 
   /**
-   * Updates the current step from an external event (`detail.current`, 0-based)
-   * and dispatches `change`. Out-of-range indices are clamped to the step set,
+   * Moves the indicator from an external event (`detail.index`, 0-based) and
+   * dispatches `change`. Out-of-range positions are clamped to the step set,
    * and both sides of the no-op test are clamped, so moving onto the step an
-   * out-of-range `current` already renders is not reported as a change.
+   * out-of-range `index` already renders is not reported as a change.
    */
-  setCurrent(event: CustomEvent<{ current?: number }>): void {
-    const next = event.detail?.current;
+  setIndex(event: CustomEvent<{ index?: number }>): void {
+    const next = event.detail?.index;
     if (typeof next !== "number" || !Number.isFinite(next)) return;
     const clamped = this.#clamp(next);
-    const moved = clamped !== this.#clamp(this.currentValue);
-    // Normalise even when the display does not move: an out-of-range `current` left
+    const previous = this.#clamp(this.indexValue);
+    const moved = clamped !== previous;
+    // Normalise even when the display does not move: an out-of-range `index` left
     // in the markup would otherwise be re-clamped against a later step set and land
     // somewhere the consumer never asked for. Writing it here is the consumer-driven
     // path, the only one that owns the Value.
-    this.currentValue = clamped;
+    this.indexValue = clamped;
     if (!moved) return;
     this.#render();
     this.dispatch("change", {
-      detail: { current: clamped, total: this.stepTargets.length },
+      detail: { index: clamped, previous, total: this.stepTargets.length },
     });
   }
 
   /**
    * Applies `data-state`, `aria-current`, and the progress ratio custom property.
    *
-   * A pure function of the step set and `current`, so running it again writes the
+   * A pure function of the step set and `index`, so running it again writes the
    * same values — which is what lets the action path paint synchronously (the event
    * goes out after the DOM is updated) while a coalesced pass may still follow.
    *
@@ -110,7 +113,7 @@ export class StepIndicatorController extends Controller<HTMLElement> {
    */
   #render(): void {
     const total = this.stepTargets.length;
-    const current = this.#clamp(this.currentValue);
+    const current = this.#clamp(this.indexValue);
     this.stepTargets.forEach((step, index) => {
       step.dataset.state =
         index < current ? "complete" : index === current ? "current" : "upcoming";
@@ -126,7 +129,7 @@ export class StepIndicatorController extends Controller<HTMLElement> {
 
   /**
    * Constrains an index to `[0, total-1]` (or `0` when there are no steps). A
-   * non-finite index falls back to the first step: `current` is read from markup,
+   * non-finite index falls back to the first step: `index` is read from markup,
    * so an unparsable attribute arrives as `NaN` and would otherwise propagate
    * into every state hook.
    */

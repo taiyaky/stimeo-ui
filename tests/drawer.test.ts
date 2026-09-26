@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DrawerController } from "../src/controllers/drawer_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
+import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -383,6 +384,123 @@ describe("DrawerController", () => {
       "dialog, Settings, modal",
       "heading, Settings, level 2",
     ]);
+  });
+
+  // --- State events ---
+
+  describe("state events", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    const root = () => document.querySelector("[data-controller='stimeo--drawer']") as HTMLElement;
+    const controller = () => {
+      const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--drawer");
+      if (!(instance instanceof DrawerController)) throw new Error("drawer controller not found");
+      return instance;
+    };
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--drawer");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    it("reports a trigger click as user, as soon as data-state is written", () => {
+      const states: string[] = [];
+      root().addEventListener("stimeo--drawer:open", () => {
+        states.push(`${panel().getAttribute("data-state")} ${panel().hidden}`);
+      });
+
+      trigger().click();
+
+      expect(capture.names()).toEqual(["open"]);
+      expect(capture.reasons()).toEqual(["user"]);
+      expect(states).toEqual(["open false"]);
+      expect(capture.seen[0]?.bubbles).toBe(true);
+      expect(capture.seen[0]?.cancelable).toBe(false);
+    });
+
+    it("reports a backdrop click as outside and Escape as escape", () => {
+      trigger().click();
+      capture.clear();
+      overlay().click();
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["outside"]);
+
+      trigger().click();
+      capture.clear();
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+      expect(capture.reasons()).toEqual(["escape"]);
+    });
+
+    it("stays silent for an idempotent call in either direction", () => {
+      controller().close();
+      expect(capture.seen).toEqual([]);
+
+      controller().open();
+      capture.clear();
+      controller().open();
+
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("stays silent while connect restores an authored-open drawer", async () => {
+      disconnectAndStopApplication(application);
+      const fresh = captureStateEvents("stimeo--drawer");
+      document.body.innerHTML = markup().replace('data-state="closed" hidden', 'data-state="open"');
+      application = Application.start();
+      application.register("stimeo--drawer", DrawerController);
+      await tick();
+
+      expect(panel().getAttribute("data-state")).toBe("open");
+      expect(fresh.seen).toEqual([]);
+      fresh.stop();
+    });
+
+    it("stays silent while a removed panel target is reconciled away", async () => {
+      trigger().click();
+      capture.clear();
+
+      panel().remove();
+      await tick();
+
+      expect(capture.seen).toEqual([]);
+    });
+  });
+
+  // --- Re-entry from a subscriber ---
+
+  describe("re-entry from a subscriber", () => {
+    const root = () => document.querySelector("[data-controller='stimeo--drawer']") as HTMLElement;
+    const controller = () => {
+      const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--drawer");
+      if (!(instance instanceof DrawerController)) throw new Error("drawer controller not found");
+      return instance;
+    };
+
+    it("drops the modal side effects when the open handler closes it again", () => {
+      root().addEventListener("stimeo--drawer:open", () => controller().close());
+
+      controller().open();
+
+      expect(panel().getAttribute("data-state")).toBe("closed");
+      expect(document.body.style.overflow).toBe("");
+    });
+
+    it("keeps the drawer on screen when the close handler reopens it", () => {
+      controller().open();
+      root().addEventListener("stimeo--drawer:close", () => controller().open());
+
+      controller().close();
+
+      expect(panel().getAttribute("data-state")).toBe("open");
+      // The deferred hide belongs to the close that was overtaken; applying it
+      // would hide a drawer whose state says it is open.
+      expect(panel().hidden).toBe(false);
+    });
   });
 });
 

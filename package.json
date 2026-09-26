@@ -1,6 +1,6 @@
 {
   "name": "stimeo-ui",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Headless Stimulus UI framework for Ruby on Rails — behavior-only, accessible components driven by HTML attributes.",
   "type": "module",
   "license": "MIT",
@@ -86,7 +86,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@floating-ui/dom": "1.8.0",
-    "@guidepup/virtual-screen-reader": "0.32.1",
+    "@guidepup/virtual-screen-reader": "0.33.0",
     "@hotwired/stimulus": "3.2.2",
     "@hotwired/turbo": "8.0.23",
     "@rails/actioncable": "8.1.301",

@@ -57,6 +57,13 @@ const TRANSIENT_STATES = new Set(["copied", "error"]);
  * in-page move — returns to `idle`, and the state is rewound before Turbo caches
  * the page (`BeforeCacheReset`). The rewind is silent: it discards nothing a
  * reconnect does not derive again.
+ *
+ * A `copiedLabel` / `errorLabel` changed on the live element while its result is
+ * shown rewrites the slot — only while the slot still reads the label the copy wrote
+ * — without announcing, dispatching or moving the return to idle. Stimulus reports no
+ * change when a label attribute whose value was empty is removed, so the slot keeps
+ * the empty label until the next copy. `feedbackDuration` and the announcement texts
+ * belong to one copy, so a change to them applies from the next.
  */
 export class ClipboardController extends Controller<HTMLElement> {
   static override targets = ["source", "button", "feedback"];
@@ -98,7 +105,9 @@ export class ClipboardController extends Controller<HTMLElement> {
    * Whether this connection is still live. `copy()` suspends on the Clipboard API,
    * and a teardown that lands while it is suspended must win: the continuation
    * would otherwise write to an element nobody owns and arm a timer past the
-   * `clearAll()` that was supposed to be the last word.
+   * `clearAll()` that was supposed to be the last word. Stimulus also runs the label
+   * callbacks ahead of `connect()`, while this is still false: a result restored with
+   * the markup is `connect()`'s to settle, not theirs.
    */
   #connected = false;
 
@@ -115,9 +124,34 @@ export class ClipboardController extends Controller<HTMLElement> {
   }
 
   /**
+   * Follows a `copiedLabel` swapped in place while a successful copy is shown.
+   *
+   * Render only: nothing is announced or dispatched, and the return to idle keeps the
+   * deadline the copy set. The slot changes only while `data-state` is `copied` and it
+   * still reads the previous label — the one the copy wrote there — so text someone
+   * else put in the slot stays. Stimulus also runs this ahead of `connect()`, which
+   * settles a result restored with the markup itself, so nothing is written then.
+   */
+  copiedLabelValueChanged(label: string, previous: string | undefined): void {
+    this.#followLabel("copied", label, previous);
+  }
+
+  /**
+   * Follows an `errorLabel` swapped in place while a failed copy is shown, on the same
+   * terms as {@link ClipboardController.copiedLabelValueChanged}: only while
+   * `data-state` is `error` and the slot still reads the previous label.
+   */
+  errorLabelValueChanged(label: string, previous: string | undefined): void {
+    this.#followLabel("error", label, previous);
+  }
+
+  /**
    * Copies the resolved text and reports the outcome. Bound via `data-action`
-   * (click). Dispatches `stimeo--clipboard:copy` with `{ success, text }` once per
-   * completed attempt — including on failure — so consumers can react either way.
+   * (click). Dispatches `stimeo--clipboard:copy` with `{ success, text, message }`
+   * once per completed attempt — including on failure — so consumers can react
+   * either way. `message` is the authored label for that outcome, so a part that
+   * shows wording — `stimeo--clipboard:copy->stimeo--toast#show` — needs nothing
+   * else; wiring both that and the announcer reads the same result twice.
    * An attempt whose connection ended while it was in flight reports nothing.
    */
   async copy(): Promise<void> {
@@ -132,7 +166,8 @@ export class ClipboardController extends Controller<HTMLElement> {
     if (!this.#connected) return;
 
     this.#reportResult(success);
-    this.dispatch("copy", { detail: { success, text } });
+    const message = success ? this.copiedLabelValue : this.errorLabelValue;
+    this.dispatch("copy", { detail: { success, text, message } });
   }
 
   /**
@@ -185,20 +220,54 @@ export class ClipboardController extends Controller<HTMLElement> {
     this.#reset();
   }
 
-  /** Reflects the result, announces it, and schedules the return to idle. */
+  /**
+   * Reflects the result, announces it, and schedules the return to idle.
+   *
+   * @stimeoRenderRoot
+   */
   #reportResult(success: boolean): void {
     this.element.setAttribute("data-state", success ? "copied" : "error");
     if (this.hasFeedbackTarget) {
       this.feedbackTarget.textContent = success ? this.copiedLabelValue : this.errorLabelValue;
     }
-    announce(success ? this.announceCopiedTextValue : this.announceErrorTextValue);
+    this.#announceResult(success);
+    this.#scheduleReset();
+  }
 
+  /**
+   * Reads the result out through the shared announcer.
+   *
+   * @stimeoRuntimeOnly `announceCopiedText` / `announceErrorText` word the one announcement a copy
+   *   makes.
+   */
+  #announceResult(success: boolean): void {
+    announce(success ? this.announceCopiedTextValue : this.announceErrorTextValue);
+  }
+
+  /**
+   * Arms the return to idle for the result just shown.
+   *
+   * @stimeoRuntimeOnly `feedbackDuration` is the delay of the one timer this call arms, and the
+   *   reset that timer runs reads no Value.
+   */
+  #scheduleReset(): void {
     // Drop any in-flight reset so consecutive copies restart the full window
     // rather than having the earlier timer clear the new result prematurely.
     this.#timers.clearAll();
     if (this.feedbackDurationValue > 0) {
       this.#timers.set(() => this.#reset(), this.feedbackDurationValue);
     }
+  }
+
+  /**
+   * Rewrites the slot to `label` while `state` is shown and the slot still reads
+   * `previous`, the label this controller wrote for that result.
+   */
+  #followLabel(state: "copied" | "error", label: string, previous: string | undefined): void {
+    if (!this.#connected) return;
+    if (this.element.getAttribute("data-state") !== state || !this.hasFeedbackTarget) return;
+    if (this.feedbackTarget.textContent !== previous) return;
+    this.feedbackTarget.textContent = label;
   }
 
   /** Returns to the idle state and empties the completion slot. */

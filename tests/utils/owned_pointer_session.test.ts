@@ -15,7 +15,7 @@ describe("OwnedPointerSession", () => {
       move: (event) => firstMoves.push(event.clientX),
       end: firstEnd,
     });
-    const second = new OwnedPointerSession(pointer("pointerdown", 2, 20), secondOwner, {
+    new OwnedPointerSession(pointer("pointerdown", 2, 20), secondOwner, {
       move: (event) => secondMoves.push(event.clientX),
       end: secondEnd,
     });
@@ -25,12 +25,13 @@ describe("OwnedPointerSession", () => {
     expect(secondMoves).toEqual([]);
 
     document.dispatchEvent(pointer("pointerup", 2, 30));
-    expect(first.active).toBe(true);
-    expect(second.active).toBe(false);
     expect(firstEnd).not.toHaveBeenCalled();
     expect(secondEnd).toHaveBeenCalledOnce();
 
+    // The ended session is deaf; the live one keeps receiving its own pointer.
+    document.dispatchEvent(pointer("pointermove", 2, 50));
     document.dispatchEvent(pointer("pointermove", 1, 40));
+    expect(secondMoves).toEqual([]);
     expect(firstMoves).toEqual([30, 40]);
     first.end();
   });
@@ -38,20 +39,20 @@ describe("OwnedPointerSession", () => {
   it("ignores another pointer's up and cancel events", () => {
     const owner = document.createElement("div");
     document.body.append(owner);
+    const moves = vi.fn();
     const ended = vi.fn();
-    const session = new OwnedPointerSession(pointer("pointerdown", 7, 0), owner, {
-      move: vi.fn(),
-      end: ended,
-    });
+    new OwnedPointerSession(pointer("pointerdown", 7, 0), owner, { move: moves, end: ended });
 
     document.dispatchEvent(pointer("pointerup", 8, 0));
     document.dispatchEvent(pointer("pointercancel", 8, 0));
-    expect(session.active).toBe(true);
+    document.dispatchEvent(pointer("pointermove", 7, 5));
     expect(ended).not.toHaveBeenCalled();
+    expect(moves).toHaveBeenCalledOnce();
 
     document.dispatchEvent(pointer("pointercancel", 7, 0));
-    expect(session.active).toBe(false);
+    document.dispatchEvent(pointer("pointermove", 7, 9));
     expect(ended).toHaveBeenCalledOnce();
+    expect(moves).toHaveBeenCalledOnce();
   });
 
   it("captures and releases the pointer while ending idempotently", () => {
@@ -88,7 +89,6 @@ describe("OwnedPointerSession", () => {
     });
     document.dispatchEvent(pointer("pointermove", 5, 12));
 
-    expect(session.active).toBe(true);
     expect(moves).toHaveBeenCalledOnce();
     session.end();
   });
@@ -99,31 +99,84 @@ describe("OwnedPointerSession", () => {
     owner.releasePointerCapture = vi.fn(() => {
       throw new DOMException("Pointer capture was already lost", "NotFoundError");
     });
+    const moves = vi.fn();
     const ended = vi.fn();
     const session = new OwnedPointerSession(pointer("pointerdown", 6, 0), owner, {
-      move: vi.fn(),
+      move: moves,
       end: ended,
     });
 
     expect(() => session.end()).not.toThrow();
-    expect(session.active).toBe(false);
+    document.dispatchEvent(pointer("pointermove", 6, 3));
+    expect(moves).not.toHaveBeenCalled();
     expect(ended).toHaveBeenCalledOnce();
   });
 
-  it("ends when matching pointer capture is lost", () => {
+  it("keeps delivering movement when the owner loses pointer capture", () => {
     const owner = document.createElement("div");
     document.body.append(owner);
+    const moves = vi.fn();
     const ended = vi.fn();
     const session = new OwnedPointerSession(pointer("pointerdown", 3, 0), owner, {
-      move: vi.fn(),
+      move: moves,
+      end: ended,
+    });
+
+    owner.dispatchEvent(pointer("lostpointercapture", 3, 0));
+    document.dispatchEvent(pointer("pointermove", 3, 18));
+    expect(moves).toHaveBeenCalledOnce();
+    expect(ended).not.toHaveBeenCalled();
+    session.end();
+  });
+
+  it("ignores a lost capture belonging to another pointer", () => {
+    const owner = document.createElement("div");
+    document.body.append(owner);
+    const moves = vi.fn();
+    const ended = vi.fn();
+    const session = new OwnedPointerSession(pointer("pointerdown", 3, 0), owner, {
+      move: moves,
       end: ended,
     });
 
     owner.dispatchEvent(pointer("lostpointercapture", 9, 0));
-    expect(session.active).toBe(true);
-    owner.dispatchEvent(pointer("lostpointercapture", 3, 0));
-    expect(session.active).toBe(false);
-    expect(ended).toHaveBeenCalledOnce();
+    document.dispatchEvent(pointer("pointermove", 3, 21));
+    expect(moves).toHaveBeenCalledOnce();
+    expect(ended).not.toHaveBeenCalled();
+    session.end();
+  });
+
+  it("names a released pointer as the end of the session", () => {
+    const owner = document.createElement("div");
+    document.body.append(owner);
+    const ended = vi.fn();
+    new OwnedPointerSession(pointer("pointerdown", 11, 0), owner, { move: vi.fn(), end: ended });
+
+    document.dispatchEvent(pointer("pointerup", 11, 0));
+    expect(ended).toHaveBeenCalledExactlyOnceWith("up");
+  });
+
+  it("names a cancelled pointer as the end of the session", () => {
+    const owner = document.createElement("div");
+    document.body.append(owner);
+    const ended = vi.fn();
+    new OwnedPointerSession(pointer("pointerdown", 12, 0), owner, { move: vi.fn(), end: ended });
+
+    document.dispatchEvent(pointer("pointercancel", 12, 0));
+    expect(ended).toHaveBeenCalledExactlyOnceWith("cancel");
+  });
+
+  it("names a caller-driven close as a teardown", () => {
+    const owner = document.createElement("div");
+    document.body.append(owner);
+    const ended = vi.fn();
+    const session = new OwnedPointerSession(pointer("pointerdown", 13, 0), owner, {
+      move: vi.fn(),
+      end: ended,
+    });
+
+    session.end();
+    expect(ended).toHaveBeenCalledExactlyOnceWith("teardown");
   });
 });
 

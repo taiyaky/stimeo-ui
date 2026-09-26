@@ -1,4 +1,5 @@
 import { isReservedArrowChord, logicalArrowKey } from "./arrow_step";
+import { matchingPart } from "./element_part";
 import { RovingTabindex } from "./roving_tabindex";
 
 /** Consumer-owned behavior that differs between removable-chip widgets. */
@@ -36,7 +37,8 @@ export class ChipRow {
   constructor(options: ChipRowOptions) {
     this.#directionElement = options.directionElement;
     this.#getItems = options.getItems;
-    this.#getButton = options.getButton ?? ((item) => item.querySelector("button"));
+    this.#getButton =
+      options.getButton ?? ((item) => matchingPart<HTMLButtonElement>(item, "button"));
     this.#onRemove = options.onRemove;
     this.#focusAfterEnd = options.focusAfterEnd;
   }

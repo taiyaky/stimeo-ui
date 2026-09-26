@@ -11,8 +11,11 @@ const DEFAULT_TOKENS: Readonly<Record<string, string>> = {
   "*": "[A-Za-z0-9]",
 };
 
-/** Attribute marking the hidden raw-value sink; its value may name the paired input's `id`. */
-const UNMASK_ATTR = "data-stimeo--input-mask-unmask";
+/**
+ * Suffix of the attribute marking the hidden raw-value sink; its value may name the
+ * paired input's `id`.
+ */
+const UNMASK_ATTR = "unmask";
 
 /** Which neighbour a deleting keystroke aimed at, when the platform names one. */
 type Deletion = "backward" | "forward";
@@ -159,7 +162,7 @@ function tokenCharOffset(tokenFlags: readonly boolean[], n: number): number {
  * Headless **input mask** — formats a field in place against a fixed pattern
  * (`9`=digit, `a`=letter, `*`=alphanumeric, others literal), preserving the caret,
  * rejecting invalid characters, and syncing the raw value to a hidden field. No
- * dedicated APG pattern; Currency Input owns money-specific formatting.
+ * dedicated APG pattern; `stimeo--currency-input` owns money-specific formatting.
  *
  * Markup contract (identifier: `stimeo--input-mask`, on the `<input>`):
  *   <input type="text" inputmode="numeric"
@@ -188,7 +191,10 @@ function tokenCharOffset(tokenFlags: readonly boolean[], n: number): number {
  * exactly where it was. Backspace and Delete always progress: when the keystroke
  * only removed literals the mask re-inserts, the significant character it aimed at
  * goes instead. Events fired mid-IME-composition are ignored; the confirmed text is
- * formatted once on `compositionend`.
+ * formatted once on `compositionend`. A `pattern` / `tokens` / `unmaskToHidden`
+ * change that arrives mid-composition leaves the uncommitted text alone and applies
+ * with that same format: as the user's `change` when the composition committed
+ * text, as `reconcile` when it ended on the text it began with.
  *
  * It reflects `data-mask-complete` / `data-mask-empty`, dispatches
  * `stimeo--input-mask:change` only when a user edit moves the committed value, and
@@ -204,6 +210,11 @@ function tokenCharOffset(tokenFlags: readonly boolean[], n: number): number {
  * `disconnect()`.
  */
 export class InputMaskController extends Controller<HTMLInputElement> {
+  /** The attribute above, in the namespace this controller is registered under. */
+  get #unmaskAttribute(): string {
+    return `data-${this.identifier}-${UNMASK_ATTR}`;
+  }
+
   static override values = {
     pattern: { type: String, default: "" },
     tokens: { type: String, default: "" },
@@ -223,8 +234,24 @@ export class InputMaskController extends Controller<HTMLInputElement> {
   /** Validated token map; the hot path never parses the `tokens` declaration. */
   #tokens = compileTokens("");
 
-  /** Holds mid-composition input so the IME's uncommitted text is never rewritten. */
-  readonly #composition = new CompositionTracker({ onEnd: () => this.#reformat("edit") });
+  /** The field's text when the running composition began. */
+  #textBeforeComposition = "";
+
+  /**
+   * Holds mid-composition input so the IME's uncommitted text is never rewritten,
+   * and formats the confirmed text once when the composition ends. A composition
+   * that ends on the text it began with committed nothing, so a re-format then is
+   * the page's: the mask changed while it ran.
+   */
+  readonly #composition = new CompositionTracker({
+    onStart: () => {
+      this.#textBeforeComposition = this.element.value;
+    },
+    onEnd: () => {
+      const committedNothing = this.element.value === this.#textBeforeComposition;
+      this.#reformat(committedNothing ? "reconcile" : "edit");
+    },
+  });
 
   /** Re-parses the declaration and re-formats under the tokens it now selects. */
   tokensValueChanged(): void {
@@ -269,8 +296,12 @@ export class InputMaskController extends Controller<HTMLInputElement> {
   /**
    * Core reformat: mask the current value, restore the caret, sync the sink and
    * the state hooks, and report a moved value under the event `cause` selects.
+   *
+   * @stimeoRenderRoot
    */
   #reformat(cause: Cause, deletion: Deletion | null = null): void {
+    // The IME owns the text until it commits; the composition's end re-formats it.
+    if (this.#composition.isComposing()) return;
     const input = this.element;
     const raw = input.value;
 
@@ -376,8 +407,8 @@ export class InputMaskController extends Controller<HTMLInputElement> {
    *    `id` (`data-stimeo--input-mask-unmask="zip"`).
    * 2. **Nearest container** — otherwise, walking up from the input, the first
    *    *value-less* sink in the closest ancestor. Wrapped input+sink pairs each
-   *    find their own sink, and the single form-level sink keeps working
-   *    unchanged. A sink claimed by another input's id is never matched here.
+   *    find their own sink, and a single form-level sink is found the same
+   *    way. A sink claimed by another input's id is never matched here.
    *
    * Both steps only ever consider the associated form's own controls, so a sink
    * belonging to a different form (or to none) is never written, while one the
@@ -389,13 +420,13 @@ export class InputMaskController extends Controller<HTMLInputElement> {
     const candidates = this.#sinkCandidates();
     const id = this.element.id;
     if (id.length > 0) {
-      const paired = candidates.find((sink) => sink.getAttribute(UNMASK_ATTR) === id);
+      const paired = candidates.find((sink) => sink.getAttribute(this.#unmaskAttribute) === id);
       if (paired) return paired;
     }
 
     // A bare (value-less) attribute is unclaimed, so a sink naming another
     // input's id can never be taken by this fallback.
-    const free = candidates.filter((sink) => sink.getAttribute(UNMASK_ATTR) === "");
+    const free = candidates.filter((sink) => sink.getAttribute(this.#unmaskAttribute) === "");
     for (let node = this.element.parentElement; node !== null; node = node.parentElement) {
       const ancestor = node;
       const sink = free.find((candidate) => ancestor.contains(candidate));
@@ -413,11 +444,13 @@ export class InputMaskController extends Controller<HTMLInputElement> {
   #sinkCandidates(): HTMLInputElement[] {
     const form = this.element.form;
     if (form === null) {
-      return Array.from(document.querySelectorAll<HTMLInputElement>(`input[${UNMASK_ATTR}]`));
+      return Array.from(
+        document.querySelectorAll<HTMLInputElement>(`input[${this.#unmaskAttribute}]`),
+      );
     }
     return Array.from(form.elements).filter(
       (element): element is HTMLInputElement =>
-        element instanceof HTMLInputElement && element.hasAttribute(UNMASK_ATTR),
+        element instanceof HTMLInputElement && element.hasAttribute(this.#unmaskAttribute),
     );
   }
 

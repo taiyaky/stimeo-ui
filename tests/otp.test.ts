@@ -85,6 +85,14 @@ function paste(field: HTMLElement, text: string): void {
   );
 }
 
+/** The events a handler from {@link listen} received, as `[name, detail]` in dispatch order. */
+function order(handler: ReturnType<typeof vi.fn>): Array<[string, unknown]> {
+  return handler.mock.calls.map(([event]) => {
+    const { type, detail } = event as CustomEvent;
+    return [type.replace("stimeo--otp:", ""), detail];
+  });
+}
+
 /** Records every controller event so a test can count and inspect them. */
 function listen(...names: readonly string[]): ReturnType<typeof vi.fn> {
   const handler = vi.fn();
@@ -92,12 +100,166 @@ function listen(...names: readonly string[]): ReturnType<typeof vi.fn> {
   return handler;
 }
 
+/** A lease marker as this component records it, quoted for an HTML attribute. */
+function lease(authored: string | null, written: string): string {
+  return `'${JSON.stringify({ authored, written })}'`;
+}
+
+/** A snapshot taken while the error showed, restored into a fresh page. */
+function restoredErrorMarkup(): string {
+  const owned = (index: number, authored: string | null, describedBy: string) =>
+    `<input class="field" data-stimeo--otp-target="field" aria-label="Digit ${index}"
+            maxlength="1" aria-invalid="true" aria-errormessage="error"
+            aria-describedby="${describedBy}"
+            data-otp-invalid-lease=${lease(null, "true")}
+            data-otp-errormessage-lease=${lease(null, "error")}
+            data-otp-describedby-lease=${lease(authored, describedBy)}
+            data-action="input->stimeo--otp#onInput" />`;
+  // The third field carries no records, so nothing on it is this component's.
+  const untouched = `<input class="field" data-stimeo--otp-target="field" aria-label="Digit 3"
+            maxlength="1" aria-invalid="true" aria-describedby="hint  extra"
+            data-action="input->stimeo--otp#onInput" />`;
+  return `
+    <div id="otp" data-controller="stimeo--otp" data-stimeo--otp-pattern-value="[0-9]"
+         role="group" aria-label="PIN passcode">
+      <p id="hint">Digits only</p>
+      ${owned(1, null, "error")}
+      ${owned(2, "hint", "hint error")}
+      ${untouched}
+      <div id="error" data-stimeo--otp-target="error">Error</div>
+      <input type="hidden" id="otp-value" data-stimeo--otp-target="value" name="otp" />
+    </div>`;
+}
+
 describe("OtpController", () => {
   let application: Application;
+
+  it("leaves an association the consumer changed while the error showed", async () => {
+    await remount({ fieldAttrs: (index) => (index === 0 ? 'aria-describedby="hint"' : "") });
+    const digits = fields();
+    const first = digits[0] as HTMLInputElement;
+
+    type(first, "\u3042");
+    await tick();
+    // From here the value is the consumer's, not this component's.
+    first.setAttribute("aria-describedby", "late-token");
+
+    type(first, "7");
+    await tick();
+    expect(first.getAttribute("aria-describedby")).toBe("late-token");
+  });
+
+  it("takes back what it wrote after the error target changed its id", async () => {
+    await remount({ fieldAttrs: (index) => (index === 0 ? 'aria-describedby="hint"' : "") });
+    const first = fields()[0] as HTMLInputElement;
+    type(first, "\u3042");
+    await tick();
+    expect(first.getAttribute("aria-describedby")).toBe("hint error");
+
+    // A morph can rename the target while the error shows; the record still
+    // knows which reference this component put on the field.
+    (document.getElementById("error") as HTMLElement).id = "renamed";
+    type(first, "7");
+    await tick();
+    expect(first.getAttribute("aria-describedby")).toBe("hint");
+    expect(first.hasAttribute("aria-errormessage")).toBe(false);
+  });
+
+  it("takes back its last write after a consumer change and another rejection", async () => {
+    await remount({ fieldAttrs: (index) => (index === 0 ? 'aria-describedby="hint"' : "") });
+    const first = fields()[0] as HTMLInputElement;
+    type(first, "\u3042");
+    await tick();
+    first.setAttribute("aria-describedby", "late-token");
+    // The next rejection writes over the consumer's value, so the attribute is
+    // this component's again and goes back to what was authored.
+    type(first, "\u3044");
+    await tick();
+    expect(first.getAttribute("aria-describedby")).toBe("late-token error");
+
+    type(first, "7");
+    await tick();
+    expect(first.getAttribute("aria-describedby")).toBe("hint");
+  });
+
+  it("ignores a lease marker it could not have written", async () => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = `
+      <div id="otp" data-controller="stimeo--otp" data-stimeo--otp-pattern-value="[0-9]"
+           role="group" aria-label="PIN passcode">
+        <input class="field" data-stimeo--otp-target="field" aria-label="Digit 1" maxlength="1"
+               aria-invalid="true" data-otp-invalid-lease="not json"
+               data-action="input->stimeo--otp#onInput" />
+        <input class="field" data-stimeo--otp-target="field" aria-label="Digit 2" maxlength="1"
+               aria-invalid="true" data-otp-invalid-lease='{"x":1}'
+               data-action="input->stimeo--otp#onInput" />
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--otp", OtpController);
+    await tick();
+
+    for (const field of fields()) {
+      expect(field.getAttribute("aria-invalid")).toBe("true");
+      expect(field.hasAttribute("data-otp-invalid-lease")).toBe(true);
+    }
+  });
+
+  it("keeps the first record when input is rejected twice in a row", async () => {
+    await remount({ fieldAttrs: (index) => (index === 0 ? 'aria-describedby="hint"' : "") });
+    const digits = fields();
+    const first = digits[0] as HTMLInputElement;
+
+    type(first, "\u3042");
+    await tick();
+    type(first, "\u3044");
+    await tick();
+    // The second rejection must not record the value the first one wrote, or the
+    // consumer's description is lost when the error clears.
+    type(first, "7");
+    await tick();
+
+    expect(first.getAttribute("aria-describedby")).toBe("hint");
+    expect(first.hasAttribute("aria-invalid")).toBe(false);
+  });
+
+  it("takes back the error association a restored snapshot carries", async () => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = restoredErrorMarkup();
+    application = Application.start();
+    application.register("stimeo--otp", OtpController);
+    await tick();
+
+    const digits = fields();
+    expect(document.getElementById("error")?.hasAttribute("hidden")).toBe(true);
+    // Nothing has been rejected yet, so the recorded fields go back to what they
+    // were authored with — absent here, and the consumer's own hint next door.
+    expect(digits[0]?.hasAttribute("aria-invalid")).toBe(false);
+    expect(digits[0]?.hasAttribute("aria-errormessage")).toBe(false);
+    expect(digits[0]?.hasAttribute("aria-describedby")).toBe(false);
+    expect(digits[1]?.getAttribute("aria-describedby")).toBe("hint");
+    expect(digits[1]?.hasAttribute("aria-invalid")).toBe(false);
+    // A field carrying no record holds nothing of this component's, so it comes
+    // through exactly as authored, spacing included.
+    expect(digits[2]?.getAttribute("aria-invalid")).toBe("true");
+    expect(digits[2]?.getAttribute("aria-describedby")).toBe("hint  extra");
+    // The records themselves are spent.
+    expect(digits.some((field) => field.hasAttribute("data-otp-invalid-lease"))).toBe(false);
+  });
 
   async function remount(options: FixtureOptions): Promise<void> {
     document.body.innerHTML = markup(options);
     await tick();
+  }
+
+  /**
+   * The connected instance, for driving a lifecycle callback directly: happy-dom
+   * does not deliver Value and target callbacks reliably, and each callback is
+   * idempotent, so a second delivery from Stimulus changes nothing.
+   */
+  function controller(): OtpController {
+    const found = application.getControllerForElementAndIdentifier(root(), "stimeo--otp");
+    if (!(found instanceof OtpController)) throw new Error("stimeo--otp is not connected");
+    return found;
   }
 
   beforeEach(async () => {
@@ -533,22 +695,453 @@ describe("OtpController", () => {
     expect(invalidHandler.mock.calls[0]?.[0]?.detail).toEqual({ pattern: "[0-9]" });
   });
 
-  it("drops digits a changed pattern no longer accepts", async () => {
+  it("drops digits a changed pattern no longer accepts, as a reconciliation", async () => {
     await remount({ pattern: "[0-9a-f]" });
     const digits = fields();
-    const changeHandler = listen("change");
 
     paste(digits[0] as HTMLElement, "1a2b");
     await tick();
     expect(combined()).toBe("1a2b");
 
+    // The page changed the declaration, so the digits it drops are its doing:
+    // not an edit, and never a completion.
+    const editHandler = listen("change", "complete");
+    const reconcileHandler = listen("reconcile");
     root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
     await tick();
 
     expect(digits.map((field) => field.value)).toEqual(["1", "", "2", ""]);
     expect(digits[1]?.getAttribute("data-filled")).toBeNull();
     expect(combined()).toBe("12");
-    expect(changeHandler).toHaveBeenCalledTimes(2);
+    expect(root().getAttribute("data-state")).toBe("partial");
+    expect(editHandler).not.toHaveBeenCalled();
+    expect(reconcileHandler).toHaveBeenCalledOnce();
+    expect(reconcileHandler.mock.calls[0]?.[0]?.detail).toEqual({ value: "12" });
+  });
+
+  it("stays silent when a changed pattern still accepts every entered digit", async () => {
+    paste(fields()[0] as HTMLElement, "12");
+    await tick();
+
+    const handler = listen("change", "complete", "reconcile");
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9a-f]");
+    controller().patternValueChanged();
+    await tick();
+
+    expect(combined()).toBe("12");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("reports a pattern change and a dropped field from one mutation as one reconciliation", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "1a2b");
+    await tick();
+
+    const editHandler = listen("change", "complete");
+    const reconcileHandler = listen("reconcile");
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    const last = digits[3] as HTMLInputElement;
+    last.remove();
+    controller().fieldTargetDisconnected(last);
+    await tick();
+
+    expect(fields().map((field) => field.value)).toEqual(["1", "", "2"]);
+    expect(combined()).toBe("12");
+    expect(editHandler).not.toHaveBeenCalled();
+    expect(reconcileHandler).toHaveBeenCalledOnce();
+    expect(reconcileHandler.mock.calls[0]?.[0]?.detail).toEqual({ value: "12" });
+  });
+
+  it("holds a pattern change while a field is composing, and applies it before the commit", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "a");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const second = digits[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(second, "う");
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    await tick();
+
+    // The field being composed holds the IME's text, and the drop waits for it.
+    expect(digits.map((field) => field.value)).toEqual(["a", "う", "", ""]);
+    expect(handler).not.toHaveBeenCalled();
+
+    second.value = "５";
+    second.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    // The drop was declared before the commit, so it is reported first; the
+    // commit follows as the user's edit.
+    expect(digits.map((field) => field.value)).toEqual(["", "5", "", ""]);
+    expect(order(handler)).toEqual([
+      ["reconcile", { value: "" }],
+      ["change", { value: "5" }],
+    ]);
+  });
+
+  it("applies a held drop before the commit, so the commit cannot complete what the pattern rejects", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "a12");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const fourth = digits[3] as HTMLInputElement;
+    fourth.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(fourth, "ご");
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    await tick();
+    fourth.value = "５";
+    fourth.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    expect(digits.map((field) => field.value)).toEqual(["", "1", "2", "5"]);
+    expect(order(handler)).toEqual([
+      ["reconcile", { value: "12" }],
+      ["change", { value: "125" }],
+    ]);
+  });
+
+  it("keeps a commit the new pattern accepts out of the held drop's reconciliation", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "a");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const second = digits[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(second, "ご");
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    await tick();
+    second.value = "5";
+    second.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    // The drop is the page's and reports without the 5; the 5 is the user's.
+    expect(order(handler)).toEqual([
+      ["reconcile", { value: "" }],
+      ["change", { value: "5" }],
+    ]);
+  });
+
+  it("counts a field by the text it shows once nothing is composing", async () => {
+    const handler = listen("reconcile");
+    // Written by the page, so no input event reports it; the next reconciliation reads it.
+    (fields()[0] as HTMLInputElement).value = "7";
+    const arrived = document.createElement("input");
+    arrived.className = "field";
+    arrived.setAttribute("data-stimeo--otp-target", "field");
+    arrived.setAttribute("aria-label", "Digit 5");
+    root().insertBefore(arrived, document.getElementById("error"));
+    controller().fieldTargetConnected(arrived);
+    await tick();
+
+    expect(combined()).toBe("7");
+    expect(order(handler)).toEqual([["reconcile", { value: "7" }]]);
+  });
+
+  it("reports a held drop, then the rejection of a commit the new pattern refuses", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "a1");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const third = digits[2] as HTMLInputElement;
+    third.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(third, "ｂ");
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    await tick();
+    third.value = "b";
+    third.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    expect(digits.map((field) => field.value)).toEqual(["", "1", "", ""]);
+    expect(order(handler)).toEqual([
+      ["reconcile", { value: "1" }],
+      ["invalid", { pattern: "[0-9]" }],
+    ]);
+  });
+
+  it("lets a held pattern change decide a field whose composition was cancelled", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "1a");
+    await tick();
+
+    const userHandler = listen("change", "complete", "invalid");
+    const reconcileHandler = listen("reconcile");
+    const second = digits[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    second.value = "あ";
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+
+    // Cancelling the conversion puts back the character the field held: nothing
+    // the user entered, so it is not reported as rejected input either.
+    second.value = "a";
+    second.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    expect(digits.map((field) => field.value)).toEqual(["1", "", "", ""]);
+    expect(userHandler).not.toHaveBeenCalled();
+    expect(reconcileHandler.mock.calls.map((call) => call[0]?.detail)).toEqual([{ value: "1" }]);
+    expect(document.getElementById("error")?.hidden).toBe(true);
+  });
+
+  it("keeps uncommitted text out of what a reconciliation publishes mid-composition", async () => {
+    const digits = fields();
+    type(digits[0] as HTMLInputElement, "1");
+    await tick();
+
+    const reconcileHandler = listen("reconcile");
+    const second = digits[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(second, "う");
+    const arrived = document.createElement("input");
+    arrived.className = "field";
+    arrived.setAttribute("data-stimeo--otp-target", "field");
+    arrived.setAttribute("aria-label", "Digit 5");
+    root().insertBefore(arrived, document.getElementById("error"));
+    controller().fieldTargetConnected(arrived);
+    await tick();
+
+    expect(combined()).toBe("1");
+    expect(reconcileHandler).not.toHaveBeenCalled();
+
+    second.value = "２";
+    second.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    expect(combined()).toBe("12");
+  });
+
+  it("reports a filled field removed mid-composition as reconcile at once, apart from the commit", async () => {
+    const digits = fields();
+    type(digits[0] as HTMLInputElement, "1");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const second = digits[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(second, "う");
+    const first = digits[0] as HTMLInputElement;
+    first.remove();
+    controller().fieldTargetDisconnected(first);
+    await tick();
+
+    // The removal is already in the DOM; the field being composed counts by what
+    // it had committed, so its uncommitted text stays out.
+    expect(order(handler)).toEqual([["reconcile", { value: "" }]]);
+
+    second.value = "２";
+    second.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    expect(order(handler)).toEqual([
+      ["reconcile", { value: "" }],
+      ["change", { value: "2" }],
+    ]);
+    expect(combined()).toBe("2");
+  });
+
+  it("reports a form reset mid-composition as reconcile at once, apart from the commit", async () => {
+    await remount({ inForm: true });
+    const digits = fields();
+    type(digits[0] as HTMLInputElement, "1");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const second = digits[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(second, "う");
+    (document.getElementById("form") as HTMLFormElement).reset();
+    await tick();
+
+    expect(order(handler)).toEqual([["reconcile", { value: "" }]]);
+    expect(combined()).toBe("");
+
+    second.value = "５";
+    second.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    expect(order(handler)).toEqual([
+      ["reconcile", { value: "" }],
+      ["change", { value: "5" }],
+    ]);
+  });
+
+  it("gives the error surface back when the form is reset mid-composition", async () => {
+    await remount({
+      inForm: true,
+      fieldAttrs: (index) => (index === 0 ? 'aria-describedby="hint"' : ""),
+    });
+    const digits = fields();
+    const first = digits[0] as HTMLInputElement;
+    type(first, "あ");
+    await tick();
+    expect(first.getAttribute("aria-invalid")).toBe("true");
+
+    const second = digits[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(second, "う");
+    (document.getElementById("form") as HTMLFormElement).reset();
+    await tick();
+
+    expect(first.hasAttribute("aria-invalid")).toBe(false);
+    expect(first.hasAttribute("aria-errormessage")).toBe(false);
+    expect(first.getAttribute("aria-describedby")).toBe("hint");
+    expect(document.getElementById("error")?.hidden).toBe(true);
+  });
+
+  it("reports a field added mid-composition as reconcile at once when it moves completeness", async () => {
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "1234");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const fourth = digits[3] as HTMLInputElement;
+    fourth.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(fourth, "よ");
+    const arrived = document.createElement("input");
+    arrived.className = "field";
+    arrived.setAttribute("data-stimeo--otp-target", "field");
+    arrived.setAttribute("aria-label", "Digit 5");
+    root().insertBefore(arrived, document.getElementById("error"));
+    controller().fieldTargetConnected(arrived);
+    await tick();
+
+    // The composing field still counts by its committed 4, so only the empty
+    // arrival moves the state: the passcode stops being complete.
+    expect(order(handler)).toEqual([["reconcile", { value: "1234" }]]);
+    expect(root().getAttribute("data-state")).toBe("partial");
+
+    fourth.value = "９";
+    fourth.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    expect(order(handler)).toEqual([
+      ["reconcile", { value: "1234" }],
+      ["change", { value: "1239" }],
+    ]);
+  });
+
+  it("reports a removal at once, then a held pattern drop, then the commit", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "a1");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const third = digits[2] as HTMLInputElement;
+    third.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(third, "う");
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    await tick();
+    const second = digits[1] as HTMLInputElement;
+    second.remove();
+    controller().fieldTargetDisconnected(second);
+    await tick();
+
+    // The removal is in the DOM already; the drop of "a" waits for the commit.
+    expect(order(handler)).toEqual([["reconcile", { value: "a" }]]);
+
+    third.value = "５";
+    third.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    expect(order(handler)).toEqual([
+      ["reconcile", { value: "a" }],
+      ["reconcile", { value: "" }],
+      ["change", { value: "5" }],
+    ]);
+    expect(fields().map((field) => field.value)).toEqual(["", "5", ""]);
+  });
+
+  it("applies a held pattern drop once the composing field itself is removed", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "a1");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const third = digits[2] as HTMLInputElement;
+    third.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(third, "ｂ");
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    await tick();
+    third.remove();
+    controller().fieldTargetDisconnected(third);
+    await tick();
+
+    // With the composition gone, nothing waits any more.
+    expect(fields().map((field) => field.value)).toEqual(["", "1", ""]);
+    expect(order(handler)).toEqual([["reconcile", { value: "1" }]]);
+  });
+
+  it("takes a cancelled composition as no edit: no event and no step forward", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "a1");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const second = digits[1] as HTMLInputElement;
+    second.focus();
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    type(second, "あ");
+    // Cancelling puts back the text the field had before the composition began.
+    second.value = "1";
+    second.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    expect(document.activeElement).toBe(second);
+    expect(digits.map((field) => field.value)).toEqual(["a", "1", "", ""]);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("drops the page changes a composition held when the controller disconnects", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "a");
+    await tick();
+
+    const second = digits[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    // Stimulus delivers its own callback too; both land mid-composition.
+    await tick();
+    expect(digits[0]?.value).toBe("a");
+
+    const instance = controller();
+    instance.disconnect();
+    instance.connect();
+
+    // A reconnection reads the fields as they are; a later reconciliation does
+    // not bring back the drop the disconnection discarded.
+    const arrived = document.createElement("input");
+    arrived.className = "field";
+    arrived.setAttribute("data-stimeo--otp-target", "field");
+    arrived.setAttribute("aria-label", "Digit 5");
+    root().insertBefore(arrived, document.getElementById("error"));
+    instance.fieldTargetConnected(arrived);
+    await tick();
+
+    expect(digits[0]?.value).toBe("a");
   });
 
   it("keeps a server-rendered value the pattern rejects", async () => {
@@ -674,6 +1267,29 @@ describe("OtpController", () => {
 
     expect(next.value).toBe("6");
     expect(combined()).toBe("56");
+  });
+
+  it("accepts a keyless edit that lands on the field that just confirmed", async () => {
+    // Dictation, autofill and a drop arrive with no key before them, so the
+    // window that absorbs the browser's echo cannot tell them apart on timing
+    // alone; the kind the engine reports on the event can.
+    const digits = fields();
+    const first = digits[0] as HTMLInputElement;
+
+    first.focus();
+    first.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    first.value = "１";
+    first.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+    expect(combined()).toBe("1");
+
+    first.value = "7";
+    first.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+    await tick();
+
+    expect(first.value).toBe("7");
+    expect(combined()).toBe("7");
+    expect(document.activeElement).toBe(digits[1]);
   });
 
   it("does not re-spread a commit the browser confirms with a trailing input", async () => {
@@ -971,12 +1587,15 @@ describe("OtpController", () => {
   it("reconciles after a native form reset", async () => {
     await remount({ inForm: true });
     const digits = fields();
-    const changeHandler = listen("change");
 
     paste(digits[0] as HTMLElement, "1234");
     await tick();
     expect(combined()).toBe("1234");
 
+    // The reset restored the form's controls; nobody edited the passcode, so
+    // the move is a reconciliation — not an edit.
+    const editHandler = listen("change", "complete");
+    const reconcileHandler = listen("reconcile");
     (document.getElementById("form") as HTMLFormElement).reset();
     await tick();
 
@@ -984,9 +1603,41 @@ describe("OtpController", () => {
     expect(digits.some((field) => field.hasAttribute("data-filled"))).toBe(false);
     expect(combined()).toBe("");
     expect(root().getAttribute("data-state")).toBe("empty");
-    expect(changeHandler).toHaveBeenLastCalledWith(
-      expect.objectContaining({ detail: { value: "" } }),
-    );
+    expect(editHandler).not.toHaveBeenCalled();
+    expect(reconcileHandler).toHaveBeenCalledOnce();
+    expect(reconcileHandler.mock.calls[0]?.[0]?.detail).toEqual({ value: "" });
+  });
+
+  it("reports a reset that refills every field as a reconciliation, never a completion", async () => {
+    // A completion is what makes a subscriber submit the code, and the page's
+    // own defaults coming back are not a code the user entered.
+    await remount({ inForm: true, fieldAttrs: (index) => `value="${index + 1}"` });
+    const digits = fields();
+    expect(root().getAttribute("data-state")).toBe("complete");
+    press(digits[3] as HTMLElement, "Backspace");
+    await tick();
+    expect(combined()).toBe("123");
+
+    const editHandler = listen("change", "complete");
+    const reconcileHandler = listen("reconcile");
+    (document.getElementById("form") as HTMLFormElement).reset();
+    await tick();
+
+    expect(combined()).toBe("1234");
+    expect(root().getAttribute("data-state")).toBe("complete");
+    expect(editHandler).not.toHaveBeenCalled();
+    expect(reconcileHandler).toHaveBeenCalledOnce();
+    expect(reconcileHandler.mock.calls[0]?.[0]?.detail).toEqual({ value: "1234" });
+  });
+
+  it("stays silent when a reset leaves the passcode where it was", async () => {
+    await remount({ inForm: true });
+    const handler = listen("change", "complete", "reconcile");
+    (document.getElementById("form") as HTMLFormElement).reset();
+    await tick();
+
+    expect(combined()).toBe("");
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it("ignores a reset that another form owns", async () => {
@@ -1036,6 +1687,44 @@ describe("OtpController", () => {
 
     expect(digits.some((field) => field.hasAttribute("data-filled"))).toBe(false);
     expect(root().getAttribute("data-state")).toBe("empty");
+  });
+
+  it("gives the error surface back when the form it belongs to is reset", async () => {
+    await remount({
+      inForm: true,
+      fieldAttrs: (index) => (index === 0 ? 'aria-describedby="hint"' : ""),
+    });
+    const first = fields()[0] as HTMLInputElement;
+    type(first, "あ");
+    await tick();
+    expect(first.getAttribute("aria-invalid")).toBe("true");
+    expect(document.getElementById("error")?.hidden).toBe(false);
+
+    (document.getElementById("form") as HTMLFormElement).reset();
+    await tick();
+
+    // Nothing is rejected in a form that was just reset.
+    expect(first.hasAttribute("aria-invalid")).toBe(false);
+    expect(first.hasAttribute("aria-errormessage")).toBe(false);
+    expect(first.getAttribute("aria-describedby")).toBe("hint");
+    expect(document.getElementById("error")?.hidden).toBe(true);
+  });
+
+  it("drops a reset reconciliation the group disconnected before", async () => {
+    await remount({ inForm: true });
+    const digits = fields();
+
+    paste(digits[0] as HTMLElement, "1234");
+    await tick();
+
+    const controller = application.getControllerForElementAndIdentifier(root(), "stimeo--otp");
+    (document.getElementById("form") as HTMLFormElement).reset();
+    (controller as unknown as { disconnect(): void }).disconnect();
+    root().setAttribute("data-state", "sentinel");
+
+    await tick();
+
+    expect(root().getAttribute("data-state")).toBe("sentinel");
   });
 
   // --- Machine-detectable a11y ---
@@ -1120,5 +1809,25 @@ describe("OtpController", () => {
 
     expect(document.getElementById("error")?.getAttribute("hidden")).toBe("");
     expect(digits.some((field) => field.hasAttribute("aria-errormessage"))).toBe(false);
+  });
+
+  it("returns the error leases of an input that stops being a field", async () => {
+    await remount({ fieldAttrs: (index) => (index === 0 ? 'aria-describedby="hint"' : "") });
+    const digits = fields();
+    const first = digits[0] as HTMLInputElement;
+    type(first, "あ");
+    await tick();
+    expect(first.getAttribute("aria-describedby")).toBe("hint error");
+
+    // A morph can drop the target token and leave the input in the page.
+    first.removeAttribute("data-stimeo--otp-target");
+    await tick();
+
+    expect(first.getAttribute("aria-describedby")).toBe("hint");
+    expect(first.hasAttribute("aria-invalid")).toBe(false);
+    expect(first.hasAttribute("aria-errormessage")).toBe(false);
+    expect(first.hasAttribute("data-otp-describedby-lease")).toBe(false);
+    // The error still stands on the fields that remain.
+    expect(digits[1]?.getAttribute("aria-invalid")).toBe("true");
   });
 });

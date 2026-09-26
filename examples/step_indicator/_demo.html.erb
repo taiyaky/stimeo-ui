@@ -1,10 +1,12 @@
 <%# Markup for the step-indicator (read-only progress) demo.
-    The library holds the current step number, sets data-state on each li, sets
+    The library holds the current position, sets data-state on each li, sets
     aria-current="step" on the current li, and updates the progress CSS variable
     (--stimeo--step-indicator-ratio). The steps themselves aren't interactive, so the
-    current step is updated via the external step:set event (fired by demo.js from the
-    prev/next buttons). %>
-<div class="step-indicator-demo">
+    position is moved from the outside: a stepper sits inside and dispatches
+    stimeo--stepper:change with { index, previous, total, step }, which the indicator
+    receives through setIndex. No consumer JS is involved. %>
+<div class="step-indicator-demo" data-controller="stimeo--stepper"
+     data-stimeo--stepper-index-value="1">
   <%# --steps lets the CSS put the track between the first and last dot centres:
       the library's ratio is "how far along the range", and the range runs from
       centre to centre, not edge to edge. %>
@@ -13,8 +15,8 @@
     style="--steps: 4"
     data-controller="stimeo--step-indicator"
     aria-label="<%= t("components.step_indicator.demo.label") %>"
-    data-stimeo--step-indicator-current-value="1"
-    data-action="step:set->stimeo--step-indicator#setCurrent">
+    data-stimeo--step-indicator-index-value="1"
+    data-action="stimeo--stepper:change@window->stimeo--step-indicator#setIndex">
     <% %w[cart shipping payment confirm].each_with_index do |step, index| %>
       <li
         class="step-indicator__step"
@@ -30,11 +32,27 @@
     <% end %>
   </ol>
 
+  <%# The stepper owns the position; its own steps stay visually hidden because the
+      indicator above is what this demo shows. %>
+  <ol class="step-indicator__driver">
+    <% %w[cart shipping payment confirm].each_with_index do |step, index| %>
+      <li data-stimeo--stepper-target="step">
+        <button
+          type="button"
+          class="demo-trigger"
+          data-stimeo--stepper-index-param="<%= index %>"
+          data-action="click->stimeo--stepper#goto">
+          <%= t("components.step_indicator.demo.steps.#{step}") %>
+        </button>
+      </li>
+    <% end %>
+  </ol>
+
   <div class="step-indicator__controls">
-    <button type="button" class="demo-trigger" data-step-indicator-prev>
+    <button type="button" class="demo-trigger" data-action="click->stimeo--stepper#prev">
       <%= t("components.step_indicator.demo.back") %>
     </button>
-    <button type="button" class="demo-trigger" data-step-indicator-next>
+    <button type="button" class="demo-trigger" data-action="click->stimeo--stepper#next">
       <%= t("components.step_indicator.demo.advance") %>
     </button>
   </div>

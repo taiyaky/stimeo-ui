@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { ownerIndex } from "../utils/event_owner";
 import { canTakeFocus } from "../utils/focus_candidate";
+import { FormResetWatcher } from "../utils/form_reset_watcher";
 import { ListenerSet } from "../utils/listener_set";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { TabindexLoan } from "../utils/tabindex_loan";
@@ -98,6 +99,10 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
   /** Coalesces one target/morph/mutation batch into one full DOM reconciliation. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileDom());
   readonly #listeners = new ListenerSet();
+  readonly #formReset = new FormResetWatcher(
+    (form) => this.#hasTriggerOwnedBy(form),
+    () => this.#reconcile.schedule(),
+  );
   /** Provides the last-resort focus landmark without claiming an authored tabindex. */
   readonly #rootTabindex = new TabindexLoan<HTMLElement>();
   /** Watches retained targets and controls whose declarative or reflected state changed. */
@@ -117,16 +122,6 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
     this.#reconcile.schedule();
   };
 
-  /** Reconciles the settled defaults after a non-cancelled owning form reset. */
-  readonly #onReset = (event: Event): void => {
-    const form = event.target;
-    if (form instanceof HTMLFormElement && this.#hasTriggerOwnedBy(form)) {
-      queueMicrotask(() => {
-        if (!event.defaultPrevented) this.#reconcile.schedule();
-      });
-    }
-  };
-
   /** Reflects initial live state and opens every retained-DOM reconciliation path. */
   override connect(): void {
     this.#lastVisible = new WeakMap();
@@ -143,7 +138,7 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
     this.#listeners.add(this.element, "change", this.#onTriggerInput);
     this.#listeners.add(this.element, "input", this.#onTriggerInput);
     this.#listeners.add(this.element, "turbo:morph-element", this.#onMorph);
-    document.addEventListener("reset", this.#onReset, true);
+    this.#formReset.observe();
   }
 
   /** Releases all external resources and returns the temporary focus landmark loan. */
@@ -152,7 +147,7 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
     this.#observing = false;
     this.#observer.disconnect();
     this.#listeners.dispose();
-    document.removeEventListener("reset", this.#onReset, true);
+    this.#formReset.disconnect();
     this.#rootTabindex.returnAll();
   }
 
@@ -194,6 +189,8 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
   /**
    * Computes one settled plan, shows destinations before hiding sources, and then
    * returns logical transitions in DOM order after every region is internally coherent.
+   *
+   * @stimeoRenderRoot
    */
   #settle(triggers: Trigger[] = this.triggerTargets): RegionTransition[] {
     const regions = this.regionTargets;

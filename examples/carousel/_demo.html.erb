@@ -22,12 +22,13 @@
       class="carousel__play"
       aria-label="<%= t("components.carousel.demo.autoplay") %>"
       data-stimeo--carousel-target="playToggle">
-      <%# The library owns aria-pressed (the autoplay Value is the intent it mirrors);
-          demo.css swaps the glyph off it so the control visibly reflects play (❚❚) vs.
-          paused (▶). The icons are decorative; the accessible name comes from aria-label
-          above. %>
-      <span class="carousel__play-icon carousel__play-icon--play" aria-hidden="true">▶</span>
-      <span class="carousel__play-icon carousel__play-icon--pause" aria-hidden="true">❚❚</span>
+      <%# The library owns aria-pressed (derived from the autoplay Value, whether a slide
+          is left to rotate to, and the reduced-motion preference) and the hidden of the
+          two glyph halves: ❚❚ shows while autoplay runs, ▶ while it is stopped. The
+          icons are decorative; the accessible name comes from the aria-label above and
+          stays the same in both states. %>
+      <span aria-hidden="true" data-stimeo--carousel-target="offLabel">▶</span>
+      <span aria-hidden="true" hidden data-stimeo--carousel-target="onLabel">❚❚</span>
     </button>
     <%# A visual read-out only. The library makes the viewport the live region, so a
         second one here would make a screen reader announce the change twice. %>

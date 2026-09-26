@@ -102,8 +102,9 @@ const BUTTON_BUSY_LABEL = "data-submit-once-busy-label";
  * Attribute writes use `AttributeLease`, so a consumer mutation made
  * while busy wins over restoration. `DetachGate` preserves an in-flight
  * session across an in-page move, while `BeforeCacheReset` rewinds the
- * snapshot before Turbo caches it. Cache/detach rewinds are silent and never
- * move focus.
+ * snapshot before Turbo caches it. Cache/detach rewinds dispatch no `end`,
+ * announce nothing and never move focus; a cache rewind that abandons a
+ * submission reports it once as `reconcile`.
  */
 export class SubmitOnceController extends Controller<HTMLElement> {
   static override targets = ["submit", "idle", "busy"];
@@ -248,7 +249,12 @@ export class SubmitOnceController extends Controller<HTMLElement> {
     this.#enterControl(session, target);
   }
 
-  /** Ends one session, restores owned state, and reports the observable completion. */
+  /**
+   * Ends one session, restores owned state, and reports the observable completion.
+   *
+   * @stimeoRuntimeOnly `announceReadyText` words the one announcement of this finished submission
+   *   and `restoreFocus` decides where its focus returns.
+   */
   #complete(form: HTMLFormElement | null, reason: CompletionReason, success?: boolean): void {
     const session = this.#sessionFor(form);
     if (!session) return;
@@ -277,7 +283,12 @@ export class SubmitOnceController extends Controller<HTMLElement> {
     this.#controlBusy.write(control, "true");
   }
 
-  /** Swaps only the triggering control's safe label channel. */
+  /**
+   * Swaps only the triggering control's safe label channel.
+   *
+   * @stimeoRuntimeOnly `busyLabel` is the label this one submission shows until it ends; the idle
+   *   label comes back with the state it returns.
+   */
   #enterLabel(session: SubmissionSession): void {
     const control = session.submitter;
     if (!control) return;
@@ -376,7 +387,10 @@ export class SubmitOnceController extends Controller<HTMLElement> {
     this.#sessions.clear();
   }
 
-  /** Keeps Turbo's cached snapshot idle, without events, announcements, or focus moves. */
+  /**
+   * Keeps Turbo's cached snapshot idle without `end`, announcements, or focus
+   * moves; the abandoned forms are reported once as `reconcile`.
+   */
   #rewindForCache(): void {
     const forms = [...this.#sessions.keys()];
     this.#abandonSessions();

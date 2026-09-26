@@ -112,6 +112,7 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
     this.#frames.cancel();
   }
 
+  /** @stimeoRenderRoot */
   #measure(): void {
     const y = scrollOffset(this.#scrollerEl);
     // The offset zone decides before the jitter guard: a move small enough to
@@ -124,9 +125,19 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
     }
 
     const delta = y - this.#lastY;
-    if (Math.abs(delta) < this.toleranceValue) return;
+    if (this.#isJitter(delta)) return;
     this.#lastY = y;
     this.#apply(delta > 0);
+  }
+
+  /**
+   * Whether one scroll step is too small to act on.
+   *
+   * @stimeoRuntimeOnly `tolerance` is the allowance one scroll step is compared against; the
+   *   header's state at rest does not depend on it.
+   */
+  #isJitter(delta: number): boolean {
+    return Math.abs(delta) < this.toleranceValue;
   }
 
   /**

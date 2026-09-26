@@ -8,10 +8,12 @@ import {
   toISODateString,
   toISOMonthString,
 } from "../utils/dates";
+import { commitField, writeField } from "../utils/field_mirror";
 import { resolveLocale } from "../utils/locale";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { parseStringList } from "../utils/string_list";
+import { targetSelector } from "../utils/target_selector";
 
 /** Number of cells in a six-week month grid (7 × 6). */
 const GRID_SIZE = 42;
@@ -49,13 +51,26 @@ const GRID_SIZE = 42;
  * `data-range-start` / `data-in-range` / `data-range-end` hooks. Assistive tech
  * is told the two confirmed endpoints via `aria-selected`; inner cells use
  * `data-in-range` (visual only) so the announcement stays to the two ends. The
- * confirmed range is also mirrored to the live `status` region.
+ * range the user confirms is also announced in the live `status` region.
  *
  * Selection model: the first click/Enter sets a *pending* start and enters
  * "selecting" mode (preview follows the pointer/focus); the second confirms the
- * end (auto-swapped if earlier than the start) and dispatches `change` with
- * `{ start, end }` ISO dates. Escape abandons an in-progress selection,
- * restoring the last confirmed range.
+ * end (auto-swapped if earlier than the start), and a preset confirms its range
+ * in one step. Escape abandons an in-progress selection, restoring the last
+ * confirmed range.
+ *
+ * A confirmed range is painted — the cells, both hidden fields and the status —
+ * before anything reports it. Each hidden field that moved then emits a native
+ * bubbling `change`, the way a form control does, so `stimeo--auto-submit` and
+ * form-level validation hear it; `monthchange` follows when the paint moved the
+ * month, and last `change` dispatches `{ start: string, end: string }`, the ISO
+ * range the picker holds. A bound a listener moves meanwhile is applied by the
+ * repaint its Value callback runs, so the `reconcile` it causes follows the
+ * `change`. A listener that replaces the range before these reports are all out
+ * — by confirming another range, or with a repaint that narrows this one — has
+ * the replacing range report itself: what is still pending for the replaced
+ * range is not sent, and focus stays where the replacing move put it. The seed
+ * `connect()` reads out of the hidden fields is written back silently.
  *
  * Availability is declarative on both axes: `min` / `max` bound the selectable
  * interval and `disabledDates` excludes individual dates inside it. Both are
@@ -65,6 +80,17 @@ const GRID_SIZE = 42;
  * navigation dispatches `monthchange` with `{ month }` as a notification (for
  * fetching a month's availability, say); the fetched result comes back in
  * through `disabledDates`, which repaints on its own.
+ *
+ * The same predicate holds the confirmed range. When a change to `min`, `max`
+ * or `disabledDates` leaves an end unselectable, the paint narrows the range:
+ * each end moves inward to the nearest day that can still be chosen, and a
+ * range with no such day left is cleared. The hidden fields follow without a
+ * native `change`, the status keeps announcing what the user confirmed, and
+ * `reconcile` dispatches `{ start: string, end: string }` — the narrowed range,
+ * empty strings once cleared — rather than `change`, which stays the user's.
+ * `connect()` narrows the range it reads from the fields the same way,
+ * silently. An in-progress selection whose start becomes unselectable is
+ * dropped, as Escape would drop it, and the next pick starts a new one.
  */
 export class DateRangePickerController extends Controller<HTMLElement> {
   static override targets = ["grid", "monthLabel", "cell", "status", "startField", "endField"];
@@ -78,7 +104,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     locale: { type: String, default: "" },
   };
   static actions = ["applyPreset", "next", "onKeydown", "prev", "previewTo", "selectDate"] as const;
-  static events = ["change", "monthchange"] as const;
+  static events = ["change", "monthchange", "reconcile"] as const;
 
   declare readonly gridTarget: HTMLElement;
   declare readonly hasGridTarget: boolean;
@@ -111,6 +137,15 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   /** Deferred focus after an async month transition (cancelled on teardown). */
   readonly #focusTimer = new SafeTimeout();
 
+  /**
+   * How many times the confirmed range has moved — a commit or a narrowing — so
+   * a report still pending for a range a listener has since replaced can tell.
+   */
+  #rangeMoves = 0;
+
+  /** How many month transitions have started, so one a listener starts mid-paint keeps its focus. */
+  #transitions = 0;
+
   /** The declared unavailable dates, indexed for the per-cell paint lookup. */
   #disabledDates = new Set<string>();
 
@@ -128,17 +163,22 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     this.#render();
   });
 
-  /** Seeds and normalizes the range from optional hidden fields, then paints the grid. */
+  /**
+   * Seeds the range from optional hidden fields — ordered, and narrowed to the
+   * days that can be chosen — then paints the grid, which writes the range back
+   * to the fields silently.
+   */
   override connect(): void {
     this.#repaint.activate();
     this.#beforeCache.activate();
     const authoredStart = this.hasStartFieldTarget ? normalizeISO(this.startFieldTarget.value) : "";
     const authoredEnd = this.hasEndFieldTarget ? normalizeISO(this.endFieldTarget.value) : "";
-    [this.#startDate, this.#endDate] = orderRange(authoredStart, authoredEnd);
+    [this.#startDate, this.#endDate] = this.#selectableRange(
+      ...orderRange(authoredStart, authoredEnd),
+    );
     this.#pendingStart = "";
     this.#previewDate = "";
     this.#announcedMonth = null;
-    this.#commitFields();
 
     const anchor =
       parseISODateString(this.#startDate) ?? this.#clampToBounds(new Date()) ?? new Date();
@@ -238,16 +278,11 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     // still painted `aria-disabled="true"`.
     if (!this.#isSelectable(start) || !this.#isSelectable(end)) return;
 
-    this.#startDate = start;
-    this.#endDate = end;
-    this.#pendingStart = "";
-    this.#previewDate = "";
+    const move = this.#setConfirmed(start, end);
     const endDate = parseISODateString(end);
     if (endDate) this.#focusedDate = endDate;
-    this.#commitFields();
-    this.#transitionTo(toISOMonthString(parseISODateString(end) ?? new Date()), end);
-    this.#announce();
-    this.dispatch("change", { detail: { start, end } });
+    this.#transitionTo(toISOMonthString(parseISODateString(end) ?? new Date()), end, true);
+    this.#reportConfirmed(move);
   }
 
   /** Grid keyboard navigation, selection (Enter/Space), and Escape-to-cancel. */
@@ -318,7 +353,9 @@ export class DateRangePickerController extends Controller<HTMLElement> {
 
   /** Records a chosen date as either the pending start or the confirmed end. */
   #choose(date: string): void {
-    if (!this.#pendingStart) {
+    // A pending start the availability has taken away cannot become an
+    // endpoint — the next paint drops it — so this pick starts a new selection.
+    if (!this.#pendingStart || !this.#isSelectable(this.#pendingStart)) {
       this.#pendingStart = date;
       this.#previewDate = date;
       const parsed = parseISODateString(date);
@@ -329,14 +366,34 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     // Second click confirms; order the two so start ≤ end.
     const [start, end] =
       date < this.#pendingStart ? [date, this.#pendingStart] : [this.#pendingStart, date];
+    const move = this.#setConfirmed(start, end);
+    this.#render(true);
+    this.#reportConfirmed(move);
+  }
+
+  /**
+   * Makes `start`–`end` the confirmed range, ending any selection in progress,
+   * ahead of the paint that shows it.
+   *
+   * @returns The move count the range is now at, which its `change` checks.
+   */
+  #setConfirmed(start: string, end: string): number {
     this.#startDate = start;
     this.#endDate = end;
     this.#pendingStart = "";
     this.#previewDate = "";
-    this.#commitFields();
-    this.#render();
-    this.#announce();
-    this.dispatch("change", { detail: { start, end } });
+    this.#rangeMoves += 1;
+    return this.#rangeMoves;
+  }
+
+  /**
+   * Dispatches `change` for the range confirmed at `move`, once its paint has
+   * reported it through the fields. A listener of those reports that moved the
+   * range on has had the range it moved to reported instead.
+   */
+  #reportConfirmed(move: number): void {
+    if (move !== this.#rangeMoves) return;
+    this.dispatch("change", { detail: { start: this.#startDate, end: this.#endDate } });
   }
 
   /** Moves roving focus to `date`, transitioning the month when needed. */
@@ -349,12 +406,21 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     this.#transitionTo(toISOMonthString(date), iso);
   }
 
-  /** Renders `month`, then focuses the cell for `dateStr` (deferred if async). */
-  #transitionTo(month: string, dateStr: string): void {
+  /**
+   * Renders `month`, then focuses the cell for `dateStr` (deferred if async).
+   * A listener of the paint's reports that started another move has placed
+   * focus itself, so this one leaves it there.
+   *
+   * @param confirmed - Whether the paint shows a range the user has just confirmed.
+   */
+  #transitionTo(month: string, dateStr: string, confirmed = false): void {
     const isTransition = month !== this.#viewMonth;
     this.#focusTimer.clearAll();
     this.#viewMonth = month;
-    this.#render();
+    this.#transitions += 1;
+    const transition = this.#transitions;
+    this.#render(confirmed);
+    if (transition !== this.#transitions) return;
     const focusCell = (): void => {
       this.cellTargets.find((c) => c.getAttribute("data-date") === dateStr)?.focus();
     };
@@ -380,19 +446,31 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   }
 
   /**
-   * Builds the six-week grid and binds range/roving/disabled state per cell.
+   * Builds the six-week grid and binds range/roving/disabled state per cell,
+   * mirrors the confirmed range to the hidden fields, then reports what the
+   * paint moved.
+   *
+   * @param confirmed - Whether the paint shows a range the user has just
+   *   confirmed, which the status then announces and each moved field reports.
    *
    * @stimeoRenderRoot
    */
-  #render(): void {
+  #render(confirmed = false): void {
     const info = parseISOMonthString(this.#viewMonth);
     if (!info) return;
     const { year, month } = info;
 
     // Tightening `min` / `max` / `disabledDates` mid-selection can strand the
-    // preview on a day that is no longer choosable; drop it back to the pending
-    // start rather than advertising a range the user cannot confirm.
+    // in-progress range on a day that is no longer choosable. A stranded start
+    // cannot become an endpoint, so the selection in progress is dropped, as
+    // Escape drops it; a stranded preview falls back to the pending start
+    // rather than advertising a range the user cannot confirm.
+    if (this.#pendingStart && !this.#isSelectable(this.#pendingStart)) {
+      this.#pendingStart = "";
+      this.#previewDate = "";
+    }
     if (this.#previewDate && !this.#isSelectable(this.#previewDate)) this.#previewDate = "";
+    const narrowed = this.#narrowConfirmedRange();
 
     if (this.hasMonthLabelTarget) {
       const formatter = monthLabelFormatter(resolveLocale(this.element, this.localeValue));
@@ -450,14 +528,73 @@ export class DateRangePickerController extends Controller<HTMLElement> {
       fallback?.setAttribute("tabindex", "0");
     }
 
+    // Every report goes out once the grid, both fields and the status show the
+    // range, so a listener of any of them reads what it is told about. A
+    // listener of one may replace the range before the next goes out; the
+    // replacing range then reports itself, so a field only reports while it
+    // holds the value this paint wrote to it.
+    const move = this.#rangeMoves;
+    const moved = this.#mirrorFields();
+    if (confirmed) {
+      this.#announce();
+      for (const [field, value] of moved) {
+        if (field.value === value) commitField(field);
+      }
+    }
+
     // A month event belongs to the completed paint so a listener that reads the
     // grid sees the new dates. It reports the paint; it is not a hook the paint
-    // waits on, so nothing here depends on what a listener does with it.
+    // waits on, so nothing here depends on what a listener does with it. The
+    // month is recorded as it is reported, so a paint a listener makes meanwhile
+    // reports a move this one has not reported yet, and this one does not
+    // report it again.
     const previous = this.#announcedMonth;
     this.#announcedMonth = this.#viewMonth;
     if (previous !== null && previous !== this.#viewMonth) {
       this.dispatch("monthchange", { detail: { month: this.#viewMonth } });
     }
+    // A listener of an earlier report that moved the range on — a `monthchange`
+    // listener that confirmed a range, say — has had that range reported, so a
+    // report of this paint's narrowing would be stale.
+    if (narrowed && move === this.#rangeMoves) {
+      this.dispatch("reconcile", { detail: { start: this.#startDate, end: this.#endDate } });
+    }
+  }
+
+  /**
+   * Narrows the confirmed range to days that can still be chosen. The paint
+   * mirrors it to the fields without reporting a commit.
+   *
+   * @returns Whether the range moved.
+   */
+  #narrowConfirmedRange(): boolean {
+    const [start, end] = this.#selectableRange(this.#startDate, this.#endDate);
+    if (start === this.#startDate && end === this.#endDate) return false;
+    this.#startDate = start;
+    this.#endDate = end;
+    this.#rangeMoves += 1;
+    return true;
+  }
+
+  /**
+   * The range `start`–`end` with each end moved inward to the nearest day that
+   * can be chosen, or two empty strings when none of its days can be. A lone
+   * endpoint is the one-day range it names, and stays lone.
+   */
+  #selectableRange(start: string, end: string): [string, string] {
+    let from = parseISODateString(start || end);
+    let to = parseISODateString(end || start);
+    if (!from || !to) return [start, end];
+    // Each walk stops at the other end, so a range with nothing selectable
+    // ends with the two crossed rather than running past it.
+    while (from.getTime() <= to.getTime() && !this.#isSelectable(toISODateString(from))) {
+      from = addDays(from, 1);
+    }
+    while (to.getTime() >= from.getTime() && !this.#isSelectable(toISODateString(to))) {
+      to = addDays(to, -1);
+    }
+    if (from.getTime() > to.getTime()) return ["", ""];
+    return [start ? toISODateString(from) : "", end ? toISODateString(to) : ""];
   }
 
   /** The ordered [start, end] pair to paint: the preview while selecting, else confirmed. */
@@ -471,10 +608,20 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     return [this.#startDate, this.#endDate];
   }
 
-  /** Writes the confirmed range to the hidden fields. */
-  #commitFields(): void {
-    if (this.hasStartFieldTarget) this.startFieldTarget.value = this.#startDate;
-    if (this.hasEndFieldTarget) this.endFieldTarget.value = this.#endDate;
+  /**
+   * Writes the confirmed range to the hidden fields.
+   *
+   * @returns Each field whose value moved, with the value written to it.
+   */
+  #mirrorFields(): [HTMLInputElement, string][] {
+    const moved: [HTMLInputElement, string][] = [];
+    if (this.hasStartFieldTarget && writeField(this.startFieldTarget, this.#startDate)) {
+      moved.push([this.startFieldTarget, this.#startDate]);
+    }
+    if (this.hasEndFieldTarget && writeField(this.endFieldTarget, this.#endDate)) {
+      moved.push([this.endFieldTarget, this.#endDate]);
+    }
+    return moved;
   }
 
   /** Announces the confirmed range in the live status region. */
@@ -543,7 +690,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   #cellFrom(target: EventTarget | null): HTMLElement | null {
     return (
       (target as HTMLElement | null)?.closest<HTMLElement>(
-        "[data-stimeo--date-range-picker-target='cell']",
+        targetSelector(this.identifier, "cell"),
       ) ?? null
     );
   }

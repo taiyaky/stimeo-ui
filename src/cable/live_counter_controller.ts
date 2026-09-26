@@ -3,11 +3,15 @@ import { announce, fillTemplate } from "../utils/announce";
 import { authoredInteger } from "../utils/authored_integer";
 import { BlurDeferral } from "../utils/blur_deferral";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { TransientHooks } from "../utils/transient_hooks";
 import {
   type ConfirmedCableSubscription,
   createConfirmedSubscription,
   parseSubscriptionParams,
 } from "./consumer";
+
+/** The hook a connection may find written by an earlier, now-gone one. */
+const TRANSIENT = new TransientHooks({ attributes: ["data-live-counter-rejected"] });
 
 /**
  * Marker on triggers this controller disabled: `disabled` is a shared
@@ -149,9 +153,12 @@ export class LiveCounterController extends Controller<HTMLElement> {
    * The rejected hook is transient server state: a Turbo cache snapshot must not
    * resurrect it — the fresh subscription re-decides it. An outstanding guess
    * belongs to the identifier that is going away, so it is dropped with it.
+   *
+   * @stimeoRuntimeOnly `channel` decides whether this call opens a subscription at all; the
+   *   rejected hook it clears does not depend on it.
    */
   #subscribe(): void {
-    this.element.removeAttribute("data-live-counter-rejected");
+    TRANSIENT.reset(this.element);
     this.#outstanding.length = 0;
     if (this.channelValue) {
       this.#subscription = this.#open();
@@ -169,6 +176,9 @@ export class LiveCounterController extends Controller<HTMLElement> {
    * half-wired: no gate reflected, and a trigger that looks live. The gate reads
    * the declaration, so a null subscription keeps it shut and the display never
    * moves past what the server can receive.
+   *
+   * @stimeoRuntimeOnly `channel` and its params choose the one subscription this call opens; `id`
+   *   is read by the handlers it wires.
    */
   #open(): ConfirmedCableSubscription | null {
     try {
@@ -220,7 +230,7 @@ export class LiveCounterController extends Controller<HTMLElement> {
     this.#focusedTriggers.releaseAll();
     this.#subscription?.unsubscribe();
     this.#subscription = null;
-    this.element.removeAttribute("data-live-counter-rejected");
+    TRANSIENT.reset(this.element);
     // `disabled` is borrowed while the gate is shut: give back what is ours.
     for (const trigger of this.triggerTargets) this.#release(trigger);
   }
@@ -323,6 +333,8 @@ export class LiveCounterController extends Controller<HTMLElement> {
    * authored-disabled trigger ("disabled until valid", say) is never
    * re-enabled by the gate. A marked disabled restored from a Turbo cache
    * snapshot is recognized as ours and lifted once the gate opens.
+   *
+   * @stimeoRenderRoot
    */
   #syncTrigger(trigger: HTMLElement): void {
     if (this.#ready) {
@@ -376,6 +388,9 @@ export class LiveCounterController extends Controller<HTMLElement> {
    * Settles the display on a count the server stated, announcing what it settled
    * on. Announcing the optimistic bump instead would read a guess out and then
    * correct it, so the announcement rides this path only.
+   *
+   * @stimeoRuntimeOnly The count shown is the value received; `announceText` words the one
+   *   announcement of this change.
    */
   #reconcile(count: number): void {
     if (this.#write(count)) this.#announce(count);

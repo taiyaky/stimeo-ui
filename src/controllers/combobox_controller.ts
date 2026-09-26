@@ -2,8 +2,10 @@ import { Controller } from "@hotwired/stimulus";
 import { syncActiveOption } from "../utils/active_option";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { CompositionTracker } from "../utils/composition_tracker";
+import { commitField } from "../utils/field_mirror";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { scrollOptionIntoView } from "../utils/option_scroll";
+import { StateRegions } from "../utils/state_regions";
 
 /**
  * Headless, accessible combobox behavior (list autocomplete).
@@ -23,6 +25,7 @@ import { scrollOptionIntoView } from "../utils/option_scroll";
  *           data-action="click->stimeo--combobox#selectByClick">Apple</li>
  *       <!-- more options -->
  *     </ul>
+ *     <p data-stimeo--combobox-target="empty" hidden>No fruit matches.</p>
  *   </div>
  *
  * Implements the WAI-ARIA APG **Combobox** pattern with a listbox popup and
@@ -37,7 +40,12 @@ import { scrollOptionIntoView } from "../utils/option_scroll";
  * its text). The consumer owns styling, typically keyed off `[aria-selected]`.
  * When an open listbox has no matching options, the root element gets
  * `data-stimeo--combobox-empty` so the consumer can style the empty state (hide
- * the list, show a "no results" node, …) — the library imposes no visuals.
+ * the list, dim it, …) — the library imposes no visuals. The optional `empty`
+ * targets are the regions that belong to that state — the "no results" message
+ * the page shows in place of options, authored outside the listbox. They are
+ * shown while no option matches and hidden otherwise, written wherever the state
+ * is, so an authored `hidden` settles at the first reflection and a restored DOM
+ * cannot leave the message standing over a listbox full of matches.
  *
  * Behavior provided:
  * - Typing filters the options and opens the listbox.
@@ -51,25 +59,29 @@ import { scrollOptionIntoView } from "../utils/option_scroll";
  * - A click outside the combobox closes the listbox.
  */
 export class ComboboxController extends Controller<HTMLElement> {
-  static override targets = ["input", "list", "option"];
+  static override targets = ["input", "list", "option", "empty"];
   static actions = ["close", "filter", "onKeydown", "open", "selectByClick"] as const;
   static events = ["selected"] as const;
 
+  declare readonly emptyTargets: HTMLElement[];
   declare readonly inputTarget: HTMLInputElement;
   declare readonly listTarget: HTMLElement;
   declare readonly optionTargets: HTMLElement[];
   declare readonly hasInputTarget: boolean;
   declare readonly hasListTarget: boolean;
 
+  /** Owns `hidden` on the regions declared for the empty state. */
+  readonly #emptyRegion = new StateRegions({ whenTrue: () => this.emptyTargets });
   /** Stable ID of the active option; the live element is resolved before every use. */
   #activeId: string | null = null;
   #connected = false;
   /** Collapses one mutation batch of target callbacks into a single pass. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileOptions());
   /**
-   * Suppresses {@link open} for the duration of the programmatic re-focus in
-   * `#select`, so committing a value (which returns focus to the input)
-   * does not immediately re-open the listbox via a `focus`-bound action.
+   * Suppresses {@link ComboboxController.open | open} for the duration of the
+   * programmatic re-focus in `#select`, so committing a value (which returns focus
+   * to the input) does not immediately re-open the listbox via a `focus`-bound
+   * action.
    */
   #suppressOpen = false;
   /** Owns IME lifecycle state; confirmed text re-filters the list once. */
@@ -101,6 +113,11 @@ export class ComboboxController extends Controller<HTMLElement> {
   /** Removes composition listeners when the active input is replaced or removed. */
   inputTargetDisconnected(input: HTMLInputElement): void {
     this.#composition.unobserve(input);
+  }
+
+  /** Settles a connecting region on the side the empty state is on. */
+  emptyTargetConnected(): void {
+    this.#reflectEmptyState();
   }
 
   /** Establishes the active-state baseline, then reconciles a runtime addition. */
@@ -160,7 +177,7 @@ export class ComboboxController extends Controller<HTMLElement> {
   close(): void {
     if (!this.hasListTarget) return;
     this.listTarget.hidden = true;
-    this.element.removeAttribute("data-stimeo--combobox-empty");
+    this.#reflectEmptyState();
     if (this.hasInputTarget) this.inputTarget.setAttribute("aria-expanded", "false");
     this.#setActive(-1);
   }
@@ -292,10 +309,10 @@ export class ComboboxController extends Controller<HTMLElement> {
    * Commits an option: fills the input, closes the listbox, notifies listeners.
    *
    * An input removed while the popup is open leaves the options clickable, and
-   * {@link close} already survives that state. Selection does too: the popup
-   * comes down and listeners still hear the choice, with only the field-bound
-   * half — the value write, the focus return, and the native `change` — skipped,
-   * because there is no field to carry them.
+   * {@link ComboboxController.close | close} already survives that state. Selection
+   * does too: the popup comes down and listeners still hear the choice, with only
+   * the field-bound half — the value write, the focus return, and the native
+   * `change` — skipped, because there is no field to carry them.
    */
   #select(option: HTMLElement): void {
     const value = option.dataset.value ?? (option.textContent ?? "").trim();
@@ -318,24 +335,29 @@ export class ComboboxController extends Controller<HTMLElement> {
       // auto-submit — hear the commit without knowing this widget. Deliberately
       // NOT `input`: that is this combobox's own filter trigger and would reopen
       // the popup on every selection.
-      this.inputTarget.dispatchEvent(new Event("change", { bubbles: true }));
+      commitField(this.inputTarget);
     }
     this.dispatch("selected", { detail: { value } });
   }
 
   /**
-   * Reflects whether the open listbox currently has zero matching options by
-   * toggling `data-stimeo--combobox-empty` on the root element. Behavior only:
-   * consumers decide how to present the empty state (hide the list, show a
-   * "no results" node, etc.) via CSS keyed off this attribute.
+   * Writes whether the open listbox has zero matching options to the state hook
+   * `data-stimeo--combobox-empty` on the root element and to the regions declared
+   * for that state. Behavior only: consumers decide how to present the empty state
+   * via CSS keyed off the attribute, while the `empty` targets carry the copy.
+   *
+   * Every path that can change the answer — opening, filtering, reconciling a
+   * runtime option change, and closing — ends here, so the hook and the regions
+   * are a pure function of the state rather than of the order things happened in.
    */
   #reflectEmptyState(): void {
     const empty = !this.#isClosed && this.#visibleOptions().length === 0;
     if (empty) {
-      this.element.setAttribute("data-stimeo--combobox-empty", "");
+      this.element.setAttribute(`data-${this.identifier}-empty`, "");
     } else {
-      this.element.removeAttribute("data-stimeo--combobox-empty");
+      this.element.removeAttribute(`data-${this.identifier}-empty`);
     }
+    this.#emptyRegion.reflect(this.element, empty);
   }
 
   /**

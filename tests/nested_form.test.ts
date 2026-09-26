@@ -9,12 +9,12 @@ import { tick } from "./helpers/timing";
 /**
  * Behavioral tests for {@link NestedFormController}: template cloning with index
  * renumbering (custom and default placeholders), persisted vs unsaved removal
- * with the flag value as the destruction truth source, min/max constraints +
- * state hooks (including runtime Value changes), focus movement with untakeable
- * candidates skipped, the add/remove/reconcile events, delegation scoped against
- * nested instances, external-mutation reconciliation, ownership of the add
- * button's `disabled`, missing-contract diagnostics, the announce bridge, and
- * teardown.
+ * with the flag value as the destruction truth source, target declarations that
+ * carry more than the bare name, min/max constraints + state hooks (including
+ * runtime Value changes), focus movement with untakeable candidates skipped, the
+ * add/remove/reconcile events, delegation scoped against nested instances,
+ * external-mutation reconciliation, ownership of the add button's `disabled`,
+ * missing-contract diagnostics, the announce bridge, and teardown.
  */
 
 describe("NestedFormController", () => {
@@ -63,6 +63,21 @@ describe("NestedFormController", () => {
       root(),
       "stimeo--nested-form",
     ) as NestedFormController;
+
+  // The list holds exactly the rows: a template is authored across lines, so the
+  // whitespace around its row would settle in the list as the author adds and
+  // removes rows, and only the row itself is taken back.
+  it("leaves nothing behind in the list across repeated add/remove cycles", async () => {
+    await start(MARKUP());
+
+    for (let round = 0; round < 100; round++) {
+      addButton().click();
+      query<HTMLButtonElement>("[data-stimeo--nested-form-target='remove']", list()).click();
+    }
+
+    expect(list().children).toHaveLength(0);
+    expect(list().childNodes).toHaveLength(0);
+  });
 
   it("adds a row from the template with the placeholder replaced", async () => {
     await start(MARKUP());
@@ -143,6 +158,41 @@ describe("NestedFormController", () => {
     // The destroyed row no longer counts toward the effective total.
     expect(root().getAttribute("data-nested-count")).toBe("0");
   });
+
+  // Stimulus reads a target attribute as a space-separated token list, so a
+  // declaration carrying more than the bare name still names the target.
+  it.each([
+    { declaration: "surrounded by whitespace", remove: " remove ", flag: " destroyFlag " },
+    {
+      declaration: "alongside a second token",
+      remove: "remove rowControl",
+      flag: "destroyFlag rowControl",
+    },
+  ])(
+    "removes a persisted row whose targets are declared $declaration",
+    async ({ remove, flag }) => {
+      const persisted = `
+      <fieldset class="row">
+        <input type="hidden" name="order[items_attributes][0][_destroy]" value="0"
+               data-stimeo--nested-form-target="${flag}">
+        <input type="text" name="order[items_attributes][0][name]">
+        <button type="button" data-stimeo--nested-form-target="${remove}">Remove</button>
+      </fieldset>`;
+      await start(MARKUP("", persisted));
+      const details: Array<{ persisted: boolean }> = [];
+      root().addEventListener("stimeo--nested-form:remove", (event) => {
+        details.push((event as CustomEvent<{ persisted: boolean }>).detail);
+      });
+
+      query<HTMLButtonElement>("button", list()).click();
+
+      const row = query<HTMLElement>(".row", list());
+      expect(row.hidden).toBe(true);
+      expect(query<HTMLInputElement>("input[type='hidden']", row).value).toBe("1");
+      expect(root().getAttribute("data-nested-count")).toBe("0");
+      expect(details.map((detail) => detail.persisted)).toEqual([true]);
+    },
+  );
 
   it("counts author-hidden rows that carry no destroy flag", async () => {
     const existing = `

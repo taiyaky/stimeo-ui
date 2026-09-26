@@ -189,7 +189,9 @@ describe("CharacterCounterController", () => {
 
     input.value = "日本語";
     input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
-    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+    input.dispatchEvent(
+      new InputEvent("input", { bubbles: true, inputType: "insertCompositionText" }),
+    );
 
     expect(output().textContent).toBe("7");
     expect(changes).toEqual([{ length: 3, remaining: 7, over: false }]);
@@ -197,6 +199,54 @@ describe("CharacterCounterController", () => {
     expect(announcementMessages).toEqual(["7 remaining"]);
     await vi.advanceTimersByTimeAsync(1);
     expect(announcer().textContent).toBe("7 remaining");
+  });
+
+  it("reports a keyless edit that lands right after a commit", async () => {
+    // Dictation, autofill and a drop arrive with no key before them, so the
+    // window that absorbs the engine's echo has to read the kind reported on
+    // the event rather than assume the next one is the echo.
+    await start('data-stimeo--character-counter-max-value="10"');
+    const changes = captureChanges();
+    const input = field();
+
+    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    type("にほんご", input);
+    input.value = "日本語";
+    input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    expect(changes).toEqual([{ length: 3, remaining: 7, over: false }]);
+
+    input.value = "日本語です";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+
+    expect(output().textContent).toBe("5");
+    expect(changes).toEqual([
+      { length: 3, remaining: 7, over: false },
+      { length: 5, remaining: 5, over: false },
+    ]);
+  });
+
+  it("lets a pending Value change reach the page through the repaint, not the echo", async () => {
+    await start('data-stimeo--character-counter-max-value="10"');
+    const changes = captureChanges();
+    const reconciles = captureReconciles();
+    const input = field();
+
+    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    type("にほんご", input);
+    input.value = "日本語";
+    input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    changes.length = 0;
+    reconciles.length = 0;
+
+    root().setAttribute("data-stimeo--character-counter-max-value", "20");
+    input.dispatchEvent(
+      new InputEvent("input", { bubbles: true, inputType: "insertCompositionText" }),
+    );
+    expect(reconciles).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(changes).toEqual([]);
+    expect(reconciles).toEqual([{ length: 3, remaining: 17, over: false }]);
   });
 
   it("does not report an empty composition lifecycle as a change", async () => {

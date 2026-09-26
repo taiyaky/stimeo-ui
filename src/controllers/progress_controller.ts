@@ -16,11 +16,12 @@ type SetValueEvent = Event & {
 };
 
 /**
- * Marks an `aria-valuetext` this controller wrote, so a render takes back only
- * its own text. `aria-valuetext` is shared: a consumer may author it instead of
- * supplying a template, and that text is theirs to keep across renders.
+ * Suffix of the marker on an `aria-valuetext` this controller wrote, so a render
+ * takes back only its own text. `aria-valuetext` is shared: a consumer may author
+ * it instead of supplying a template, and that text is theirs to keep across
+ * renders.
  */
-const OWNED_VALUE_TEXT = "data-stimeo--progress-owns-valuetext";
+const OWNED_VALUE_TEXT = "owns-valuetext";
 
 /**
  * Headless progress-bar behavior backed by the WAI-ARIA `progressbar` role.
@@ -49,6 +50,11 @@ const OWNED_VALUE_TEXT = "data-stimeo--progress-owns-valuetext";
  * `data-state="indeterminate"`.
  */
 export class ProgressController extends Controller<HTMLElement> {
+  /** The marker above, in the namespace this controller is registered under. */
+  get #ownedValueText(): string {
+    return `data-${this.identifier}-${OWNED_VALUE_TEXT}`;
+  }
+
   static override targets = ["bar"];
   static override values = {
     value: { type: Number, default: 0 },
@@ -192,13 +198,13 @@ export class ProgressController extends Controller<HTMLElement> {
       .replaceAll("{value}", String(value))
       .replaceAll("{percent}", String(percent));
     this.element.setAttribute("aria-valuetext", text);
-    this.element.setAttribute(OWNED_VALUE_TEXT, "");
+    this.element.setAttribute(this.#ownedValueText, "");
   }
 
   /** Removes `aria-valuetext` only when this controller is the one that wrote it. */
   #clearOwnValueText(): void {
-    if (!this.element.hasAttribute(OWNED_VALUE_TEXT)) return;
+    if (!this.element.hasAttribute(this.#ownedValueText)) return;
     this.element.removeAttribute("aria-valuetext");
-    this.element.removeAttribute(OWNED_VALUE_TEXT);
+    this.element.removeAttribute(this.#ownedValueText);
   }
 }

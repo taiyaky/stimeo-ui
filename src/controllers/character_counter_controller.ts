@@ -97,6 +97,9 @@ export class CharacterCounterController extends Controller<HTMLElement> {
   readonly #onInput = (event: Event): void => {
     const field = this.#boundField;
     if (!field || event.currentTarget !== field || this.#field !== field) return;
+    // An engine may echo a confirmed composition with one more `input`;
+    // committing it again would re-run the reading the commit already took.
+    if (this.#composition.consumesConfirmedInput(event)) return;
     if (this.#composition.isComposing(event as InputEvent)) return;
     this.#commit(field);
   };
@@ -155,7 +158,7 @@ export class CharacterCounterController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
-  /** Cancels a pending old message when its consumer-authored template changes. */
+  /** Rewords a pending announcement with the template the consumer changed it to. */
   announceTextValueChanged(): void {
     this.#repaint.schedule();
   }
@@ -303,7 +306,12 @@ export class CharacterCounterController extends Controller<HTMLElement> {
     }
   }
 
-  /** Debounces one i18n-neutral message into the shared polite announcer. */
+  /**
+   * Debounces one i18n-neutral message into the shared polite announcer.
+   *
+   * @stimeoRuntimeOnly `announceText` is the template of the one announcement this call schedules;
+   *   the count is painted by the marked renderer.
+   */
   #scheduleAnnouncement(reading: CharacterCountReading): void {
     this.#cancelAnnouncement();
     const message = fillTemplate(this.announceTextValue, {

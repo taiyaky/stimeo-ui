@@ -9,22 +9,22 @@ import { tick } from "./helpers/timing";
 /**
  * Behavioral tests for {@link StepIndicatorController}: the read-only progress
  * indicator — derived `data-state`/`aria-current`, the progress-ratio custom
- * property, `setCurrent` updates, and the `change` event.
+ * property, `setIndex` updates, and the `change` event.
  */
 
 const markup = (current: number | string = 1) => `
   <ol data-controller="stimeo--step-indicator" aria-label="Checkout progress"
-      data-stimeo--step-indicator-current-value="${current}"
-      data-action="step:set->stimeo--step-indicator#setCurrent">
+      data-stimeo--step-indicator-index-value="${current}"
+      data-action="step:set->stimeo--step-indicator#setIndex">
     <li data-stimeo--step-indicator-target="step">Cart</li>
     <li data-stimeo--step-indicator-target="step">Shipping</li>
     <li data-stimeo--step-indicator-target="step">Payment</li>
   </ol>`;
 
-/** Same contract as {@link markup}, with the step count and the `current` attribute free. */
+/** Same contract as {@link markup}, with the step count and the `index` attribute free. */
 const customMarkup = (steps: number, currentAttribute = "") => `
   <ol data-controller="stimeo--step-indicator" aria-label="Checkout progress" ${currentAttribute}
-      data-action="step:set->stimeo--step-indicator#setCurrent">
+      data-action="step:set->stimeo--step-indicator#setIndex">
     ${Array.from({ length: steps }, (_, index) => `<li data-stimeo--step-indicator-target="step">Step ${index}</li>`).join("")}
   </ol>`;
 
@@ -60,18 +60,18 @@ describe("StepIndicatorController", () => {
     );
   const states = () => steps().map((step) => step.dataset.state);
   const currents = () => steps().map((step) => step.getAttribute("aria-current"));
-  const setStep = (current: unknown) =>
-    root().dispatchEvent(new CustomEvent("step:set", { detail: { current } }));
+  const setStep = (index: unknown) =>
+    root().dispatchEvent(new CustomEvent("step:set", { detail: { index } }));
   const ratio = () => root().style.getPropertyValue("--stimeo--step-indicator-ratio");
   const recordChanges = () => {
-    const seen: Array<{ current: number; total: number }> = [];
+    const seen: Array<{ index: number; previous: number; total: number }> = [];
     root().addEventListener("stimeo--step-indicator:change", (event) => {
       seen.push((event as CustomEvent).detail);
     });
     return seen;
   };
 
-  it("derives data-state and aria-current from the initial current value", async () => {
+  it("derives data-state and aria-current from the initial index value", async () => {
     await start(1);
     expect(states()).toEqual(["complete", "current", "upcoming"]);
     expect(currents()).toEqual([null, "step", null]);
@@ -86,53 +86,59 @@ describe("StepIndicatorController", () => {
     expect(root().style.getPropertyValue("--stimeo--step-indicator-ratio")).toBe("0.5");
   });
 
-  it("updates state when setCurrent fires", async () => {
+  it("updates state when setIndex fires", async () => {
     await start(0);
     setStep(2);
     expect(states()).toEqual(["complete", "complete", "current"]);
     expect(currents()).toEqual([null, null, "step"]);
   });
 
-  it("clamps an out-of-range current to the step set", async () => {
+  it("clamps an out-of-range index to the step set", async () => {
     await start(0);
     setStep(99);
     expect(states()).toEqual(["complete", "complete", "current"]);
   });
 
-  it("dispatches change with current and total", async () => {
+  it("dispatches change with the new position, the one it left, and the total", async () => {
     await start(0);
-    const details: Array<{ current: number; total: number }> = [];
-    root().addEventListener("stimeo--step-indicator:change", (event) => {
-      details.push((event as CustomEvent).detail);
-    });
+    const details = recordChanges();
     setStep(1);
-    expect(details).toEqual([{ current: 1, total: 3 }]);
+    expect(details).toEqual([{ index: 1, previous: 0, total: 3 }]);
   });
 
-  it("starts from the declared default current when no value attribute is given", async () => {
+  // `previous` is the position the indicator was actually showing, which is the
+  // clamped value — an out-of-range attribute never rendered where it points.
+  it("reports the position it was showing as previous, not the raw value", async () => {
+    await start(99);
+    const details = recordChanges();
+    setStep(0);
+    expect(details).toEqual([{ index: 0, previous: 2, total: 3 }]);
+  });
+
+  it("starts from the declared default index when no value attribute is given", async () => {
     await startWith(customMarkup(3));
     expect(states()).toEqual(["current", "upcoming", "upcoming"]);
     expect(currents()).toEqual(["step", null, null]);
     expect(ratio()).toBe("0");
   });
 
-  it("clamps a negative current to the first step", async () => {
+  it("clamps a negative index to the first step", async () => {
     await start(-4);
     expect(states()).toEqual(["current", "upcoming", "upcoming"]);
     expect(ratio()).toBe("0");
   });
 
-  // A `current` attribute the Number Value cannot read yields NaN, which would
+  // An `index` attribute the Number Value cannot read yields NaN, which would
   // otherwise reach every state hook: no step would be `current` and the ratio
   // would be published as the literal string "NaN".
-  it("falls back to the first step when current is not a finite number", async () => {
+  it("falls back to the first step when index is not a finite number", async () => {
     await start("abc");
     expect(states()).toEqual(["current", "upcoming", "upcoming"]);
     expect(currents()).toEqual(["step", null, null]);
     expect(ratio()).toBe("0");
   });
 
-  it("ignores a setCurrent whose detail carries no finite index", async () => {
+  it("ignores a setIndex whose detail carries no finite index", async () => {
     await start(1);
     const seen = recordChanges();
     setStep(undefined);
@@ -152,13 +158,13 @@ describe("StepIndicatorController", () => {
   });
 
   it("keeps the ratio at 0 when there is only one step", async () => {
-    await startWith(customMarkup(1, 'data-stimeo--step-indicator-current-value="0"'));
+    await startWith(customMarkup(1, 'data-stimeo--step-indicator-index-value="0"'));
     expect(ratio()).toBe("0");
     expect(states()).toEqual(["current"]);
   });
 
-  it("ignores setCurrent when there are no steps", async () => {
-    await startWith(customMarkup(0, 'data-stimeo--step-indicator-current-value="0"'));
+  it("ignores setIndex when there are no steps", async () => {
+    await startWith(customMarkup(0, 'data-stimeo--step-indicator-index-value="0"'));
     const seen = recordChanges();
     setStep(2);
     expect(seen).toEqual([]);
@@ -192,14 +198,14 @@ describe("StepIndicatorController", () => {
     expect(ratio()).toBe("1");
   });
 
-  it("does not dispatch change when an authored out-of-range current already renders that step", async () => {
+  it("does not dispatch change when an authored out-of-range index already renders that step", async () => {
     await start(99);
     expect(states()).toEqual(["complete", "complete", "current"]);
     const seen = recordChanges();
     setStep(2);
     expect(seen).toEqual([]);
     setStep(0);
-    expect(seen).toEqual([{ current: 0, total: 3 }]);
+    expect(seen).toEqual([{ index: 0, previous: 2, total: 3 }]);
   });
 
   it("stops deriving step state once the controller is unloaded", async () => {
@@ -230,10 +236,10 @@ describe("StepIndicatorController", () => {
     await expectNoA11yViolations(root());
   });
 
-  it("normalises an out-of-range current even when the step does not move", async () => {
+  it("normalises an out-of-range index even when the step does not move", async () => {
     // The consumer asked for this index and never moved; leaving the raw value in
     // the markup would let a later step set re-clamp it somewhere else.
-    await startWith(customMarkup(3, 'data-stimeo--step-indicator-current-value="99"'));
+    await startWith(customMarkup(3, 'data-stimeo--step-indicator-index-value="99"'));
     setStep(2);
     await tick();
     const added = document.createElement("li");
@@ -243,11 +249,11 @@ describe("StepIndicatorController", () => {
     expect(states()).toEqual(["complete", "complete", "current", "upcoming"]);
   });
 
-  it("follows a current swapped in place by a morph", async () => {
+  it("follows an index swapped in place by a morph", async () => {
     // A morph keeps the element and swaps the attribute, so `connect()` never runs
     // again: without following the Value the indicator stays on the old step.
-    await startWith(customMarkup(4, 'data-stimeo--step-indicator-current-value="0"'));
-    root().setAttribute("data-stimeo--step-indicator-current-value", "3");
+    await startWith(customMarkup(4, 'data-stimeo--step-indicator-index-value="0"'));
+    root().setAttribute("data-stimeo--step-indicator-index-value", "3");
     await tick();
     expect(states()).toEqual(["complete", "complete", "complete", "current"]);
     expect(root().style.getPropertyValue("--stimeo--step-indicator-ratio")).toBe("1");

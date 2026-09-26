@@ -174,6 +174,9 @@ export class IntersectionController extends Controller<HTMLElement> {
    * so the observer's initial callback fires `enter` for an element that starts
    * visible but stays silent after a cache restore that already recorded it.
    * An initial not-visible state is established silently (no `exit`).
+   *
+   * @stimeoRuntimeOnly `once` decides whether this enter spends the watcher's one shot; the hook it
+   *   writes follows the entry.
    */
   #syncIntersecting(intersecting: boolean, ratio: number, entry: IntersectionObserverEntry): void {
     const previous = this.element.getAttribute("data-intersecting");

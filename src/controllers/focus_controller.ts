@@ -129,6 +129,7 @@ export class FocusController extends Controller<HTMLElement> {
     this.dispatch("activate", { detail: {} });
   }
 
+  /** @stimeoRuntimeOnly `restore` decides whether releasing this one trap returns focus. */
   #deactivate(): void {
     if (!this.#active) return;
     this.#active = false;

@@ -8,7 +8,11 @@
     </h3>
     <div class="toggle-group-demo" role="group"
          aria-labelledby="toggle-group-multiple-heading"
-         data-controller="stimeo--toggle-group">
+         data-controller="stimeo--toggle-group"
+         data-stimeo--toggle-group-name-value="styles[]">
+      <%# The container the pressed items' data-value are generated into as hidden
+          inputs; it is optional. %>
+      <div data-stimeo--toggle-group-target="fields"></div>
       <button type="button" class="toggle-group-demo__item" aria-pressed="false" tabindex="0"
               aria-label="<%= t('components.toggle_group.demo.bold') %>" data-value="bold"
               data-stimeo--toggle-group-target="item">
@@ -50,7 +54,10 @@
     <div class="toggle-group-demo" role="group"
          aria-labelledby="toggle-group-single-heading"
          data-controller="stimeo--toggle-group"
-         data-stimeo--toggle-group-mode-value="single">
+         data-stimeo--toggle-group-mode-value="single"
+         data-stimeo--toggle-group-name-value="align">
+      <%# single mode submits 0 or 1 value through the same container. %>
+      <div data-stimeo--toggle-group-target="fields"></div>
       <button type="button" class="toggle-group-demo__item" aria-pressed="true" tabindex="0"
               aria-label="<%= t('components.toggle_group.demo.align_left') %>" data-value="left"
               data-stimeo--toggle-group-target="item">
@@ -87,7 +94,10 @@
     </h3>
     <div class="toggle-group-demo" role="group"
          aria-labelledby="toggle-group-disabled-heading"
-         data-controller="stimeo--toggle-group">
+         data-controller="stimeo--toggle-group"
+         data-stimeo--toggle-group-name-value="filters[]">
+      <%# Unavailable items can never be pressed, so they never reach the container. %>
+      <div data-stimeo--toggle-group-target="fields"></div>
       <button type="button" class="toggle-group-demo__item toggle-group-demo__item--wide"
               aria-pressed="false" tabindex="0" data-value="available"
               data-stimeo--toggle-group-target="item">
@@ -106,3 +116,13 @@
     </div>
   </section>
 </div>
+
+<%# Readout: what the component just reported. Purely visual — the component
+    already announces what a screen reader needs, so this line is aria-hidden to
+    keep it from being read twice. The value is a code fragment (API identifiers
+    and values), so only the label is translated. %>
+<p class="demo-readout" aria-hidden="true">
+  <span><%= t("catalog.readout.field") %></span>
+  <span class="demo-readout__value" data-readout
+        data-empty-text="<%= t("catalog.readout.empty") %>">—</span>
+</p>

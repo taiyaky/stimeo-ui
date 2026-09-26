@@ -39,3 +39,13 @@
          "components.tabs.demo.billing_content"
        ) %></div>
 </div>
+
+<%# Readout: what the component just reported. Purely visual — the component
+    already announces what a screen reader needs, so this line is aria-hidden to
+    keep it from being read twice. The value is a code fragment (API identifiers
+    and values), so only the label is translated. %>
+<p class="demo-readout" aria-hidden="true">
+  <span><%= t("catalog.readout.events") %></span>
+  <span class="demo-readout__value" data-readout
+        data-change-template="<%= t("catalog.readout.tabs_change") %>">—</span>
+</p>
