@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NumberInputController } from "../src/controllers/number_input_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
@@ -86,6 +86,124 @@ describe("NumberInputController", () => {
   // A native `<input type="number">` reports arrow and spinner edits as `input`
   // then `change`. This widget owns that stepping, so it owes the same pair on
   // the same element — a form listening for either otherwise never hears the edit.
+
+  it.each(["replace", "read", "repeat"])(
+    "keeps native and widget reports current after an input listener: %s",
+    (mode) => {
+      const native = nativeEvents();
+      const custom = customChanges();
+      let handled = false;
+      input().addEventListener(
+        "input",
+        () => {
+          if (handled) return;
+          handled = true;
+          if (mode === "replace") press("Home");
+          if (mode === "repeat") press("End");
+        },
+        { once: true },
+      );
+      press("End");
+      expect(native).toEqual(
+        mode === "replace" ? ["input", "input", "change"] : ["input", "change"],
+      );
+      expect(custom).toEqual([mode === "replace" ? 0 : 100]);
+    },
+  );
+
+  it.each(["a", "b"])(
+    "compares a pending field edit with the last confirmed number: %s",
+    (mode) => {
+      const custom = customChanges();
+      const native = nativeEvents();
+      input().value = mode === "a" ? "100" : "20";
+      press(mode === "a" ? "End" : "Home");
+      expect(custom).toEqual(mode === "a" ? [100] : []);
+      expect(native).toEqual(mode === "a" ? [] : ["input", "change"]);
+    },
+  );
+
+  it("withholds native reports for a value superseded during focus rescue", () => {
+    const native = nativeEvents();
+    const custom = customChanges();
+    incrementBtn().focus();
+    input().addEventListener("focus", () => press("ArrowDown"), { once: true });
+    press("End");
+    expect(input().value).toBe("90");
+    expect(native).toEqual(["input", "change"]);
+    expect(custom).toEqual([90]);
+  });
+
+  it("withholds a widget report replaced by a native change listener", () => {
+    const custom = customChanges();
+    let handled = false;
+    input().addEventListener("change", () => {
+      if (handled) return;
+      handled = true;
+      press("Home");
+    });
+    press("End");
+    expect(custom).toEqual([0]);
+  });
+
+  it("preserves both button directions when an increment focus rescue reenters", () => {
+    incrementBtn().focus();
+    input().addEventListener("focus", () => press("Home"), { once: true });
+    press("End");
+    expect(incrementBtn().disabled).toBe(false);
+    expect(decrementBtn().disabled).toBe(true);
+  });
+
+  it("preserves remaining decrement buttons after a decrement focus rescue reenters", async () => {
+    const second = decrementBtn().cloneNode(true) as HTMLButtonElement;
+    root().append(second);
+    await tick();
+    press("End");
+    decrementBtn().focus();
+    input().addEventListener(
+      "focus",
+      () => {
+        press("End");
+        second.focus();
+      },
+      { once: true },
+    );
+    press("Home");
+    expect(decrementBtn().disabled).toBe(false);
+    expect(second.disabled).toBe(false);
+    expect(document.activeElement).toBe(second);
+    expect(incrementBtn().disabled).toBe(true);
+  });
+
+  it("does not reconcile a number already replaced by a focus listener", async () => {
+    const seen: string[] = [];
+    root().addEventListener("stimeo--number-input:reconcile", () => seen.push("reconcile"));
+    root().addEventListener("stimeo--number-input:change", () => seen.push("change"));
+    incrementBtn().focus();
+    input().addEventListener(
+      "focus",
+      () => {
+        root().setAttribute("data-stimeo--number-input-max-value", "100");
+        press("End");
+      },
+      { once: true },
+    );
+    root().setAttribute("data-stimeo--number-input-max-value", "0");
+    await tick();
+    expect(input().value).toBe("100");
+    expect(seen).toEqual(["change"]);
+  });
+
+  it("keeps a newer value and enabled button when focus reenters while reaching a bound", () => {
+    const custom = customChanges();
+    incrementBtn().focus();
+    input().addEventListener("focus", () => press("Home"), { once: true });
+    press("End");
+    expect(custom).toEqual([0]);
+    expect(input().value).toBe("0");
+    expect(incrementBtn().disabled).toBe(false);
+  });
+
   it("reports a button step the way the browser reports its own", () => {
     const native = nativeEvents();
     const custom = customChanges();
@@ -269,6 +387,35 @@ describe("NumberInputController", () => {
     press("PageDown");
     expect(input().value).toBe("0");
   });
+
+  it.each(["-2", "NaN", "Infinity"])(
+    "uses ten fractional steps for invalid pageStep %s and publishes finite values",
+    (raw) => {
+      root().setAttribute("data-stimeo--number-input-step-value", "0.5");
+      root().setAttribute("data-stimeo--number-input-page-step-value", raw);
+      const seen: Array<[string, string, number]> = [];
+      const read = (type: string) => seen.push([type, input().value, input().valueAsNumber]);
+      input().addEventListener("input", () => read("input"));
+      input().addEventListener("change", () => read("native"));
+      root().addEventListener("stimeo--number-input:change", () => read("change"));
+
+      press("PageUp");
+      press("PageDown");
+
+      expect(seen).toEqual([
+        ["input", "5", 5],
+        ["native", "5", 5],
+        ["change", "5", 5],
+        ["input", "0", 0],
+        ["native", "0", 0],
+        ["change", "0", 0],
+      ]);
+      expect(input().value).toBe("0");
+      expect(decrementBtn().disabled).toBe(true);
+      expect(incrementBtn().disabled).toBe(false);
+      expect(root().getAttribute("data-stimeo--number-input-page-step-value")).toBe(raw);
+    },
+  );
 
   it("uses an authored page step in both directions", () => {
     root().setAttribute("data-stimeo--number-input-page-step-value", "25");
@@ -797,6 +944,148 @@ describe("NumberInputController", () => {
     expect(after.defaultPrevented).toBe(false);
   });
 
+  /** Presses `button` and releases the pointer, returning whether the press was consumed. */
+  const pressConsumed = (button: HTMLButtonElement): boolean => {
+    const down = new Event("pointerdown", { bubbles: true, cancelable: true });
+    button.dispatchEvent(down);
+    window.dispatchEvent(new Event("pointerup"));
+    return down.defaultPrevented;
+  };
+
+  it("wires both step buttons again when disconnect() and connect() run directly", () => {
+    input().value = "50";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    const instance = controller();
+
+    instance.disconnect();
+    instance.connect();
+
+    expect([incrementBtn(), decrementBtn()].map(pressConsumed)).toEqual([true, true]);
+  });
+
+  it("aborts every window listener it added when it disconnects", () => {
+    const instance = controller();
+    const add = vi.spyOn(window, "addEventListener");
+    instance.disconnect();
+    instance.connect();
+    const signals = add.mock.calls
+      .filter(([type]) => ["pointerup", "pointercancel", "blur"].includes(type))
+      .map(([, , options]) => (typeof options === "object" ? options.signal : undefined));
+    add.mockRestore();
+    expect(signals).toHaveLength(3);
+
+    instance.disconnect();
+
+    expect(signals.map((signal) => signal?.aborted)).toEqual([true, true, true]);
+  });
+
+  it("wires a step button again when it leaves and comes back", async () => {
+    const button = incrementBtn();
+    const parent = button.parentElement as HTMLElement;
+
+    button.remove();
+    await tick();
+    parent.append(button);
+    await tick();
+
+    expect(pressConsumed(button)).toBe(true);
+  });
+
+  it("disables an increment button added at runtime at the maximum", async () => {
+    press("End");
+
+    root().insertAdjacentHTML(
+      "beforeend",
+      `<button type="button" tabindex="-1" data-stimeo--number-input-target="increment">+</button>`,
+    );
+    const added = root().lastElementChild as HTMLButtonElement;
+    await tick();
+
+    expect(added.disabled).toBe(true);
+  });
+
+  it("wires a decrement button added at runtime and derives its bound state", async () => {
+    root().insertAdjacentHTML(
+      "beforeend",
+      `<button type="button" tabindex="-1" data-stimeo--number-input-target="decrement">−</button>`,
+    );
+    const added = root().lastElementChild as HTMLButtonElement;
+    await tick();
+    expect(added.disabled).toBe(true); // the field sits at the minimum
+
+    press("ArrowUp");
+
+    expect(added.disabled).toBe(false);
+    expect(pressConsumed(added)).toBe(true);
+  });
+
+  it("drops its marker when it enables a button again, so a later author disable stays", () => {
+    expect(decrementBtn().hasAttribute("data-number-input-disabled")).toBe(true);
+
+    press("ArrowUp");
+    expect(decrementBtn().disabled).toBe(false);
+    expect(decrementBtn().hasAttribute("data-number-input-disabled")).toBe(false);
+
+    decrementBtn().disabled = true;
+    controller().disconnect();
+    expect(decrementBtn().disabled).toBe(true);
+  });
+
+  it("keeps focus on the input after using the decrement button", () => {
+    press("End");
+
+    decrementBtn().click();
+
+    expect(input().value).toBe("90");
+    expect(document.activeElement).toBe(input());
+  });
+
+  it("moves focus to the input when a step button is pressed", () => {
+    expect(document.activeElement).not.toBe(input());
+
+    pressConsumed(incrementBtn());
+
+    expect(document.activeElement).toBe(input());
+  });
+
+  it("prevents the browser's own stepping for a key it handles", () => {
+    const event = new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true });
+
+    input().dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(input().value).toBe("10");
+  });
+
+  it("reconciles against a runtime minimum changed on its own", async () => {
+    const seen = reports();
+
+    root().setAttribute("data-stimeo--number-input-min-value", "30");
+    controller().minValueChanged();
+    await flushMicrotasks();
+
+    expect(input().value).toBe("30");
+    expect(seen).toEqual(["reconcile:30"]);
+  });
+
+  it("reports an input swapped in beside the old one once the old one leaves", async () => {
+    const seen = reports();
+    const old = input();
+    const replacement = old.cloneNode(true) as HTMLInputElement;
+    replacement.value = "23";
+
+    old.after(replacement);
+    await tick();
+    expect(seen).toEqual([]);
+
+    old.remove();
+    await tick();
+
+    expect(input()).toBe(replacement);
+    expect(replacement.value).toBe("20");
+    expect(seen).toEqual(["reconcile:20"]);
+  });
+
   it("has no machine-detectable a11y violations", async () => {
     await expectNoA11yViolations(root());
   });
@@ -891,12 +1180,64 @@ describe("NumberInputController on a custom spinbutton host", () => {
     expect(input().getAttribute("aria-valuemax")).toBe("99");
   });
 
-  it("restores authored ARIA before Turbo caches the page", () => {
+  it("keeps its ARIA through turbo:before-cache, which also fires on a page that stays", () => {
     document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(input().getAttribute("aria-valuenow")).toBe("3");
+    expect(input().getAttribute("aria-valuemin")).toBe("1");
+    expect(input().getAttribute("aria-valuemax")).toBe("5");
+  });
+
+  it("gives the author's ARIA back on a page restored from the cache", async () => {
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--number-input", NumberInputController),
+    );
+    expect(input().getAttribute("aria-valuenow")).toBe("3");
+
+    controller().disconnect();
 
     expect(input().getAttribute("aria-valuenow")).toBe("99");
     expect(input().getAttribute("aria-valuemin")).toBe("-99");
     expect(input().getAttribute("aria-valuemax")).toBe("99");
+    expect(
+      input()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-lease")),
+    ).toEqual([]);
+  });
+
+  /** The range ARIA `element` carries, as `[valuenow, valuemin, valuemax]`. */
+  const rangeAria = (element: HTMLElement) =>
+    ["aria-valuenow", "aria-valuemin", "aria-valuemax"].map((name) => element.getAttribute(name));
+
+  it("restores authored ARIA on an input that leaves the controller", async () => {
+    const removed = input();
+    expect(rangeAria(removed)).toEqual(["3", "1", "5"]);
+
+    removed.remove();
+    await tick();
+
+    expect(rangeAria(removed)).toEqual(["99", "-99", "99"]);
+  });
+
+  it("returns its ARIA when the host stops being a spinbutton", () => {
+    input().removeAttribute("role");
+
+    input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+
+    expect(input().value).toBe("4");
+    expect(rangeAria(input())).toEqual(["99", "-99", "99"]);
+  });
+
+  it("starts from a clean composition state when it connects again", () => {
+    input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    const instance = controller();
+
+    instance.disconnect();
+    instance.connect();
+    input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+
+    expect(input().value).toBe("4");
   });
 
   it("holds a range reconciliation while the field is composing, and runs it once the composition ends", async () => {
@@ -1095,7 +1436,7 @@ describe("NumberInputController with full-width input on a text field", () => {
 
 /**
  * Press-and-hold auto-repeat (APG spinbutton convenience): holding a step button
- * steps once, then repeats after a short delay until release / the bound /
+ * starts repeated steps after a short delay until release / the bound /
  * disconnect. The `click` binding stays the single-step path, so a held press
  * must not also double-step via its trailing click. Driven with fake timers.
  */
@@ -1166,7 +1507,7 @@ describe("NumberInputController press-and-hold", () => {
   };
   const releaseOutside = () => window.dispatchEvent(new Event("pointerup"));
 
-  it("steps once immediately and does not repeat before the hold delay", () => {
+  it("steps once on a quick click without repeating before the hold delay", () => {
     pointerdown(incrementBtn());
     expect(input().value).toBe("0"); // pointerdown alone does not step
     vi.advanceTimersByTime(399);
@@ -1184,6 +1525,20 @@ describe("NumberInputController press-and-hold", () => {
     releaseOutside();
     incrementBtn().click(); // trailing click after a hold is ignored
     expect(input().value).toBe("40");
+  });
+
+  it("stops auto-repeat when a change listener ends the hold on its first repeat", () => {
+    root().addEventListener(
+      "stimeo--number-input:change",
+      () => window.dispatchEvent(new Event("blur")),
+      { once: true },
+    );
+    pointerdown(incrementBtn());
+    vi.advanceTimersByTime(400);
+    vi.advanceTimersByTime(80 * 3);
+
+    expect(input().value).toBe("10");
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("auto-repeats decrement and swallows its trailing click", () => {
@@ -1221,6 +1576,22 @@ describe("NumberInputController press-and-hold", () => {
     // The typed 80 is a real commit, followed by 90 and 100; no-op repeats at
     // the bound add nothing.
     expect(values).toEqual([80, 90, 100]);
+  });
+
+  it("reads the range and step at each repeat of a hold", async () => {
+    pointerdown(incrementBtn());
+    vi.advanceTimersByTime(400 + 80); // -> 10, 20
+    expect(input().value).toBe("20");
+
+    root().setAttribute("data-stimeo--number-input-step-value", "5");
+    root().setAttribute("data-stimeo--number-input-max-value", "30");
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(80); // the next repeat steps on the new grid
+    expect(input().value).toBe("25");
+    vi.advanceTimersByTime(80 * 3); // 30, then the new bound stops the repeat
+    expect(input().value).toBe("30");
+    expect(incrementBtn().disabled).toBe(true);
+    releaseOutside();
   });
 
   it("keeps each simultaneous hold owned by its initiating pointer", async () => {
@@ -1388,5 +1759,71 @@ describe("NumberInputController press-and-hold", () => {
     controller().disconnect();
     vi.advanceTimersByTime(2000); // advancing past every timer must do nothing
     expect(input().value).toBe("0");
+  });
+
+  it("stops a hold that is already repeating when it disconnects", () => {
+    pointerdown(incrementBtn());
+    vi.advanceTimersByTime(400); // first repeat -> 10
+    controller().disconnect();
+    vi.advanceTimersByTime(1000);
+    expect(input().value).toBe("10");
+  });
+
+  it.each(["pointercancel", "blur"])("stops a running hold on a window %s", (type) => {
+    pointerdown(incrementBtn());
+    vi.advanceTimersByTime(400); // first repeat -> 10
+
+    window.dispatchEvent(new Event(type));
+    vi.advanceTimersByTime(1000);
+
+    expect(input().value).toBe("10");
+  });
+
+  it("stops a hold immediately when its input target disconnects", async () => {
+    pointerdown(incrementBtn());
+    vi.advanceTimersByTime(200);
+
+    const replacement = input().cloneNode(true) as HTMLInputElement;
+    input().replaceWith(replacement);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(1000);
+
+    expect(replacement.value).toBe("0");
+  });
+
+  it("lets a press on the other button replace the running hold", () => {
+    input().value = "50";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+
+    pointerdown(incrementBtn());
+    vi.advanceTimersByTime(200);
+    pointerdown(decrementBtn());
+    vi.advanceTimersByTime(400); // the decrement hold's first repeat -> 40
+
+    expect(input().value).toBe("40");
+    releaseOutside();
+  });
+
+  it("leaves no hold timer pending after a disconnect during a suppressed window", () => {
+    pointerdown(incrementBtn());
+    vi.advanceTimersByTime(400 + 80); // -> 10, 20
+    releaseOutside(); // the trailing-click suppression and its safety net are pending
+    expect(vi.getTimerCount()).toBe(1);
+
+    controller().disconnect();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retires the safety-net timer once the trailing click is swallowed", () => {
+    pointerdown(incrementBtn());
+    vi.advanceTimersByTime(400); // -> 10
+    releaseOutside();
+    expect(vi.getTimerCount()).toBe(1);
+
+    incrementBtn().click(); // the trailing click, swallowed
+
+    expect(input().value).toBe("10");
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

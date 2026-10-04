@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ScrollVisibilityController } from "../src/controllers/scroll_visibility_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { delay, tick } from "./helpers/timing";
 
 /**
@@ -71,6 +71,27 @@ describe("ScrollVisibilityController", () => {
               data-stimeo--scroll-visibility-target="element"
               data-action="stimeo--scroll-visibility#toTop">Back to top</button>
     </div>`;
+
+  it.each(["root", "target"])(
+    "repairs retained morph direction state at rest from %s",
+    async (origin) => {
+      await start(offsetMarkup.replace('mode-value="offset"', 'mode-value="direction"'));
+      await scrollToY(600);
+      expect(element().hidden).toBe(true);
+      expect(root().getAttribute("data-state")).toBe("hidden");
+      const changes = vi.fn();
+      root().addEventListener("stimeo--scroll-visibility:change", changes);
+      element().hidden = false;
+      root().removeAttribute("data-state");
+      (origin === "root" ? root() : element()).dispatchEvent(
+        new CustomEvent("turbo:morph-element", { bubbles: true }),
+      );
+      await tick();
+      expect(element().hidden).toBe(true);
+      expect(root().getAttribute("data-state")).toBe("hidden");
+      expect(changes).not.toHaveBeenCalled();
+    },
+  );
 
   it("starts hidden below the offset", async () => {
     await start(offsetMarkup);
@@ -145,6 +166,49 @@ describe("ScrollVisibilityController", () => {
 
     application.unload("stimeo--scroll-visibility");
     expect(main.hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("gives back the focus tabindex a page restored from the cache carries", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-focus-selector-value="#main">
+        <button type="button" data-stimeo--scroll-visibility-target="element"
+                data-action="stimeo--scroll-visibility#toTop">Top</button>
+      </div>
+      <main id="main">Content</main>`);
+    element().click();
+    expect(document.getElementById("main")?.getAttribute("tabindex")).toBe("-1");
+
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--scroll-visibility", ScrollVisibilityController),
+    );
+
+    const main = document.getElementById("main") as HTMLElement;
+    expect(main.hasAttribute("tabindex")).toBe(false);
+    expect(main.getAttributeNames().filter((name) => name.endsWith("-loan"))).toEqual([]);
+  });
+
+  it("gives back the focus tabindex a page restored from the cache carries on a former focus target", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-visibility"
+           data-stimeo--scroll-visibility-focus-selector-value="#main">
+        <button type="button" data-stimeo--scroll-visibility-target="element"
+                data-action="stimeo--scroll-visibility#toTop">Top</button>
+      </div>
+      <main id="main">Content</main>
+      <section id="other">Other</section>`);
+    element().click();
+    expect(document.getElementById("main")?.getAttribute("tabindex")).toBe("-1");
+    root().setAttribute("data-stimeo--scroll-visibility-focus-selector-value", "#other");
+    await tick();
+
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--scroll-visibility", ScrollVisibilityController),
+    );
+
+    const main = document.getElementById("main") as HTMLElement;
+    expect(main.hasAttribute("tabindex")).toBe(false);
+    expect(main.getAttributeNames().filter((name) => name.endsWith("-loan"))).toEqual([]);
   });
 
   it("preserves an authored focus tabindex when the controller disconnects", async () => {
@@ -254,6 +318,190 @@ describe("ScrollVisibilityController", () => {
       </div>`);
     await scrollToY(500);
     expect(element().hidden).toBe(false);
+  });
+
+  // --- A root that changes at runtime ------------------------------------------
+
+  /** Two scroll containers, with the controller watching the first. */
+  const twoPanesMarkup = (mode = "offset", offset = 400) => `
+    <div id="pane-a"></div>
+    <div id="pane-b"></div>
+    <div data-controller="stimeo--scroll-visibility"
+         data-stimeo--scroll-visibility-root-value="#pane-a"
+         data-stimeo--scroll-visibility-offset-value="${offset}"
+         data-stimeo--scroll-visibility-mode-value="${mode}">
+      <button type="button" hidden
+              data-stimeo--scroll-visibility-target="element"
+              data-action="stimeo--scroll-visibility#toTop">Back to top</button>
+    </div>`;
+
+  const pane = (id: string) => document.getElementById(id) as HTMLElement;
+
+  /** Scrolls `el` to `y` and lets the rAF-coalesced handler run. */
+  const scrollPaneTo = async (el: HTMLElement, y: number) => {
+    el.scrollTop = y;
+    el.dispatchEvent(new Event("scroll"));
+    await settle();
+  };
+
+  const recordChanges = () => {
+    const changes: boolean[] = [];
+    root().addEventListener("stimeo--scroll-visibility:change", (event) => {
+      changes.push((event as CustomEvent<{ visible: boolean }>).detail.visible);
+    });
+    return changes;
+  };
+
+  it("moves to the container a changed root names, and releases the one it left", async () => {
+    await start(twoPanesMarkup());
+    await scrollPaneTo(pane("pane-a"), 500);
+    expect(element().hidden).toBe(false);
+    const changes = recordChanges();
+
+    root().setAttribute("data-stimeo--scroll-visibility-root-value", "#pane-b");
+    await tick();
+    // Decided from the new source's position at once, like any other change the
+    // page makes to the declaration.
+    expect(element().hidden).toBe(true);
+    expect(changes).toEqual([false]);
+
+    // The container it left schedules no measurement at all.
+    const frame = vi.spyOn(window, "requestAnimationFrame");
+    await scrollPaneTo(pane("pane-a"), 900);
+    expect(frame).not.toHaveBeenCalled();
+    frame.mockRestore();
+    expect(element().hidden).toBe(true);
+    await scrollPaneTo(pane("pane-b"), 500);
+    expect(element().hidden).toBe(false);
+    expect(changes).toEqual([false, true]);
+
+    const scrollTo = vi.fn();
+    pane("pane-b").scrollTo = scrollTo as unknown as HTMLElement["scrollTo"];
+    element().click();
+    expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 0 }));
+  });
+
+  it("follows a root set back by a change handler, and only that source", async () => {
+    await start(twoPanesMarkup());
+    await scrollPaneTo(pane("pane-a"), 500);
+    const changes = recordChanges();
+    // A subscriber that answers the move by pointing the root straight back.
+    root().addEventListener("stimeo--scroll-visibility:change", () =>
+      root().setAttribute("data-stimeo--scroll-visibility-root-value", "#pane-a"),
+    );
+    root().setAttribute("data-stimeo--scroll-visibility-root-value", "#pane-b");
+    await tick();
+    await settle();
+    // The move and the move back are each decided once, and it ends where it began.
+    expect(changes).toEqual([false, true]);
+    expect(element().hidden).toBe(false);
+
+    const frame = vi.spyOn(window, "requestAnimationFrame");
+    pane("pane-b").dispatchEvent(new Event("scroll"));
+    expect(frame).not.toHaveBeenCalled();
+    frame.mockRestore();
+    await scrollPaneTo(pane("pane-a"), 0);
+    expect(element().hidden).toBe(true);
+  });
+
+  it("releases the source it moved to on disconnect", async () => {
+    await start(twoPanesMarkup());
+    root().setAttribute("data-stimeo--scroll-visibility-root-value", "#pane-b");
+    await tick();
+    await scrollPaneTo(pane("pane-b"), 500);
+    expect(element().hidden).toBe(false);
+    await scrollPaneTo(pane("pane-b"), 0);
+
+    application
+      .getControllerForElementAndIdentifier(root(), "stimeo--scroll-visibility")
+      ?.disconnect();
+    await scrollPaneTo(pane("pane-b"), 500);
+    expect(element().hidden).toBe(true);
+  });
+
+  it("reads a position on the new source as a baseline, not a movement", async () => {
+    await start(twoPanesMarkup("direction", 100));
+    await scrollPaneTo(pane("pane-a"), 600); // down → hidden
+    expect(element().hidden).toBe(true);
+    // The other container sits higher up than the first one had scrolled; that
+    // is not an upward scroll, so the hidden state stands.
+    pane("pane-b").scrollTop = 400;
+
+    root().setAttribute("data-stimeo--scroll-visibility-root-value", "#pane-b");
+    await tick();
+    expect(element().hidden).toBe(true);
+    await scrollPaneTo(pane("pane-b"), 300); // a real upward scroll reveals
+    expect(element().hidden).toBe(false);
+  });
+
+  it("moves to the node that replaced the root when a morph reaches the controller", async () => {
+    await start(twoPanesMarkup());
+    const original = pane("pane-a");
+    const replacement = document.createElement("div");
+    replacement.id = "pane-a";
+    original.replaceWith(replacement);
+
+    // The selector string is unchanged; the morph that swapped the node reaches the
+    // retained controller element, and the root is resolved from the DOM again.
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await tick();
+    await scrollPaneTo(replacement, 500);
+    expect(element().hidden).toBe(false);
+    await scrollPaneTo(original, 0);
+    expect(element().hidden).toBe(false);
+  });
+
+  it("keeps the one listener when a pass resolves to the source it already has", async () => {
+    await start(twoPanesMarkup());
+    const add = vi.spyOn(pane("pane-a"), "addEventListener");
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    root().setAttribute("data-stimeo--scroll-visibility-offset-value", "300");
+    await tick();
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("decides a root and offset changed together once, from the new source", async () => {
+    await start(twoPanesMarkup());
+    await scrollPaneTo(pane("pane-a"), 500);
+    pane("pane-b").scrollTop = 700;
+    const changes = recordChanges();
+
+    // Measured on the old source, the new offset alone would hide the control for
+    // a moment; one pass after the batch reads the new source with both.
+    root().setAttribute("data-stimeo--scroll-visibility-offset-value", "600");
+    root().setAttribute("data-stimeo--scroll-visibility-root-value", "#pane-b");
+    await tick();
+    expect(element().hidden).toBe(false);
+    expect(changes).toEqual([]);
+  });
+
+  it("holds a hide the new source asks for while the control owns focus", async () => {
+    await start(twoPanesMarkup());
+    await scrollPaneTo(pane("pane-a"), 500);
+    element().focus();
+
+    root().setAttribute("data-stimeo--scroll-visibility-root-value", "#pane-b");
+    await tick();
+    expect(element().hidden).toBe(false);
+
+    element().blur();
+    await settle();
+    expect(element().hidden).toBe(true);
+  });
+
+  it("does not move to a new root from a change outside the connected window", async () => {
+    await start(twoPanesMarkup());
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--scroll-visibility",
+    ) as ScrollVisibilityController;
+    controller.disconnect();
+
+    root().setAttribute("data-stimeo--scroll-visibility-root-value", "#pane-b");
+    controller.rootValueChanged();
+    await tick();
+    await scrollPaneTo(pane("pane-b"), 500);
+    expect(element().hidden).toBe(true);
   });
 
   // --- Event contract ---------------------------------------------------------
@@ -529,6 +777,46 @@ describe("ScrollVisibilityController", () => {
     expect(root().getAttribute("data-state")).toBe("visible");
   });
 
+  it("lets a blur of the departed control decide nothing once the target is gone", async () => {
+    await start(offsetMarkup);
+    const control = element();
+    await scrollToY(500);
+    control.focus();
+    await scrollToY(100); // held back while the control owns focus
+    const changes: boolean[] = [];
+    root().addEventListener("stimeo--scroll-visibility:change", (event) => {
+      changes.push((event as CustomEvent<{ visible: boolean }>).detail.visible);
+    });
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--scroll-visibility",
+    ) as ScrollVisibilityController;
+
+    control.remove();
+    controller.elementTargetDisconnected(control);
+    control.dispatchEvent(new FocusEvent("blur"));
+    await settle();
+    expect(changes).toEqual([]);
+    expect(root().getAttribute("data-state")).toBe("visible");
+  });
+
+  it("releases a held-back hide's blur listener on disconnect", async () => {
+    await start(offsetMarkup);
+    const control = element();
+    await scrollToY(500);
+    control.focus();
+    await scrollToY(100); // held back while the control owns focus
+    const remove = vi.spyOn(control, "removeEventListener");
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--scroll-visibility",
+    ) as ScrollVisibilityController;
+
+    controller.disconnect();
+    expect(remove.mock.calls.filter(([type]) => type === "blur")).toHaveLength(1);
+    remove.mockRestore();
+  });
+
   it("writes the current visibility onto a control that arrives after connect", async () => {
     await start(offsetMarkup);
     await scrollToY(500);
@@ -541,6 +829,186 @@ describe("ScrollVisibilityController", () => {
     await settle();
     expect(element().hidden).toBe(false);
     expect(root().getAttribute("data-state")).toBe("visible");
+  });
+
+  it("writes the current visibility onto a control that arrives after the only one left", async () => {
+    await start(offsetMarkup);
+    await scrollToY(500);
+    const arrival = element().cloneNode(true) as HTMLElement;
+    arrival.hidden = true;
+    element().remove();
+    await tick();
+    root().append(arrival);
+    await tick();
+
+    expect(arrival.hidden).toBe(false);
+  });
+
+  describe("a control that stays after an earlier one leaves", () => {
+    /** Inserts a copy of the control, authored hidden, after it and lets Stimulus report it. */
+    const insertSuccessor = async (): Promise<[HTMLElement, HTMLElement]> => {
+      const original = element();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.hidden = true;
+      original.after(successor);
+      await tick();
+      return [original, successor];
+    };
+
+    it("carries a visibility the scroll changed while both were present", async () => {
+      await start(offsetMarkup);
+      await scrollToY(500);
+      const [original, successor] = await insertSuccessor();
+      expect(successor.hidden).toBe(false);
+      await scrollToY(100); // hides the earlier control only
+      original.remove();
+      await tick();
+
+      expect(element()).toBe(successor);
+      expect(root().getAttribute("data-state")).toBe("hidden");
+      expect(successor.hidden).toBe(true);
+    });
+
+    it("reports nothing while it synchronizes the control that stays", async () => {
+      await start(offsetMarkup);
+      await scrollToY(500);
+      const [original] = await insertSuccessor();
+      await scrollToY(100);
+      const changes: boolean[] = [];
+      root().addEventListener("stimeo--scroll-visibility:change", (event) => {
+        changes.push((event as CustomEvent<{ visible: boolean }>).detail.visible);
+      });
+      original.remove();
+      await tick();
+
+      expect(changes).toEqual([]);
+    });
+
+    it("tolerates the removal of the only control", async () => {
+      await start(offsetMarkup);
+      await scrollToY(500);
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--scroll-visibility",
+      ) as ScrollVisibilityController;
+      const only = element();
+      only.remove();
+
+      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      expect(() => controller.elementTargetDisconnected(only)).not.toThrow();
+      expect(root().getAttribute("data-state")).toBe("visible");
+    });
+
+    it("writes nothing into the control that stays once it has disconnected", async () => {
+      await start(offsetMarkup);
+      await scrollToY(500);
+      const [original, successor] = await insertSuccessor();
+      await scrollToY(100);
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--scroll-visibility",
+      ) as ScrollVisibilityController;
+      controller.disconnect();
+      original.remove();
+      controller.elementTargetDisconnected(original);
+      await tick();
+
+      expect(successor.hidden).toBe(false);
+    });
+  });
+
+  describe("a control that stops resolving", () => {
+    /** Drops only the element token from `control`, which stays where it is. */
+    const dropElementToken = async (control: HTMLElement) => {
+      control.removeAttribute("data-stimeo--scroll-visibility-target");
+      await tick();
+    };
+
+    it("gives a control that stops being one back the hidden it was authored with", async () => {
+      await start(offsetMarkup);
+      await scrollToY(500);
+      const departed = element();
+      expect(departed.hidden).toBe(false);
+      const changes: unknown[] = [];
+      root().addEventListener("stimeo--scroll-visibility:change", (event) => changes.push(event));
+
+      await dropElementToken(departed);
+
+      expect(departed.hidden).toBe(true);
+      expect(root().getAttribute("data-state")).toBe("visible");
+      expect(changes).toEqual([]);
+    });
+
+    it("gives the departed control its own hidden back while the control that stays shows the state", async () => {
+      await start(offsetMarkup);
+      await scrollToY(500);
+      const departed = element();
+      const successor = departed.cloneNode(true) as HTMLElement;
+      departed.after(successor);
+      await tick();
+      expect(successor.hidden).toBe(false);
+
+      await dropElementToken(departed);
+
+      expect(element()).toBe(successor);
+      expect(departed.hidden).toBe(true);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("removes the hidden it wrote on a departed control that was authored without one", async () => {
+      await start(offsetMarkup.replace("hidden\n", "\n"));
+      const departed = element();
+      expect(departed.hidden).toBe(true);
+
+      await dropElementToken(departed);
+
+      expect(departed.hasAttribute("hidden")).toBe(false);
+    });
+
+    it("keeps a hidden the page wrote on a control after the last write", async () => {
+      await start(offsetMarkup);
+      const departed = element();
+      expect(departed.hidden).toBe(true);
+      departed.hidden = false;
+
+      await dropElementToken(departed);
+
+      expect(departed.hidden).toBe(false);
+    });
+
+    it("keeps the visibility of a control that moves within the controller", async () => {
+      await start(offsetMarkup.replace("</button>", '</button><p id="elsewhere"></p>'));
+      await scrollToY(500);
+      const moving = element();
+
+      (document.getElementById("elsewhere") as HTMLElement).append(moving);
+      await tick();
+
+      expect(element()).toBe(moving);
+      expect(moving.hidden).toBe(false);
+    });
+
+    it("gives the control back its own hidden when the controller loses its identifier", async () => {
+      await start(offsetMarkup);
+      await scrollToY(500);
+      const departed = element();
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("keeps what it wrote on the control when the whole controller leaves the page", async () => {
+      await start(offsetMarkup);
+      await scrollToY(500);
+      const kept = element();
+
+      root().remove();
+      await tick();
+
+      expect(kept.hidden).toBe(false);
+    });
   });
 
   // --- Direction mode edges ----------------------------------------------------

@@ -1,9 +1,13 @@
 import { Controller } from "@hotwired/stimulus";
+import { type ActionSource, actionSource } from "../utils/action_source";
 import { ownerOf } from "../utils/event_owner";
 import { ListenerSet } from "../utils/listener_set";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { PausableTimers } from "../utils/pausable_timers";
 import { SafeTimeout } from "../utils/safe_timeout";
+import type { StateReason } from "../utils/state_reason";
 import { targetSelector } from "../utils/target_selector";
 import { cloneTemplateRoot } from "../utils/template_row";
 import { maxTransitionTotalMs } from "../utils/transition_completion";
@@ -12,6 +16,9 @@ const DELEGATED_EVENTS = ["click", "focusin", "focusout", "keydown", "mouseover"
 
 /**
  * Headless, highly accessible toast notification behavior.
+ *
+ * Capacity evicts by arrival order, independent of DOM order. The same controller
+ * instance preserves that order across reconnects; a new instance uses DOM order.
  *
  * Markup contract (identifier: `stimeo--toast`):
  *   <div data-controller="stimeo--toast"
@@ -40,6 +47,13 @@ const DELEGATED_EVENTS = ["click", "focusin", "focusout", "keydown", "mouseover"
  * once the last of hover and focus is released, so the pointer's target and the
  * focused control stay where they are.
  *
+ * `duration` is read as each toast is taken on. While the controller stays connected
+ * a toast already shown keeps the deadline it was given — a change neither shortens,
+ * stretches nor restarts it, and the time a hover or focus hold banked stays banked —
+ * and the next toast takes the new value. A change on its own arms, dismisses and
+ * reports nothing. A connection that finds toasts already in the list arms each of
+ * them from the current `duration`.
+ *
  * The `max` limit (`0` or less, or not a finite number, means none) keeps them there too.
  * Past it the oldest toasts go with reason `limit`, passing over every toast the pointer
  * is over or focus is inside — whether or not a timer runs — the toast just taken on, and
@@ -47,7 +61,7 @@ const DELEGATED_EVENTS = ["click", "focusin", "focusout", "keydown", "mouseover"
  * over the limit, and the limit is applied again once hover and focus have both left a
  * toast, or a toast they held leaves the list.
  *
- * `dismiss` dispatches `{ item: HTMLElement, reason: "timeout" | "user" | "limit" }`.
+ * `dismiss` dispatches `{ item: HTMLElement, reason: StateReason }`.
  *
  * `show` dispatches `{ item: HTMLElement }`.
  *
@@ -56,11 +70,19 @@ const DELEGATED_EVENTS = ["click", "focusin", "focusout", "keydown", "mouseover"
  * while leaving visual styling completely to the client's CSS transitions.
  */
 export class ToastController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["list", "template", "item"];
   static override values = {
     duration: { type: Number, default: 0 },
     max: { type: Number, default: 3 },
   };
+
+  static valueConstraints = {
+    duration: NUMBER_BOUNDS.timer,
+    max: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof ToastController.values>;
   static actions = ["dismiss", "onKeydown", "pause", "resume", "show"] as const;
   static events = ["dismiss", "show"] as const;
 
@@ -82,8 +104,14 @@ export class ToastController extends Controller<HTMLElement> {
   /** Toasts taken on and not let go; a move within the list keeps a toast here. */
   readonly #taken = new Set<HTMLElement>();
 
+  /** Toasts reported while they sat outside the first list, left for the list that stays. */
+  readonly #outside = new WeakSet<HTMLElement>();
+
+  /** The phase of each retained toast, independent of its rendered state hook. */
+  readonly #phases = new WeakMap<HTMLElement, "entering" | "visible" | "leaving">();
+
   /** Applies the `max` limit again once the event that released a hold has run its course. */
-  readonly #reapply = new MicrotaskCoalescer(() => this.#reapplyLimit());
+  readonly #reapply = new MorphRenderWatcher(() => this.#reapplyLimit());
 
   /** Toasts the pointer or focus moved into since the limit was last applied again. */
   #spared: HTMLElement[] = [];
@@ -106,6 +134,8 @@ export class ToastController extends Controller<HTMLElement> {
 
   /** Whether the controller is between `connect()` and `disconnect()`. */
   #connected = false;
+  /** Intake order retained while the same instance reconnects. */
+  readonly #arrivals = new Set<HTMLElement>();
 
   /**
    * The `max` the list was last held to, or `null` before the first time. `connect()`
@@ -121,15 +151,19 @@ export class ToastController extends Controller<HTMLElement> {
    */
   override connect(): void {
     this.#connected = true;
-    this.#reapply.activate();
+    const current = this.itemTargets;
+    for (const item of this.#arrivals) {
+      if (!current.includes(item)) this.#arrivals.delete(item);
+    }
+    this.#reapply.observe(this.element);
     this.#connectDelegatedEvents();
     for (const item of this.itemTargets) {
       if (!this.#dismiss.tracks(item) && item.dataset.state !== "leaving") {
         this.#startTimer(item);
       }
     }
-    if (!Object.is(this.#appliedMax, this.maxValue)) {
-      this.#appliedMax = this.maxValue;
+    if (!Object.is(this.#appliedMax, this.#safeMax)) {
+      this.#appliedMax = this.#safeMax;
       this.#enforceMax();
     }
   }
@@ -142,7 +176,7 @@ export class ToastController extends Controller<HTMLElement> {
     this.#timers.clearAll();
     this.#dismiss.clearAll();
     this.#taken.clear();
-    this.#reapply.cancel();
+    this.#reapply.disconnect();
     this.#spared = [];
     this.#pointer.dispose();
     this.#awaitingPointer.clear();
@@ -152,29 +186,22 @@ export class ToastController extends Controller<HTMLElement> {
     this.#rafHandles.clear();
   }
 
-  /** Rebinds delegated interaction when Turbo replaces the list target in place. */
-  listTargetConnected(element: HTMLElement): void {
-    if (this.#delegatedList !== element) this.#connectDelegatedEvents(element);
+  /** Keeps delegated interaction on the first list when a list arrives. */
+  listTargetConnected(): void {
+    if (this.#delegatedList !== this.listTarget) this.#connectDelegatedEvents();
   }
 
-  /** Releases delegation only when the removed target is its current owner. */
+  /**
+   * Moves delegation to the list that stays and takes in the toasts it held while an earlier
+   * list was first. A toast that arrives with the list in the same task is left to
+   * `itemTargetConnected`, which applies the limit.
+   */
   listTargetDisconnected(element: HTMLElement): void {
     if (this.#delegatedList === element) this.#disconnectDelegatedEvents();
-  }
-
-  durationValueChanged(): void {
+    if (!this.#connected || !this.hasListTarget || this.listTarget === element) return;
+    if (this.#delegatedList !== this.listTarget) this.#connectDelegatedEvents();
     for (const item of this.itemTargets) {
-      if (item.dataset.state === "leaving") continue;
-
-      if (this.durationValue <= 0) {
-        // The timer goes and the hold stays, so the limit still passes over a held toast.
-        this.#dismiss.disarm(item);
-        item.removeAttribute("data-paused");
-      } else {
-        // A toast held by hover or focus keeps its hold and banks the new
-        // duration, so the change reaches it without dismissing it.
-        this.#startTimer(item);
-      }
+      if (this.#outside.has(item)) this.#takeIn(item);
     }
   }
 
@@ -185,7 +212,7 @@ export class ToastController extends Controller<HTMLElement> {
    */
   maxValueChanged(): void {
     if (!this.#connected) return;
-    this.#appliedMax = this.maxValue;
+    this.#appliedMax = this.#safeMax;
     this.enforceMaxLimit();
   }
 
@@ -199,21 +226,33 @@ export class ToastController extends Controller<HTMLElement> {
    * `connect()` are left to it.
    */
   itemTargetConnected(element: HTMLElement): void {
-    if (this.#taken.has(element)) return;
-    if (element.dataset.state === "leaving" || element.parentNode !== this.listTarget) return;
+    if (this.#takeIn(element) && this.#connected) this.#enforceMax([element]);
+  }
+
+  /**
+   * Takes on a toast of the list with the holds it already has, arms its timer and starts its
+   * entering phase, and reports whether it did. A toast already taken on, already leaving or
+   * parented outside `list` is skipped; one outside `list` is remembered for the list that stays.
+   */
+  #takeIn(element: HTMLElement): boolean {
+    if (this.#taken.has(element) || element.dataset.state === "leaving") return false;
+    if (element.parentNode !== this.listTarget) {
+      this.#outside.add(element);
+      return false;
+    }
 
     this.#taken.add(element);
+    this.#arrivals.add(element);
     this.#readHolds(element);
     this.#startTimer(element);
-    element.setAttribute("data-state", "entering");
-    this.#cancelAnimation(element);
+    this.#setPhase(element, "entering");
     const handle = window.requestAnimationFrame(() => {
       this.#rafHandles.delete(element);
       if (element.parentNode !== this.listTarget || element.dataset.state === "leaving") return;
-      element.setAttribute("data-state", "visible");
+      this.#setPhase(element, "visible");
     });
     this.#rafHandles.set(element, handle);
-    if (this.#connected) this.#enforceMax([element]);
+    return true;
   }
 
   /**
@@ -230,6 +269,8 @@ export class ToastController extends Controller<HTMLElement> {
       return;
     }
     this.#taken.delete(element);
+    this.#phases.delete(element);
+    if (this.#connected) this.#arrivals.delete(element);
     element.removeAttribute("data-paused");
     this.#letGo(element);
     this.#cancelAnimation(element);
@@ -298,12 +339,13 @@ export class ToastController extends Controller<HTMLElement> {
     return null;
   }
 
-  /** Dismisses the toast that contained the trigger. */
-  dismiss(event: Event): void {
-    const item = this.#itemFromEvent(event);
+  /** Dismisses an owned item or descendant, or the item a DOM action operated. */
+  dismiss(input: Event | HTMLElement): void {
+    const source = actionSource(input);
+    const item = this.#itemFromSource(source);
     if (!item) return;
 
-    this.#removeWithTransition(item, "user");
+    this.#removeWithTransition(item, source.reason);
   }
 
   /** Dismisses the focused toast when Escape is pressed. */
@@ -313,7 +355,7 @@ export class ToastController extends Controller<HTMLElement> {
       // A press during IME composition (a text field inside the toast) cancels
       // the conversion, never the toast.
       if (event.defaultPrevented || event.isComposing) return;
-      const item = this.#itemFromEvent(event);
+      const item = this.#itemFromSource(actionSource(event));
       if (!item) return;
 
       event.preventDefault();
@@ -329,11 +371,13 @@ export class ToastController extends Controller<HTMLElement> {
    * reason has been released (see {@link resume}). This keeps a toast paused
    * while it is still hovered *or* focused, per WCAG 2.2.1. The hold is recorded
    * whether or not a timer runs, so the `max` limit passes over the toast either
-   * way; `data-paused` marks a timer that stopped, and only that.
+   * way; `data-paused` marks a timer that stopped, and only that. An explicit
+   * item or descendant holds the hover reason, shared with pointer entry.
    */
-  pause(event: Event): void {
-    const item = this.#itemFromEvent(event);
-    if (item && this.#dismiss.pause(item, this.#pauseReason(event))) {
+  pause(input: Event | HTMLElement): void {
+    const source = actionSource(input);
+    const item = this.#itemFromSource(source);
+    if (item && this.#dismiss.pause(item, this.#pauseReason(source.event))) {
       item.setAttribute("data-paused", "true");
     }
   }
@@ -341,15 +385,17 @@ export class ToastController extends Controller<HTMLElement> {
   /**
    * Resumes the auto-dismiss timer once both hover and focus have been released,
    * and then applies the `max` limit again, sparing the toast the pointer or focus is
-   * moving into: its own hold only arrives after this event.
+   * moving into: its own hold only arrives after this event. An explicit item
+   * or descendant releases the hover reason without releasing a focus hold.
    */
-  resume(event: Event): void {
-    const item = this.#itemFromEvent(event);
+  resume(input: Event | HTMLElement): void {
+    const source = actionSource(input);
+    const item = this.#itemFromSource(source);
     if (item) {
       this.#release(
         item,
-        this.#pauseReason(event),
-        ownerOf(this.itemTargets, (event as Partial<FocusEvent>).relatedTarget),
+        this.#pauseReason(source.event),
+        ownerOf(this.itemTargets, (source.event as Partial<FocusEvent> | null)?.relatedTarget),
       );
     }
   }
@@ -372,8 +418,24 @@ export class ToastController extends Controller<HTMLElement> {
     this.#reapply.schedule();
   }
 
+  /** Records a phase and publishes its state hook without changing any deadline. */
+  #setPhase(item: HTMLElement, phase: "entering" | "visible" | "leaving"): void {
+    this.#phases.set(item, phase);
+    item.setAttribute("data-state", phase);
+  }
+
   /** Applies the limit again, sparing every toast gathered since the last pass. */
   #reapplyLimit(): void {
+    for (const item of this.itemTargets) {
+      if (!this.#taken.has(item) || !this.hasListTarget || item.parentNode !== this.listTarget)
+        continue;
+      const phase = this.#phases.get(item);
+      if (item.dataset.state === "leaving") this.#phases.set(item, "leaving");
+      else if (phase) item.setAttribute("data-state", phase);
+      if (this.#dismiss.isHeld(item) && this.#dismiss.tracks(item))
+        item.setAttribute("data-paused", "true");
+      else item.removeAttribute("data-paused");
+    }
     const spared = this.#spared;
     this.#spared = [];
     this.#enforceMax(spared);
@@ -435,21 +497,23 @@ export class ToastController extends Controller<HTMLElement> {
     if (this.#awaitingPointer.size === 0) this.#pointer.dispose();
   }
 
-  /** Resolves the toast item element a pause/resume event targets. */
-  #itemFromEvent(event: Event): HTMLElement | null {
-    const target = event.target instanceof Element ? event.target : event.currentTarget;
-    if (!(target instanceof Element) || !this.hasListTarget) return null;
+  /** Resolves a current owned item from an action's origin or binding host. */
+  #itemFromSource(source: ActionSource): HTMLElement | null {
+    const target = source.origin ?? source.host;
+    if (!target || !this.hasListTarget) return null;
+    if (target.closest(`[data-controller~="${this.identifier}"]`) !== this.element) return null;
     const item = target.closest<HTMLElement>(targetSelector(this.identifier, "item"));
-    return item && this.listTarget.contains(item) ? item : null;
+    return item && this.itemTargets.includes(item) && this.listTarget.contains(item) ? item : null;
   }
 
   /** Classifies a pause/resume event as a hover or focus reason. */
-  #pauseReason(event: Event): "focus" | "hover" {
-    return event.type === "focusin" || event.type === "focusout" ? "focus" : "hover";
+  #pauseReason(event?: Event | null): "focus" | "hover" {
+    return event?.type === "focusin" || event?.type === "focusout" ? "focus" : "hover";
   }
 
   /**
-   * Arms a toast's auto-dismiss; a non-positive `duration` means it never expires.
+   * Arms a toast's auto-dismiss as it is taken on; a non-positive `duration` means it
+   * never expires. The toast keeps this deadline when `duration` changes later.
    * On a toast hover or focus already holds, the timer waits for the release.
    * `data-paused` is written from that state, so a mark the toast carried in with it,
    * from a restored page, does not outlive it.
@@ -459,24 +523,24 @@ export class ToastController extends Controller<HTMLElement> {
   #startTimer(element: HTMLElement): void {
     if (element.dataset.state === "leaving" || element.parentNode !== this.listTarget) return;
 
-    const armed = this.durationValue > 0;
+    const armed = this.#safeDuration > 0;
     if (armed) {
       this.#dismiss.set(
         element,
         () => this.#removeWithTransition(element, "timeout"),
-        this.durationValue,
+        this.#safeDuration,
       );
     }
     if (armed && this.#dismiss.isHeld(element)) element.setAttribute("data-paused", "true");
     else element.removeAttribute("data-paused");
   }
 
-  #removeWithTransition(element: HTMLElement, reason: "timeout" | "user" | "limit"): void {
+  #removeWithTransition(element: HTMLElement, reason: StateReason): void {
     if (element.dataset.state === "leaving" || element.parentNode !== this.listTarget) return;
 
     this.#letGo(element);
     this.#cancelAnimation(element);
-    element.setAttribute("data-state", "leaving");
+    this.#setPhase(element, "leaving");
 
     const finalize = () => {
       if (element.parentNode !== this.listTarget) return;
@@ -518,9 +582,9 @@ export class ToastController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #enforceMax(spared: readonly HTMLElement[] = []): void {
-    if (!Number.isFinite(this.maxValue) || this.maxValue <= 0) return;
-    for (const item of this.itemTargets) {
-      if (this.#shownCount() <= this.maxValue) return;
+    if (this.#safeMax <= 0) return;
+    for (const item of [...this.#arrivals]) {
+      if (this.#shownCount() <= this.#safeMax) return;
       if (this.#isShown(item) && !spared.includes(item) && !this.#dismiss.isHeld(item)) {
         this.#removeWithTransition(item, "limit");
       }
@@ -579,7 +643,7 @@ export class ToastController extends Controller<HTMLElement> {
 
   /** Whether a bubbling focus/pointer event enters or leaves a toast boundary. */
   #crossesItemBoundary(event: Event): boolean {
-    const item = this.#itemFromEvent(event);
+    const item = this.#itemFromSource(actionSource(event));
     if (!item) return false;
     const related = "relatedTarget" in event ? event.relatedTarget : null;
     return !(related instanceof Node && item.contains(related));
@@ -591,5 +655,20 @@ export class ToastController extends Controller<HTMLElement> {
     if (handle === undefined) return;
     window.cancelAnimationFrame(handle);
     this.#rafHandles.delete(element);
+  }
+  /** Current `duration` declaration resolved against its numeric contract. */
+  get #safeDuration(): number {
+    return this.#numbers.read(
+      this,
+      "duration",
+      this.durationValue,
+      ToastController.values.duration.default,
+      ToastController.valueConstraints.duration,
+    );
+  }
+
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(this, "max", this.maxValue, 0, ToastController.valueConstraints.max);
   }
 }

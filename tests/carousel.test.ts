@@ -1,9 +1,10 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CarouselController } from "../src/controllers/carousel_controller";
+import { AttributeLease } from "../src/utils/attribute_lease";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -142,10 +143,26 @@ describe("CarouselController", () => {
 
   const root = () =>
     document.querySelector<HTMLElement>("[data-controller='stimeo--carousel']") as HTMLElement;
+  const carousel = () =>
+    application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--carousel",
+    ) as CarouselController;
   const slides = () =>
     Array.from(document.querySelectorAll<HTMLElement>("[data-stimeo--carousel-target='slide']"));
   const pickers = () =>
     Array.from(document.querySelectorAll<HTMLElement>("[data-stimeo--carousel-target='picker']"));
+  /**
+   * Counts the passes over what the carousel publishes: each pass writes the play toggle's
+   * `aria-pressed` through its lease, whether or not the value moves.
+   */
+  const publishingPasses = () => {
+    const write = vi.spyOn(AttributeLease.prototype, "write");
+    return () =>
+      write.mock.calls.filter(
+        ([element, value]) => element === playToggle() && (value === "true" || value === "false"),
+      ).length;
+  };
   const playToggle = () =>
     document.querySelector<HTMLElement>(
       "[data-stimeo--carousel-target='playToggle']",
@@ -217,6 +234,261 @@ describe("CarouselController", () => {
     });
     return { listening: () => signals.some((signal) => !signal.aborted) };
   };
+
+  it("does not replay a picker action after its change subscriber advances again", async () => {
+    await startReal();
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--carousel",
+    ) as CarouselController;
+    const reports: number[] = [];
+    root().addEventListener("stimeo--carousel:change", (event) =>
+      reports.push((event as CustomEvent<{ index: number }>).detail.index),
+    );
+    let advanced = false;
+    root().addEventListener("stimeo--carousel:change", () => {
+      if (advanced) return;
+      advanced = true;
+      instance.next();
+    });
+    click(pickers()[1]);
+    expect(reports).toEqual([1, 2]);
+    expect(states()).toEqual(["inactive", "inactive", "active"]);
+    const first = pickers()[0];
+    if (!first) throw new Error("Missing first picker");
+    first.removeAttribute("data-action");
+    await tick();
+    click(first);
+    expect(reports).toEqual([1, 2, 0]);
+    expect(states()).toEqual(["active", "inactive", "inactive"]);
+  });
+
+  it("ignores an unmarked owned element without resetting the current slide", async () => {
+    await startReal();
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--carousel",
+    ) as CarouselController;
+    instance.next();
+    expect(states()).toEqual(["inactive", "active", "inactive"]);
+    const unmarked = document.createElement("span");
+    root().append(unmarked);
+    const reports: CustomEvent[] = [];
+    root().addEventListener("stimeo--carousel:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    instance.goto(unmarked);
+    expect(states()).toEqual(["inactive", "active", "inactive"]);
+    expect(reports).toHaveLength(0);
+    const target = pickers()[2];
+    if (!target) throw new Error("Missing picker");
+    instance.goto(target);
+    expect(states()).toEqual(["inactive", "inactive", "active"]);
+    expect(reports).toHaveLength(1);
+  });
+
+  it("rejects nested-origin action events while accepting owned descendants", async () => {
+    await startReal();
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--carousel']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--carousel",
+    ) as CarouselController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--carousel-target='picker']",
+    )[1];
+    if (!target) throw new Error("Missing target");
+
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--carousel");
+    const inner = target.cloneNode(true) as HTMLElement;
+    inner.removeAttribute("data-action");
+    nested.append(inner);
+    target.append(nested);
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--carousel:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener("pointerup", (event) => instance.goto(event));
+    inner.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(0);
+    nested.remove();
+    const owned = document.createElement("span");
+    target.append(owned);
+    owned.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe("user");
+  });
+
+  it("distinguishes autoplay reason from no-argument navigation", async () => {
+    await start(
+      'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+    );
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--carousel",
+    ) as CarouselController;
+    const reasons: string[] = [];
+    root().addEventListener("stimeo--carousel:change", (event) =>
+      reasons.push((event as CustomEvent).detail.reason),
+    );
+    await vi.advanceTimersByTimeAsync(500);
+    instance.next();
+    expect(reasons).toEqual(["timeout", "api"]);
+  });
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+  ])("preserves action event modality %s", async (type, reason) => {
+    await startReal();
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--carousel']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--carousel",
+    ) as CarouselController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--carousel-target='picker']",
+    )[1];
+    if (!target) throw new Error("Missing action target");
+
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--carousel:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener(type, (event) => instance.goto(event), { once: true });
+    target.dispatchEvent(new Event(type));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe(reason);
+  });
+
+  it.each([false, true])(
+    "accepts an owned element API source (descendant=%s) without stealing outside focus",
+    async (descendant) => {
+      await startReal();
+      const element = document.querySelector<HTMLElement>("[data-controller='stimeo--carousel']");
+      if (!element) throw new Error("Missing controller root");
+      const instance = application.getControllerForElementAndIdentifier(
+        element,
+        "stimeo--carousel",
+      ) as CarouselController;
+      const target = element.querySelectorAll<HTMLElement>(
+        "[data-stimeo--carousel-target='picker']",
+      )[1];
+      if (!target) throw new Error("Missing action target");
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      outside.focus();
+      const reports: CustomEvent[] = [];
+      element.addEventListener("stimeo--carousel:change", (event) =>
+        reports.push(event as CustomEvent),
+      );
+
+      const child = document.createElement("span");
+      target.append(child);
+      const foreign = target.cloneNode(true) as HTMLElement;
+      foreign.removeAttribute("data-action");
+      const nested = document.createElement("div");
+      nested.setAttribute("data-controller", "stimeo--carousel");
+      const nestedTarget = foreign.cloneNode(true) as HTMLElement;
+      nested.append(nestedTarget);
+      element.append(nested);
+      const before = element.innerHTML;
+      instance.goto(foreign);
+      document.body.append(foreign);
+      instance.goto(foreign);
+      instance.goto(nestedTarget);
+      expect(element.innerHTML).toBe(before);
+      expect(reports).toHaveLength(0);
+      instance.goto(descendant ? child : target);
+      expect(target.getAttribute("aria-selected")).toBe("true");
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.detail.reason).toBe("api");
+      expect(document.activeElement).toBe(outside);
+    },
+  );
+
+  it.each([false, true])(
+    "keeps the outer carousel report when a pause listener only reads or repeats (%s)",
+    async (repeat) => {
+      await start(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-loop-value="false"',
+      );
+      const seen: number[] = [];
+      const instance = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--carousel",
+      ) as CarouselController;
+      root().addEventListener("stimeo--carousel:change", (event) =>
+        seen.push((event as CustomEvent).detail.index),
+      );
+      root().addEventListener(
+        "stimeo--carousel:pause",
+        () => {
+          expect(playToggle().getAttribute("aria-pressed")).toBe("false");
+          expect(viewport().getAttribute("aria-live")).toBe("polite");
+          if (repeat) instance.next();
+        },
+        { once: true },
+      );
+      instance.next();
+      seen.length = 0;
+      instance.next();
+      expect(seen).toEqual([2]);
+    },
+  );
+
+  it("steps from the page's active slide before reconciliation", async () => {
+    await start();
+    const seen: number[] = [];
+    root().addEventListener("stimeo--carousel:change", (event) =>
+      seen.push((event as CustomEvent).detail.index),
+    );
+    slides().forEach((slide, index) => {
+      slide.setAttribute("data-state", index === 1 ? "active" : "inactive");
+    });
+    click(stepControl("next"));
+    expect(states()).toEqual(["inactive", "inactive", "active"]);
+    expect(seen).toEqual([2]);
+  });
+
+  it("does not report a step ending at the previously published slide", async () => {
+    await start();
+    const seen: Event[] = [];
+    root().addEventListener("stimeo--carousel:change", (event) => seen.push(event));
+    slides().forEach((slide, index) => {
+      slide.setAttribute("data-state", index === 1 ? "active" : "inactive");
+    });
+    click(stepControl("prev"));
+    expect(states()).toEqual(["active", "inactive", "inactive"]);
+    expect(seen).toEqual([]);
+  });
+
+  it("keeps the replacement slide and timer state after a pause listener navigates", async () => {
+    await start(
+      'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-loop-value="false"',
+    );
+    const seen: number[] = [];
+    root().addEventListener("stimeo--carousel:change", (event) =>
+      seen.push((event as CustomEvent).detail.index),
+    );
+    root().addEventListener("stimeo--carousel:pause", () => click(stepControl("prev")), {
+      once: true,
+    });
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--carousel",
+    ) as CarouselController;
+    instance.next();
+    seen.length = 0;
+    instance.next();
+    expect(seen).toEqual([1]);
+    expect(states()).toEqual(["inactive", "active", "inactive"]);
+    expect(playToggle().getAttribute("aria-pressed")).toBe("true");
+    expect(viewport().getAttribute("aria-live")).toBe("off");
+  });
 
   it("reverses the horizontal arrows under RTL, leaving Down/Up alone", async () => {
     // Logical direction: APG describes the horizontal pair as "next / previous",
@@ -342,7 +614,7 @@ describe("CarouselController", () => {
       detail.push((event as CustomEvent<{ index: number; total: number }>).detail);
     });
     click(stepControl("next"));
-    expect(detail).toEqual([{ index: 1, total: 3 }]);
+    expect(detail).toEqual([{ index: 1, total: 3, reason: "user" }]);
   });
 
   it("moves picker focus only with the arrow keys (manual activation)", async () => {
@@ -405,6 +677,17 @@ describe("CarouselController", () => {
     press(pickers()[2], "Home");
     expect(document.activeElement).toBe(pickers()[0]);
     expect(states()).toEqual(["active", "inactive", "inactive"]);
+  });
+
+  it("consumes the picker keys it handles, so the page does not scroll with them", async () => {
+    await start();
+    const keys = ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End"];
+    const prevented = keys.map((key) => {
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      pickers()[1]?.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+    expect(prevented).toEqual([true, true, true, true, true, true]);
   });
 
   it("lands End on the last picker even when the sets are not paired one to one", async () => {
@@ -972,20 +1255,14 @@ describe("CarouselController", () => {
       for (const type of ["change", "reconcile"]) {
         root().addEventListener(`stimeo--carousel:${type}`, () => reports.push(type));
       }
-      const records: MutationRecord[] = [];
-      const observer = new MutationObserver((batch) => records.push(...batch));
-      observer.observe(playToggle(), { attributes: true, attributeFilter: ["aria-pressed"] });
+      const passes = publishingPasses();
 
       root().setAttribute("data-stimeo--carousel-loop-value", "false");
       await vi.advanceTimersByTimeAsync(0);
-      records.push(...observer.takeRecords());
-      observer.disconnect();
 
-      // The index stays where it was, so nothing is reported. This DOM-only environment
-      // records an identical reassignment too, so one record is one pass over what the
-      // carousel publishes.
+      // The index stays where it was, so nothing is reported.
       expect(reports).toEqual([]);
-      expect(records).toHaveLength(1);
+      expect(passes()).toBe(1);
       expect(stepControl("prev").getAttribute("aria-disabled")).toBe("true");
       expect(states()).toEqual(["active", "inactive", "inactive"]);
     });
@@ -1633,6 +1910,38 @@ describe("CarouselController", () => {
       expect(stepControl("prev").hasAttribute("aria-disabled")).toBe(false);
       expect(viewport().hasAttribute("aria-live")).toBe(false);
       expect(viewport().hasAttribute("aria-atomic")).toBe(false);
+      expect(playToggle().hasAttribute("aria-pressed")).toBe(false);
+    });
+
+    it("keeps every leased attribute through turbo:before-cache, which also fires on a page that stays", async () => {
+      await start('data-stimeo--carousel-loop-value="false"');
+
+      document.dispatchEvent(new Event("turbo:before-cache"));
+
+      expect(stepControl("prev").getAttribute("aria-disabled")).toBe("true");
+      expect(viewport().getAttribute("aria-live")).toBe("polite");
+      expect(viewport().getAttribute("aria-atomic")).toBe("false");
+    });
+
+    it("gives the author's attributes back on a page restored from the cache", async () => {
+      await start('data-stimeo--carousel-loop-value="false"');
+      application = await restoreFromCache(
+        application,
+        (restored) => restored.register("stimeo--carousel", CarouselController),
+        () => vi.advanceTimersByTimeAsync(0),
+      );
+      expect(stepControl("prev").getAttribute("aria-disabled")).toBe("true");
+
+      carousel().disconnect();
+
+      expect(stepControl("prev").hasAttribute("aria-disabled")).toBe(false);
+      expect(viewport().hasAttribute("aria-live")).toBe(false);
+      expect(viewport().hasAttribute("aria-atomic")).toBe(false);
+      expect(
+        viewport()
+          .getAttributeNames()
+          .filter((name) => name.endsWith("-lease")),
+      ).toEqual([]);
     });
   });
 
@@ -1656,6 +1965,13 @@ describe("CarouselController", () => {
   });
 
   describe("wiring", () => {
+    /** The actionless carousel, rotating every 500ms. */
+    const rotatingActionless = () =>
+      actionlessMarkup().replace(
+        'aria-label="Featured"',
+        'aria-label="Featured" data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+
     it("drives every control with no data-action in the markup", async () => {
       await startWith(actionlessMarkup());
       expect(root().hasAttribute("data-action")).toBe(false);
@@ -1709,9 +2025,49 @@ describe("CarouselController", () => {
       expect(states()).toEqual(["active", "inactive", "inactive"]);
 
       expect(detail).toEqual([
-        { index: 1, total: 3 },
-        { index: 0, total: 3 },
+        { index: 1, total: 3, reason: "user" },
+        { index: 0, total: 3, reason: "user" },
       ]);
+    });
+
+    it("publishes once for a hover or focus move the authored pause and resume also hear", async () => {
+      // The default fixture binds all four on the root, where the delegation listens too.
+      await start(
+        'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
+      );
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      const counted = publishingPasses();
+      let seen = 0;
+      const passes = (interaction: () => void) => {
+        interaction();
+        const total = counted();
+        const these = total - seen;
+        seen = total;
+        return these;
+      };
+
+      const counts = [
+        passes(() => root().dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }))),
+        passes(() => root().dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }))),
+        passes(() => moveFocus(null, pickers()[0] ?? null)),
+        passes(() => moveFocus(pickers()[0] ?? null, outside)),
+      ];
+      expect(counts).toEqual([1, 1, 1, 1]);
+    });
+
+    it("moves picker focus once for a key both wirings hear, even when it cannot be cancelled", async () => {
+      // A script's synthetic keydown is not cancelable, so `defaultPrevented` cannot
+      // tell the delegation the authored binding already took it.
+      await start();
+      const focus = vi.spyOn(pickers()[1] as HTMLElement, "focus");
+
+      pickers()[0]?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+      );
+
+      expect(document.activeElement).toBe(pickers()[1]);
+      expect(focus).toHaveBeenCalledTimes(1);
     });
 
     it("yields a control a descendant already consumed", async () => {
@@ -1771,6 +2127,46 @@ describe("CarouselController", () => {
       expect(states()).toEqual(["active", "inactive", "inactive"]);
     });
 
+    it("resumes from a delegated focus that leaves the carousel with no data-action", async () => {
+      await startWith(rotatingActionless());
+      const edges = recordRunEdges();
+      const outside = document.createElement("button");
+      document.body.append(outside);
+
+      moveFocus(null, pickers()[0] ?? null);
+      moveFocus(pickers()[0] ?? null, outside);
+
+      expect(edges).toEqual(["pause", "play"]);
+      vi.advanceTimersByTime(500);
+      expect(states()).toEqual(["inactive", "active", "inactive"]);
+    });
+
+    it.each([
+      { type: "click", fire: () => click(stepControl("next")) },
+      { type: "keydown", fire: () => press(pickers()[0], "ArrowRight") },
+      { type: "focusin", fire: () => moveFocus(null, pickers()[0] ?? null) },
+      { type: "focusout", fire: () => moveFocus(pickers()[0] ?? null, null) },
+      { type: "mouseenter", fire: () => root().dispatchEvent(new MouseEvent("mouseenter")) },
+      { type: "mouseleave", fire: () => root().dispatchEvent(new MouseEvent("mouseleave")) },
+      {
+        type: "visibilitychange",
+        fire: () => document.dispatchEvent(new Event("visibilitychange")),
+      },
+    ])("hears no delegated $type once disconnect() has run", async ({ fire }) => {
+      await startWith(rotatingActionless());
+      carousel().disconnect();
+      await Promise.resolve(); // no reconnect: the probe ends the run
+      const edges = recordRunEdges();
+
+      fire();
+      vi.advanceTimersByTime(1000);
+
+      expect(states()).toEqual(["active", "inactive", "inactive"]);
+      expect(pickers().map((picker) => picker.tabIndex)).toEqual([0, -1, -1]);
+      expect(viewport().hasAttribute("aria-live")).toBe(false);
+      expect(edges).toEqual([]);
+    });
+
     it("drives a pair added at runtime with no action of its own", async () => {
       // Delegation is what makes this work: a per-element binding would have to
       // be authored onto the new picker before it could be operated.
@@ -1815,6 +2211,23 @@ describe("CarouselController", () => {
 
       expect(states()).toEqual(["inactive", "inactive", "active"]);
       expect(repairs).toEqual([{ index: 2, total: 3 }]);
+    });
+
+    it("stops recording state-attribute rewrites once disconnect() has run", async () => {
+      const observe = vi.spyOn(MutationObserver.prototype, "observe");
+      await start();
+      const index = observe.mock.calls.findIndex(
+        ([target, options]) =>
+          target === root() && options?.attributeFilter?.includes("aria-selected") === true,
+      );
+      const observer = observe.mock.contexts[index];
+      observe.mockRestore();
+      if (!(observer instanceof MutationObserver)) throw new Error("expected the state observer");
+
+      carousel().disconnect();
+      slides()[1]?.setAttribute("data-state", "active");
+
+      expect(observer.takeRecords()).toEqual([]);
     });
 
     it("does not feed its own repaint back into the observer", async () => {
@@ -1863,6 +2276,39 @@ describe("CarouselController", () => {
       // The current slide is kept: a late arrival never steals the selection.
       expect(selected()).toEqual(["true", "false", "false", "false"]);
       expect(pickers().map((picker) => picker.tabIndex)).toEqual([0, -1, -1, -1]);
+    });
+
+    it("re-establishes the single selected picker when a picker arrives without a slide", async () => {
+      // No slide joins with it, so the picker's own target callback is what resolves
+      // the second selection.
+      await start();
+      const late = document.createElement("button");
+      late.type = "button";
+      late.setAttribute("role", "tab");
+      late.setAttribute("aria-selected", "true");
+      late.setAttribute("aria-label", "Slide 4");
+      late.setAttribute("data-stimeo--carousel-target", "picker");
+      (document.querySelector('[role="tablist"]') as HTMLElement).appendChild(late);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(selected()).toEqual(["true", "false", "false", "false"]);
+    });
+
+    it("hides a slide that arrives without a picker and reports the new total", async () => {
+      await start();
+      const repairs: unknown[] = [];
+      root().addEventListener("stimeo--carousel:reconcile", (event) => {
+        repairs.push((event as CustomEvent).detail);
+      });
+      const slide = document.createElement("div");
+      slide.setAttribute("role", "tabpanel");
+      slide.setAttribute("data-stimeo--carousel-target", "slide");
+      viewport().appendChild(slide);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(states()).toEqual(["active", "inactive", "inactive", "inactive"]);
+      expect(slide.hidden).toBe(true);
+      expect(repairs).toEqual([{ index: 0, total: 4 }]);
     });
 
     it("re-establishes selection and the Tab stop when the active pair is removed", async () => {
@@ -1989,6 +2435,206 @@ describe("CarouselController", () => {
 
       expect(pickers().filter((picker) => picker.tabIndex === 0)).toHaveLength(1);
       expect(selected().filter((state) => state === "true")).toHaveLength(1);
+    });
+
+    it("hands selection and the Tab stop on when the selected picker leaves a settled carousel", async () => {
+      // Nothing the controller wrote is still waiting on its observer, so the picker's
+      // own target callback is the only thing that answers the removal.
+      await start();
+      pickers()[0]?.remove();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(selected()).toEqual(["true", "false"]);
+      expect(pickers().map((picker) => picker.tabIndex)).toEqual([0, -1]);
+    });
+  });
+
+  describe("viewport that arrives or stays", () => {
+    const VIEWPORT = "data-stimeo--carousel-target";
+    /** A carousel whose viewport wraps a track, so the target can move without the slides. */
+    const trackMarkup = (attrs = "", viewportAttrs = "") => `
+      <section data-controller="stimeo--carousel" aria-roledescription="carousel"
+               aria-label="Featured" ${attrs}>
+        <button type="button" aria-label="Slide autoplay"
+                data-stimeo--carousel-target="playToggle">Play</button>
+        <div id="outer" data-stimeo--carousel-target="viewport" ${viewportAttrs}>
+          <div id="track">
+            <div role="group" data-stimeo--carousel-target="slide">One</div>
+            <div role="group" data-stimeo--carousel-target="slide" hidden inert>Two</div>
+          </div>
+        </div>
+        <button type="button" aria-label="Next" data-stimeo--carousel-target="next">›</button>
+      </section>`;
+    const outer = () => document.getElementById("outer") as HTMLElement;
+    const track = () => document.getElementById("track") as HTMLElement;
+    const settle = () => vi.advanceTimersByTimeAsync(0);
+    const ROTATING =
+      'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="1000"';
+
+    it("publishes the live region on a viewport that replaces the current one", async () => {
+      await start(ROTATING);
+      click(playToggle());
+      expect(viewport().getAttribute("aria-live")).toBe("polite");
+      const successor = viewport().cloneNode(true) as HTMLElement;
+      successor.setAttribute("aria-live", "off");
+
+      viewport().replaceWith(successor);
+      await settle();
+
+      expect(viewport()).toBe(successor);
+      expect(successor.getAttribute("aria-live")).toBe("polite");
+      expect(successor.getAttribute("aria-atomic")).toBe("false");
+    });
+
+    it("publishes the live region on an element the viewport target moves to", async () => {
+      await startWith(trackMarkup());
+      expect(outer().getAttribute("aria-live")).toBe("polite");
+
+      outer().removeAttribute(VIEWPORT);
+      track().setAttribute(VIEWPORT, "viewport");
+      await settle();
+
+      expect(viewport()).toBe(track());
+      expect(track().getAttribute("aria-live")).toBe("polite");
+      expect(track().getAttribute("aria-atomic")).toBe("false");
+    });
+
+    it("publishes the live region on a viewport that stays after an earlier one leaves", async () => {
+      await startWith(trackMarkup(ROTATING));
+      expect(outer().getAttribute("aria-live")).toBe("off");
+      const successor = document.createElement("div");
+      successor.setAttribute(VIEWPORT, "viewport");
+      outer().after(successor);
+      await settle();
+      successor.append(track());
+      await settle();
+      click(playToggle());
+      await settle();
+      expect(outer().getAttribute("aria-live")).toBe("polite");
+      outer().remove();
+      await settle();
+
+      expect(viewport()).toBe(successor);
+      expect(successor.getAttribute("aria-live")).toBe("polite");
+      expect(successor.getAttribute("aria-atomic")).toBe("false");
+    });
+
+    it("brings a viewport up to date without an event", async () => {
+      await startWith(trackMarkup(ROTATING));
+      const events: string[] = [];
+      for (const type of ["change", "reconcile", "play", "pause"]) {
+        root().addEventListener(`stimeo--carousel:${type}`, () => events.push(type));
+      }
+      root().addEventListener("change", () => events.push("native change"));
+
+      outer().removeAttribute(VIEWPORT);
+      track().setAttribute(VIEWPORT, "viewport");
+      await settle();
+
+      expect(track().getAttribute("aria-live")).toBe("off");
+      expect(events).toEqual([]);
+    });
+
+    it("keeps working when its only viewport leaves", async () => {
+      await startWith(trackMarkup());
+      const errors: unknown[] = [];
+      application.handleError = (error) => {
+        errors.push(error);
+      };
+      outer().removeAttribute(VIEWPORT);
+      await settle();
+      click(stepControl("next"));
+      await settle();
+
+      expect(errors).toEqual([]);
+      expect(states()).toEqual(["inactive", "active"]);
+    });
+
+    it("publishes the live region on a viewport that arrives after the only one left", async () => {
+      await startWith(trackMarkup());
+      outer().removeAttribute(VIEWPORT);
+      await settle();
+
+      track().setAttribute(VIEWPORT, "viewport");
+      await settle();
+
+      expect(track().getAttribute("aria-live")).toBe("polite");
+      expect(track().getAttribute("aria-atomic")).toBe("false");
+    });
+
+    it("gives a viewport that stops being one back the live region it was authored without", async () => {
+      await startWith(trackMarkup());
+      const departed = outer();
+      expect(departed.getAttribute("aria-live")).toBe("polite");
+
+      departed.removeAttribute(VIEWPORT);
+      await settle();
+
+      expect(departed.hasAttribute("aria-live")).toBe(false);
+      expect(departed.hasAttribute("aria-atomic")).toBe(false);
+    });
+
+    it("gives a departed viewport back the live region it was authored with", async () => {
+      await startWith(trackMarkup(ROTATING, 'aria-live="assertive" aria-atomic="true"'));
+      const departed = outer();
+      expect(departed.getAttribute("aria-live")).toBe("off");
+
+      departed.removeAttribute(VIEWPORT);
+      await settle();
+
+      expect(departed.getAttribute("aria-live")).toBe("assertive");
+      expect(departed.getAttribute("aria-atomic")).toBe("true");
+    });
+
+    it("keeps a live region the page wrote on a viewport after the last write", async () => {
+      await startWith(trackMarkup());
+      const departed = outer();
+      departed.setAttribute("aria-live", "assertive");
+
+      departed.removeAttribute(VIEWPORT);
+      await settle();
+
+      expect(departed.getAttribute("aria-live")).toBe("assertive");
+      expect(departed.hasAttribute("aria-atomic")).toBe(false);
+    });
+
+    it("gives the viewport back its own live region when the carousel loses its controller", async () => {
+      await startWith(trackMarkup(ROTATING, 'aria-live="assertive"'));
+      const departed = outer();
+
+      root().removeAttribute("data-controller");
+      await settle();
+
+      expect(departed.getAttribute("aria-live")).toBe("assertive");
+      expect(departed.hasAttribute("aria-atomic")).toBe(false);
+    });
+
+    it("keeps a viewport that moves within the carousel published without touching it", async () => {
+      await startWith(trackMarkup());
+      const moving = outer();
+      const writes: string[] = [];
+      new MutationObserver((records) => {
+        for (const record of records) {
+          if (record.attributeName?.startsWith("aria-")) writes.push(record.attributeName);
+        }
+      }).observe(moving, { attributes: true });
+
+      root().append(moving);
+      await settle();
+
+      expect(viewport()).toBe(moving);
+      expect(moving.getAttribute("aria-live")).toBe("polite");
+      expect(writes).toEqual([]);
+    });
+
+    it("writes nothing onto the viewport while Stimulus tears the controller down", async () => {
+      await startWith(trackMarkup());
+
+      application.unload("stimeo--carousel");
+      await settle();
+
+      expect(outer().hasAttribute("aria-live")).toBe(false);
+      expect(outer().hasAttribute("aria-atomic")).toBe(false);
     });
   });
 });

@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { validSelector } from "../utils/declared_value";
+import { LivedMark } from "../utils/lived_mark";
 
 /** Field types whose state is authored markup rather than something a user changed. */
 const STATELESS_INPUT_TYPES = new Set(["hidden", "submit", "reset", "button", "image"]);
@@ -39,12 +40,15 @@ function restoreField(element: Element): void {
 }
 
 /**
- * Headless **before-cache reset** — Hotwire-specific, with no APG pattern. On `turbo:before-cache` it returns transient UI (open menus/modals,
- * typed-in values, spinning indicators) to its initial state, so a page restored by
- * the Back button is not frozen mid-interaction. Place one on `<body>`.
+ * Headless **restore reset** — Hotwire-specific, with no APG pattern. When Turbo restores a
+ * page from its cache (Back and Forward, or a promoted frame navigation followed by Back),
+ * it returns transient UI declared in the markup (open disclosures, typed-in values, shown
+ * overlays, flash messages) to the state the page was written in, so the restored page is
+ * not frozen mid-interaction. A page that stays on screen is never reset. Place one on
+ * `<body>` or around the region it covers.
  *
- * Markup contract (identifier: `stimeo--reset-before-cache`):
- *   <body data-controller="stimeo--reset-before-cache">
+ * Markup contract (identifier: `stimeo--reset-on-restore`):
+ *   <body data-controller="stimeo--reset-on-restore">
  *     <details data-reset-attr="open">…</details>     <!-- remove these attributes -->
  *     <div data-reset-class="is-open is-loading">…</div> <!-- remove these classes -->
  *     <form data-reset-form>…</form>                   <!-- form.reset() -->
@@ -58,70 +62,77 @@ function restoreField(element: Element): void {
  * cannot read falls back to that default rather than taking the sweep down with
  * it, and so does one that matches nothing.
  *
- * `reset` dispatches `{}`; `request` dispatches `{}`.
+ * `reset` dispatches `{}`.
  *
  * @remarks
  * Behavior only and **idempotent** — every run converges on the same initial state,
- * holding no module-scope state. It does the cross-cutting DOM cleanup directly
- * (attribute removal, class removal, restoring a field to its authored state,
- * re-hiding, node removal) and, when
- * `dispatchReset` is on, fires `stimeo--reset-before-cache:request` so individual
- * Stimeo controllers can run their own close logic. The `turbo:before-cache`
- * listener is paired to `connect()` / `disconnect()` so it never double-registers or
- * leaks. {@link reset} is also a public action for manual triggering.
+ * holding no module-scope state. The sweep removes attributes and classes, resets
+ * forms, returns fields to their authored state, re-hides and removes nodes, and then
+ * dispatches `stimeo--reset-on-restore:reset`.
+ *
+ * **Which page is a restored one.** Every connection marks the element with
+ * `data-stimeo--reset-on-restore-lived`, and nothing removes the mark: Turbo copies the
+ * page into its cache at different moments of a navigation, before the controller
+ * disconnects or after, and the copy carries the mark either way. A new instance that
+ * finds the mark is on such a copy and runs the sweep once. Server markup never carries
+ * the mark, so a fresh render keeps an authored `open` or value. A reconnect of the same
+ * instance — an in-page move, a `data-turbo-permanent` element carried to the next page —
+ * runs nothing, and neither does `turbo:before-cache`, which Turbo also dispatches on
+ * pages that stay (a promoted frame navigation, a `popstate` without Turbo state, a
+ * refresh of a cached URL). A Turbo morph keeps only the attributes the server sent, so
+ * the mark is written again after one. A cached page Turbo shows as a preview is a copy
+ * as well and is reset, before the fresh response replaces it.
+ *
+ * The `reset` a restored copy runs is dispatched while that copy connects, before the
+ * controllers inside it: a document or window listener hears it, an action on a
+ * controller inside does not. Each Stimeo controller normalizes its own transient state
+ * when it connects to a restored copy. {@link reset} is also a public action that runs
+ * the sweep on the live page.
  */
-export class ResetBeforeCacheController extends Controller<HTMLElement> {
+export class ResetOnRestoreController extends Controller<HTMLElement> {
   static override values = {
     scope: { type: String, default: "" },
-    dispatchReset: { type: Boolean, default: true },
   };
   static actions = ["reset"] as const;
-  static events = ["reset", "request"] as const;
+  static events = ["reset"] as const;
 
   declare scopeValue: string;
-  declare dispatchResetValue: boolean;
 
   /** The `scope` declaration after validation; empty when it cannot be parsed. */
   #scopeSelector = "";
 
-  /** Runs the reset just before Turbo caches the snapshot. */
-  readonly #onBeforeCache = (): void => this.reset();
+  /** Writes the mark a restored copy carries, and tells such a copy from a fresh render. */
+  readonly #lived = new LivedMark(this.identifier);
 
   /**
    * Validates the scope declaration once, keeping only a selector the engine can
    * read.
    *
    * A selector reads back as an ordinary string, so a malformed one survives
-   * until it is handed to the DOM — and this part runs from a single listener
-   * whose whole job is to keep a cached page from freezing. Falling back to the
-   * default keeps that job running with a visible, findable result instead of
-   * silently taking the sweep down.
+   * until it is handed to the DOM. Falling back to the default keeps the sweep
+   * running with a visible, findable result instead of silently taking it down.
    */
   scopeValueChanged(): void {
     this.#scopeSelector = validSelector(this.element, this.scopeValue, "");
   }
 
+  /** Marks the element, and resets a restored copy of it once. */
   override connect(): void {
-    document.addEventListener("turbo:before-cache", this.#onBeforeCache);
+    if (this.#lived.connect(this.element) === "restored") this.reset();
   }
 
+  /** Stops following morphs; the mark stays for the copy Turbo may take after this. */
   override disconnect(): void {
-    document.removeEventListener("turbo:before-cache", this.#onBeforeCache);
+    this.#lived.disconnect();
   }
 
   /**
-   * Resets transient UI within scope to its initial state. Asks controllers to
-   * close (via `request`) first, then applies the declarative `data-reset-*` cleanup,
-   * and finally emits `reset`. Safe to call any number of times (idempotent).
-   *
-   * `dispatchReset` decides only whether the `request` ask goes out; the cleanup
-   * and the closing `reset` run either way. Both the listener and this action
-   * reach the same sweep, so `reset` is emitted for a manual call too.
+   * Resets transient UI within scope to its initial state: applies the declarative
+   * `data-reset-*` cleanup, then emits `reset`. Safe to call any number of times
+   * (idempotent).
    */
   reset(): void {
     const root = this.#scopeRoot();
-
-    if (this.dispatchResetValue) this.dispatch("request");
 
     for (const element of root.querySelectorAll("[data-reset-attr]")) {
       for (const name of (element.getAttribute("data-reset-attr") ?? "").split(/\s+/)) {

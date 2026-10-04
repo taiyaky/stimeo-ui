@@ -1,10 +1,10 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DismissibleController } from "../src/controllers/dismissible_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { byId, query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -55,6 +55,21 @@ describe("DismissibleController", () => {
     document.querySelector<HTMLElement>("[data-stimeo--dismissible-target='root']");
   /** The root, asserted present (`hide` mode and pre-dismiss lookups). */
   const root = () => query("[data-stimeo--dismissible-target='root']");
+
+  it("gives a restored root its own data-state back once it stops being the root", async () => {
+    await start(remove_markup);
+    expect(root().getAttribute("data-state")).toBe("open");
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--dismissible", DismissibleController),
+    );
+    const restoredRoot = root();
+
+    restoredRoot.removeAttribute("data-stimeo--dismissible-target");
+    controller().rootTargetDisconnected(restoredRoot);
+
+    expect(restoredRoot.hasAttribute("data-state")).toBe(false);
+    expect(restoredRoot.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
 
   it("removes the root from the DOM in remove mode", async () => {
     await start(remove_markup);
@@ -223,6 +238,22 @@ describe("DismissibleController", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
+  it("falls back to document.body in hide mode too, off the control it hides", async () => {
+    await start(`
+      <div data-controller="stimeo--dismissible"
+           data-stimeo--dismissible-mode-value="hide">
+        <div data-stimeo--dismissible-target="root">
+          <button id="close" data-action="stimeo--dismissible#dismiss">Close</button>
+        </div>
+      </div>`);
+    byId("close").focus();
+
+    byId("close").click();
+
+    expect(root().hidden).toBe(true);
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it("does not move focus when focus was outside the element", async () => {
     await start(remove_markup);
     const before = byId("before");
@@ -357,6 +388,71 @@ describe("DismissibleController", () => {
     expect(root().hidden).toBe(false);
   });
 
+  it("detaches its keydown listener when closeOnEscape changes to false", async () => {
+    await start(`
+      <div data-controller="stimeo--dismissible"
+           data-stimeo--dismissible-mode-value="hide"
+           data-stimeo--dismissible-close-on-escape-value="true">
+        <div data-stimeo--dismissible-target="root">
+          <button id="close">Close</button>
+        </div>
+      </div>`);
+    const removed = vi.spyOn(host(), "removeEventListener");
+
+    host().setAttribute("data-stimeo--dismissible-close-on-escape-value", "false");
+    controller().closeOnEscapeValueChanged();
+
+    expect(removed).toHaveBeenCalledWith("keydown", expect.any(Function));
+  });
+
+  it("keeps dismissing on Escape after the element moves within the page", async () => {
+    await start(`
+      <div id="first-slot">
+        <div data-controller="stimeo--dismissible"
+             data-stimeo--dismissible-mode-value="hide"
+             data-stimeo--dismissible-close-on-escape-value="true">
+          <div data-stimeo--dismissible-target="root">
+            <button id="close">Close</button>
+          </div>
+        </div>
+      </div>
+      <div id="second-slot"></div>`);
+    const element = host();
+
+    // Stimulus reconnects the same controller and, the Value attribute being
+    // unchanged, does not deliver its change callback again.
+    element.remove();
+    await tick();
+    byId("second-slot").append(element);
+    await tick();
+    byId("close").focus();
+    host().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    expect(root().hidden).toBe(true);
+  });
+
+  it("reads closeOnEscape at the press, before its change callback has run", async () => {
+    await start(`
+      <div data-controller="stimeo--dismissible"
+           data-stimeo--dismissible-mode-value="hide"
+           data-stimeo--dismissible-close-on-escape-value="true">
+        <div data-stimeo--dismissible-target="root">
+          <button id="close">Close</button>
+        </div>
+      </div>`);
+    byId("close").focus();
+    // A handler earlier on the propagation path turns the Value off during the same
+    // dispatch. The change callback runs only after the dispatch returns, so the
+    // listener registered for `true` still receives this press.
+    byId("close").addEventListener("keydown", () => {
+      host().setAttribute("data-stimeo--dismissible-close-on-escape-value", "false");
+    });
+
+    byId("close").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    expect(root().hidden).toBe(false);
+  });
+
   it("normalizes an unknown mode to remove in behavior and event detail", async () => {
     await start(`
       <div data-controller="stimeo--dismissible"
@@ -400,6 +496,365 @@ describe("DismissibleController", () => {
 
     expect(byId("first-root").hidden).toBe(true);
     expect(byId("second-root").hidden).toBe(false);
+  });
+
+  describe("a root that takes over", () => {
+    const hide_markup = `
+      <div data-controller="stimeo--dismissible"
+           data-stimeo--dismissible-mode-value="hide">
+        <div data-stimeo--dismissible-target="root" role="status">
+          <p>Saved.</p>
+          <button type="button" aria-label="Close"
+                  data-action="stimeo--dismissible#dismiss">×</button>
+        </div>
+        <p id="elsewhere"></p>
+      </div>`;
+
+    /** A copy of `root`, as the server renders it: no `data-state`, not hidden. */
+    const freshCopy = (element: HTMLElement): HTMLElement => {
+      const copy = element.cloneNode(true) as HTMLElement;
+      copy.removeAttribute("data-state");
+      copy.hidden = false;
+      return copy;
+    };
+
+    /** Records everything a takeover must not dispatch, on the host and the document. */
+    const recordDispatches = () => {
+      const seen: string[] = [];
+      const names = ["stimeo--dismissible:dismiss", "change", "reconcile"];
+      const listener = (event: Event): void => {
+        seen.push(event.type);
+      };
+      for (const name of names) document.addEventListener(name, listener, true);
+      return {
+        seen,
+        stop: () => {
+          for (const name of names) document.removeEventListener(name, listener, true);
+        },
+      };
+    };
+
+    it("writes the open default onto a root that replaces the current one in one task", async () => {
+      await start(remove_markup);
+      const original = root();
+      const successor = freshCopy(original);
+
+      original.replaceWith(successor);
+      await tick();
+
+      expect(successor.getAttribute("data-state")).toBe("open");
+    });
+
+    it("writes the open default onto a root that stays after an earlier one leaves", async () => {
+      await start(remove_markup);
+      const original = root();
+      const successor = freshCopy(original);
+      original.after(successor);
+      await tick();
+
+      original.remove();
+      await tick();
+
+      expect(root()).toBe(successor);
+      expect(successor.getAttribute("data-state")).toBe("open");
+    });
+
+    it("writes the open default onto a second root present at connect once the first leaves", async () => {
+      await start(`
+        <div data-controller="stimeo--dismissible">
+          <div id="first-root" data-stimeo--dismissible-target="root">
+            <button data-action="stimeo--dismissible#dismiss">Close</button>
+          </div>
+          <div id="second-root" data-stimeo--dismissible-target="root">
+            <button data-action="stimeo--dismissible#dismiss">Close</button>
+          </div>
+        </div>`);
+      const second = byId("second-root");
+      expect(byId("first-root").getAttribute("data-state")).toBe("open");
+      expect(second.hasAttribute("data-state")).toBe(false);
+
+      query("button", byId("first-root")).click();
+      await tick();
+
+      expect(root()).toBe(second);
+      expect(second.getAttribute("data-state")).toBe("open");
+    });
+
+    it("keeps a data-state the root that takes over was authored with", async () => {
+      await start(remove_markup);
+      const original = root();
+      const successor = freshCopy(original);
+      successor.setAttribute("data-state", "custom");
+
+      original.replaceWith(successor);
+      await tick();
+
+      expect(successor.getAttribute("data-state")).toBe("custom");
+    });
+
+    it("takes over silently, without moving focus", async () => {
+      await start(remove_markup);
+      const original = root();
+      const successor = freshCopy(original);
+      byId("before").focus();
+      const recording = recordDispatches();
+
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+      recording.stop();
+
+      expect(successor.getAttribute("data-state")).toBe("open");
+      expect(recording.seen).toEqual([]);
+      expect(document.activeElement).toBe(byId("before"));
+    });
+
+    it("dismisses only the root present then: a root arriving after a dismissal is open", async () => {
+      await start(hide_markup);
+      const dismissed = root();
+      query("button", dismissed).click();
+      expect(dismissed.hidden).toBe(true);
+      expect(dismissed.getAttribute("data-state")).toBe("closing");
+      const arrival = freshCopy(dismissed);
+
+      dismissed.replaceWith(arrival);
+      await tick();
+
+      expect(arrival.hidden).toBe(false);
+      expect(arrival.getAttribute("data-state")).toBe("open");
+      query("button", arrival).click();
+      expect(arrival.hidden).toBe(true);
+      expect(arrival.getAttribute("data-state")).toBe("closing");
+    });
+
+    it("writes nothing on the host once the sole root is dismissed and removed", async () => {
+      await start(remove_markup);
+
+      byId("close").click();
+      await tick();
+
+      expect(maybeRoot()).toBeNull();
+      expect(host().hasAttribute("data-state")).toBe(false);
+    });
+
+    it("does not throw and writes nothing on the host when the sole root leaves", async () => {
+      await start(remove_markup);
+      const only = root();
+
+      only.remove();
+      // Drive the callback directly: happy-dom delivers target callbacks unreliably, and a
+      // throw from one it delivers surfaces outside the test.
+      expect(() => controller().rootTargetDisconnected(only)).not.toThrow();
+      await tick();
+
+      expect(maybeRoot()).toBeNull();
+      expect(host().hasAttribute("data-state")).toBe(false);
+    });
+
+    it("writes the open default onto a root that arrives after the sole one left", async () => {
+      await start(remove_markup);
+      const original = root();
+      original.remove();
+      await tick();
+      const arrival = freshCopy(original);
+
+      host().append(arrival);
+      await tick();
+
+      expect(arrival.getAttribute("data-state")).toBe("open");
+      expect(host().hasAttribute("data-state")).toBe(false);
+    });
+
+    it("writes nothing onto a root that takes over after disconnect()", async () => {
+      await start(remove_markup);
+      const original = root();
+      const successor = freshCopy(original);
+      const laterSuccessor = freshCopy(original);
+      original.after(successor);
+      await tick();
+
+      controller().disconnect();
+      original.remove();
+      await tick();
+      successor.replaceWith(laterSuccessor);
+      await tick();
+
+      expect(successor.hasAttribute("data-state")).toBe(false);
+      expect(laterSuccessor.hasAttribute("data-state")).toBe(false);
+    });
+
+    /** Drops only the root token from `element`, which stays where it is. */
+    const dropRootToken = async (element: HTMLElement) => {
+      element.removeAttribute("data-stimeo--dismissible-target");
+      await tick();
+    };
+
+    it("gives a root that stops being one back the data-state it was authored without", async () => {
+      await start(remove_markup);
+      const departed = root();
+      expect(departed.getAttribute("data-state")).toBe("open");
+
+      await dropRootToken(departed);
+
+      expect(departed.hasAttribute("data-state")).toBe(false);
+      expect(host().hasAttribute("data-state")).toBe(false);
+    });
+
+    it("keeps an authored data-state on a root that stops being one", async () => {
+      await start(`
+        <div data-controller="stimeo--dismissible">
+          <div data-stimeo--dismissible-target="root" data-state="custom">
+            <button id="close" data-action="stimeo--dismissible#dismiss">Close</button>
+          </div>
+        </div>`);
+      const departed = root();
+
+      await dropRootToken(departed);
+
+      expect(departed.getAttribute("data-state")).toBe("custom");
+    });
+
+    it("keeps a data-state the page wrote on a root after the open default", async () => {
+      await start(remove_markup);
+      const departed = root();
+      departed.setAttribute("data-state", "settling");
+
+      await dropRootToken(departed);
+
+      expect(departed.getAttribute("data-state")).toBe("settling");
+    });
+
+    it("leaves a dismissed root that stops being one as the dismissal left it", async () => {
+      await start(hide_markup);
+      const departed = root();
+      query("button", departed).click();
+
+      await dropRootToken(departed);
+
+      expect(departed.hidden).toBe(true);
+      expect(departed.getAttribute("data-state")).toBe("closing");
+    });
+
+    /**
+     * What Stimulus does when the host moves within the page: the same instance
+     * disconnects and connects again, its leases still held.
+     */
+    const moveWithinPage = () => {
+      const instance = controller();
+      instance.disconnect();
+      instance.connect();
+    };
+
+    it("leaves the closing a dismissal wrote on a root that stops being one after the host moved", async () => {
+      await start(hide_markup);
+      const departed = root();
+      query("button", departed).click();
+      moveWithinPage();
+
+      departed.removeAttribute("data-stimeo--dismissible-target");
+      controller().rootTargetDisconnected(departed);
+
+      expect(departed.hidden).toBe(true);
+      expect(departed.getAttribute("data-state")).toBe("closing");
+    });
+
+    it("keeps a data-state the page wrote after the open default once the host moved", async () => {
+      await start(remove_markup);
+      const departed = root();
+      departed.setAttribute("data-state", "settling");
+      moveWithinPage();
+
+      departed.removeAttribute("data-stimeo--dismissible-target");
+      controller().rootTargetDisconnected(departed);
+
+      expect(departed.getAttribute("data-state")).toBe("settling");
+    });
+
+    it("keeps the closing a dismissal wrote on a restored root that stops being one", async () => {
+      await start(hide_markup);
+      query("button", root()).click();
+      application = await restoreFromCache(application, (restored) =>
+        restored.register("stimeo--dismissible", DismissibleController),
+      );
+      const departed = root();
+
+      departed.removeAttribute("data-stimeo--dismissible-target");
+      controller().rootTargetDisconnected(departed);
+
+      expect(departed.hidden).toBe(true);
+      expect(departed.getAttribute("data-state")).toBe("closing");
+      expect(departed.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+    });
+
+    it("gives a restored root that was no longer the first its own data-state back once it stops being one", async () => {
+      await start(remove_markup);
+      const ahead = document.createElement("div");
+      ahead.id = "ahead";
+      ahead.setAttribute("data-stimeo--dismissible-target", "root");
+      root().before(ahead);
+      await tick();
+      controller().rootTargetConnected(ahead);
+      application = await restoreFromCache(application, (restored) =>
+        restored.register("stimeo--dismissible", DismissibleController),
+      );
+      const later = document.querySelectorAll<HTMLElement>(
+        "[data-stimeo--dismissible-target='root']",
+      )[1] as HTMLElement;
+      expect(later.getAttribute("data-state")).toBe("open");
+
+      await dropRootToken(later);
+      controller().rootTargetDisconnected(later);
+
+      expect(later.hasAttribute("data-state")).toBe(false);
+      expect(later.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+      expect(query("#ahead").getAttribute("data-state")).toBe("open");
+    });
+
+    it("writes the open default onto the root left once the earlier one stops being one", async () => {
+      await start(remove_markup);
+      const original = root();
+      const successor = freshCopy(original);
+      original.after(successor);
+      await tick();
+
+      await dropRootToken(original);
+
+      expect(root()).toBe(successor);
+      expect(original.hasAttribute("data-state")).toBe(false);
+      expect(successor.getAttribute("data-state")).toBe("open");
+    });
+
+    it("gives the root back the data-state it was authored without when the host loses its controller", async () => {
+      await start(remove_markup);
+      const departed = root();
+
+      host().removeAttribute("data-controller");
+      await tick();
+
+      expect(departed.hasAttribute("data-state")).toBe(false);
+    });
+
+    it("keeps the open default on a root that moves within the host", async () => {
+      await start(hide_markup);
+      const moving = root();
+
+      byId("elsewhere").append(moving);
+      await tick();
+
+      expect(root()).toBe(moving);
+      expect(moving.getAttribute("data-state")).toBe("open");
+    });
+
+    it("keeps the open default on the root when the whole host leaves the page", async () => {
+      await start(remove_markup);
+      const kept = root();
+
+      host().remove();
+      await tick();
+
+      expect(kept.getAttribute("data-state")).toBe("open");
+    });
   });
 
   it("has no machine-detectable a11y violations", async () => {

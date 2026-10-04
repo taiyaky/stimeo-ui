@@ -1,8 +1,12 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { hasModifierChord, isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
 import { validSelector } from "../utils/declared_value";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
 import { readLocalStorage, writeLocalStorage } from "../utils/safe_storage";
+import { type StateReason, stateReasonFor } from "../utils/state_reason";
+import { targetSelector } from "../utils/target_selector";
 
 /** The three selectable modes; `system` follows the OS `prefers-color-scheme`. */
 type ThemeMode = "light" | "dark" | "system";
@@ -24,6 +28,9 @@ const DEFAULT_TARGET = "html";
  * effective theme onto the root for the consumer's CSS. Ships no colors; only state
  * hooks.
  *
+ * Toggle resolves persisted preference before the declared mode, including system
+ * preference, so it inverts the effective current theme.
+ *
  * Two markup contracts (identifier: `stimeo--theme`):
  *
  * Canonical 3-value radiogroup (use this when `system` is offered):
@@ -44,10 +51,11 @@ const DEFAULT_TARGET = "html";
  *   <button data-controller="stimeo--theme" data-action="click->stimeo--theme#toggle"
  *           aria-pressed="false">Dark mode</button>
  *
- * `change` dispatches `{ mode, resolved }` when a selection or the OS preference moves
- * one of the two. `reconcile` dispatches the same `{ mode, resolved }` when a `mode`
+ * `change` dispatches `{ mode, resolved, reason }` when a selection or the OS preference moves
+ * one of the two. `reconcile` dispatches `{ mode, resolved }` when a `mode`
  * declaration that changes after connect moves one of them — the declaration
- * itself, or a stored choice that outranks it. Connecting is silent.
+ * itself, or a stored choice that outranks it — or a `storageKey` change brings the
+ * choice saved under the new key. Connecting is silent.
  *
  * @remarks
  * Behavior only — the actual palette is the consumer's CSS keyed off `data-theme`
@@ -59,15 +67,16 @@ const DEFAULT_TARGET = "html";
  * `connect()` and removed on `disconnect()` (Turbo included). FOUC avoidance for the
  * very first paint is an inline `<head>` snippet, not this controller. A `mode`
  * declaration rewritten after connect is followed, but never over a stored choice
- * ({@link ThemeController.modeValueChanged}).
+ * ({@link ThemeController.modeValueChanged}), and so is a `storageKey`
+ * ({@link ThemeController.storageKeyValueChanged}).
  *
  * Every declaration is validated where it enters, and an unreadable one falls back
  * to that Value's default rather than taking the widget with it: a `mode` outside
  * the three modes reads as `system`, and a `target` that is not a parsable selector
  * reads as `html`. An option whose `data-value` is outside the three can be focused
- * but never becomes the selection, so no more than one option is ever checked —
- * and none at all when the resolved mode matches no option, where the first one
- * keeps the Tab stop.
+ * but never becomes the selection. Every option matching the selected mode is
+ * checked, and the first matching option keeps the Tab stop. When no option
+ * matches, none is checked and the first option keeps the Tab stop.
  *
  * The radiogroup stays one Tab stop through `RovingTabindex`, re-derived
  * whenever an option enters or leaves, so a set rendered after connect or swapped
@@ -99,6 +108,9 @@ export class ThemeController extends Controller<HTMLElement> {
   /** The `target` declaration after validation; the default when unparsable. */
   #targetSelector = DEFAULT_TARGET;
 
+  /** The storage key last read, so a `storageKey` callback naming it again reads nothing. */
+  #storageKeyRead: string | null = null;
+
   /** Owns the single Tab stop across the option set (APG radiogroup). */
   readonly #roving = new RovingTabindex(() => this.optionTargets);
 
@@ -117,7 +129,7 @@ export class ThemeController extends Controller<HTMLElement> {
   readonly #onMediaChange = (): void => {
     // Only `system` follows the OS; an explicit mode already decided the answer.
     if (this.#mode !== "system") return;
-    this.#commit();
+    this.#commit("media");
   };
 
   /** Arrow/Home/End navigation for the radiogroup (APG radio pattern). */
@@ -162,7 +174,14 @@ export class ThemeController extends Controller<HTMLElement> {
     if (mode) this.#setMode(mode);
   };
 
+  readonly #morph = new MorphRenderWatcher(() => {
+    this.#applyTheme();
+    this.#reconcileControls();
+  });
+
   override connect(): void {
+    this.#morph.observe(this.element);
+    this.#storageKeyRead = this.storageKeyValue;
     const stored = this.#readStored();
     if (stored) this.modeValue = stored;
 
@@ -178,6 +197,7 @@ export class ThemeController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
+    this.#morph.disconnect();
     this.#connected = false;
     this.#media?.removeEventListener("change", this.#onMediaChange);
     this.element.removeEventListener("keydown", this.#onKeydown);
@@ -186,6 +206,7 @@ export class ThemeController extends Controller<HTMLElement> {
   /** Validates the `target` declaration once, so the render path never parses. */
   targetValueChanged(): void {
     this.#targetSelector = validSelector(this.element, this.targetValue, DEFAULT_TARGET);
+    this.#morph.schedule();
   }
 
   /**
@@ -213,14 +234,33 @@ export class ThemeController extends Controller<HTMLElement> {
     this.#reconcileControls();
   }
 
+  /**
+   * Follows a `storageKey` rewritten after connect. A valid choice saved under the new
+   * key outranks the mode on screen as at connect — `mode` is written to it and a moved
+   * pair is reported as `reconcile` — and without one the mode stays. Nothing is copied
+   * or written; the next selection is saved under the new key.
+   */
+  storageKeyValueChanged(): void {
+    // `connect()` reads the initial key itself.
+    if (!this.#connected) return;
+    const key = this.storageKeyValue;
+    if (key === this.#storageKeyRead) return;
+    this.#storageKeyRead = key;
+    const stored = this.#readStored();
+    if (stored === null || stored === this.modeValue) return;
+    this.modeValue = stored;
+    this.#applyTheme();
+    this.#reconcileControls();
+  }
+
   /** Re-derives the single Tab stop and ARIA for an option set that changed. */
   optionTargetConnected(): void {
-    if (this.#connected) this.#reconcileControls();
+    if (this.#connected) this.#morph.schedule();
   }
 
   /** Re-derives them again when an option leaves, so a Tab stop always remains. */
   optionTargetDisconnected(): void {
-    if (this.#connected) this.#reconcileControls();
+    if (this.#connected) this.#morph.schedule();
   }
 
   /**
@@ -229,23 +269,28 @@ export class ThemeController extends Controller<HTMLElement> {
    * Read through the same lane that decides which option is checked, so the two
    * can never disagree about what an option declares.
    */
-  set(event: Event): void {
-    const option = event.currentTarget;
-    if (!(option instanceof HTMLElement)) return;
+  set(source: Event | HTMLElement): void {
+    const { host, origin, reason } = actionSource(source);
+    const option = host?.closest<HTMLElement>(targetSelector(this.identifier, "option"));
+    if (!option || !this.optionTargets.includes(option)) return;
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
     const mode = this.#optionMode(option);
-    if (mode) this.#setMode(mode);
+    if (mode) this.#setMode(mode, reason);
   }
 
   /** Toggles light↔dark for the 2-value single-button contract. */
-  toggle(): void {
-    this.#setMode(this.#resolved() === "dark" ? "light" : "dark");
+  toggle(event?: Event): void {
+    const mode = this.#readStored() ?? this.#mode;
+    const dark = mode === "dark" || (mode === "system" && this.#media?.matches === true);
+    this.#setMode(dark ? "light" : "dark", stateReasonFor(event));
   }
 
   /** Central mode change: persist, apply to the root, resync controls, announce. */
-  #setMode(mode: ThemeMode): void {
+  #setMode(mode: ThemeMode, reason: StateReason = "user"): void {
     this.modeValue = mode;
     this.#writeStored(mode);
-    this.#commit();
+    this.#commit(reason);
   }
 
   /**
@@ -253,11 +298,11 @@ export class ThemeController extends Controller<HTMLElement> {
    * event means "the selection or the effective theme moved", so re-choosing the
    * option already chosen is not one.
    */
-  #commit(): void {
+  #commit(reason: StateReason): void {
     this.#applyTheme();
     this.#syncControls();
     const moved = this.#settle();
-    if (moved) this.dispatch("change", { detail: moved });
+    if (moved) this.dispatch("change", { detail: { ...moved, reason } });
   }
 
   /**

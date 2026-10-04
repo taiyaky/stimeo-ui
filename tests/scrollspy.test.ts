@@ -229,6 +229,78 @@ describe("ScrollspyController", () => {
 
   // --- Observation setup ------------------------------------------------------
 
+  it.each(["root", "target"])(
+    "reevaluates live section positions on retained morph from %s",
+    async (origin) => {
+      await start();
+      layoutSections({ intro: 0, usage: 200, api: 400 });
+      deliver([entryFor("intro", true), entryFor("usage", true), entryFor("api", true)]);
+      expect(currentIds()).toEqual(["link-intro"]);
+      const changes = vi.fn();
+      requireElement("#scrollspy").addEventListener("stimeo--scrollspy:change", changes);
+      layoutSections({ intro: -250, usage: 0, api: 300 });
+      (origin === "root" ? requireElement("#scrollspy") : link("usage")).dispatchEvent(
+        new CustomEvent("turbo:morph-element", { bubbles: true }),
+      );
+      await tick();
+      expect(currentIds()).toEqual(["link-usage"]);
+      expect(changes).toHaveBeenCalledTimes(1);
+      expect(stimulusErrors).toEqual([]);
+    },
+  );
+
+  it("keeps retained morph selection silent and accepts only the new observer generation", async () => {
+    await start();
+    layoutSections({ intro: 0, usage: 200, api: 400 });
+    deliver([entryFor("intro", true), entryFor("usage", true), entryFor("api", true)]);
+    expect(currentIds()).toEqual(["link-intro"]);
+    const changes = vi.fn();
+    requireElement("#scrollspy").addEventListener("stimeo--scrollspy:change", changes);
+    const oldGeneration = observers.length - 1;
+    link("intro").removeAttribute("aria-current");
+    requireElement("#scrollspy").dispatchEvent(
+      new CustomEvent("turbo:morph-element", { bubbles: true }),
+    );
+    await tick();
+    expect(currentIds()).toEqual(["link-intro"]);
+    expect(changes).not.toHaveBeenCalled();
+    expect(observers[oldGeneration]?.disconnectCount).toBeGreaterThan(0);
+    expect(observers).toHaveLength(oldGeneration + 2);
+    layoutSections({ intro: 200, usage: 0, api: 400 });
+    deliver([entryFor("intro", false), entryFor("usage", true)], oldGeneration);
+    expect(currentIds()).toEqual(["link-intro"]);
+    deliver([entryFor("intro", false), entryFor("usage", true)]);
+    expect(currentIds()).toEqual(["link-usage"]);
+    expect(changes).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["removed", "replaced", "unlinked"])(
+    "drops a %s section from retained morph measurements",
+    async (change) => {
+      await start();
+      layoutSections({ intro: 0, usage: 200, api: 400 });
+      deliver([entryFor("intro", true), entryFor("usage", true), entryFor("api", true)]);
+      expect(currentIds()).toEqual(["link-intro"]);
+      const oldIntro = section("intro");
+      requireElement("#scrollspy").dispatchEvent(
+        new CustomEvent("turbo:morph-element", { bubbles: true }),
+      );
+      if (change === "removed") oldIntro.remove();
+      if (change === "replaced") {
+        const replacement = document.createElement("section");
+        replacement.id = "intro";
+        oldIntro.replaceWith(replacement);
+        layout(replacement, 0);
+      }
+      if (change === "unlinked") link("intro").setAttribute("href", "#missing");
+      layout(section("usage"), 0);
+      await Promise.resolve();
+      expect(currentIds()).toEqual(["link-usage"]);
+      await tick();
+      expect(currentIds()).toEqual(["link-usage"]);
+    },
+  );
+
   it("initializes and observes target section elements", async () => {
     await start();
 
@@ -339,6 +411,18 @@ describe("ScrollspyController", () => {
     expect(observers.at(-1)?.options?.root).toBe(requireElement(".content"));
   });
 
+  it("rebuilds the observer when only the rootMargin Value changes", async () => {
+    await start();
+    const controller = controllerFor();
+
+    controller.rootMarginValue = "-10px 0px -50% 0px";
+    controller.rootMarginValueChanged();
+
+    expect(observers).toHaveLength(2);
+    expect(observers[0]?.disconnectCount).toBe(1);
+    expect(observers.at(-1)?.options?.rootMargin).toBe("-10px 0px -50% 0px");
+  });
+
   // --- Active-section algorithm -----------------------------------------------
 
   it("toggles aria-current on links according to intersection visibility states", async () => {
@@ -398,7 +482,7 @@ describe("ScrollspyController", () => {
     await start();
 
     // Path A — two batches. The first records intro while it is the closest;
-    // the second reports only usage and carries intro's *stale* coordinate.
+    // the second reports only usage and carries usage's *stale* coordinate.
     // Every rect must be re-measured, otherwise intro's remembered top (90)
     // beats usage's stale one (250) even though usage now sits on the line.
     layoutSections({ intro: 90, usage: 250, api: 800 });
@@ -1048,6 +1132,33 @@ describe("ScrollspyController", () => {
     expect(observers[0]?.disconnectCount).toBe(1);
   });
 
+  it("keeps an anchor rewritten while disconnected from disturbing the next retained morph", async () => {
+    await start();
+    const controller = controllerFor();
+    layoutSections({ intro: 0, usage: 200, api: 400 });
+    deliver([entryFor("intro", true), entryFor("usage", true), entryFor("api", true)]);
+    expect(currentIds()).toEqual(["link-intro"]);
+
+    controller.disconnect();
+    link("api").setAttribute("data-href", "#api");
+    await tick();
+    controller.connect();
+    deliver([entryFor("intro", true), entryFor("usage", true), entryFor("api", true)]);
+    const changes = vi.fn();
+    requireElement("#scrollspy").addEventListener("stimeo--scrollspy:change", changes);
+
+    // `connect()` already rebuilt from the links as they are now, so the first morph
+    // afterwards re-measures the sections it tracks instead of starting empty.
+    layoutSections({ intro: -250, usage: 0, api: 300 });
+    requireElement("#scrollspy").dispatchEvent(
+      new CustomEvent("turbo:morph-element", { bubbles: true }),
+    );
+    await tick();
+
+    expect(currentIds()).toEqual(["link-usage"]);
+    expect(changes).toHaveBeenCalledOnce();
+  });
+
   // --- Scroll-root resolution -------------------------------------------------
 
   it("re-resolves a scroll root that a morph replaced before scrolling it", async () => {
@@ -1144,6 +1255,18 @@ describe("ScrollspyController", () => {
     link("faq").remove();
     await tick();
     expect(observers.at(-1)?.observed.map((el) => el.id)).toEqual(["intro", "usage", "api"]);
+  });
+
+  it("stops observing the sections once the last link is removed", async () => {
+    await start();
+    const controller = controllerFor();
+
+    for (const id of ["intro", "usage", "api"]) link(id).remove();
+    controller.linkTargetDisconnected();
+    await tick();
+
+    expect(observers).toHaveLength(1);
+    expect(observers[0]?.disconnectCount).toBe(1);
   });
 
   it("keeps two instances independent", async () => {
@@ -1395,5 +1518,89 @@ describe("ScrollspyController", () => {
 
     expect(currentIds()).toEqual([]);
     expect(changeHandler).not.toHaveBeenCalled();
+  });
+  it.each([false, true])(
+    "target API scrolls owned link descendants (%s) without stealing external focus",
+    async (descendant) => {
+      await start(
+        FIXTURE.replace(
+          'id="scrollspy"',
+          'id="scrollspy" data-stimeo--scrollspy-focus-section-value="true"',
+        ),
+      );
+      layout(section("intro"), 200);
+      layout(section("usage"), 500);
+      link("usage").click();
+      expect(window.scrollTo).toHaveBeenLastCalledWith({ top: 420, behavior: "smooth" });
+      expect(document.activeElement).toBe(section("usage"));
+      const outside = document.createElement("button");
+      document.body.appendChild(outside);
+      outside.focus();
+      const child = document.createElement("span");
+      link("intro").appendChild(child);
+      controllerFor().scrollTo(descendant ? child : link("intro"));
+      expect(window.scrollTo).toHaveBeenLastCalledWith({ top: 120, behavior: "smooth" });
+      expect(document.activeElement).toBe(outside);
+      expect(stimulusErrors).toEqual([]);
+    },
+  );
+  it.each(["foreign", "undeclared", "detached", "nested"])(
+    "target API rejects %s links without scrolling or preventing their Event",
+    async (kind) => {
+      await start(FIXTURE);
+      layout(section("usage"), 500);
+      const owned = link("usage");
+      const invalid = owned.cloneNode(true);
+      if (!(invalid instanceof HTMLElement)) throw new Error("Missing invalid link");
+      invalid.removeAttribute("data-action");
+      if (kind === "foreign") document.body.append(invalid);
+      if (kind === "undeclared") {
+        invalid.removeAttribute("data-stimeo--scrollspy-target");
+        requireElement("#scrollspy").append(invalid);
+      }
+      if (kind === "nested") {
+        const nested = document.createElement("div");
+        nested.setAttribute("data-controller", "stimeo--scrollspy");
+        nested.append(invalid);
+        link("intro").append(nested);
+      }
+      controllerFor().scrollTo(invalid);
+      invalid.addEventListener("probe", (event) => controllerFor().scrollTo(event));
+      const event = new Event("probe", { cancelable: true });
+      invalid.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(window.scrollTo).not.toHaveBeenCalled();
+      controllerFor().scrollTo(owned);
+      expect(window.scrollTo).toHaveBeenLastCalledWith({ top: 420, behavior: "smooth" });
+    },
+  );
+
+  it("target API rejects a nested Event origin at an owned outer link", async () => {
+    await start(FIXTURE);
+    layout(section("usage"), 500);
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--scrollspy");
+    const child = document.createElement("span");
+    nested.append(child);
+    link("usage").append(nested);
+    link("usage").addEventListener("probe", (event) => controllerFor().scrollTo(event));
+    child.dispatchEvent(new Event("probe", { bubbles: true }));
+    expect(window.scrollTo).not.toHaveBeenCalled();
+    controllerFor().scrollTo(link("usage"));
+    expect(window.scrollTo).toHaveBeenCalledOnce();
+  });
+
+  it("target API retains an existing section focus move when focus starts inside", async () => {
+    await start(
+      FIXTURE.replace(
+        'id="scrollspy"',
+        'id="scrollspy" data-stimeo--scrollspy-focus-section-value="true"',
+      ),
+    );
+    layout(section("usage"), 500);
+    link("intro").focus();
+    controllerFor().scrollTo(link("usage"));
+    expect(document.activeElement).toBe(section("usage"));
+    expect(window.scrollTo).toHaveBeenLastCalledWith({ top: 420, behavior: "smooth" });
   });
 });

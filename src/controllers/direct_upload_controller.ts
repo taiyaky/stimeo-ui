@@ -1,8 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { validSelector } from "../utils/declared_value";
-import { SafeTimeout } from "../utils/safe_timeout";
+import { KeyedTimers } from "../utils/keyed_timers";
 import { cloneTemplateRoot } from "../utils/template_row";
 
 /** Detail shapes for the ActiveStorage `direct-upload:*` events. */
@@ -15,6 +14,9 @@ interface UploadDetail {
 
 /** Delay (ms) before a completed row is removed when `removeOnDone` is set. */
 const REMOVE_DELAY = 4000;
+
+/** Suffix of the mark on every row this controller renders; it holds the upload id. */
+const GENERATED_ATTRIBUTE = "generated";
 
 /**
  * Headless progress UI for ActiveStorage Direct Uploads: subscribes to the
@@ -41,8 +43,8 @@ const REMOVE_DELAY = 4000;
  * fills `[data-field="name"]` and becomes the row's `aria-label` unless the
  * template already authors one. The aggregate across live rows is mirrored on
  * the controller element as `data-upload-progress` plus the same custom
- * property, recomputed whenever a row is added, updated, or removed, and
- * withdrawn entirely once no rows remain.
+ * property, recomputed whenever a row is added, updated, or removed, or a `list`
+ * leaves, and withdrawn entirely once no rows remain.
  *
  * A row leaves `uploading` exactly once: `direct-upload:error` settles it as
  * `error`, and `direct-upload:end` — which ActiveStorage fires after success
@@ -65,7 +67,8 @@ const REMOVE_DELAY = 4000;
  * - `stimeo--direct-upload:done` dispatches `{ id: string }` when an upload
  *   completes successfully.
  * - `stimeo--direct-upload:reconcile` dispatches `{ ids: string[] }` — the uploads
- *   the Turbo cache rewind discarded, none of which can still finish.
+ *   whose rows a page restored from the Turbo cache still showed, none of which can
+ *   still finish.
  * - `stimeo--direct-upload:error` dispatches `{ id: string, error: string }`
  *   when an upload fails.
  *
@@ -73,10 +76,18 @@ const REMOVE_DELAY = 4000;
  * Behavior only — no bars are drawn. The `direct-upload:*` listeners live on
  * `document` (the events bubble there) and are removed on `disconnect()` (Turbo
  * navigation included), along with any pending removal timers, so a callback
- * that arrives after teardown never touches a detached row. Rows are transient
- * UI: just before Turbo caches the page they are removed and the aggregate is
- * withdrawn, so a restored snapshot starts pristine instead of replaying stale
- * rows (a dead upload cannot resume after restoration). The live DOM stays the
+ * that arrives after teardown never touches a detached row. `removeOnDone` follows a
+ * change made while connected: turning it off cancels every pending removal, turning
+ * it on arms one for each completed row still shown, with the full delay from then,
+ * and a row never holds more than one pending removal. Rows are transient
+ * UI, and each carries `data-<identifier>-generated` with its upload id. A page Turbo
+ * restores from its cache is a copy that still shows them, so a connection holding no
+ * row of its own removes the marked rows in its list, withdraws the aggregate and
+ * reports the discarded ids as `reconcile` (a dead upload cannot resume after
+ * restoration). Nothing is removed on `turbo:before-cache`, which Turbo also
+ * dispatches on pages that stay — a promoted frame navigation, a state-less
+ * `popstate`, a refresh of a cached URL, a `data-turbo-permanent` element carried to
+ * the next page — where the uploads are still running. The live DOM stays the
  * source of truth — a row removed or replaced outside this controller is
  * forgotten and rebuilt on the next event for its id, and a clone stranded
  * outside the current `list` (a re-pointed target) is removed outright, so
@@ -108,9 +119,11 @@ export class DirectUploadController extends Controller<HTMLElement> {
   declare announceErrorTextValue: string;
   declare scopeValue: string;
 
-  readonly #timeouts = new SafeTimeout();
+  /** The pending removal of each completed row, keyed by upload id. */
+  readonly #removals = new KeyedTimers<string>();
   readonly #rows = new Map<string, HTMLElement>();
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+  /** Whether the controller is between `connect()` and `disconnect()`. */
+  #connected = false;
 
   /** The validated `scope` selector; a broken declaration falls back to `""`. */
   #scopeSelector = "";
@@ -144,32 +157,70 @@ export class DirectUploadController extends Controller<HTMLElement> {
   };
 
   override connect(): void {
+    this.#connected = true;
     document.addEventListener("direct-upload:initialize", this.#onInitialize);
     document.addEventListener("direct-upload:progress", this.#onProgress);
     document.addEventListener("direct-upload:error", this.#onError);
     document.addEventListener("direct-upload:end", this.#onEnd);
-    this.#beforeCache.activate();
+    this.#discardInherited();
     // An in-page move runs disconnect() → connect() on the same instance, and
     // teardown cancelled any pending removals; completed rows re-earn theirs.
-    this.#rescheduleRemovals();
+    this.#syncRemovals();
   }
 
   override disconnect(): void {
+    this.#connected = false;
     document.removeEventListener("direct-upload:initialize", this.#onInitialize);
     document.removeEventListener("direct-upload:progress", this.#onProgress);
     document.removeEventListener("direct-upload:error", this.#onError);
     document.removeEventListener("direct-upload:end", this.#onEnd);
-    this.#beforeCache.deactivate();
-    this.#timeouts.clearAll();
+    this.#removals.clearAll();
     // `#rows` is kept: `disconnect()` also fires on an in-page move, where the
     // rows travel with the element and the next event should keep updating
-    // them. Stale entries self-heal via `#prune`, and the Turbo-cache path
-    // clears everything in `#reset()`.
+    // them. Stale entries self-heal via `#prune`.
+  }
+
+  /** The row mark above, in the namespace this controller is registered under. */
+  get #generatedAttribute(): string {
+    return `data-${this.identifier}-${GENERATED_ATTRIBUTE}`;
+  }
+
+  /**
+   * Removes the marked rows a connection holding no row of its own finds in its list —
+   * on a page restored from Turbo's cache, the copies of rows whose uploads died with
+   * the page they ran on — withdraws the aggregate, and reports their ids once.
+   */
+  #discardInherited(): void {
+    if (this.#rows.size > 0 || !this.hasListTarget) return;
+    const ids: string[] = [];
+    for (const row of Array.from(this.listTarget.children)) {
+      const id = row.getAttribute(this.#generatedAttribute);
+      if (id === null) continue;
+      row.remove();
+      ids.push(id);
+    }
+    if (ids.length === 0) return;
+    this.#syncAggregate();
+    this.dispatch("reconcile", { detail: { ids } });
   }
 
   /** Validates `scope` once so the per-event path never parses or throws. */
   scopeValueChanged(): void {
     this.#scopeSelector = validSelector(this.element, this.scopeValue, "");
+  }
+
+  /**
+   * Follows `removeOnDone` changed at runtime: off cancels every pending removal, on
+   * arms one for each completed row that has none, with the full delay from now.
+   * Stimulus also calls this ahead of `connect()`, which arms the removals itself.
+   */
+  removeOnDoneValueChanged(): void {
+    if (this.#connected) this.#syncRemovals();
+  }
+
+  /** Recounts the aggregate once a list leaves, retiring rows outside the list that stays. */
+  listTargetDisconnected(): void {
+    if (this.#connected) this.#syncAggregate();
   }
 
   /** Updates a row's progress and the aggregate, emitting `progress`. */
@@ -198,9 +249,7 @@ export class DirectUploadController extends Controller<HTMLElement> {
     this.#syncAggregate();
     this.#announce(this.announceDoneTextValue, name, row);
     this.dispatch("done", { detail: { id } });
-    if (this.removeOnDoneValue) {
-      this.#timeouts.set(() => this.#removeRow(id), REMOVE_DELAY);
-    }
+    if (this.removeOnDoneValue) this.#scheduleRemoval(id, row);
   }
 
   /**
@@ -228,19 +277,29 @@ export class DirectUploadController extends Controller<HTMLElement> {
   }
 
   /**
-   * Re-arms `removeOnDone` for completed rows after a reconnect.
+   * Brings the pending removals in line with `removeOnDone`: with it off none is left
+   * pending; with it on every completed row still shown has one, and a row that already
+   * has one keeps it and its deadline.
    *
-   * @stimeoRuntimeOnly `removeOnDone` decides whether reconnecting arms the removal of finished
-   *   rows again.
+   * @stimeoRuntimeOnly `removeOnDone` decides whether the completed rows have a removal
+   *   pending.
    */
-  #rescheduleRemovals(): void {
-    if (!this.removeOnDoneValue) return;
+  #syncRemovals(): void {
+    if (!this.removeOnDoneValue) {
+      this.#removals.clearAll();
+      return;
+    }
     this.#prune();
     for (const [id, row] of this.#rows) {
-      if (row.getAttribute("data-upload-state") === "done") {
-        this.#timeouts.set(() => this.#removeRow(id), REMOVE_DELAY);
+      if (row.getAttribute("data-upload-state") === "done" && !this.#removals.has(id)) {
+        this.#scheduleRemoval(id, row);
       }
     }
+  }
+
+  /** Arms the removal of a completed row, replacing one its id already had pending. */
+  #scheduleRemoval(id: string, row: HTMLElement): void {
+    this.#removals.set(id, () => this.#removeRow(row), REMOVE_DELAY);
   }
 
   /** Returns the live row for `id`, creating (and labeling) one on first sight. */
@@ -255,13 +314,13 @@ export class DirectUploadController extends Controller<HTMLElement> {
       // Removed, replaced, or no longer inside the current list: retire the
       // clone (removing it is a no-op when something else already did) and
       // rebuild from the live DOM.
-      existing.remove();
-      this.#rows.delete(key);
+      this.#retire(key, existing);
     }
     if (!this.hasRowTarget || !this.hasListTarget) return null;
     const clone = cloneTemplateRoot(this.rowTarget);
     if (!clone) return null;
     this.#applyName(clone, name);
+    clone.setAttribute(this.#generatedAttribute, key);
     clone.setAttribute("data-upload-state", "uploading");
     this.#applyProgress(clone, 0);
     this.listTarget.appendChild(clone);
@@ -296,11 +355,8 @@ export class DirectUploadController extends Controller<HTMLElement> {
     return clamped;
   }
 
-  #removeRow(id: string): void {
-    const row = this.#rows.get(id);
-    if (row === undefined) return;
+  #removeRow(row: HTMLElement): void {
     row.remove();
-    this.#rows.delete(id);
     this.#syncAggregate();
   }
 
@@ -337,32 +393,23 @@ export class DirectUploadController extends Controller<HTMLElement> {
   /**
    * Retires rows that left the live UI (list swap, external removal). A retired
    * clone is removed outright — generated rows only ever live under the current
-   * `list`, so the before-cache rewind never has an untracked leftover to miss.
+   * `list`, which is where a restored page's discard looks for them.
    */
   #prune(): void {
     for (const [id, row] of this.#rows) {
       if (this.#tracksRow(row)) continue;
-      row.remove();
-      this.#rows.delete(id);
+      this.#retire(id, row);
     }
   }
 
   /**
-   * Rewinds for the snapshot and reports what that discarded. An upload in flight
-   * cannot survive the navigation, so a consumer mirroring the rows would keep a
-   * progress bar that never resolves.
+   * Removes and forgets a retired clone, cancelling the removal its id had pending, so a
+   * row rebuilt for the same id never inherits that deadline.
    */
-  #rewindForCache(): void {
-    const ids = [...this.#rows.keys()];
-    this.#reset();
-    if (ids.length > 0) this.dispatch("reconcile", { detail: { ids } });
-  }
-
-  #reset(): void {
-    for (const row of this.#rows.values()) row.remove();
-    this.#rows.clear();
-    this.#timeouts.clearAll();
-    this.#syncAggregate();
+  #retire(id: string, row: HTMLElement): void {
+    row.remove();
+    this.#rows.delete(id);
+    this.#removals.clear(id);
   }
 
   /**

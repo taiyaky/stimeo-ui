@@ -2,18 +2,21 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 import { describe } from "vitest";
+import { cableControllers } from "../../src/cable";
 import { stimeoControllers } from "../../src/index";
 import { positioningControllers } from "../../src/positioning";
 import { describeContractGuard } from "../helpers/contract";
 
 /**
- * Contract drift guard for the core + opt-in positioning controllers (see
+ * Contract drift guard for the core, positioning, and cable controllers (see
  * `tests/helpers/contract.ts` for the shared checks and their rationale).
  */
 // Resolve from the project root (Vitest's cwd) rather than `import.meta.url`:
 // under the coverage runner the module URL is not always a `file:` URL, so
 // `fileURLToPath` would throw ERR_INVALID_URL_SCHEME.
 const CONTROLLERS_DIR = join(process.cwd(), "src", "controllers");
+const CABLE_DIR = join(process.cwd(), "src", "cable");
+const CABLE_IDS = new Set(Object.keys(cableControllers));
 const POSITIONING_DIR = join(process.cwd(), "src", "positioning");
 
 /** Opt-in positioning controllers live outside `src/controllers/` (own subpath). */
@@ -22,7 +25,11 @@ const POSITIONING_IDS = new Set(Object.keys(positioningControllers));
 /** Resolves the source file for a controller identifier (`stimeo--alert-dialog`). */
 function sourceFor(identifier: string): string {
   const base = identifier.replace(/^stimeo--/, "").replace(/-/g, "_");
-  const dir = POSITIONING_IDS.has(identifier) ? POSITIONING_DIR : CONTROLLERS_DIR;
+  const dir = CABLE_IDS.has(identifier)
+    ? CABLE_DIR
+    : POSITIONING_IDS.has(identifier)
+      ? POSITIONING_DIR
+      : CONTROLLERS_DIR;
   return readFileSync(`${dir}/${base}_controller.ts`, "utf8");
 }
 
@@ -31,24 +38,18 @@ function sourceFor(identifier: string): string {
  * These are genuine public methods that are *not* user-wired actions, so they
  * must not appear in `static actions`, yet legitimately remain public.
  *
- * - `stimeo--calendar` `selectDayElement`: internal grid mechanics kept public
- *   as a deterministic test seam — happy-dom does not reliably fire Stimulus's
- *   delegated-click path, so the calendar specs drive it directly instead of
- *   synthesizing unreliable DOM events.
  * - `stimeo--toast` `enforceMaxLimit`: enforcement normally runs from
  *   `itemTargetConnected` (a MutationObserver-driven Stimulus callback happy-dom
  *   does not reliably fire), so the toast spec invokes it directly.
  */
 const NON_ACTION_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
-  "stimeo--calendar": ["selectDayElement"],
   "stimeo--toast": ["enforceMaxLimit"],
 };
 
 describe("public API contract declarations (drift guard)", () => {
-  // Core + opt-in positioning controllers: both are reflected into the manifest,
-  // so both must keep their public surface honest.
+  // Every public registry reflected into the manifest shares the same contract guard.
   describeContractGuard(
-    { ...stimeoControllers, ...positioningControllers },
+    { ...stimeoControllers, ...positioningControllers, ...cableControllers },
     sourceFor,
     NON_ACTION_ALLOWLIST,
   );

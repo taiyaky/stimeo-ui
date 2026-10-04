@@ -513,6 +513,19 @@ describe("InputMaskController", () => {
     expect(input().value).toBe("more text 456");
   });
 
+  it("keeps data-mask-empty in step with a field that has no pattern", async () => {
+    await start(`
+      <input id="i" type="text" data-controller="stimeo--input-mask"
+             data-action="input->stimeo--input-mask#format">`);
+    expect(input().getAttribute("data-mask-empty")).toBe("true");
+
+    type("abc");
+    expect(input().hasAttribute("data-mask-empty")).toBe(false);
+
+    type("");
+    expect(input().getAttribute("data-mask-empty")).toBe("true");
+  });
+
   it("re-formats a server-rendered value on connect and reports it as reconciled", async () => {
     const log = record();
     await start(`
@@ -546,6 +559,23 @@ describe("InputMaskController", () => {
 
     expect(input().value).toBe("123-4567");
     expect(log).toEqual([]);
+  });
+
+  it("honors an input event's composition flag without a preceding compositionstart", async () => {
+    await start(ZIP);
+    const log = record();
+    const field = input();
+    field.value = "１２３４５６７";
+    field.setSelectionRange(3, 3);
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    expect(field.value).toBe("１２３４５６７");
+    expect(field.selectionStart).toBe(3);
+    expect(hidden().value).toBe("");
+    expect(log).toEqual([]);
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: false }));
+    expect(field.value).toBe("123-4567");
+    expect(hidden().value).toBe("1234567");
+    expect(log).toHaveLength(1);
   });
 
   it("keeps the uncommitted IME text until the composition ends", async () => {
@@ -772,6 +802,22 @@ describe("InputMaskController", () => {
     expect(hidden().value).toBe("");
   });
 
+  it("refills the sink with the current raw value when unmaskToHidden turns back on", async () => {
+    await start(`
+      <input id="i" type="text" data-controller="stimeo--input-mask"
+             data-stimeo--input-mask-pattern-value="999-9999"
+             data-stimeo--input-mask-unmask-to-hidden-value="false"
+             data-action="input->stimeo--input-mask#format">
+      <input id="hidden" type="hidden" data-stimeo--input-mask-unmask>`);
+    type("1234567");
+    expect(hidden().value).toBe("");
+
+    input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "true");
+    controller().unmaskToHiddenValueChanged();
+
+    expect(hidden().value).toBe("1234567");
+  });
+
   it("leaves a read-only field's value to the page", async () => {
     await start(`
       <input id="i" type="text" value="1234567" readonly
@@ -844,6 +890,21 @@ describe("InputMaskController", () => {
     expect(hidden().value).toBe("");
   });
 
+  it("releases the composition listeners on disconnect", async () => {
+    await start(ZIP);
+    const log = record();
+    controller().disconnect();
+
+    const field = input();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "1234567";
+    field.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+
+    expect(field.value).toBe("1234567");
+    expect(hidden().value).toBe("");
+    expect(log).toEqual([]);
+  });
+
   it("has no machine-detectable a11y violations", async () => {
     await start(`
       <main>
@@ -853,5 +914,36 @@ describe("InputMaskController", () => {
                data-action="input->stimeo--input-mask#format">
       </main>`);
     await expectNoA11yViolations(document.body);
+  });
+
+  it("reports a pending page format once when the user confirms the text", async () => {
+    await start(ZIP);
+    type("1234567");
+    const changes: unknown[] = [];
+    const repairs: unknown[] = [];
+    input().addEventListener("stimeo--input-mask:change", (event) =>
+      changes.push((event as CustomEvent).detail),
+    );
+    input().addEventListener("stimeo--input-mask:reconcile", (event) =>
+      repairs.push((event as CustomEvent).detail),
+    );
+    input().setAttribute("data-stimeo--input-mask-pattern-value", "99-99999");
+    type("1234567");
+    await tick();
+    expect(changes).toEqual([{ masked: "12-34567", unmasked: "1234567", complete: true }]);
+    expect(repairs).toEqual([]);
+  });
+
+  it("stays quiet when the user returns pending text to the last published masked value", async () => {
+    await start(ZIP);
+    type("1234567");
+    const changes: unknown[] = [];
+    input().addEventListener("stimeo--input-mask:change", (event) =>
+      changes.push((event as CustomEvent).detail),
+    );
+    input().value = "7654321";
+    type("1234567");
+    expect(input().value).toBe("123-4567");
+    expect(changes).toEqual([]);
   });
 });

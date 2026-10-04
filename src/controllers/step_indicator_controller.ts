@@ -1,5 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 
 /**
  * Headless, accessible **read-only** step-progress indicator.
@@ -35,10 +37,17 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  *   compose with one `data-action` and no glue.
  */
 export class StepIndicatorController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["step"];
   static override values = {
     index: { type: Number, default: 0 },
   };
+
+  static valueConstraints = {
+    index: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof StepIndicatorController.values>;
   static actions = ["setIndex"] as const;
   static events = ["change"] as const;
 
@@ -50,17 +59,17 @@ export class StepIndicatorController extends Controller<HTMLElement> {
    * them — into one repaint. Replacing a list of N steps delivers N callbacks, and
    * each one would otherwise rewrite every step's state.
    */
-  readonly #repaint = new MicrotaskCoalescer(() => this.#render());
+  readonly #repaint = new MorphRenderWatcher(() => this.#render());
 
   /** Renders the initial state from the `index` value. */
   override connect(): void {
-    this.#repaint.activate();
+    this.#repaint.observe(this.element);
     this.#render();
   }
 
   /** Closes the window in which a queued repaint may still run. */
   override disconnect(): void {
-    this.#repaint.cancel();
+    this.#repaint.disconnect();
   }
 
   /** Syncs a step appended or replaced at runtime (the consumer owns the list). */
@@ -88,7 +97,7 @@ export class StepIndicatorController extends Controller<HTMLElement> {
     const next = event.detail?.index;
     if (typeof next !== "number" || !Number.isFinite(next)) return;
     const clamped = this.#clamp(next);
-    const previous = this.#clamp(this.indexValue);
+    const previous = this.#clamp(this.#safeIndex);
     const moved = clamped !== previous;
     // Normalise even when the display does not move: an out-of-range `index` left
     // in the markup would otherwise be re-clamped against a later step set and land
@@ -113,7 +122,7 @@ export class StepIndicatorController extends Controller<HTMLElement> {
    */
   #render(): void {
     const total = this.stepTargets.length;
-    const current = this.#clamp(this.indexValue);
+    const current = this.#clamp(this.#safeIndex);
     this.stepTargets.forEach((step, index) => {
       step.dataset.state =
         index < current ? "complete" : index === current ? "current" : "upcoming";
@@ -127,15 +136,20 @@ export class StepIndicatorController extends Controller<HTMLElement> {
     this.element.style.setProperty("--stimeo--step-indicator-ratio", String(ratio));
   }
 
-  /**
-   * Constrains an index to `[0, total-1]` (or `0` when there are no steps). A
-   * non-finite index falls back to the first step: `index` is read from markup,
-   * so an unparsable attribute arrives as `NaN` and would otherwise propagate
-   * into every state hook.
-   */
+  /** Constrains a finite index to the live step range, or zero when there are no steps. */
   #clamp(index: number): number {
     const last = this.stepTargets.length - 1;
-    if (last < 0 || !Number.isFinite(index)) return 0;
+    if (last < 0) return 0;
     return Math.min(last, Math.max(0, Math.trunc(index)));
+  }
+  /** Current `index` declaration resolved against its numeric contract. */
+  get #safeIndex(): number {
+    return this.#numbers.read(
+      this,
+      "index",
+      this.indexValue,
+      StepIndicatorController.values.index.default,
+      StepIndicatorController.valueConstraints.index,
+    );
   }
 }

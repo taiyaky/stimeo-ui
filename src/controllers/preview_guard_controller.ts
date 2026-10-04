@@ -1,10 +1,13 @@
 import { Controller } from "@hotwired/stimulus";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { StylePropertyLease } from "../utils/style_property_lease";
 import { TransientHooks } from "../utils/transient_hooks";
 
 /** The hook a connection may find written by an earlier, now-gone one. */
 const TRANSIENT = new TransientHooks({ attributes: ["data-preview-hidden"] });
+
+/** Suffix of the record of the content a placeholder displaced; see the class remarks. */
+const CONTENT_RECORD = "content";
 
 /**
  * Headless **preview guard** (Hotwire-specific): hides or placeholders a volatile element
@@ -33,10 +36,16 @@ const TRANSIENT = new TransientHooks({ attributes: ["data-preview-hidden"] });
  * each other: the child nodes a placeholder displaced are held and put back intact, the
  * inline `visibility` is leased so an authored declaration — and one the consumer writes
  * while guarded — survives, and a fresh `connect()` clears a `data-preview-hidden` it
- * finds already on the element. The rewind Turbo's snapshot needs runs on
- * `turbo:before-cache` rather than `disconnect()`, so an in-page move keeps the guard
- * instead of flashing the stale value between the two lifecycle calls — and the instance
- * that comes back re-forms it rather than reading the hook as someone else's leftover.
+ * finds already on the element. A placeholder also records the markup it displaced on
+ * the element as `data-<identifier>-content` (a JSON string), and the `visibility` lease
+ * leaves its own record, so a copy of the element taken while guarded — a page Turbo
+ * restores from its cache — gets its content or its `visibility` back from the fresh
+ * `connect()` that finds them. Nothing comes down on `turbo:before-cache`,
+ * which Turbo also dispatches on pages that stay (a state-less `popstate`, a refresh of
+ * a cached URL), where the preview is still on screen; nor on `disconnect()`, so an
+ * in-page move keeps the guard instead of flashing the stale value between the two
+ * lifecycle calls — and the instance that comes back re-forms it rather than reading
+ * the hook as someone else's leftover.
  *
  * Focus is only ever handed back, never taken: an element that held focus when the guard
  * went up gets it back on show, and focus resting anywhere else is left alone.
@@ -49,8 +58,7 @@ export class PreviewGuardController extends Controller<HTMLElement> {
 
   declare placeholderValue: string;
 
-  readonly #visibility = new StylePropertyLease("visibility");
-  readonly #beforeCache = new BeforeCacheReset(() => this.#restore());
+  readonly #visibility = new StylePropertyLease("visibility", this.identifier);
 
   #observer: MutationObserver | null = null;
   #connected = false;
@@ -60,18 +68,29 @@ export class PreviewGuardController extends Controller<HTMLElement> {
   /** The descendant that held focus when the guard went up, so show can hand it back. */
   #focused: HTMLElement | null = null;
 
+  readonly #morphRender = new MorphRenderWatcher(() => {
+    this.#sync();
+    if (this.#hidden) this.#reguard();
+  });
+
   override connect(): void {
+    this.#morphRender.observe(this.element);
     this.#connected = true;
     // The hook means "the connection now running has this element guarded", and which of
     // the two connects is happening is only knowable from the instance. A restored
     // snapshot brings a fresh controller to an element that still carries the hook, with
-    // nothing in the DOM to say what was underneath it, so that one drops it. An in-page
-    // move brings the *same* instance back still holding the guard, so that one re-forms
-    // instead — against the `placeholder` as it stands now, since a morph can swap it
-    // while the element is detached, where the value callback has no connection to act on.
-    if (this.#hidden) this.#reguard();
-    else TRANSIENT.reset(this.element);
-    this.#beforeCache.activate();
+    // no instance left holding what was underneath it, so that one puts back the content
+    // a placeholder recorded and drops the hook. An in-page move brings the *same*
+    // instance back still holding the guard, so that one re-forms instead — against the
+    // `placeholder` as it stands now, since a morph can swap it while the element is
+    // detached, where the value callback has no connection to act on.
+    if (this.#hidden) {
+      this.#reguard();
+    } else {
+      if (this.element.hasAttribute("data-preview-hidden")) this.#restoreRecordedContent();
+      this.#visibility.return(this.element);
+      TRANSIENT.reset(this.element);
+    }
     if (typeof MutationObserver !== "undefined") {
       this.#observer = new MutationObserver(() => this.#sync());
       this.#observer.observe(document.documentElement, {
@@ -84,8 +103,8 @@ export class PreviewGuardController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
+    this.#morphRender.disconnect();
     this.#connected = false;
-    this.#beforeCache.deactivate();
     this.#observer?.disconnect();
     this.#observer = null;
   }
@@ -122,11 +141,33 @@ export class PreviewGuardController extends Controller<HTMLElement> {
     if (this.placeholderValue === "") {
       this.#visibility.write(this.element, "hidden");
     } else {
+      this.element.setAttribute(this.#contentRecord, JSON.stringify(this.element.innerHTML));
       this.#savedNodes = document.createDocumentFragment();
       this.#savedNodes.append(...this.element.childNodes);
       this.element.textContent = this.placeholderValue;
     }
     this.element.setAttribute("data-preview-hidden", "true");
+  }
+
+  /** The record of the content a placeholder displaced, in this controller's namespace. */
+  get #contentRecord(): string {
+    return `data-${this.identifier}-${CONTENT_RECORD}`;
+  }
+
+  /**
+   * Puts back the content a copy of a guarded element records — no instance holds its
+   * nodes any more — and drops the record.
+   */
+  #restoreRecordedContent(): void {
+    const raw = this.element.getAttribute(this.#contentRecord) ?? "null";
+    this.element.removeAttribute(this.#contentRecord);
+    let content: unknown = null;
+    try {
+      content = JSON.parse(raw);
+    } catch {
+      // A record that is not JSON holds no content.
+    }
+    if (typeof content === "string") this.element.innerHTML = content;
   }
 
   /**
@@ -141,6 +182,7 @@ export class PreviewGuardController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #reguard(): void {
+    this.element.setAttribute("data-preview-hidden", "true");
     if (this.#savedNodes && this.placeholderValue !== "") {
       this.element.textContent = this.placeholderValue;
       return;
@@ -156,7 +198,7 @@ export class PreviewGuardController extends Controller<HTMLElement> {
     this.dispatch("show", { detail: {} });
   }
 
-  /** Reverts the guard and hands focus back. Used by show and by the snapshot rewind. */
+  /** Reverts the guard and hands focus back. */
   #restore(): void {
     this.#revert();
     this.#refocus();
@@ -174,6 +216,7 @@ export class PreviewGuardController extends Controller<HTMLElement> {
       this.element.textContent = "";
       this.element.append(this.#savedNodes);
       this.#savedNodes = null;
+      this.element.removeAttribute(this.#contentRecord);
     } else {
       this.#visibility.return(this.element);
     }

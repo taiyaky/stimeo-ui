@@ -1,6 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { AttributeLease } from "../utils/attribute_lease";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 
 /** The selection figures every report carries. */
 type SelectionDetail = { count: number; allPages: boolean };
@@ -69,16 +72,24 @@ type SelectionDetail = { count: number; allPages: boolean };
  * The delegated listener and the pending repair are both released on `disconnect()`.
  */
 export class BulkSelectController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["all", "item", "bar", "count", "selectAllPages"];
   static override values = {
     totalCount: { type: Number, default: 0 },
     announceText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    totalCount: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof BulkSelectController.values>;
   static actions = ["clear", "selectAllPages"] as const;
   static events = ["change", "reconcile"] as const;
 
   declare readonly allTarget: HTMLInputElement;
   declare readonly barTarget: HTMLElement;
+  declare readonly barTargets: HTMLElement[];
   declare readonly countTarget: HTMLElement;
   declare readonly itemTargets: HTMLInputElement[];
   declare readonly hasAllTarget: boolean;
@@ -98,7 +109,9 @@ export class BulkSelectController extends Controller<HTMLElement> {
   #lastAllPages = false;
 
   /** Collapses every signal from one DOM or Value update into one repair. */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileNow());
+  readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileNow());
+  /** Owns the `hidden` written on each bar, so one that departs gets its own back. */
+  readonly #barHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
 
   /** Delegated `change` handler covering the select-all box and every row. */
   readonly #onChange = (event: Event): void => {
@@ -114,14 +127,14 @@ export class BulkSelectController extends Controller<HTMLElement> {
 
   override connect(): void {
     this.#allPagesMode = this.element.dataset.allPages === "true";
-    this.#reconcile.activate();
+    this.#reconcile.observe(this.element);
     this.element.addEventListener("change", this.#onChange);
     this.#recompute();
   }
 
   override disconnect(): void {
     this.element.removeEventListener("change", this.#onChange);
-    this.#reconcile.cancel();
+    this.#reconcile.disconnect();
   }
 
   /** Repairs the figures for a row that arrived at runtime. */
@@ -141,6 +154,30 @@ export class BulkSelectController extends Controller<HTMLElement> {
 
   /** Repairs the figures after the select-all box leaves. */
   allTargetDisconnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Shows or hides a bar that arrives at runtime as the selection calls for. */
+  barTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /**
+   * Gives a bar that no longer resolves its own `hidden` back, even after `disconnect()`,
+   * and repaints the bar that stays.
+   */
+  barTargetDisconnected(bar: HTMLElement): void {
+    if (!this.barTargets.includes(bar)) this.#barHidden.return(bar);
+    this.#reconcile.schedule();
+  }
+
+  /** Writes the shown figure into a count that arrives at runtime. */
+  countTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Writes the shown figure into the count that stays after another leaves. */
+  countTargetDisconnected(): void {
     this.#reconcile.schedule();
   }
 
@@ -221,8 +258,8 @@ export class BulkSelectController extends Controller<HTMLElement> {
 
   /** The declared `totalCount`, or the default `0` in place of a non-finite one. */
   get #totalCount(): number {
-    const declared = this.totalCountValue;
-    return Number.isFinite(declared) ? declared : 0;
+    const declared = this.#safeTotalCount;
+    return declared;
   }
 
   /**
@@ -252,7 +289,7 @@ export class BulkSelectController extends Controller<HTMLElement> {
       if (!show && this.hasAllTarget && this.barTarget.contains(document.activeElement)) {
         this.allTarget.focus();
       }
-      this.barTarget.hidden = !show;
+      this.#barHidden.write(this.barTarget, show ? null : "");
     }
     if (this.hasCountTarget) this.countTarget.textContent = String(count);
 
@@ -264,5 +301,15 @@ export class BulkSelectController extends Controller<HTMLElement> {
     this.#lastCount = count;
     this.#lastAllPages = allPages;
     return changed ? { count, allPages } : null;
+  }
+  /** Current `totalCount` declaration resolved against its numeric contract. */
+  get #safeTotalCount(): number {
+    return this.#numbers.read(
+      this,
+      "totalCount",
+      this.totalCountValue,
+      BulkSelectController.values.totalCount.default,
+      BulkSelectController.valueConstraints.totalCount,
+    );
   }
 }

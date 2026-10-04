@@ -3,6 +3,9 @@ import { CompositionTracker } from "../utils/composition_tracker";
 import { halfWidthChar } from "../utils/half_width";
 import { intlFormatter } from "../utils/intl_format";
 import { resolveLocale } from "../utils/locale";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import type { NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 
 /** The number-shaped pieces of an in-progress entry, in typing order. */
 interface EntryParts {
@@ -104,7 +107,8 @@ const FALLBACK_LOCALE = "en-US";
  * Value change, when the controller connects, and when a display arrives; the
  * hot path only ever sees validated values through cached `Intl.NumberFormat`
  * instances, never built per keystroke. Late-arriving or swapped `field` /
- * `srValue` / `display` targets are re-synced on connection.
+ * `srValue` / `display` targets are re-synced on connection; one that arrives
+ * behind the target in charge is re-synced when that target leaves.
  *
  * Reconnecting starts from the committed value: a display still showing this
  * controller's own rendering is not read back but re-rendered from that value
@@ -122,12 +126,19 @@ const FALLBACK_LOCALE = "en-US";
  * screen reader announces.
  */
 export class CurrencyInputController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["display", "field", "srValue"];
   static override values = {
     locale: { type: String, default: "" },
     currency: { type: String, default: "" },
     precision: { type: Number, default: 2 },
   };
+
+  static valueConstraints = {
+    precision: { finite: true, integer: true, min: 0, max: 100 },
+  } satisfies NumberValueConstraints<typeof CurrencyInputController.values>;
   static actions = ["format", "onInput"] as const;
   static events = ["change", "reconcile"] as const;
 
@@ -256,6 +267,8 @@ export class CurrencyInputController extends Controller<HTMLElement> {
     this.#revalidate();
   }
 
+  readonly #morph = new MorphRenderWatcher(() => this.#applyValueChange());
+
   /**
    * Takes in the declarations the page carries now and normalizes the display
    * to its fixed-precision form.
@@ -269,6 +282,7 @@ export class CurrencyInputController extends Controller<HTMLElement> {
    * page's, written for the declarations it carries, so it is read with them.
    */
   override connect(): void {
+    this.#morph.observe(this.element);
     this.#started = true;
     this.#takeInDeclarations();
     if (!this.hasDisplayTarget) return;
@@ -290,6 +304,7 @@ export class CurrencyInputController extends Controller<HTMLElement> {
    * taken in on the next `connect()`.
    */
   override disconnect(): void {
+    this.#morph.disconnect();
     this.#endUntrackedComposition();
     this.#composition.disconnect();
     this.#started = false;
@@ -300,21 +315,28 @@ export class CurrencyInputController extends Controller<HTMLElement> {
    * under the declarations the page carries now, reading this controller's own
    * rendering with the separators it was written under; an amount that differs
    * from the committed one is the page's, so it is reported as `reconcile`.
+   * A display that arrives behind the one in charge is only tracked: the one
+   * ahead may be composing against the declarations in force, and the arrival
+   * is read when that one leaves.
    */
   displayTargetConnected(target: HTMLInputElement): void {
     this.#composition.observe(target);
-    if (!this.#started) return;
+    if (!this.#started || !this.hasDisplayTarget || this.displayTarget !== target) return;
     this.#renderFixed(this.#readDisplay().value, "reconcile");
   }
 
   /**
    * Stops tracking a display that leaves. A composition running on it hears no
    * `compositionend` any more, so it ends here; a change it held waits for the
-   * next display to be read.
+   * next display to be read. A composition running on another display still hears
+   * its own `compositionend`, so its text is left to it. A display that stays is
+   * read again as a declaration change reads it, so an amount it holds that
+   * differs from the committed one is the page's and is reported as `reconcile`.
    */
   displayTargetDisconnected(target: HTMLInputElement): void {
     this.#composition.unobserve(target);
-    this.#endUntrackedComposition();
+    if (target === this.#composing) this.#endUntrackedComposition();
+    this.#applyValueChange();
   }
 
   /**
@@ -338,8 +360,18 @@ export class CurrencyInputController extends Controller<HTMLElement> {
     if (this.#started) this.#resync();
   }
 
+  /** Syncs the hidden field that stays when an earlier one leaves, silently. */
+  fieldTargetDisconnected(): void {
+    if (this.#started) this.#resync();
+  }
+
   /** Syncs a late-arriving screen-reader span the same way. */
   srValueTargetConnected(): void {
+    if (this.#started) this.#resync();
+  }
+
+  /** Syncs the screen-reader span that stays when an earlier one leaves, silently. */
+  srValueTargetDisconnected(): void {
     if (this.#started) this.#resync();
   }
 
@@ -399,7 +431,7 @@ export class CurrencyInputController extends Controller<HTMLElement> {
 
   /** Writes `text` to the display as this controller's own rendering. */
   #show(text: string): void {
-    this.displayTarget.value = text;
+    if (this.displayTarget.value !== text) this.displayTarget.value = text;
     this.#rendered = text;
   }
 
@@ -547,9 +579,7 @@ export class CurrencyInputController extends Controller<HTMLElement> {
     const usable = intlFormatter(Intl.NumberFormat, resolved, {});
     this.#locale = usable === null ? FALLBACK_LOCALE : resolved;
 
-    const precision = this.precisionValue;
-    this.#precision =
-      Number.isInteger(precision) && precision >= 0 && precision <= 100 ? precision : 2;
+    this.#precision = this.#safePrecision;
 
     this.#currency = "";
     if (this.currencyValue !== "") {
@@ -627,6 +657,16 @@ export class CurrencyInputController extends Controller<HTMLElement> {
       }
     }
     return out;
+  }
+  /** Current `precision` declaration resolved against its numeric contract. */
+  get #safePrecision(): number {
+    return this.#numbers.read(
+      this,
+      "precision",
+      this.precisionValue,
+      CurrencyInputController.values.precision.default,
+      CurrencyInputController.valueConstraints.precision,
+    );
   }
 }
 

@@ -12,7 +12,7 @@ import { delay, tick } from "./helpers/timing";
  * Behavioral tests for {@link ClipboardController}: copy execution against a
  * mocked Clipboard API, success/failure `data-state`, the visible completion slot
  * and its auto-clear, the shared-announcer messages, the `copy` event on both
- * paths, transient-state normalisation on connect and before the Turbo snapshot,
+ * paths, transient-state normalisation on connect, retained state through turbo:before-cache,
  * teardown while a copy is still in flight, and the labels a shown result follows.
  */
 
@@ -273,47 +273,27 @@ describe("ClipboardController", () => {
     expect(feedback().textContent).toBe("held");
   });
 
-  it("rewinds the completion state before Turbo caches the page", async () => {
-    await start();
+  it("keeps the completion state through turbo:before-cache, which Turbo also dispatches on pages that stay", async () => {
+    await start('data-stimeo--clipboard-feedback-duration-value="0"');
     await instance().copy();
     expect(controllerEl().getAttribute("data-state")).toBe("copied");
 
     document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(controllerEl().getAttribute("data-state")).toBe("copied");
+    expect(feedback().textContent).toBe("Copied");
+  });
+
+  it("still returns to idle on time after turbo:before-cache", async () => {
+    await start('data-stimeo--clipboard-feedback-duration-value="20"');
+    await instance().copy();
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(controllerEl().getAttribute("data-state")).toBe("copied");
+    await delay(40);
+
     expect(controllerEl().getAttribute("data-state")).toBe("idle");
     expect(feedback().textContent).toBe("");
-  });
-
-  it("leaves an authored data-state the controller does not own out of the rewind", async () => {
-    await mount(`
-      <div data-controller="stimeo--clipboard" data-state="disabled">
-        <button data-stimeo--clipboard-target="button"
-                data-action="stimeo--clipboard#copy">Copy</button>
-        <span data-stimeo--clipboard-target="feedback">held</span>
-      </div>`);
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(controllerEl().getAttribute("data-state")).toBe("disabled");
-    expect(feedback().textContent).toBe("held");
-  });
-
-  it("does not dispatch copy from the before-cache rewind", async () => {
-    await start();
-    await instance().copy();
-    let fired = 0;
-    controllerEl().addEventListener("stimeo--clipboard:copy", () => {
-      fired += 1;
-    });
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(fired).toBe(0);
-  });
-
-  it("stops rewinding once disconnected", async () => {
-    await start();
-    await instance().copy();
-    const element = controllerEl();
-    instance().disconnect();
-    element.setAttribute("data-state", "copied");
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(element.getAttribute("data-state")).toBe("copied");
   });
 
   it("copies a textarea's value", async () => {
@@ -380,14 +360,19 @@ describe("ClipboardController", () => {
 
   it("restarts the auto-clear window on a second copy (cancels the stale timer)", async () => {
     await start('data-stimeo--clipboard-feedback-duration-value="50"');
-    await instance().copy();
-    await delay(30);
-    // Second copy ~30ms in must restart the window, not let the first timer fire.
-    await instance().copy();
-    await delay(30); // 60ms since first copy, 30ms since second
-    expect(controllerEl().getAttribute("data-state")).toBe("copied");
-    await delay(40); // now past the second window
-    expect(controllerEl().getAttribute("data-state")).toBe("idle");
+    vi.useFakeTimers();
+    try {
+      await instance().copy();
+      vi.advanceTimersByTime(30);
+      // Second copy 30ms in must restart the window, not let the first timer fire.
+      await instance().copy();
+      vi.advanceTimersByTime(49); // 79ms since the first copy, 49ms since the second
+      expect(controllerEl().getAttribute("data-state")).toBe("copied");
+      vi.advanceTimersByTime(1); // the end of the second window
+      expect(controllerEl().getAttribute("data-state")).toBe("idle");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // Detaching the element drives Stimulus `disconnect()`, where SafeTimeout's
@@ -404,7 +389,8 @@ describe("ClipboardController", () => {
     instance().disconnect();
     fb.textContent = "sentinel";
     await delay(40);
-    // The cancelled timer must not have reset the feedback back to "".
+    // The cancelled timer must not have returned the result to idle, nor touched the slot.
+    expect(controllerEl().getAttribute("data-state")).toBe("copied");
     expect(fb.textContent).toBe("sentinel");
   });
 
@@ -506,16 +492,23 @@ describe("ClipboardController", () => {
 
       it("keeps the return to idle on the deadline the copy set", async () => {
         await start('data-stimeo--clipboard-feedback-duration-value="200"');
-        await copyOnce(fails);
-        await delay(50);
-        controllerEl().setAttribute(attribute, "Swapped");
-        await tick();
-        expect(feedback().textContent).toBe("Swapped");
-        // 170ms after the swap is past the 200ms window the copy started, and short of a
-        // window the swap would have restarted.
-        await delay(170);
-        expect(controllerEl().getAttribute("data-state")).toBe("idle");
-        expect(feedback().textContent).toBe("");
+        vi.useFakeTimers();
+        try {
+          await copyOnce(fails);
+          vi.advanceTimersByTime(50);
+          controllerEl().setAttribute(attribute, "Swapped");
+          await vi.advanceTimersByTimeAsync(0);
+          expect(feedback().textContent).toBe("Swapped");
+          // The window the copy started ends 150ms after the swap, short of a window the
+          // swap would have restarted.
+          vi.advanceTimersByTime(149);
+          expect(controllerEl().getAttribute("data-state")).toBe(state);
+          vi.advanceTimersByTime(1);
+          expect(controllerEl().getAttribute("data-state")).toBe("idle");
+          expect(feedback().textContent).toBe("");
+        } finally {
+          vi.useRealTimers();
+        }
       });
 
       it("leaves text someone else wrote into the slot alone", async () => {
@@ -586,16 +579,91 @@ describe("ClipboardController", () => {
 
   it("applies a feedbackDuration swapped while a result is shown from the next copy", async () => {
     await start('data-stimeo--clipboard-feedback-duration-value="200"');
-    await instance().copy();
-    controllerEl().setAttribute("data-stimeo--clipboard-feedback-duration-value", "20");
+    vi.useFakeTimers();
+    try {
+      await instance().copy();
+      controllerEl().setAttribute("data-stimeo--clipboard-feedback-duration-value", "20");
+      await vi.advanceTimersByTimeAsync(0);
+      // The result on screen keeps the window its copy armed.
+      vi.advanceTimersByTime(60);
+      expect(controllerEl().getAttribute("data-state")).toBe("copied");
+      // The next copy arms the new window.
+      await instance().copy();
+      vi.advanceTimersByTime(19);
+      expect(controllerEl().getAttribute("data-state")).toBe("copied");
+      vi.advanceTimersByTime(1);
+      expect(controllerEl().getAttribute("data-state")).toBe("idle");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * Rewrites `feedbackDuration` and delivers its Value callback directly when the
+   * controller defines one, since happy-dom does not reliably run it for an attribute
+   * write.
+   */
+  const declareFeedbackDuration = (value: number) => {
+    controllerEl().setAttribute("data-stimeo--clipboard-feedback-duration-value", String(value));
+    const owner = instance();
+    const callback: unknown = Reflect.get(owner, "feedbackDurationValueChanged");
+    if (typeof callback === "function") callback.call(owner);
+  };
+
+  it.each([
+    { direction: "shrinks", next: 20 },
+    { direction: "grows", next: 5000 },
+  ])(
+    "keeps a shown result's return to idle when feedbackDuration $direction, and times the next copy anew",
+    async ({ next }) => {
+      await start('data-stimeo--clipboard-feedback-duration-value="200"');
+      vi.useFakeTimers();
+      try {
+        await instance().copy();
+        vi.advanceTimersByTime(50);
+
+        declareFeedbackDuration(next);
+        vi.advanceTimersByTime(149);
+        expect(controllerEl().getAttribute("data-state")).toBe("copied");
+        vi.advanceTimersByTime(1);
+        expect(controllerEl().getAttribute("data-state")).toBe("idle");
+
+        await instance().copy();
+        vi.advanceTimersByTime(next - 1);
+        expect(controllerEl().getAttribute("data-state")).toBe("copied");
+        vi.advanceTimersByTime(1);
+        expect(controllerEl().getAttribute("data-state")).toBe("idle");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("arms nothing and reports nothing from a feedbackDuration change alone", async () => {
+    await start(
+      'data-stimeo--clipboard-feedback-duration-value="0" ' +
+        'data-stimeo--clipboard-announce-copied-text-value="Copied"',
+    );
+    const copies: unknown[] = [];
+    controllerEl().addEventListener("stimeo--clipboard:copy", (event) =>
+      copies.push((event as CustomEvent).detail),
+    );
+    vi.useFakeTimers();
+    try {
+      await instance().copy();
+      expect(copies).toHaveLength(1);
+
+      // The result on screen was promised no return to idle, and a later duration keeps it.
+      declareFeedbackDuration(20);
+      vi.advanceTimersByTime(1000);
+      expect(controllerEl().getAttribute("data-state")).toBe("copied");
+      expect(feedback().textContent).toBe("Copied");
+      expect(copies).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
     await tick();
-    // The result on screen keeps the window its copy armed.
-    await delay(60);
-    expect(controllerEl().getAttribute("data-state")).toBe("copied");
-    // The next copy arms the new window.
-    await instance().copy();
-    await delay(60);
-    expect(controllerEl().getAttribute("data-state")).toBe("idle");
+    expect(announcements).toEqual(["Copied"]);
   });
 
   it.each([
@@ -635,5 +703,158 @@ describe("ClipboardController", () => {
     // `feedback` is optional, so a swapped label has nowhere to go and must not throw.
     expect(() => instance().copiedLabelValueChanged("Swapped", "Copied")).not.toThrow();
     expect(controllerEl().getAttribute("data-state")).toBe("copied");
+  });
+
+  it("adopts a slot that stays after an earlier one leaves only on its next copy", async () => {
+    // A slot that is not the one the copy wrote belongs to the page until a copy
+    // writes it, the same as a slot swapped in by a morph.
+    await start('data-stimeo--clipboard-feedback-duration-value="0"');
+    const original = feedback();
+    const successor = original.cloneNode(true) as HTMLElement;
+    successor.textContent = "Ready";
+    original.after(successor);
+    await tick();
+    await instance().copy();
+    expect(original.textContent).toBe("Copied");
+
+    original.remove();
+    await tick();
+    expect(feedback()).toBe(successor);
+    expect(successor.textContent).toBe("Ready");
+
+    await instance().copy();
+    expect(successor.textContent).toBe("Copied");
+  });
+
+  describe("the return to idle", () => {
+    const TARGET = "data-stimeo--clipboard-target";
+    const SHORT = 'data-stimeo--clipboard-feedback-duration-value="20"';
+
+    it("keeps the text the page put into a feedback that replaced the one the copy wrote", async () => {
+      await start(SHORT);
+      await instance().copy();
+      const replacement = feedback().cloneNode(false) as HTMLElement;
+      replacement.textContent = "Replacement";
+      feedback().replaceWith(replacement);
+      await tick();
+
+      await delay(40);
+
+      expect(controllerEl().getAttribute("data-state")).toBe("idle");
+      expect(replacement.textContent).toBe("Replacement");
+    });
+
+    it("empties the feedback the copy wrote, not one the page put ahead of it", async () => {
+      await start(SHORT);
+      await instance().copy();
+      const written = feedback();
+      const ahead = written.cloneNode(false) as HTMLElement;
+      ahead.textContent = "Ready";
+      written.before(ahead);
+      await tick();
+
+      await delay(40);
+
+      expect(controllerEl().getAttribute("data-state")).toBe("idle");
+      expect(ahead.textContent).toBe("Ready");
+      expect(written.textContent).toBe("");
+    });
+
+    it("leaves wording the page wrote into the feedback after the copy", async () => {
+      await start(SHORT);
+      await instance().copy();
+      feedback().textContent = "Saved by the page";
+
+      await delay(40);
+
+      expect(controllerEl().getAttribute("data-state")).toBe("idle");
+      expect(feedback().textContent).toBe("Saved by the page");
+    });
+
+    it("leaves a feedback the page put an element into", async () => {
+      await start(SHORT);
+      await instance().copy();
+      feedback().insertAdjacentHTML("beforeend", '<svg aria-hidden="true"></svg>');
+      expect(feedback().textContent).toBe("Copied");
+
+      await delay(40);
+
+      expect(controllerEl().getAttribute("data-state")).toBe("idle");
+      expect(feedback().textContent).toBe("Copied");
+      expect(feedback().querySelector("svg")).not.toBeNull();
+    });
+
+    it("leaves a slot that stopped being the feedback as it is", async () => {
+      await start(SHORT);
+      await instance().copy();
+      const departed = feedback();
+      departed.removeAttribute(TARGET);
+      await tick();
+
+      await delay(40);
+
+      expect(controllerEl().getAttribute("data-state")).toBe("idle");
+      expect(departed.textContent).toBe("Copied");
+    });
+
+    it("empties the relabelled wording the result shows when it ends", async () => {
+      await start(SHORT);
+      vi.useFakeTimers();
+      try {
+        await instance().copy();
+        controllerEl().setAttribute("data-stimeo--clipboard-copied-label-value", "Link copied");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(feedback().textContent).toBe("Link copied");
+
+        vi.advanceTimersByTime(20);
+
+        expect(feedback().textContent).toBe("");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps the page's wording when an in-page move returns the result to idle", async () => {
+      await start('data-stimeo--clipboard-feedback-duration-value="0"');
+      await instance().copy();
+      feedback().textContent = "Saved by the page";
+
+      instance().disconnect();
+      instance().connect();
+
+      expect(controllerEl().getAttribute("data-state")).toBe("idle");
+      expect(feedback().textContent).toBe("Saved by the page");
+    });
+
+    it("forgets the slot a result was written into once that result ends", async () => {
+      await start(SHORT);
+      await instance().copy();
+      const earlier = feedback();
+      await delay(40);
+      expect(earlier.textContent).toBe("");
+      const ahead = earlier.cloneNode(false) as HTMLElement;
+      earlier.before(ahead);
+      await tick();
+      // The page's own wording, which happens to match the label.
+      earlier.textContent = "Copied";
+      await instance().copy();
+      expect(ahead.textContent).toBe("Copied");
+
+      await delay(40);
+
+      expect(ahead.textContent).toBe("");
+      expect(earlier.textContent).toBe("Copied");
+    });
+
+    it("empties its own wording when an in-page move returns the result to idle", async () => {
+      await start('data-stimeo--clipboard-feedback-duration-value="0"');
+      await instance().copy();
+
+      instance().disconnect();
+      instance().connect();
+
+      expect(controllerEl().getAttribute("data-state")).toBe("idle");
+      expect(feedback().textContent).toBe("");
+    });
   });
 });

@@ -1,12 +1,17 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { commitField, writeField } from "../utils/field_mirror";
 import { isRtl } from "../utils/logical_scroll";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { RovingTabindex } from "../utils/roving_tabindex";
+import type { StateReason } from "../utils/state_reason";
 import { TabindexLoan } from "../utils/tabindex_loan";
+import { targetSelector } from "../utils/target_selector";
 
 /**
  * Headless, accessible rating behavior over an ordinal symbol sequence.
@@ -31,11 +36,18 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * the last is N. Unlike a generic radio group, arrows deliberately clamp rather
  * than wrap because the values have an ordered lower and upper bound.
  *
- * `change` and `reconcile` dispatch `{ value: number }`. A rating the user set
+ * `change` dispatches `{ value: number, reason: StateReason }`; `reconcile`
+ * dispatches `{ value: number }`. A rating set through an action
  * also emits a native bubbling `change` from the hidden `field`, the way a form
  * control does, so `stimeo--auto-submit` and form-level validation hear it; a
  * repaint driven by the `value` Value, by a replacement field, or by the
  * controller's own normalization refreshes the mirror silently.
+ *
+ * All published state is settled before its reports. A synchronous listener
+ * that confirms another value leaves that newer confirmation to report itself;
+ * reports still pending for the replaced value are not sent. A read-only listener
+ * or a confirmation that moves no published value leaves pending reports intact.
+ * An event already being dispatched still reaches its remaining listeners.
  *
  * @remarks
  * Behavior only — consumers style `[aria-checked]` and `data-rating-hover`. In
@@ -43,6 +55,10 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * human-readable accessible name (for example, "Rated 3 of 5"). Focus standing on
  * a symbol when that mode begins lands on the root and returns to the Tab stop
  * when it ends, so it is never left on a node outside the accessibility tree.
+ * `turbo:before-cache`, which Turbo also dispatches on pages that stay, hands nothing
+ * back; a page Turbo restores from its cache carries the authored values the readonly
+ * leases recorded on the elements, so the restored rating stays readonly and turns back
+ * into the authored radiogroup when readonly ends.
  *
  * The `value` Value is the page's request. The rating shown is that request
  * normalized to the live scale, and normalizing never writes the Value back: a
@@ -56,12 +72,22 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * from the rating last shown. Initial reflection emits neither.
  */
 export class RatingController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
+  readonly #moves = new MoveCounter();
+  #move = 0;
+
   static override targets = ["symbol", "field"];
   static override values = {
     value: { type: Number, default: 0 },
     clearable: { type: Boolean, default: true },
     readonly: { type: Boolean, default: false },
   };
+
+  static valueConstraints = {
+    value: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof RatingController.values>;
   static actions = ["endPreview", "onKeydown", "preview", "select"] as const;
   static events = ["change", "reconcile"] as const;
 
@@ -73,12 +99,11 @@ export class RatingController extends Controller<HTMLElement> {
   declare readonlyValue: boolean;
 
   readonly #roving = new RovingTabindex(() => this.symbolTargets);
-  readonly #rootRole = new AttributeLease<HTMLElement>("role");
-  readonly #symbolRole = new AttributeLease<HTMLElement>("role");
-  readonly #symbolAriaHidden = new AttributeLease<HTMLElement>("aria-hidden");
-  readonly #rootTabindex = new TabindexLoan();
-  readonly #repaint = new MicrotaskCoalescer(() => this.#reconcileScale());
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+  readonly #rootRole = new AttributeLease<HTMLElement>("role", this.identifier);
+  readonly #symbolRole = new AttributeLease<HTMLElement>("role", this.identifier);
+  readonly #symbolAriaHidden = new AttributeLease<HTMLElement>("aria-hidden", this.identifier);
+  readonly #rootTabindex = new TabindexLoan("-1", this.identifier);
+  readonly #repaint = new MorphRenderWatcher(() => this.#reconcileScale());
   #connected = false;
   #rescuedFocus = false;
 
@@ -87,9 +112,9 @@ export class RatingController extends Controller<HTMLElement> {
 
   /** Reflects declarative state without announcing an initial user change. */
   override connect(): void {
-    this.#repaint.activate();
-    this.#beforeCache.activate();
-    this.#shown = this.#normalize(this.valueValue);
+    this.#rootTabindex.reclaim(this.element);
+    this.#repaint.observe(this.element);
+    this.#shown = this.#normalize(this.#safeValue);
     this.#apply(this.#shown, { focus: false });
     this.#connected = true;
   }
@@ -97,8 +122,7 @@ export class RatingController extends Controller<HTMLElement> {
   /** Drops a queued reconciliation and hands every borrowed attribute back. */
   override disconnect(): void {
     this.#connected = false;
-    this.#repaint.cancel();
-    this.#beforeCache.deactivate();
+    this.#repaint.disconnect();
     this.#releaseReadonly();
   }
 
@@ -141,35 +165,50 @@ export class RatingController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
-  /** Selects or clears the clicked symbol. Bound via `data-action` (click). */
-  select(event: Event): void {
+  /** Selects or clears an owned symbol named by an action or explicit element. */
+  select(source: Event | HTMLElement): void {
     if (this.readonlyValue) return;
-    const ordinal = this.#symbolOrdinal(event.currentTarget);
+    const { event, host, origin, reason } = actionSource(source);
+    const symbol = host?.closest<HTMLElement>(targetSelector(this.identifier, "symbol"));
+    if (!symbol || !this.symbolTargets.includes(symbol)) return;
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const moveFocus = event !== null || this.element.contains(document.activeElement);
+    const ordinal = this.#symbolOrdinal(symbol);
     if (ordinal === null) return;
-    const current = this.#normalize(this.valueValue);
-    this.#commit(this.clearableValue && ordinal === current ? 0 : ordinal, {
-      focus: ordinal === current,
-    });
+    const current = this.#normalize(this.#safeValue);
+    this.#commit(
+      this.clearableValue && ordinal === current ? 0 : ordinal,
+      {
+        focus: ordinal === current && moveFocus,
+      },
+      reason,
+    );
   }
 
   /** Previews a fill range on hover or focus without committing it. */
-  preview(event: Event): void {
+  preview(source: Event | HTMLElement): void {
     if (this.readonlyValue) return;
-    const ordinal = this.#symbolOrdinal(event.currentTarget);
+    const { host, origin } = actionSource(source);
+    const symbol = host?.closest<HTMLElement>(targetSelector(this.identifier, "symbol"));
+    if (!symbol || !this.symbolTargets.includes(symbol)) return;
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const ordinal = this.#symbolOrdinal(symbol);
     if (ordinal !== null) this.#setFillRange(ordinal);
   }
 
   /** Restores the fill range after hover or focus leaves a symbol. */
   endPreview(): void {
     if (this.readonlyValue) return;
-    this.#setFillRange(this.#normalize(this.valueValue));
+    this.#setFillRange(this.#normalize(this.#safeValue));
   }
 
   /** Arrow/Home/End/Space/Delete keyboard control, clamped without wrapping. */
   onKeydown(event: KeyboardEvent): void {
     if (event.defaultPrevented || isReservedArrowChord(event) || this.readonlyValue) return;
 
-    const current = this.#normalize(this.valueValue);
+    const current = this.#normalize(this.#safeValue);
     let next: number | null = null;
     const rtl = isRtl(this.element);
 
@@ -218,12 +257,14 @@ export class RatingController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #reconcileScale(): void {
-    const value = this.#normalize(this.valueValue);
+    const value = this.#normalize(this.#safeValue);
     const previous = this.#shown;
     // Settled before the report, so a listener that moves the rating on is
     // measured from the value it was just told about.
     this.#shown = value;
+    const move = this.#move;
     this.#apply(value, { focus: false });
+    if (!this.#moves.isLatest(move)) return;
     if (value !== previous) this.dispatch("reconcile", { detail: { value } });
   }
 
@@ -234,21 +275,30 @@ export class RatingController extends Controller<HTMLElement> {
    * listener of the field's native `change` already reads it there, and the pass
    * that the write starts finds nothing left to report.
    */
-  #commit(raw: number, { focus }: { focus: boolean }): void {
+  #commit(raw: number, { focus }: { focus: boolean }, reason: StateReason = "user"): void {
     const previous = this.#shown;
     const value = this.#normalize(raw);
     if (!Object.is(this.valueValue, value)) this.valueValue = value;
     this.#shown = value;
-    this.#apply(value, { focus, notify: true });
-    if (value !== previous) this.dispatch("change", { detail: { value } });
+    if (value !== previous) this.#move = this.#moves.record();
+    const move = this.#move;
+    const field = this.#apply(value, { focus });
+    if (!this.#moves.isLatest(move)) return;
+    if (field) commitField(field);
+    if (!this.#moves.isLatest(move)) return;
+    if (value !== previous) this.dispatch("change", { detail: { value, reason } });
   }
 
   /** Synchronizes ARIA, roving focus, form state, and the visual fill hook. */
-  #apply(value: number, { focus, notify = false }: { focus: boolean; notify?: boolean }): void {
+  #apply(value: number, { focus }: { focus: boolean }): HTMLInputElement | null {
+    const move = this.#move;
     this.symbolTargets.forEach((symbol, index) => {
       symbol.setAttribute("aria-checked", value > 0 && index + 1 === value ? "true" : "false");
     });
 
+    const field = this.hasFieldTarget ? this.fieldTarget : null;
+    const moved = field && writeField(field, String(value));
+    this.#setFillRange(value);
     if (this.readonlyValue) {
       this.#applyReadonly();
     } else {
@@ -256,14 +306,8 @@ export class RatingController extends Controller<HTMLElement> {
       this.#roving.setActive(value > 0 ? value - 1 : 0, { focus: focus || returning });
     }
 
-    this.#mirrorField(value, notify);
-    this.#setFillRange(value);
-  }
-
-  /** Mirrors `value` into the optional form field, reporting only a user's move. */
-  #mirrorField(value: number, notify: boolean): void {
-    if (!this.hasFieldTarget) return;
-    if (writeField(this.fieldTarget, String(value)) && notify) commitField(this.fieldTarget);
+    if (this.#moves.isLatest(move)) this.#setFillRange(value);
+    return moved ? field : null;
   }
 
   /** Marks the first `range` symbols with the consumer-owned fill hook. */
@@ -277,12 +321,14 @@ export class RatingController extends Controller<HTMLElement> {
    * Temporarily turns the radiogroup into a non-interactive image snapshot.
    *
    * Each lease is returned before it is taken again, so a value the consumer
-   * wrote while readonly becomes the value the lease restores on release. The
-   * return is a no-op on an attribute still holding this controller's own
-   * write, which is the ordinary case.
+   * wrote while readonly becomes the value the lease restores on release. A
+   * return restores the authored value while the controller's write remains,
+   * and preserves a different value the consumer wrote.
    */
   #applyReadonly(): void {
+    const move = this.#move;
     this.#rescueFocus();
+    if (!this.#moves.isLatest(move)) return;
     this.#rootRole.return(this.element);
     this.#rootRole.write(this.element, "img");
     for (const symbol of this.symbolTargets) {
@@ -292,21 +338,6 @@ export class RatingController extends Controller<HTMLElement> {
       this.#symbolAriaHidden.write(symbol, "true");
     }
     this.#roving.setActive(-1);
-  }
-
-  /**
-   * Hands every readonly borrowing back before Turbo clones the page.
-   *
-   * The snapshot is taken while the controller is still connected, so an
-   * element left as `role="img"` with hidden symbols is what a restored page
-   * connects against — and that markup would be read as the authored one,
-   * leaving no way back to the radiogroup. Rewinding first keeps the cached
-   * copy identical to what the consumer wrote.
-   */
-  #rewindForCache(): void {
-    this.#releaseReadonly();
-    const value = this.#normalize(this.valueValue);
-    this.#roving.setActive(value > 0 ? value - 1 : 0);
   }
 
   /**
@@ -322,12 +353,13 @@ export class RatingController extends Controller<HTMLElement> {
     if (!(active instanceof HTMLElement) || active === this.element) return;
     if (!this.element.contains(active)) return;
     this.#rootTabindex.lend(this.element);
-    this.element.focus();
     this.#rescuedFocus = true;
+    this.element.focus();
   }
 
   /**
-   * Restores authored roles and visibility after leaving readonly mode.
+   * Restores authored roles and visibility after leaving readonly mode, on the symbols a
+   * copy of the page carries from an earlier instance's readonly mode as well.
    *
    * @returns whether focus is standing on the root because {@link #rescueFocus}
    *   put it there, and therefore belongs back on the Tab stop.
@@ -336,16 +368,20 @@ export class RatingController extends Controller<HTMLElement> {
     const returning = this.#rescuedFocus && document.activeElement === this.element;
     this.#rescuedFocus = false;
     this.#rootRole.return(this.element);
+    for (const symbol of this.symbolTargets) {
+      this.#symbolRole.return(symbol);
+      this.#symbolAriaHidden.return(symbol);
+    }
     this.#symbolRole.returnAll();
     this.#symbolAriaHidden.returnAll();
     this.#rootTabindex.returnAll();
     return returning;
   }
 
-  /** Normalizes a raw value to an integer ordinal in the live DOM range. */
+  /** Normalizes a finite value to an integer ordinal in the live DOM range. */
   #normalize(raw: number): number {
     const maximum = this.symbolTargets.length;
-    const ordinal = Number.isFinite(raw) ? Math.round(raw) : this.#minValue;
+    const ordinal = Math.round(raw);
     return Math.min(maximum, Math.max(this.#minValue, ordinal));
   }
 
@@ -359,5 +395,15 @@ export class RatingController extends Controller<HTMLElement> {
     const targets: readonly (EventTarget | null)[] = this.symbolTargets;
     const index = targets.indexOf(target);
     return index < 0 ? null : index + 1;
+  }
+  /** Current `value` declaration resolved against its numeric contract. */
+  get #safeValue(): number {
+    return this.#numbers.read(
+      this,
+      "value",
+      this.valueValue,
+      RatingController.values.value.default,
+      RatingController.valueConstraints.value,
+    );
   }
 }

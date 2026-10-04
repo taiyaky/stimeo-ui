@@ -1,9 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { AttributeLease } from "../utils/attribute_lease";
 import { DetachGate } from "../utils/detach_gate";
 import { ListenerSet } from "../utils/listener_set";
 import { MinDurationFloor } from "../utils/min_duration_floor";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -25,9 +27,10 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * net so the state never sticks). `minDuration` keeps the skeleton up long enough to
  * avoid a flicker.
  *
- * `start`, `end`, and `reconcile` dispatch `{}`. The last of those reports that
- * the Turbo cache rewind ended a load the frame never finished — `end` would
- * claim the frame arrived.
+ * `start`, `end`, and `reconcile` dispatch `{}`. The last of those reports that a
+ * connection found the frame marked `data-frame-loading` with no load of its own behind
+ * it — a page restored from the Turbo cache in the middle of a load, which can no
+ * longer arrive. `end` would claim the frame arrived.
  *
  * @remarks
  * Behavior only — it ships no skeleton markup or styling (pair with Skeleton/CSS);
@@ -35,14 +38,24 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * targets' `hidden`. The `content` target is marked `inert` while loading to block
  * double-submits, and focus inside the frame is explicitly blurred then restored
  * (when `restoreFocus`) so it is testable without relying on emergent `inert`
- * focus behavior. Listeners are torn down on `disconnect()` (Turbo navigation
- * included) along with the `MinDurationFloor` holding the finish back, kept
- * across an in-page move by `DetachGate`. A detach that keeps the element
- * returns the frame to its idle form, as does `BeforeCacheReset` for the
- * snapshot a cached page freezes; a frame render that swaps the targets mid-load
- * re-arms them.
+ * focus behavior. Every one of those attributes is leased, so finishing a load gives
+ * back what the author wrote — an authored `aria-busy="false"` stays — and leaves a
+ * value the page wrote since alone, and the author's value is recorded on the element
+ * for a copy of it to find: a connection with no load of its own gives the hooks a copy
+ * of the page carries back to the author, before it reports `reconcile`. Listeners are
+ * torn down on `disconnect()` (Turbo navigation included) along with the
+ * `MinDurationFloor` holding the finish back, kept across an in-page move and a
+ * `data-turbo-permanent` frame Turbo carries to the next page by `DetachGate`. A detach that keeps the element
+ * returns the frame to its idle form; a frame render that swaps the targets mid-load
+ * re-arms them. A load is never abandoned on `turbo:before-cache`, which Turbo also
+ * dispatches on pages that stay — among them the promotion of this very frame's
+ * navigation to a page visit, dispatched after `turbo:frame-load` — so a finish held
+ * back by `minDuration` still ends the load, announces it and restores focus.
  */
 export class FrameLoadingController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["content", "skeleton", "overlay"];
   static override values = {
     announceText: { type: String, default: "" },
@@ -50,11 +63,18 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     minDuration: { type: Number, default: 0 },
     restoreFocus: { type: Boolean, default: true },
   };
+
+  static valueConstraints = {
+    minDuration: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof FrameLoadingController.values>;
   static events = ["start", "end", "reconcile"] as const;
 
   declare readonly contentTarget: HTMLElement;
   declare readonly skeletonTarget: HTMLElement;
   declare readonly overlayTarget: HTMLElement;
+  declare readonly contentTargets: HTMLElement[];
+  declare readonly skeletonTargets: HTMLElement[];
+  declare readonly overlayTargets: HTMLElement[];
   declare readonly hasContentTarget: boolean;
   declare readonly hasSkeletonTarget: boolean;
   declare readonly hasOverlayTarget: boolean;
@@ -67,8 +87,15 @@ export class FrameLoadingController extends Controller<HTMLElement> {
   readonly #timeouts = new SafeTimeout();
   readonly #floor = new MinDurationFloor(this.#timeouts);
   readonly #gate = new DetachGate();
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   readonly #listeners = new ListenerSet();
+  /** Owns the frame's `aria-busy` for the length of a load. */
+  readonly #busy = new AttributeLease<HTMLElement>("aria-busy", this.identifier);
+  /** Owns the frame's `data-frame-loading` for the length of a load. */
+  readonly #loadingHook = new AttributeLease<HTMLElement>("data-frame-loading", this.identifier);
+  /** Owns the `hidden` of the skeleton and overlay a load reveals. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Owns the `inert` a load puts on the content. */
+  readonly #inert = new AttributeLease<HTMLElement>("inert", this.identifier);
   #loading = false;
   /**
    * The optional targets this controller revealed, and the content it marked inert.
@@ -100,20 +127,34 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     if (!this.#loading) return;
     // The newest end signal owns the finish: the floor replaces whatever it was
     // holding rather than letting a second wait stack behind the first.
-    this.#floor.schedule(this.minDurationValue, () => this.#finish());
+    this.#floor.schedule(this.#safeMinDuration, () => this.#finish());
   };
 
   override connect(): void {
     this.#gate.cancel();
-    this.#beforeCache.activate();
     this.#listeners.add(this.element, "turbo:before-fetch-request", this.#onStart);
     this.#listeners.add(this.element, "turbo:frame-load", this.#onEnd);
     this.#listeners.add(this.element, "turbo:fetch-request-error", this.#onEnd);
+    if (this.#loading) return;
+    // The hook says a load is running, and no load of this instance is: the markup
+    // outlived the load that wrote it.
+    const stale = this.element.hasAttribute("data-frame-loading");
+    this.#returnCopied();
+    if (stale) this.dispatch("reconcile", { detail: {} });
+  }
+
+  /** Gives back the hooks a copy of the page carries from a load of an earlier instance. */
+  #returnCopied(): void {
+    this.#busy.return(this.element);
+    this.#loadingHook.return(this.element);
+    for (const region of [...this.skeletonTargets, ...this.overlayTargets]) {
+      this.#hidden.return(region);
+    }
+    for (const content of this.contentTargets) this.#inert.return(content);
   }
 
   override disconnect(): void {
     this.#listeners.dispose();
-    this.#beforeCache.deactivate();
     this.#gate.disconnected(this, () => this.#teardown());
   }
 
@@ -126,47 +167,21 @@ export class FrameLoadingController extends Controller<HTMLElement> {
    * leaving this controller's care, and moving it now would be an unexplained jump.
    */
   #teardown(): void {
-    this.#gate.cancel();
     this.#timeouts.clearAll();
-    this.#floor.cancel();
     if (this.#loading) this.#rewindHooks();
     this.#loading = false;
     this.#previousFocus = null;
   }
 
   /**
-   * Returns the frame to its idle form for the snapshot Turbo is about to take, so
-   * a page reached with the Back button does not restore a frame that is busy and
-   * inert with nothing left to finish it. State only — no `end` event and no focus
-   * move, because the load did not actually complete.
-   *
-   * The load is abandoned rather than paused, so the flag and any finish the floor
-   * still holds drop along with the hooks. A kept finish would surface after the
-   * rewind as exactly the three things this pass exists to avoid — an `end`, a
-   * completion announcement, and a focus move — and a kept flag would leave the
-   * next fetch on a page that survives a cancelled visit skipping the loading
-   * state, its idempotence guard already satisfied.
-   */
-  #rewindForCache(): void {
-    if (!this.#loading) return;
-    this.#loading = false;
-    this.#floor.cancel();
-    this.#rewindHooks();
-    // The fetch does not survive the navigation, so a consumer still painting
-    // "loading" from `start` would never be released by `end`.
-    this.dispatch("reconcile", { detail: {} });
-  }
-
-  /**
-   * Clears every hook the loading state writes. Shared by the three ways a load can
-   * stop — completion, detach, snapshot — so none of them can drift into tidying
-   * only part of it.
+   * Gives back every hook the loading state writes. Shared by the two ways a load can
+   * stop — completion and detach — so neither can drift into tidying only part of it.
    */
   #rewindHooks(): void {
-    this.element.removeAttribute("aria-busy");
-    this.element.removeAttribute("data-frame-loading");
-    if (this.#revealedSkeleton) this.#revealedSkeleton.hidden = true;
-    if (this.#revealedOverlay) this.#revealedOverlay.hidden = true;
+    this.#busy.return(this.element);
+    this.#loadingHook.return(this.element);
+    if (this.#revealedSkeleton) this.#hidden.return(this.#revealedSkeleton);
+    if (this.#revealedOverlay) this.#hidden.return(this.#revealedOverlay);
     this.#revealedSkeleton = null;
     this.#revealedOverlay = null;
     this.#clearInert();
@@ -182,9 +197,23 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     if (this.#loading) this.#revealSkeleton();
   }
 
+  /**
+   * Shows the `skeleton` that stays when an earlier one leaves mid-load, hiding the
+   * departing one first when this controller revealed it. A departure that still
+   * resolves as a target is an in-page move and changes nothing.
+   */
+  skeletonTargetDisconnected(skeleton: HTMLElement): void {
+    if (this.#loading && !this.skeletonTargets.includes(skeleton)) this.#revealSkeleton();
+  }
+
   /** Re-shows an `overlay` that arrived mid-load — the same swap as the skeleton. */
   overlayTargetConnected(): void {
     if (this.#loading) this.#revealOverlay();
+  }
+
+  /** Shows the `overlay` that stays when an earlier one leaves mid-load, as the skeleton does. */
+  overlayTargetDisconnected(overlay: HTMLElement): void {
+    if (this.#loading && !this.overlayTargets.includes(overlay)) this.#revealOverlay();
   }
 
   /**
@@ -198,18 +227,38 @@ export class FrameLoadingController extends Controller<HTMLElement> {
     this.#applyInert();
   }
 
+  /**
+   * Blocks the `content` that stays when an earlier one leaves mid-load, releasing
+   * the departing one first. A departure that still resolves as a target is an
+   * in-page move and changes nothing.
+   */
+  contentTargetDisconnected(content: HTMLElement): void {
+    if (!this.#loading || this.contentTargets.includes(content)) return;
+    this.#clearInert();
+    this.#applyInert();
+  }
+
   /** Reveals the optional `skeleton`, noting it as this controller's to hide again. */
   #revealSkeleton(): void {
-    if (!this.hasSkeletonTarget) return;
-    this.#revealedSkeleton = this.skeletonTarget;
-    this.skeletonTarget.hidden = false;
+    const next = this.hasSkeletonTarget ? this.skeletonTarget : null;
+    this.#revealedSkeleton = this.#reveal(this.#revealedSkeleton, next);
   }
 
   /** Reveals the optional `overlay`, noting it as this controller's to hide again. */
   #revealOverlay(): void {
-    if (!this.hasOverlayTarget) return;
-    this.#revealedOverlay = this.overlayTarget;
-    this.overlayTarget.hidden = false;
+    const next = this.hasOverlayTarget ? this.overlayTarget : null;
+    this.#revealedOverlay = this.#reveal(this.#revealedOverlay, next);
+  }
+
+  /**
+   * Shows `next` and returns it as the element revealed now, first giving back the one
+   * revealed before when that is another element: the reveal follows the first target,
+   * so one that an arrival ahead of it or a departure displaced is not left shown.
+   */
+  #reveal(revealed: HTMLElement | null, next: HTMLElement | null): HTMLElement | null {
+    if (revealed && revealed !== next) this.#hidden.return(revealed);
+    if (next) this.#hidden.write(next, null);
+    return next;
   }
 
   /**
@@ -221,8 +270,8 @@ export class FrameLoadingController extends Controller<HTMLElement> {
   #begin(): void {
     this.#loading = true;
     this.#floor.begin();
-    this.element.setAttribute("aria-busy", "true");
-    this.element.setAttribute("data-frame-loading", "true");
+    this.#busy.write(this.element, "true");
+    this.#loadingHook.write(this.element, "true");
     this.#revealSkeleton();
     this.#revealOverlay();
     this.#applyInert();
@@ -248,12 +297,12 @@ export class FrameLoadingController extends Controller<HTMLElement> {
   /** Marks the content inert to block double-submits while stale (if we own it). */
   #applyInert(): void {
     if (!this.hasContentTarget || this.contentTarget.hasAttribute("inert")) return;
-    this.contentTarget.setAttribute("inert", "");
+    this.#inert.write(this.contentTarget, "");
     this.#inertTarget = this.contentTarget;
   }
 
   #clearInert(): void {
-    this.#inertTarget?.removeAttribute("inert");
+    if (this.#inertTarget) this.#inert.return(this.#inertTarget);
     this.#inertTarget = null;
   }
 
@@ -291,5 +340,15 @@ export class FrameLoadingController extends Controller<HTMLElement> {
       const replacement = document.getElementById(id);
       if (replacement && this.element.contains(replacement)) replacement.focus();
     }
+  }
+  /** Current `minDuration` declaration resolved against its numeric contract. */
+  get #safeMinDuration(): number {
+    return this.#numbers.read(
+      this,
+      "minDuration",
+      this.minDurationValue,
+      FrameLoadingController.values.minDuration.default,
+      FrameLoadingController.valueConstraints.minDuration,
+    );
   }
 }

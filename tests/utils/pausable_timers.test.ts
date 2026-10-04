@@ -84,61 +84,6 @@ describe("PausableTimers", () => {
     expect(timers.isHeld("absent")).toBe(false);
   });
 
-  it("disarms a held key, keeping the hold and dropping the timer", () => {
-    const timers = new PausableTimers<string>();
-    const ran = vi.fn();
-
-    timers.set("a", ran, 1000);
-    timers.pause("a", "focus");
-    timers.disarm("a");
-    expect(timers.isHeld("a")).toBe(true);
-    expect(timers.tracks("a")).toBe(true);
-
-    expect(timers.resume("a", "focus")).toBe(false);
-    expect(timers.tracks("a")).toBe(false);
-    vi.advanceTimersByTime(60_000);
-    expect(ran).not.toHaveBeenCalled();
-  });
-
-  it("disarms a key nothing holds by forgetting it", () => {
-    const timers = new PausableTimers<string>();
-    const ran = vi.fn();
-
-    timers.set("a", ran, 1000);
-    timers.disarm("a");
-    expect(timers.tracks("a")).toBe(false);
-
-    vi.advanceTimersByTime(60_000);
-    expect(ran).not.toHaveBeenCalled();
-  });
-
-  it("leaves a key it does not track alone on disarm", () => {
-    const timers = new PausableTimers<string>();
-
-    timers.disarm("absent");
-
-    expect(timers.tracks("absent")).toBe(false);
-    expect(timers.isHeld("absent")).toBe(false);
-  });
-
-  it("arms a disarmed key again with the timer set while it is held", () => {
-    const timers = new PausableTimers<string>();
-    const first = vi.fn();
-    const second = vi.fn();
-
-    timers.set("a", first, 1000);
-    timers.pause("a", "hover");
-    timers.disarm("a");
-    timers.set("a", second, 700);
-    vi.advanceTimersByTime(5000);
-    expect(second).not.toHaveBeenCalled();
-
-    expect(timers.resume("a", "hover")).toBe(true);
-    vi.advanceTimersByTime(700);
-    expect(second).toHaveBeenCalledOnce();
-    expect(first).not.toHaveBeenCalled();
-  });
-
   it("drops a hold on a key with no timer on clear and on clearAll", () => {
     const timers = new PausableTimers<string>();
 

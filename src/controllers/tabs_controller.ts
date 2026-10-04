@@ -1,6 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { isRtl } from "../utils/logical_scroll";
+import type { StateReason } from "../utils/state_reason";
+import { targetSelector } from "../utils/target_selector";
 
 /**
  * Headless, accessible tabs behavior.
@@ -36,7 +39,7 @@ import { isRtl } from "../utils/logical_scroll";
  * - `ArrowRight`/`ArrowLeft` move to and select the next/previous tab (wrapping);
  *   `Home`/`End` select the first/last tab.
  * - Every selection move is reported: `stimeo--tabs:change` dispatches
- *   `{ index: number, total: number, previous: number }`, after
+ *   `{ index: number, total: number, previous: number, reason: StateReason }`, after
  *   `aria-selected`, the roving `tabindex` and the panels' `hidden` are written
  *   and before focus moves. It is informational, so it is not cancelable.
  *   Reselecting the tab that is already selected, the normalization in
@@ -79,9 +82,14 @@ export class TabsController extends Controller<HTMLElement> {
   }
 
   /** Selects the clicked tab. Bound via `data-action` (click). */
-  select(event: Event): void {
-    const index = this.tabTargets.indexOf(event.currentTarget as HTMLButtonElement);
-    if (index !== -1) this.#selectIndex(index, { focus: false });
+  select(source: Event | HTMLElement): void {
+    const { host, origin, reason } = actionSource(source);
+    const tab = host?.closest<HTMLButtonElement>(targetSelector(this.identifier, "tab"));
+    if (!tab || !this.tabTargets.includes(tab)) return;
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const index = this.tabTargets.indexOf(tab);
+    this.#selectIndex(index, { focus: false }, reason);
   }
 
   /** Implements arrow/Home/End navigation with automatic activation. */
@@ -127,7 +135,7 @@ export class TabsController extends Controller<HTMLElement> {
    * Activates the tab/panel pair at `index`: updates `aria-selected`, the roving
    * `tabindex`, and panel visibility. Optionally moves focus to the new tab.
    */
-  #selectIndex(index: number, { focus }: { focus: boolean }): void {
+  #selectIndex(index: number, { focus }: { focus: boolean }, reason: StateReason = "user"): void {
     const tabs = this.tabTargets;
     const previous = tabs.findIndex((tab) => tab.getAttribute("aria-selected") === "true");
     tabs.forEach((tab, i) => {
@@ -140,7 +148,7 @@ export class TabsController extends Controller<HTMLElement> {
     });
     if (previous !== index && this.#reporting) {
       this.dispatch("change", {
-        detail: { index, total: tabs.length, previous },
+        detail: { index, total: tabs.length, previous, reason },
         cancelable: false,
       });
     }

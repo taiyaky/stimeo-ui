@@ -3,6 +3,7 @@ import { CompositionTracker } from "../utils/composition_tracker";
 import { compileRegExp, parseJsonObject } from "../utils/declared_value";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { halfWidthChar } from "../utils/half_width";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 
 /** Default placeholder tokens → single-char regex sources (user tokens merge over these). */
 const DEFAULT_TOKENS: Readonly<Record<string, string>> = {
@@ -273,7 +274,10 @@ export class InputMaskController extends Controller<HTMLInputElement> {
     this.#reformat("reconcile");
   }
 
+  readonly #morph = new MorphRenderWatcher(() => this.#reformat("reconcile"));
+
   override connect(): void {
+    this.#morph.observe(this.element);
     this.#started = true;
     this.#composition.observe(this.element);
     // Seed the baseline from the DOM so a value that is already masked stays
@@ -283,6 +287,7 @@ export class InputMaskController extends Controller<HTMLInputElement> {
   }
 
   override disconnect(): void {
+    this.#morph.disconnect();
     this.#started = false;
     this.#composition.disconnect();
   }
@@ -344,8 +349,10 @@ export class InputMaskController extends Controller<HTMLInputElement> {
       return;
     }
 
-    input.value = result.masked;
-    this.#restoreCaret(result.tokenFlags, anchor);
+    if (input.value !== result.masked) {
+      input.value = result.masked;
+      this.#restoreCaret(result.tokenFlags, anchor);
+    }
     this.#publish(result, result.masked);
 
     if (result.masked === this.#lastValue) return;

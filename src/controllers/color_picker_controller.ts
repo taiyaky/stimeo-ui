@@ -1,9 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { toFiniteNumber } from "../utils/coerce";
+import { ownerOf } from "../utils/event_owner";
 import { commitField, writeField } from "../utils/field_mirror";
 import { isRtl } from "../utils/logical_scroll";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
 import { OwnedPointerSession } from "../utils/owned_pointer_session";
 
 /** CSS custom property exposing the current color to consumer CSS. */
@@ -74,6 +76,12 @@ interface Hsla {
  * `change` and `reconcile` dispatch
  * `{ value: string, rgba: { r: number, g: number, b: number, a: number } }`.
  *
+ * All published state is settled before its reports. A synchronous listener
+ * that confirms another value leaves that newer confirmation to report itself;
+ * reports still pending for the replaced value are not sent. A read-only listener
+ * or a confirmation that moves no published value leaves pending reports intact.
+ * An event already being dispatched still reaches its remaining listeners.
+ *
  * @remarks
  * Behavior only — the swatch/gradient visuals are the consumer's CSS/canvas, fed
  * by `--stimeo--color`. Only the consumer knows whether a channel track mirrors
@@ -106,10 +114,9 @@ interface Hsla {
  * and stay in the DOM as written, which is what makes the restored snapshot show the
  * current color.
  *
- * The internal model is integer HSL(A), so a hex → HSL → hex round-trip is not
- * exactly bijective: a typed hex can normalize to a near (not identical) value
- * once the HSL sliders are touched. This keeps the model small and zero-dep; use a
- * dedicated color library on the consumer side if exact hex preservation matters.
+ * Parsed hex bytes are kept exactly until a channel of the integer HSL(A)
+ * editing model moves. A boundary key that leaves that model unchanged keeps
+ * those bytes, and event RGBA channels describe the bytes published as hex.
  *
  * While `alpha` is disabled the model stays opaque and an alpha slider authored
  * anyway edits nothing, so the hex and `change`'s `rgba.a` never disagree.
@@ -120,6 +127,15 @@ interface Hsla {
  * `stimeo--color-picker:reconcile` with the same detail. Neither fires on connect.
  */
 export class ColorPickerController extends Controller<HTMLElement> {
+  readonly #fieldWrites = new WeakMap<HTMLInputElement, number>();
+
+  readonly #moves = new MoveCounter();
+  #move = 0;
+  #adoptedValue: string | null = null;
+  #adoptedAlpha = false;
+  /** Exact parsed bytes, kept until an editing channel actually moves. */
+  #exactHex: string | null = null;
+
   static override targets = ["slider", "hex", "preview", "field"];
   static override values = {
     value: { type: String, default: "#000000" },
@@ -131,6 +147,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
 
   declare readonly sliderTargets: HTMLElement[];
   declare readonly hexTarget: HTMLInputElement;
+  declare readonly hexTargets: HTMLInputElement[];
   declare readonly hasHexTarget: boolean;
   declare readonly previewTargets: HTMLElement[];
   declare readonly fieldTargets: HTMLInputElement[];
@@ -151,14 +168,6 @@ export class ColorPickerController extends Controller<HTMLElement> {
   #committedHex: string | null = null;
 
   /**
-   * Whether the paint about to run was asked for by this picker's own controls.
-   * The `value` Value is shared with the page — application code and a Turbo
-   * morph write it too — so the form fields and the hex input take their "did
-   * the user commit this" answer from the route, not from the Value.
-   */
-  #movedByUser = false;
-
-  /**
    * The hex this picker last wrote into its hex input, or `null` before it wrote
    * one. A repaint the page drives compares with it rather than with the input's
    * text, so a color that did not move leaves what the reader is typing alone.
@@ -166,21 +175,28 @@ export class ColorPickerController extends Controller<HTMLElement> {
   #writtenHex: string | null = null;
 
   /**
+   * The hex input a repaint last wrote as the one in use, or `null` before one was.
+   * A repaint writes the hex input it resolves whenever that is another element, so
+   * an input that takes over from an earlier one shows the current color.
+   */
+  #writtenHexInput: HTMLInputElement | null = null;
+
+  /**
    * Collapses a morph that swaps render inputs into one repaint, and refuses the
    * pass Stimulus delivers before `connect()`.
    */
-  readonly #repaint = new MicrotaskCoalescer(() => this.#reconcileColor());
+  readonly #repaint = new MorphRenderWatcher(() => this.#reconcileColor());
 
   /** Seeds the model from the initial hex value and renders every surface. */
   override connect(): void {
-    this.#repaint.activate();
+    this.#repaint.observe(this.element);
     this.#adoptValue();
     this.#render();
   }
 
   /** Cancels any active pointer drag so document listeners never leak. */
   override disconnect(): void {
-    this.#repaint.cancel();
+    this.#repaint.disconnect();
     this.#endDrag();
   }
 
@@ -215,6 +231,14 @@ export class ColorPickerController extends Controller<HTMLElement> {
   /** Fills a hex input inserted or replaced at runtime with the current color. */
   hexTargetConnected(hex: HTMLInputElement): void {
     this.#writeHex(hex, this.#hexString());
+    // Only the input a repaint resolves is recorded, so one arriving behind it leaves
+    // text typed into the input in use alone.
+    if (hex === this.hexTarget) this.#writtenHexInput = hex;
+  }
+
+  /** Repaints so the hex input that stays when an earlier one leaves shows the current color. */
+  hexTargetDisconnected(): void {
+    this.#repaint.schedule();
   }
 
   /** Fills a form field inserted or replaced at runtime with the current color. */
@@ -234,6 +258,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
     const channel = this.#editableChannel(slider);
     if (!channel) return;
 
+    this.#adoptPendingValue();
     const [min, max] = this.#rangeOf(slider, channel);
     const value = this.#color[channel];
     let next: number | null = null;
@@ -308,29 +333,51 @@ export class ColorPickerController extends Controller<HTMLElement> {
     this.#drag = drag;
   }
 
-  /** Parses the hex input on confirm and syncs every channel + surface. */
-  onHexInput(): void {
-    if (!this.hasHexTarget) return;
-    const parsed = hexToHsla(this.hexTarget.value);
+  /**
+   * Parses the hex input the confirming event came from and syncs every channel +
+   * surface. Called without an event, it reads the hex input in use; an event that
+   * no hex input dispatched commits nothing.
+   */
+  onHexInput(event?: Event): void {
+    const input = this.#confirmingHexInput(event);
+    if (!input) return;
+    const parsed = hexToHsla(input.value);
     if (!parsed) {
       // Reject invalid input by restoring the last valid hex.
-      this.#writeHex(this.hexTarget, this.#hexString());
+      this.#writeHex(input, this.#hexString());
       return;
     }
-    this.#color = this.#opaqueUnlessEnabled(parsed);
-    this.#commitColor();
+    this.#color = this.#opaqueUnlessEnabled(parsed.color);
+    this.#exactHex = parsed.hex;
+    this.#commitColor(input);
+  }
+
+  /** The hex input a confirming event came from, or the one in use for a call with no event. */
+  #confirmingHexInput(event?: Event): HTMLInputElement | null {
+    if (event) return ownerOf(this.hexTargets, event.target);
+    return this.hasHexTarget ? this.hexTarget : null;
   }
 
   /** Replaces the model with the color `value` names, leaving an unparsable one alone. */
   #adoptValue(): void {
+    this.#adoptedValue = this.valueValue;
+    this.#adoptedAlpha = this.alphaValue;
     const parsed = hexToHsla(this.valueValue);
-    if (parsed) this.#color = this.#opaqueUnlessEnabled(parsed);
+    if (parsed) {
+      this.#color = this.#opaqueUnlessEnabled(parsed.color);
+      this.#exactHex = parsed.hex;
+    }
+  }
+
+  /** Reads a page declaration that has not reached its repaint before an action. */
+  #adoptPendingValue(): void {
+    if (this.valueValue !== this.#adoptedValue || this.alphaValue !== this.#adoptedAlpha) {
+      this.#adoptValue();
+    }
   }
 
   /**
-   * The model a parsed color implies: alpha only survives while its channel is
-   * enabled, because `hexString()` would otherwise emit `#RRGGBB` while `change`
-   * reported `rgba.a < 1`.
+   * Keeps the alpha slider at full opacity while its channel is disabled.
    */
   #opaqueUnlessEnabled(parsed: Hsla): Hsla {
     return this.alphaValue ? parsed : { ...parsed, alpha: 100 };
@@ -338,7 +385,10 @@ export class ColorPickerController extends Controller<HTMLElement> {
 
   /** Clamps and snaps one channel to an integer, then re-renders + emits change. */
   #setChannel(channel: Channel, raw: number, min: number, max: number): void {
-    this.#color[channel] = Math.round(Math.min(max, Math.max(min, raw)));
+    this.#adoptPendingValue();
+    const next = Math.round(Math.min(max, Math.max(min, raw)));
+    if (next !== this.#color[channel]) this.#exactHex = null;
+    this.#color[channel] = next;
     this.#commitColor();
   }
 
@@ -350,16 +400,29 @@ export class ColorPickerController extends Controller<HTMLElement> {
    * The color is written into `value` first — the one path that writes it — so a
    * Turbo snapshot and a morph read the color the user picked, and a listener of
    * the field's native `change` already finds it there.
+   *
+   * @param source - The hex input the reader committed in, which then shows the
+   *   color in its canonical form even while it waits behind the one in use.
    */
-  #commitColor(): void {
+  #commitColor(source: HTMLInputElement | null = null): void {
     const previous = this.#committedHex;
     const hex = this.#hexString();
-    if (this.valueValue !== hex) this.valueValue = hex;
-    this.#movedByUser = true;
-    this.#render();
-    if (this.#committedHex !== previous) {
-      this.dispatch("change", { detail: this.#settledDetail() });
+    const changed = hex !== previous;
+    if (changed) {
+      if (this.valueValue !== hex) this.valueValue = hex;
+      this.#adoptedValue = hex;
+      this.#adoptedAlpha = this.alphaValue;
+      this.#move = this.#moves.record();
     }
+    const move = this.#move;
+    const fields = this.#render(true);
+    if (source) this.#writeHex(source, hex);
+    const detail = this.#settledDetail();
+    for (const [field, write] of fields) {
+      if (field.value === hex && this.#fieldWrites.get(field) === write) commitField(field);
+    }
+    if (!this.#moves.isLatest(move)) return;
+    if (changed) this.dispatch("change", { detail });
   }
 
   /**
@@ -367,27 +430,32 @@ export class ColorPickerController extends Controller<HTMLElement> {
    * `value` Value is left as it is.
    *
    * The hex input is written for the reader's own commit, which shows the color
-   * in its canonical form, and otherwise only when the hex it shows moved: a
-   * repaint the page drives that leaves the color where it is keeps text the
+   * in its canonical form, and otherwise only when the hex it shows moved or the
+   * input it resolves is another element than the one it last wrote: a repaint the
+   * page drives that leaves the color and the input where they are keeps text the
    * reader has typed there and not committed.
    *
    * @stimeoRenderRoot
    */
-  #render(): void {
-    const byUser = this.#movedByUser;
-    this.#movedByUser = false;
+  #render(byUser = false): [HTMLInputElement, number][] {
+    const fields: [HTMLInputElement, number][] = [];
     for (const slider of this.sliderTargets) this.#renderSlider(slider);
 
     const hex = this.#hexString();
     this.#committedHex = hex;
-    if (this.hasHexTarget && (byUser || hex !== this.#writtenHex)) {
-      this.#writeHex(this.hexTarget, hex);
+    if (this.hasHexTarget) {
+      const input = this.hexTarget;
+      if (byUser || hex !== this.#writtenHex || input !== this.#writtenHexInput) {
+        this.#writtenHexInput = input;
+        this.#writeHex(input, hex);
+      }
     }
     for (const field of this.fieldTargets) {
-      if (this.#mirrorColor(field, hex) && byUser) commitField(field);
+      if (this.#mirrorColor(field, hex)) fields.push([field, this.#fieldWrites.get(field) ?? 0]);
     }
     for (const preview of this.previewTargets) this.#publishColor(preview, hex);
     this.#publishColor(this.element, hex);
+    return fields;
   }
 
   /** Writes one slider's announced range, value, and value text, skipping equal ones. */
@@ -419,7 +487,9 @@ export class ColorPickerController extends Controller<HTMLElement> {
    * @returns Whether the input's value moved.
    */
   #mirrorColor(input: HTMLInputElement, hex: string): boolean {
-    return writeField(input, hex);
+    if (!writeField(input, hex)) return false;
+    this.#fieldWrites.set(input, (this.#fieldWrites.get(input) ?? 0) + 1);
+    return true;
   }
 
   /** Publishes the color as the consumer's CSS hook, skipping an equal value. */
@@ -433,33 +503,44 @@ export class ColorPickerController extends Controller<HTMLElement> {
    * Repaints after a declarative input changed at runtime and reports a color this
    * controller settled on. Disabling alpha drops it from the model and an outside
    * `value` names another color, so the committed color can move without a user
-   * edit; `change` stays reserved for the picker's own actions.
+   * edit; `change` stays reserved for the picker's own actions. A drag on a slider
+   * the picker no longer edits ends here.
    */
   #reconcileColor(): void {
+    if (this.#drag && !this.#editableChannel(this.#drag.slider)) this.#endDrag();
     // Compared against the last rendered color, not against the model: the Value
     // callback that scheduled this pass has already moved the Values, so
     // re-deriving the "before" state here would always match the "after" one.
     const previous = this.#committedHex;
-    // A `value` that equals the rendered color is the user's own commit, and
-    // re-seeding from it would round-trip the model through hex and drop the hue
-    // and saturation a gray cannot carry. Any other `value` is the page's: the
-    // model was seeded from it, or it is new, so adopting it is safe.
-    if (previous !== null && this.valueValue !== previous) this.#adoptValue();
+    /** A consumed declaration leaves hue and saturation retained in achromatic colors. */
+    this.#adoptPendingValue();
     if (!this.alphaValue) this.#color.alpha = 100;
     this.#render();
     if (previous !== null && this.#committedHex !== previous) {
+      this.#move = this.#moves.record();
       this.dispatch("reconcile", { detail: this.#settledDetail() });
     }
   }
 
   /** The settled color as event detail, shared by both report paths. */
   #settledDetail(): { value: string; rgba: { r: number; g: number; b: number; a: number } } {
-    const rgb = hslToRgb(this.#color.hue, this.#color.saturation, this.#color.lightness);
-    return { value: this.#hexString(), rgba: { ...rgb, a: this.#color.alpha / 100 } };
+    const value = this.#hexString();
+    return {
+      value,
+      rgba: {
+        r: Number.parseInt(value.slice(1, 3), 16),
+        g: Number.parseInt(value.slice(3, 5), 16),
+        b: Number.parseInt(value.slice(5, 7), 16),
+        a: this.alphaValue ? Number.parseInt(value.slice(7, 9), 16) / 255 : 1,
+      },
+    };
   }
 
   /** The current color as `#RRGGBB`, or `#RRGGBBAA` when alpha is enabled. */
   #hexString(): string {
+    if (this.#exactHex !== null) {
+      return this.alphaValue ? this.#exactHex : this.#exactHex.slice(0, 7);
+    }
     const rgb = hslToRgb(this.#color.hue, this.#color.saturation, this.#color.lightness);
     const base = `#${hex2(rgb.r)}${hex2(rgb.g)}${hex2(rgb.b)}`;
     if (!this.alphaValue) return base;
@@ -585,7 +666,7 @@ function rgbToHsl(r: number, g: number, b: number): { h: number; s: number; l: n
  * Parses `#RGB`, `#RGBA`, `#RRGGBB`, or `#RRGGBBAA` into the HSLA model, or
  * returns null when the string is not a valid hex color.
  */
-function hexToHsla(input: string): Hsla | null {
+function hexToHsla(input: string): { color: Hsla; hex: string } | null {
   const hex = input.trim().replace(/^#/, "");
   if (!/^(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(hex)) return null;
 
@@ -604,5 +685,8 @@ function hexToHsla(input: string): Hsla | null {
   const a = full.length === 8 ? Number.parseInt(full.slice(6, 8), 16) : 255;
 
   const { h, s, l } = rgbToHsl(r, g, b);
-  return { hue: h, saturation: s, lightness: l, alpha: Math.round((a / 255) * 100) };
+  return {
+    color: { hue: h, saturation: s, lightness: l, alpha: Math.round((a / 255) * 100) },
+    hex: `#${full.slice(0, 6).toLowerCase()}${hex2(a)}`,
+  };
 }

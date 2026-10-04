@@ -342,6 +342,43 @@ describe("PopoverController", () => {
     expect(panel().hidden).toBe(false);
   });
 
+  it("keeps an open panel open when it moves within the element", async () => {
+    trigger().click();
+    const moved = panel();
+    const wrapper = document.createElement("div");
+    moved.parentElement?.append(wrapper);
+    wrapper.append(moved);
+    await tick();
+
+    // The node never left the element, so it is still the panel this popover shows.
+    expect(moved.hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    const press = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    moved.dispatchEvent(press);
+    expect(press.defaultPrevented).toBe(true);
+    expect(moved.hidden).toBe(true);
+  });
+
+  it("keeps an open panel open when another panel target leaves", async () => {
+    const other = document.createElement("div");
+    other.setAttribute("data-stimeo--popover-target", "panel");
+    other.hidden = true;
+    panel().after(other);
+    await tick();
+    trigger().click();
+    expect(panel().hidden).toBe(false);
+
+    other.remove();
+    await tick();
+
+    // Only the panel this popover shows holds what the open state lent.
+    expect(panel().hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    const press = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    panel().dispatchEvent(press);
+    expect(press.defaultPrevented).toBe(true);
+  });
+
   it("cleans up closeOnScroll before returning when the panel target was removed", async () => {
     disconnectAndStopApplication(application);
     await start(defaultPanelInner, true);
@@ -359,6 +396,216 @@ describe("PopoverController", () => {
 
     window.dispatchEvent(new Event("scroll"));
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  // --- A trigger that takes over ---
+
+  /**
+   * The trigger carries the open state in `aria-expanded`. A trigger that takes over —
+   * in one task, or after an earlier one leaves in a later task — carries that state,
+   * silently.
+   */
+  describe("a trigger that takes over", () => {
+    const root = () => query("[data-controller='stimeo--popover']");
+    const firstTrigger = () => query<HTMLButtonElement>("[data-stimeo--popover-target='trigger']");
+    /** A server-rendered copy of the trigger that still reads closed. */
+    const staleTrigger = (): HTMLButtonElement => {
+      const copy = trigger().cloneNode(true) as HTMLButtonElement;
+      copy.id = "trigger-successor";
+      copy.setAttribute("aria-expanded", "false");
+      return copy;
+    };
+
+    it("reflects the open panel into a trigger replaced in one task", async () => {
+      trigger().click();
+      const successor = staleTrigger();
+      trigger().replaceWith(successor);
+      await tick();
+
+      expect(firstTrigger()).toBe(successor);
+      expect(successor.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("reflects the open panel into the trigger that stays after an earlier one leaves", async () => {
+      trigger().click();
+      const original = trigger();
+      const successor = staleTrigger();
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(firstTrigger()).toBe(successor);
+      expect(successor.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("reflects a panel the page hid into a trigger replaced in one task", async () => {
+      trigger().click();
+      panel().hidden = true;
+      const successor = staleTrigger();
+      successor.setAttribute("aria-expanded", "true");
+      trigger().replaceWith(successor);
+      await tick();
+
+      expect(successor.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("reflects a panel the page hid into the trigger that stays after an earlier one leaves", async () => {
+      trigger().click();
+      panel().hidden = true;
+      const original = trigger();
+      const successor = staleTrigger();
+      successor.setAttribute("aria-expanded", "true");
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(successor.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("reflects the closed panel into a trigger that takes over authored expanded", async () => {
+      const successor = staleTrigger();
+      successor.setAttribute("aria-expanded", "true");
+      trigger().replaceWith(successor);
+      await tick();
+
+      expect(successor.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("brings a trigger that arrives after the only one left to the open state", async () => {
+      trigger().click();
+      const late = staleTrigger();
+      trigger().remove();
+      await tick();
+
+      root().prepend(late);
+      await tick();
+
+      expect(late.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("writes nothing when a trigger arrives behind the current one", async () => {
+      trigger().click();
+      const writes: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => writes.push(...records));
+      observer.observe(root(), { attributes: true, subtree: true });
+      const behind = staleTrigger();
+      trigger().after(behind);
+      await tick();
+      writes.push(...observer.takeRecords());
+      observer.disconnect();
+
+      expect(writes.map((write) => write.attributeName)).toEqual([]);
+      expect(behind.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("reports nothing while it moves the open state", async () => {
+      trigger().click();
+      const events = captureStateEvents("stimeo--popover");
+      const changes: Event[] = [];
+      const onChange = (event: Event): void => {
+        changes.push(event);
+      };
+      document.addEventListener("change", onChange);
+      const original = trigger();
+      original.after(staleTrigger());
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(events.seen).toEqual([]);
+      expect(changes).toEqual([]);
+      events.stop();
+      document.removeEventListener("change", onChange);
+    });
+
+    it("tolerates the removal of the only trigger", () => {
+      trigger().click();
+      const only = trigger();
+      only.remove();
+
+      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      expect(() => controller().triggerTargetDisconnected(only)).not.toThrow();
+    });
+
+    it("writes nothing into the trigger that stays once it has disconnected", async () => {
+      const original = trigger();
+      const successor = staleTrigger();
+      original.after(successor);
+      await tick();
+      original.click();
+      const instance = controller();
+      instance.disconnect();
+      original.remove();
+      instance.triggerTargetDisconnected(original);
+      instance.triggerTargetConnected();
+      await tick();
+
+      expect(successor.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("gives a trigger that stops being the trigger its own aria-expanded back", async () => {
+      trigger().click();
+      const former = trigger();
+      const successor = staleTrigger();
+      former.after(successor);
+      await tick();
+
+      // The element stays; only the attribute naming it the trigger goes.
+      former.removeAttribute("data-stimeo--popover-target");
+      await tick();
+
+      expect(former.getAttribute("aria-expanded")).toBe("false");
+      expect(successor.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("gives the trigger its own aria-expanded back when the popover loses its controller", async () => {
+      trigger().click();
+      const departed = trigger();
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(departed.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps a value the page wrote on a trigger that stops being the trigger", async () => {
+      trigger().click();
+      const former = trigger();
+      former.setAttribute("aria-expanded", "mixed");
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(former.getAttribute("aria-expanded")).toBe("mixed");
+    });
+
+    it("keeps what it wrote on a trigger that moves within the popover", async () => {
+      trigger().click();
+      const moving = trigger();
+      const writes: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => writes.push(...records));
+      observer.observe(moving, { attributes: true, attributeFilter: ["aria-expanded"] });
+
+      root().append(moving);
+      await tick();
+      writes.push(...observer.takeRecords());
+      observer.disconnect();
+
+      expect(moving.getAttribute("aria-expanded")).toBe("true");
+      expect(writes).toEqual([]);
+    });
+
+    it("keeps what it wrote when the whole popover leaves the page", async () => {
+      trigger().click();
+      const kept = trigger();
+
+      root().remove();
+      await tick();
+
+      expect(kept.getAttribute("aria-expanded")).toBe("true");
+    });
   });
 
   // --- State events ---
@@ -483,6 +730,356 @@ describe("PopoverController", () => {
     });
   });
 
+  // --- What the open panel holds ---
+
+  describe("what the open panel holds", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--popover");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    const root = () => query("[data-controller='stimeo--popover']");
+
+    /**
+     * Presses Escape at the document with focus on the body, where the layer
+     * claims a press, and reports whether a layer consumed it.
+     */
+    const pressEscape = (): boolean => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement) active.blur();
+      const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+      document.dispatchEvent(press);
+      return press.defaultPrevented;
+    };
+
+    /**
+     * Rewrites `closeOnScroll` the way a morph does, lets Stimulus deliver the
+     * callback, and delivers it once more, since a repeated delivery must change
+     * nothing either.
+     */
+    const setCloseOnScroll = async (on: boolean): Promise<void> => {
+      root().setAttribute("data-stimeo--popover-close-on-scroll-value", String(on));
+      await tick();
+      controller().closeOnScrollValueChanged();
+    };
+
+    /** A server-rendered replacement for the panel, as a morph swaps it in. */
+    const freshPanel = (): HTMLElement => {
+      const element = document.createElement("div");
+      element.id = "pop";
+      element.setAttribute("data-stimeo--popover-target", "panel");
+      element.setAttribute("role", "dialog");
+      element.setAttribute("aria-label", "Edit profile");
+      element.hidden = true;
+      element.innerHTML = '<input id="fresh-field" type="text" aria-label="Name" />';
+      return element;
+    };
+
+    const leaveBy = {
+      "an outside click": () => query<HTMLButtonElement>("#outside").click(),
+      "focus leaving for the outside": () =>
+        query("#field").dispatchEvent(
+          new FocusEvent("focusout", { bubbles: true, relatedTarget: query("#outside") }),
+        ),
+    } as const;
+
+    for (const [how, leave] of Object.entries(leaveBy)) {
+      for (const hiddenByPage of [false, true]) {
+        it(`releases what the panel holds at ${how} (hidden by the page: ${hiddenByPage})`, async () => {
+          disconnectAndStopApplication(application);
+          await start(defaultPanelInner, true);
+          trigger().click();
+          capture.clear();
+          // The page hides the open panel itself, leaving the element in place.
+          if (hiddenByPage) panel().hidden = true;
+          expect(trigger().getAttribute("aria-expanded")).toBe("true");
+
+          leave();
+
+          expect(panel().hidden).toBe(true);
+          expect(trigger().getAttribute("aria-expanded")).toBe("false");
+          expect(pressEscape()).toBe(false);
+          // No scroll listener is left: a panel shown again by hand stays shown.
+          panel().hidden = false;
+          window.dispatchEvent(new Event("scroll"));
+          expect(panel().hidden).toBe(false);
+          // A panel the page already hid reads closed, so closing it moves nothing to report.
+          expect(capture.seen.length).toBe(hiddenByPage ? 0 : 1);
+        });
+      }
+
+      it(`closes a panel the page showed itself at ${how}, holding nothing`, () => {
+        panel().hidden = false;
+        leave();
+        expect(panel().hidden).toBe(true);
+        expect(capture.names()).toEqual(["close"]);
+      });
+    }
+
+    it("releases what a panel the page hid holds at the next Escape, which it consumes once", async () => {
+      disconnectAndStopApplication(application);
+      await start(defaultPanelInner, true);
+      trigger().click();
+      capture.clear();
+      panel().hidden = true;
+
+      // The trigger still reads expanded, so the press collapses it.
+      expect(pressEscape()).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(pressEscape()).toBe(false);
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("releases what a panel the page hid holds at the next dismissing scroll", async () => {
+      disconnectAndStopApplication(application);
+      await start(defaultPanelInner, true);
+      trigger().click();
+      capture.clear();
+      panel().hidden = true;
+
+      window.dispatchEvent(new Event("scroll"));
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(pressEscape()).toBe(false);
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("writes nothing when focus leaves the trigger of a closed popover", () => {
+      const observer = new MutationObserver(() => {});
+      observer.observe(root(), { attributes: true, subtree: true });
+
+      // Tabbing past a closed popover's trigger is not a close.
+      trigger().dispatchEvent(
+        new FocusEvent("focusout", { bubbles: true, relatedTarget: query("#outside") }),
+      );
+      expect(observer.takeRecords()).toEqual([]);
+      observer.disconnect();
+      expect(capture.seen).toEqual([]);
+    });
+
+    it("keeps holding the layer and aria-expanded while the open panel stays", async () => {
+      trigger().click();
+      await tick();
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(pressEscape()).toBe(true);
+      expect(panel().hidden).toBe(true);
+    });
+
+    it("releases the layer, the scroll dismissal and aria-expanded when the open panel leaves", async () => {
+      disconnectAndStopApplication(application);
+      await start(defaultPanelInner, true);
+      trigger().click();
+      capture.clear();
+
+      const departed = panel();
+      departed.remove();
+      await tick();
+
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(departed.hidden).toBe(true);
+      expect(pressEscape()).toBe(false);
+      // No scroll listener is left: a panel put back and shown by hand stays shown.
+      root().append(departed);
+      departed.hidden = false;
+      window.dispatchEvent(new Event("scroll"));
+      expect(departed.hidden).toBe(false);
+      // Target churn is not a state move anyone made, so it reports nothing.
+      expect(capture.seen).toEqual([]);
+    });
+
+    for (const order of ["removed first", "added first"] as const) {
+      it(`hands the next open to a panel a morph swapped in (${order})`, async () => {
+        disconnectAndStopApplication(application);
+        await start(defaultPanelInner, true);
+        trigger().click();
+        capture.clear();
+
+        const departed = panel();
+        const arrived = freshPanel();
+        if (order === "removed first") {
+          departed.replaceWith(arrived);
+        } else {
+          departed.after(arrived);
+          await tick();
+          departed.remove();
+        }
+        await tick();
+
+        expect(trigger().getAttribute("aria-expanded")).toBe("false");
+        expect(arrived.hidden).toBe(true);
+        expect(pressEscape()).toBe(false);
+        expect(capture.seen).toEqual([]);
+
+        trigger().click();
+        expect(arrived.hidden).toBe(false);
+        expect(document.activeElement).toBe(query("#fresh-field"));
+        window.dispatchEvent(new Event("scroll"));
+        expect(arrived.hidden).toBe(true);
+        // The scroll close released the one layer this open took.
+        expect(pressEscape()).toBe(false);
+        expect(capture.names()).toEqual(["open", "close"]);
+        expect(capture.reasons()).toEqual(["user", "scroll"]);
+      });
+    }
+
+    it("writes the closed state onto a replacement panel that arrives shown", async () => {
+      trigger().click();
+      const departed = panel();
+      const arrived = freshPanel();
+      arrived.hidden = false;
+      departed.replaceWith(arrived);
+      await tick();
+      expect(arrived.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(capture.names()).toEqual(["open"]);
+    });
+
+    it("leaves the DOM alone when the panel's disconnect follows the controller's", async () => {
+      disconnectAndStopApplication(application);
+      await start(defaultPanelInner, true);
+      trigger().click();
+      const shown = panel();
+
+      // Stimulus tears down the controller first, then each of its targets.
+      controller().disconnect();
+      controller().panelTargetDisconnected(shown);
+      expect(shown.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(pressEscape()).toBe(false);
+      window.dispatchEvent(new Event("scroll"));
+      expect(shown.hidden).toBe(false);
+
+      // The same instance reconnects and holds exactly one layer again.
+      controller().connect();
+      trigger().click();
+      expect(pressEscape()).toBe(true);
+      expect(shown.hidden).toBe(true);
+      expect(pressEscape()).toBe(false);
+    });
+
+    it("releases once when the open panel leaves before the controller disconnects", async () => {
+      trigger().click();
+      const departed = panel();
+      departed.remove();
+      await tick();
+      controller().panelTargetDisconnected(departed);
+      controller().disconnect();
+      controller().panelTargetDisconnected(departed);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(pressEscape()).toBe(false);
+      expect(capture.names()).toEqual(["open"]);
+    });
+
+    it("wires the scroll dismissal when closeOnScroll turns on while open", async () => {
+      trigger().click();
+      window.dispatchEvent(new Event("scroll"));
+      expect(panel().hidden).toBe(false);
+
+      await setCloseOnScroll(true);
+      expect(panel().hidden).toBe(false);
+      expect(capture.names()).toEqual(["open"]);
+      window.dispatchEvent(new Event("scroll"));
+      expect(panel().hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(capture.names()).toEqual(["open", "close"]);
+      expect(capture.reasons()).toEqual(["user", "scroll"]);
+    });
+
+    it("releases the scroll dismissal when closeOnScroll turns off while open", async () => {
+      disconnectAndStopApplication(application);
+      await start(defaultPanelInner, true);
+      trigger().click();
+      capture.clear();
+
+      await setCloseOnScroll(false);
+      window.dispatchEvent(new Event("scroll"));
+      expect(panel().hidden).toBe(false);
+      // The Escape layer is untouched by the flip.
+      expect(pressEscape()).toBe(true);
+      expect(panel().hidden).toBe(true);
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["escape"]);
+    });
+
+    it("wires nothing while closed and reads closeOnScroll afresh at each open", async () => {
+      await setCloseOnScroll(true);
+      window.dispatchEvent(new Event("scroll"));
+      expect(panel().hidden).toBe(true);
+      expect(capture.seen).toEqual([]);
+
+      trigger().click();
+      window.dispatchEvent(new Event("scroll"));
+      expect(panel().hidden).toBe(true);
+
+      await setCloseOnScroll(false);
+      trigger().click();
+      window.dispatchEvent(new Event("scroll"));
+      expect(panel().hidden).toBe(false);
+      expect(capture.reasons()).toEqual(["user", "scroll", "user"]);
+    });
+
+    it("subscribes once when a subscriber turns closeOnScroll on from the open handler", async () => {
+      let flipped = false;
+      root().addEventListener("stimeo--popover:open", () => {
+        if (flipped) return;
+        flipped = true;
+        root().setAttribute("data-stimeo--popover-close-on-scroll-value", "true");
+        controller().closeOnScrollValueChanged();
+      });
+      trigger().click();
+      await tick();
+      window.dispatchEvent(new Event("scroll"));
+      expect(panel().hidden).toBe(true);
+
+      // A second subscription would outlive the close and dismiss the next open.
+      await setCloseOnScroll(false);
+      trigger().click();
+      window.dispatchEvent(new Event("scroll"));
+      expect(panel().hidden).toBe(false);
+      expect(capture.reasons()).toEqual(["user", "scroll", "user"]);
+    });
+
+    it("holds nothing for a panel whose controller a subscriber unloads from the open handler", async () => {
+      disconnectAndStopApplication(application);
+      await start(defaultPanelInner, true);
+      let unloaded = false;
+      root().addEventListener("stimeo--popover:open", () => {
+        if (unloaded) return;
+        unloaded = true;
+        application.unload("stimeo--popover");
+      });
+      trigger().click();
+      expect(unloaded).toBe(true);
+      expect(panel().contains(document.activeElement)).toBe(false);
+      expect(pressEscape()).toBe(false);
+      window.dispatchEvent(new Event("scroll"));
+      expect(panel().hidden).toBe(false);
+    });
+
+    it("wires nothing when the open handler closes the panel again", async () => {
+      disconnectAndStopApplication(application);
+      await start(defaultPanelInner, true);
+      let closed = false;
+      root().addEventListener("stimeo--popover:open", () => {
+        if (closed) return;
+        closed = true;
+        controller().close();
+        root().setAttribute("data-stimeo--popover-close-on-scroll-value", "true");
+        controller().closeOnScrollValueChanged();
+      });
+      trigger().click();
+      expect(panel().hidden).toBe(true);
+      expect(pressEscape()).toBe(false);
+      panel().hidden = false;
+      window.dispatchEvent(new Event("scroll"));
+      expect(panel().hidden).toBe(false);
+    });
+  });
+
   // --- Re-entry from a subscriber ---
 
   describe("re-entry from a subscriber", () => {
@@ -495,6 +1092,19 @@ describe("PopoverController", () => {
 
       expect(panel().hidden).toBe(true);
       expect(panel().contains(document.activeElement)).toBe(false);
+    });
+
+    it("takes no layer and no focus when the open handler hides the panel itself", () => {
+      query("[data-controller='stimeo--popover']").addEventListener("stimeo--popover:open", () => {
+        panel().hidden = true;
+      });
+
+      controller().open();
+
+      expect(panel().contains(document.activeElement)).toBe(false);
+      const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+      document.dispatchEvent(press);
+      expect(press.defaultPrevented).toBe(false);
     });
   });
 });

@@ -86,6 +86,16 @@ describe("runCheckTool", () => {
     expect(() => runCheckTool(manifest, ["markup"])).toThrow(InvalidToolArgsError);
   });
 
+  it("names a non-object argument value as such, for every tool", () => {
+    for (const name of ["stimeo_check", "stimeo_catalog", "stimeo_controller", "stimeo_example"]) {
+      for (const args of ["markup", ["markup"], [], 7, true]) {
+        expect(() => callTool(context, name, args)).toThrow(
+          new InvalidToolArgsError("Tool arguments must be an object."),
+        );
+      }
+    }
+  });
+
   it("rejects a non-string filename", () => {
     expect(() => runCheckTool(manifest, { source: "<div></div>", filename: 3 })).toThrow(
       InvalidToolArgsError,
@@ -159,6 +169,12 @@ describe("runControllerTool", () => {
     expect(() => runControllerTool(manifest, { id: "nope" })).toThrow(ToolExecutionError);
   });
 
+  it("points straight to the catalog when no identifier is near an unknown id", () => {
+    expect(() => runControllerTool(manifest, { id: "nope" })).toThrow(
+      /^Unknown controller "nope"\. Use stimeo_catalog to list available controllers\.$/,
+    );
+  });
+
   it("rejects prototype-inherited keys as unknown controllers", () => {
     // The manifest is parsed JSON: bare bracket access would resolve these to
     // Object.prototype members and fake a successful lookup.
@@ -189,6 +205,12 @@ describe("runExampleTool", () => {
 
   it("throws a tool execution error (not an args error) for unknown ids", () => {
     expect(() => runExampleTool(examples, { id: "nope" })).toThrow(ToolExecutionError);
+  });
+
+  it("points straight to the catalog when no identifier is near an unknown id", () => {
+    expect(() => runExampleTool(examples, { id: "nope" })).toThrow(
+      /^No example for controller "nope"\. Use stimeo_catalog to list available controllers\.$/,
+    );
   });
 
   it("rejects prototype-inherited keys as unknown examples", () => {

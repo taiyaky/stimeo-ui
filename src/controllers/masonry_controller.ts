@@ -1,6 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
 import { LayoutObserver } from "../utils/layout_observer";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 
 /** CSS custom property exposing the current column count to consumer CSS. */
 const COLUMNS_PROPERTY = "--stimeo--masonry-columns";
@@ -9,20 +11,6 @@ const COLUMNS_PROPERTY = "--stimeo--masonry-columns";
 const DEFAULT_MIN_COLUMN_WIDTH = 240;
 /** Item spacing assumed when the declaration is absent or unreadable. */
 const DEFAULT_GAP = 16;
-
-/**
- * Returns `value` when it is a number the column arithmetic can use, else
- * `fallback`.
- *
- * A unit suffix is the ordinary authoring slip here (`"240px"`), and Stimulus'
- * Number reader answers `NaN` rather than raising — which would reach the column
- * count and make the column bookkeeping impossible to allocate, leaving the grid
- * with no hooks at all. An infinity is rejected for the same reason: it divides
- * into itself as `NaN`.
- */
-function usableNumber(value: number, fallback: number): number {
-  return Number.isFinite(value) ? value : fallback;
-}
 
 /**
  * Headless **Masonry** layout helper: assigns each item to the shortest column so
@@ -71,11 +59,19 @@ function usableNumber(value: number, fallback: number): number {
  *   and taken back from an element that stops being one.
  */
 export class MasonryController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["item"];
   static override values = {
     minColumnWidth: { type: Number, default: DEFAULT_MIN_COLUMN_WIDTH },
     gap: { type: Number, default: DEFAULT_GAP },
   };
+
+  static valueConstraints = {
+    minColumnWidth: NUMBER_BOUNDS.finite,
+    gap: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof MasonryController.values>;
   static events = ["layout"] as const;
 
   declare readonly itemTargets: HTMLElement[];
@@ -110,13 +106,13 @@ export class MasonryController extends Controller<HTMLElement> {
 
   /** Resolves the declared column width once, falling back when it is unreadable. */
   minColumnWidthValueChanged(): void {
-    this.#minColumnWidth = usableNumber(this.minColumnWidthValue, DEFAULT_MIN_COLUMN_WIDTH);
+    this.#minColumnWidth = this.#safeMinColumnWidth;
     this.#reconcile.schedule();
   }
 
   /** Resolves the declared gap once, falling back when it is unreadable. */
   gapValueChanged(): void {
-    this.#gap = usableNumber(this.gapValue, DEFAULT_GAP);
+    this.#gap = this.#safeGap;
     this.#reconcile.schedule();
   }
 
@@ -129,9 +125,9 @@ export class MasonryController extends Controller<HTMLElement> {
    * Queues the column hook of an element that stopped being an item for removal.
    *
    * The removal is queued rather than immediate because teardown reports every
-   * target as disconnected: doing it here would strip the whole grid just before
-   * a Turbo snapshot is taken. The coalescer's `cancel` drops the queue
-   * with the pass, so only a genuine target change reaches it.
+   * target as disconnected. The pass that drains the queue skips an element
+   * that is still an item, which drops what teardown queued, and keeps a departure
+   * queued before a disconnect for the pass after the reconnect.
    */
   itemTargetDisconnected(item: HTMLElement): void {
     this.#released.add(item);
@@ -155,7 +151,6 @@ export class MasonryController extends Controller<HTMLElement> {
   /** Releases every observation so nothing fires after detach. */
   override disconnect(): void {
     this.#reconcile.cancel();
-    this.#released.clear();
     this.#layout.disconnect();
     this.#mutationObserver?.disconnect();
     this.#mutationObserver = null;
@@ -235,5 +230,26 @@ export class MasonryController extends Controller<HTMLElement> {
     const denominator = this.#minColumnWidth + this.#gap;
     if (width <= 0 || denominator <= 0) return 1;
     return Math.max(1, Math.floor((width + this.#gap) / denominator));
+  }
+  /** Current `minColumnWidth` declaration resolved against its numeric contract. */
+  get #safeMinColumnWidth(): number {
+    return this.#numbers.read(
+      this,
+      "minColumnWidth",
+      this.minColumnWidthValue,
+      MasonryController.values.minColumnWidth.default,
+      MasonryController.valueConstraints.minColumnWidth,
+    );
+  }
+
+  /** Current `gap` declaration resolved against its numeric contract. */
+  get #safeGap(): number {
+    return this.#numbers.read(
+      this,
+      "gap",
+      this.gapValue,
+      MasonryController.values.gap.default,
+      MasonryController.valueConstraints.gap,
+    );
   }
 }

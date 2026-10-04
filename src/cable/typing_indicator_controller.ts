@@ -1,11 +1,15 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { KeyedTimers } from "../utils/keyed_timers";
-import { MAX_TIMER_DELAY_MS, SafeTimeout } from "../utils/safe_timeout";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
+import { SafeTimeout } from "../utils/safe_timeout";
 import { TransientHooks } from "../utils/transient_hooks";
 import {
   type ConfirmedCableSubscription,
   createConfirmedSubscription,
+  identifierOf,
   parseSubscriptionParams,
 } from "./consumer";
 
@@ -86,8 +90,27 @@ const fillTokens = (template: string, values: Record<string, string>): string =>
  * from the stream. The subscription, the per-typer timers, and the delegated
  * `input` listener are all released on `disconnect()` (Turbo navigation
  * included).
+ *
+ * The declared `channel` names the subscription: `params` *adds* identifier
+ * parameters except `channel`, which is ignored. Without a declared channel
+ * nothing is subscribed whatever `params` holds.
+ *
+ * The subscription follows the declaration: a `channel` or `params` change moves
+ * it — once, after the batch, however many of the two changed together, and never
+ * before `connect()` or after `disconnect()` — and drops the typers, their expiry
+ * timers, a pending announcement, the throttle window and the rejected hook
+ * without an event, as a fresh connection would, since none of them is a fact of
+ * the new room. A `name` change keeps the subscription and the typers, except one
+ * shown under the new name: that is this client now, so it is dropped with its
+ * expiry and the display redrawn, without a `change` — it did not stop typing.
+ * The own echo is still filtered by the current `name`. `timeout` arms each
+ * typer's expiry when its signal arrives, so a change applies from that typer's
+ * next signal and never moves a deadline already set.
  */
 export class TypingIndicatorController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["input", "status"];
   static override values = {
     channel: { type: String, default: "" },
@@ -101,6 +124,11 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
     announceOneText: { type: String, default: "" },
     announceManyText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    timeout: NUMBER_BOUNDS.timer,
+    throttle: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof TypingIndicatorController.values>;
   static events = ["change"] as const;
 
   declare readonly hasStatusTarget: boolean;
@@ -116,10 +144,10 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
   /** Delay (ms) before one settled typer set is sent to the shared announcer. */
   static readonly #announceDelay = 200;
 
-  /** Identifier parameters parsed once from their declaration, never in the hot path. */
-  #params: Record<string, unknown> = {};
-
   #subscription: ConfirmedCableSubscription | null = null;
+  readonly #follow = new MicrotaskCoalescer(() => this.#followDeclaration());
+  /** The identifier the subscription was last built for. */
+  #identifier = "";
   /** Names currently typing (other clients), in the order their first signal arrived. */
   readonly #typers = new Set<string>();
   /** Each typer's auto-clear timer, restarted by every further signal from that name. */
@@ -129,15 +157,37 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
   #lastSentAt = 0;
   /** The one outstanding announcement, so a newer set supersedes it. */
   #announceId: number | null = null;
+  /**
+   * Whether this controller is between `connect()` and `disconnect()`. Stimulus
+   * delivers target callbacks before `connect()` and after `disconnect()`, where
+   * the status is teardown's to leave empty.
+   */
+  #connected = false;
+
+  /** Moves the subscription to the declared channel. */
+  channelValueChanged(): void {
+    this.#follow.schedule();
+  }
+
+  /** Moves the subscription to the identifier the parameters name. */
+  paramsValueChanged(): void {
+    this.#follow.schedule();
+  }
+
+  /** Stops showing a typer under the name this client now declares. */
+  nameValueChanged(): void {
+    this.#follow.schedule();
+  }
 
   /**
-   * Re-parses the identifier parameters when the declaration changes.
-   *
-   * A malformed declaration falls back to no parameters, so the identifier keeps
-   * naming the channel instead of the subscription never being created at all.
+   * The identifier this declaration names: the declared channel plus the other
+   * parameters, whose own `channel` key is left out. A malformed `params`
+   * declaration falls back to no parameters, so the identifier keeps naming the
+   * channel instead of the subscription never being created at all.
    */
-  paramsValueChanged(): void {
-    this.#params = parseSubscriptionParams(this.paramsValue);
+  get #descriptor(): Record<string, unknown> {
+    const { channel: _declared, ...rest } = parseSubscriptionParams(this.paramsValue);
+    return { channel: this.channelValue, ...rest };
   }
 
   /**
@@ -146,44 +196,93 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
    * No event: the set of typers did not change, only the element that displays it.
    * Without this a region swapped in mid-conversation stays empty while `data-typing`
    * still says someone is typing, leaving the state in the visual hook alone. An empty
-   * set needs no paint — a fresh region already shows it.
+   * set paints the empty copy, so a region that arrives with an old one is cleared.
    */
   statusTargetConnected(): void {
-    if (this.#typers.size > 0) this.#paint();
+    if (this.#connected) this.#paintStatus([...this.#typers]);
+  }
+
+  /** Paints the current copy, empty when nobody types, into the `status` target that stays. */
+  statusTargetDisconnected(): void {
+    if (this.#connected) this.#paintStatus([...this.#typers]);
   }
 
   override connect(): void {
+    this.#connected = true;
     // Typing state is transient: a Turbo cache snapshot must not resurrect a
     // stale indicator, and the live stream re-populates naturally. Rejection is
     // transient server state too — the fresh subscription re-decides the hook.
-    TRANSIENT.reset(this.element);
-    if (this.hasStatusTarget) this.statusTarget.textContent = "";
+    this.#reset();
 
     // Delegated on the container so the composer needs no per-input data-action
     // (and swapped/appended inputs keep working).
     this.element.addEventListener("input", this.#onInput);
-    if (this.channelValue) {
-      // Confirmation tracking (connected / disconnected / rejected) lives in
-      // the shared subscription; #onInput gates on its `confirmed` so an
-      // outage doesn't burn the throttle window on dropped sends.
-      this.#subscription = createConfirmedSubscription(
-        { channel: this.channelValue, ...this.#params },
-        {
-          // The server refused the subscription: the send gate stays shut for
-          // good, and the hook lets the consumer's CSS reflect the dead stream.
-          rejected: () => {
-            this.element.setAttribute("data-typing-indicator-rejected", "true");
-          },
-          received: (data: unknown) => this.#onReceived(data),
-        },
-      );
-    }
+    this.#follow.activate();
+    this.#open();
   }
 
   override disconnect(): void {
+    this.#connected = false;
+    this.#follow.cancel();
     this.element.removeEventListener("input", this.#onInput);
+    this.#close();
+    this.#reset();
+  }
+
+  /**
+   * Opens the subscription the declaration names, or none without a channel.
+   *
+   * @stimeoRuntimeOnly `channel` and `params` name the one subscription this call opens.
+   */
+  #open(): void {
+    const descriptor = this.#descriptor;
+    this.#identifier = identifierOf(descriptor);
+    if (!this.channelValue) return;
+    // Confirmation tracking (connected / disconnected / rejected) lives in the
+    // shared subscription; #onInput gates on its `confirmed` so an outage
+    // doesn't burn the throttle window on dropped sends.
+    this.#subscription = createConfirmedSubscription(descriptor, {
+      // The server refused the subscription: the send gate stays shut for
+      // good, and the hook lets the consumer's CSS reflect the dead stream.
+      rejected: () => {
+        this.element.setAttribute("data-typing-indicator-rejected", "true");
+      },
+      received: (data: unknown) => this.#onReceived(data),
+    });
+  }
+
+  /** Releases the subscription {@link #open} opened. */
+  #close(): void {
     this.#subscription?.unsubscribe();
     this.#subscription = null;
+  }
+
+  /**
+   * Restarts the cycle when the declaration names a different identifier, and
+   * otherwise drops a typer shown under this client's own name.
+   *
+   * @stimeoRuntimeOnly `channel` and `params` are compared with what the subscription was
+   *   built from, and `name` picks the typer that is this client now.
+   */
+  #followDeclaration(): void {
+    if (identifierOf(this.#descriptor) !== this.#identifier) {
+      this.#close();
+      this.#reset();
+      this.#open();
+    } else {
+      this.#forget(this.nameValue);
+    }
+  }
+
+  /** Drops a typer that stopped being another client, reporting no change. */
+  #forget(name: string): void {
+    if (!this.#typers.delete(name)) return;
+    this.#expiry.clear(name);
+    this.#paint();
+  }
+
+  /** Clears the transient typing state (every cycle's start + disconnect teardown). */
+  #reset(): void {
     this.#timers.clearAll();
     this.#expiry.clearAll();
     this.#announceId = null;
@@ -227,15 +326,12 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
    * The silence after which a typer is dropped, in ms: a finite, non-negative number
    * a timer can hold. Anything else names no delay — `setTimeout` reads `NaN`, a
    * negative value and `Infinity` alike as "now", and a value past
-   * {@link MAX_TIMER_DELAY_MS} overflows to the same place — so the typer would
+   * the maximum platform timer delay overflows to the same place — so the typer would
    * vanish in the same task it appeared and the indicator could never be seen. Such
    * a declaration falls back to the default.
    */
   get #timeout(): number {
-    const declared = this.timeoutValue;
-    return Number.isFinite(declared) && declared >= 0 && declared <= MAX_TIMER_DELAY_MS
-      ? declared
-      : DEFAULT_TIMEOUT;
+    return this.#safeTimeout;
   }
 
   /**
@@ -246,8 +342,7 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
    * falls back to the default.
    */
   get #throttle(): number {
-    const declared = this.throttleValue;
-    return Number.isFinite(declared) && declared >= 0 ? declared : DEFAULT_THROTTLE;
+    return this.#safeThrottle;
   }
 
   #untrack(name: string): void {
@@ -299,10 +394,13 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
   #paint(): string[] {
     const names = [...this.#typers];
     this.element.setAttribute("data-typing", names.length > 0 ? "true" : "false");
-    if (this.hasStatusTarget) {
-      this.statusTarget.textContent = this.#message(names);
-    }
+    this.#paintStatus(names);
     return names;
+  }
+
+  /** Writes the copy for `names` into the status slot, when there is one. */
+  #paintStatus(names: string[]): void {
+    if (this.hasStatusTarget) this.statusTarget.textContent = this.#message(names);
   }
 
   /**
@@ -322,5 +420,26 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
     return template
       ? fillTokens(template, { names: joined, count: String(names.length) })
       : `${joined} are typing…`;
+  }
+  /** Current `timeout` declaration resolved against its numeric contract. */
+  get #safeTimeout(): number {
+    return this.#numbers.read(
+      this,
+      "timeout",
+      this.timeoutValue,
+      TypingIndicatorController.values.timeout.default,
+      TypingIndicatorController.valueConstraints.timeout,
+    );
+  }
+
+  /** Current `throttle` declaration resolved against its numeric contract. */
+  get #safeThrottle(): number {
+    return this.#numbers.read(
+      this,
+      "throttle",
+      this.throttleValue,
+      TypingIndicatorController.values.throttle.default,
+      TypingIndicatorController.valueConstraints.throttle,
+    );
   }
 }

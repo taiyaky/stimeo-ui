@@ -1,9 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { AttributeLease } from "../utils/attribute_lease";
 import { setDefaultAttribute } from "../utils/default_attribute";
 import { DetachGate } from "../utils/detach_gate";
 import { MinDurationFloor } from "../utils/min_duration_floor";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -40,18 +42,25 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * - `stimeo--spinner:show` — the indicator became visible, after `delay`.
  * - `stimeo--spinner:hide` — the indicator went away, after `minDuration`.
  * - `stimeo--spinner:timeout` — `timeout` elapsed with the load still running;
- *   the controller then ends it exactly as `stop` would, so a `hide` follows.
+ *   the controller then ends it as `stop` would; `hide` follows only if it was shown.
  *
  * `hide`, `show`, `timeout`, and `reconcile` dispatch `{}`. The last of those
- * reports that the Turbo cache rewind returned a running cycle to idle.
+ * reports that a connection returned to idle a cycle no instance was running — a page
+ * restored from the Turbo cache in the middle of a load.
  *
  * @remarks
  * Behavior only — the visual spinner is the consumer's, alongside the text and
  * `aria-hidden="true"`. Both timers are owned by `SafeTimeout`, kept across
- * an in-page move and dropped on a real detach via `DetachGate`, while the
- * loading state a cached page would freeze is rewound by `BeforeCacheReset`.
+ * an in-page move and dropped on a real detach via `DetachGate`. A load in progress is
+ * never undone on `turbo:before-cache`, which Turbo also dispatches on pages that stay
+ * (a promoted frame navigation, a state-less `popstate`, a refresh of a cached URL, a
+ * `data-turbo-permanent` element carried to the next page): the load is still running
+ * there, and its `stop` still hides the spinner and announces the result.
  */
 export class SpinnerController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["indicator", "region", "message"];
   static override values = {
     announceText: { type: String, default: "" },
@@ -60,11 +69,19 @@ export class SpinnerController extends Controller<HTMLElement> {
     minDuration: { type: Number, default: 0 },
     timeout: { type: Number, default: 0 },
   };
+
+  static valueConstraints = {
+    delay: NUMBER_BOUNDS.timer,
+    minDuration: NUMBER_BOUNDS.timer,
+    timeout: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof SpinnerController.values>;
   static actions = ["start", "stop"] as const;
   static events = ["hide", "show", "timeout", "reconcile"] as const;
 
   declare readonly indicatorTarget: HTMLElement;
+  declare readonly indicatorTargets: HTMLElement[];
   declare readonly regionTarget: HTMLElement;
+  declare readonly regionTargets: HTMLElement[];
   declare readonly messageTarget: HTMLElement;
   declare readonly hasIndicatorTarget: boolean;
   declare readonly hasRegionTarget: boolean;
@@ -79,7 +96,17 @@ export class SpinnerController extends Controller<HTMLElement> {
   readonly #timers = new SafeTimeout();
   readonly #floor = new MinDurationFloor(this.#timers);
   readonly #gate = new DetachGate();
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+  /** Owns the `aria-busy` written on each region, so one that departs gets its own back. */
+  readonly #busyLease = new AttributeLease<HTMLElement>("aria-busy", this.identifier);
+  /** Owns the `hidden` written on each indicator, so one that departs gets its own back. */
+  readonly #hiddenLease = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Whether `connect()` has run and `disconnect()` has not since. */
+  #connected = false;
+  /**
+   * Whether this instance runs the cycle `data-state` reports: set when `start()` leaves
+   * idle, cleared when the cycle returns to idle or its timers are dropped.
+   */
+  #cycling = false;
 
   /** Pending show-delay timer id, or `null` when no start is awaiting its delay. */
   #delayTimerId: number | null = null;
@@ -87,16 +114,20 @@ export class SpinnerController extends Controller<HTMLElement> {
   #timeoutTimerId: number | null = null;
 
   override connect(): void {
+    this.#connected = true;
     this.#gate.cancel();
-    this.#beforeCache.activate();
-    if (this.#state === "pending" && this.#delayTimerId === null) {
-      // `pending` lives exactly as long as its show-delay timer. Reading it back with
-      // no timer of this instance behind it means the markup outlived the timer — a
-      // restored snapshot, or an element re-attached too late to count as a move — so
-      // nothing is left to advance it and `start()` would refuse every later load.
-      // Fall back to idle, dropping the busy flag the interrupted `start()` set.
+    if (this.#state !== "idle" && !this.#cycling) {
+      // `pending` and `loading` live exactly as long as the cycle that wrote them.
+      // Reading one back with no cycle of this instance behind it means the markup
+      // outlived the cycle — a page restored from Turbo's cache, or an element
+      // re-attached too late to count as a move — so nothing is left to advance or end
+      // it and `start()` would refuse every later load. Fall back to idle, giving the
+      // busy flag and the indicator their idle values, and report it: `hide` would
+      // claim the load finished.
       this.#setBusy(false);
+      this.#showIndicator(false);
       this.element.setAttribute("data-state", "idle");
+      this.dispatch("reconcile", { detail: {} });
       return;
     }
     setDefaultAttribute(this.element, "data-state", "idle");
@@ -111,13 +142,36 @@ export class SpinnerController extends Controller<HTMLElement> {
    * bring it back.
    */
   indicatorTargetConnected(target: HTMLElement): void {
-    target.hidden = this.#state !== "loading";
+    this.#hiddenLease.write(target, this.#state === "loading" ? null : "");
+  }
+
+  /**
+   * Gives an indicator that no longer resolves its own `hidden` back, even after
+   * `disconnect()`, and while connected re-applies the current phase to the one that stays.
+   */
+  indicatorTargetDisconnected(indicator: HTMLElement): void {
+    if (!this.indicatorTargets.includes(indicator)) this.#hiddenLease.return(indicator);
+    if (this.#connected) this.#showIndicator(this.#state === "loading");
+  }
+
+  /** Applies the current busy state to a region inserted or replaced after `connect()`. */
+  regionTargetConnected(region: HTMLElement): void {
+    if (this.#connected) this.#busyLease.write(region, String(this.#busy));
+  }
+
+  /**
+   * Gives a region that no longer resolves its own `aria-busy` back, even after
+   * `disconnect()`, and while connected resyncs the region that stays.
+   */
+  regionTargetDisconnected(region: HTMLElement): void {
+    if (!this.regionTargets.includes(region)) this.#busyLease.return(region);
+    if (this.#connected) this.#setBusy(this.#busy);
   }
 
   override disconnect(): void {
     // Symmetric with `connect()` regardless of why the disconnect came: an in-page
     // move re-subscribes, and only the timers are held back for the reconnect.
-    this.#beforeCache.deactivate();
+    this.#connected = false;
     this.#gate.disconnected(this, () => this.#teardown());
   }
 
@@ -134,16 +188,17 @@ export class SpinnerController extends Controller<HTMLElement> {
       return;
     }
     if (this.#state !== "idle") return;
+    this.#cycling = true;
     this.#setBusy(true);
     // A hide held back from a previous cycle is now stale.
     this.#floor.cancel();
     this.#armTimeout();
-    if (this.delayValue > 0) {
+    if (this.#safeDelay > 0) {
       this.element.setAttribute("data-state", "pending");
       this.#delayTimerId = this.#timers.set(() => {
         this.#delayTimerId = null;
         this.#show();
-      }, this.delayValue);
+      }, this.#safeDelay);
     } else {
       this.#show();
     }
@@ -156,6 +211,7 @@ export class SpinnerController extends Controller<HTMLElement> {
     if (state === "pending") {
       // The delay never elapsed — the spinner never appeared, so just cancel.
       this.#cancelDelay();
+      this.#cycling = false;
       this.#setBusy(false);
       this.element.setAttribute("data-state", "idle");
       return;
@@ -163,7 +219,7 @@ export class SpinnerController extends Controller<HTMLElement> {
     if (state !== "loading") return;
 
     this.#setBusy(false);
-    this.#floor.schedule(this.minDurationValue, () => this.#hide());
+    this.#floor.schedule(this.#safeMinDuration, () => this.#hide());
   }
 
   /**
@@ -173,11 +229,7 @@ export class SpinnerController extends Controller<HTMLElement> {
    */
   #show(): void {
     this.#floor.begin();
-    // A visible spinner always means a busy region. Re-asserting it costs nothing on
-    // the direct path and closes the one where a snapshot rewind cleared the flag
-    // while the show-delay timer it deliberately spared was still armed.
-    this.#setBusy(true);
-    if (this.hasIndicatorTarget) this.indicatorTarget.hidden = false;
+    this.#showIndicator(true);
     this.element.setAttribute("data-state", "loading");
     this.dispatch("show", { detail: {} });
     // loading ↔ ready is the transition worth reading; the spinner itself is
@@ -191,50 +243,37 @@ export class SpinnerController extends Controller<HTMLElement> {
    * @stimeoRuntimeOnly `announceReadyText` is the wording of the one announcement this hide makes.
    */
   #hide(): void {
-    if (this.hasIndicatorTarget) this.indicatorTarget.hidden = true;
+    this.#cycling = false;
+    this.#showIndicator(false);
     this.element.setAttribute("data-state", "idle");
     this.dispatch("hide", { detail: {} });
     announce(fillTemplate(this.announceReadyTextValue, {}));
   }
 
   /**
-   * Drops both timers on a real detach. The markup keeps whatever it last held: an
-   * element on its way out of the document has no reader left, and one whose
-   * `data-controller` dropped the identifier no longer resolves its own targets, so
-   * the rollback could only ever be partial. The snapshot is rewound where it is
-   * still whole, on `turbo:before-cache`.
+   * Drops the timers on a real detach, and with them the cycle. The markup keeps
+   * whatever it last held: an element on its way out of the document has no reader
+   * left, and one whose `data-controller` dropped the identifier no longer resolves its
+   * own targets, so the rollback could only ever be partial; the indicator's `hidden`
+   * and a region's `aria-busy` are the exceptions, given back by their target
+   * callbacks. A copy of the markup that connects again — a page restored from the
+   * cache — is returned to idle by `connect()`.
    */
   #teardown(): void {
-    this.#gate.cancel();
     this.#timers.clearAll();
     this.#delayTimerId = null;
     this.#timeoutTimerId = null;
-    this.#floor.cancel();
+    this.#cycling = false;
   }
 
-  /**
-   * Returns the loading state to idle for the snapshot Turbo is about to take,
-   * so a page reached with the Back button is not restored mid-load with a
-   * spinner nothing can stop. State only: `data-state`, the indicator's `hidden`,
-   * and `aria-busy`. No `hide` is dispatched — that would claim the load finished.
-   * The rewind reports itself as `reconcile` instead, so a consumer painting from
-   * `show` can drop it before the snapshot is taken. The live page keeps its
-   * timers, so a navigation that never completes leaves the running cycle intact.
-   */
-  #rewindForCache(): void {
-    const running = this.element.getAttribute("data-state") !== "idle";
-    this.#cancelTimeout();
-    this.#setBusy(false);
-    if (this.hasIndicatorTarget) this.indicatorTarget.hidden = true;
-    this.element.setAttribute("data-state", "idle");
-    if (running) this.dispatch("reconcile", { detail: {} });
+  /** Shows or hides the indicator (if present). */
+  #showIndicator(shown: boolean): void {
+    if (this.hasIndicatorTarget) this.#hiddenLease.write(this.indicatorTarget, shown ? null : "");
   }
 
   /** Reflects busy state onto the controlled region (if present). */
   #setBusy(busy: boolean): void {
-    if (this.hasRegionTarget) {
-      this.regionTarget.setAttribute("aria-busy", String(busy));
-    }
+    if (this.hasRegionTarget) this.#busyLease.write(this.regionTarget, String(busy));
   }
 
   /**
@@ -244,12 +283,12 @@ export class SpinnerController extends Controller<HTMLElement> {
    */
   #armTimeout(): void {
     this.#cancelTimeout();
-    if (this.timeoutValue <= 0) return;
+    if (this.#safeTimeout <= 0) return;
     this.#timeoutTimerId = this.#timers.set(() => {
       this.#timeoutTimerId = null;
       this.dispatch("timeout", { detail: {} });
       this.stop();
-    }, this.timeoutValue);
+    }, this.#safeTimeout);
   }
 
   #cancelTimeout(): void {
@@ -269,5 +308,46 @@ export class SpinnerController extends Controller<HTMLElement> {
   /** Current lifecycle phase as reflected on `data-state`. */
   get #state(): string {
     return this.element.getAttribute("data-state") ?? "idle";
+  }
+
+  /**
+   * Whether the region reads busy now: a load waits out its show delay, or shows with
+   * no hide held back by `minDuration`.
+   */
+  get #busy(): boolean {
+    const state = this.#state;
+    return state === "pending" || (state === "loading" && !this.#floor.pending);
+  }
+  /** Current `delay` declaration resolved against its numeric contract. */
+  get #safeDelay(): number {
+    return this.#numbers.read(
+      this,
+      "delay",
+      this.delayValue,
+      SpinnerController.values.delay.default,
+      SpinnerController.valueConstraints.delay,
+    );
+  }
+
+  /** Current `minDuration` declaration resolved against its numeric contract. */
+  get #safeMinDuration(): number {
+    return this.#numbers.read(
+      this,
+      "minDuration",
+      this.minDurationValue,
+      SpinnerController.values.minDuration.default,
+      SpinnerController.valueConstraints.minDuration,
+    );
+  }
+
+  /** Current `timeout` declaration resolved against its numeric contract. */
+  get #safeTimeout(): number {
+    return this.#numbers.read(
+      this,
+      "timeout",
+      this.timeoutValue,
+      SpinnerController.values.timeout.default,
+      SpinnerController.valueConstraints.timeout,
+    );
   }
 }

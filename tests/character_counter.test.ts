@@ -5,7 +5,7 @@ import { CharacterCounterController } from "../src/controllers/character_counter
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /** Must match the controller's private announcement debounce. */
@@ -74,7 +74,7 @@ describe("CharacterCounterController", () => {
     ) as CharacterCounterController;
 
   /** Sets the current field value and fires the native event observed internally. */
-  const type = (value: string, target = field()) => {
+  const type = (value: string, target: HTMLInputElement | HTMLTextAreaElement = field()) => {
     target.value = value;
     target.dispatchEvent(new Event("input", { bubbles: true }));
   };
@@ -383,7 +383,23 @@ describe("CharacterCounterController", () => {
     expect(announcer().textContent).toBe("");
   });
 
-  it("rewinds transient ownership before Turbo caches the page", async () => {
+  it("removes the near-limit hook on disconnect", async () => {
+    await start(
+      'data-stimeo--character-counter-max-value="10" ' +
+        'data-stimeo--character-counter-warn-at-value="3"',
+      "",
+      "12345678",
+    );
+    expect(root().getAttribute("data-near-limit")).toBe("true");
+
+    controller().disconnect();
+
+    expect(root().hasAttribute("data-near-limit")).toBe(false);
+  });
+
+  it("keeps an over-limit field invalid and its announcement due through turbo:before-cache", async () => {
+    // Turbo also dispatches the event on a page that stays (a promoted frame
+    // navigation, a popstate without Turbo state, a refresh of a cached URL).
     await start(
       'data-stimeo--character-counter-max-value="3" ' +
         'data-stimeo--character-counter-announce-text-value="{remaining} remaining"',
@@ -392,12 +408,41 @@ describe("CharacterCounterController", () => {
     type("hello");
 
     document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(field().getAttribute("aria-invalid")).toBe("false");
-    expect(root().hasAttribute("data-over-limit")).toBe(false);
-    expect(root().hasAttribute("data-near-limit")).toBe(false);
+    expect(field().getAttribute("aria-invalid")).toBe("true");
+    expect(root().getAttribute("data-over-limit")).toBe("true");
     await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
-    expect(announcementMessages).toEqual([]);
-    expect(announcer().textContent).toBe("");
+    expect(announcementMessages).toEqual(["-2 remaining"]);
+
+    type("hi");
+    expect(field().getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("gives back the aria-invalid a restored copy carries once its field is no longer over", async () => {
+    await boot(`
+      <div data-controller="stimeo--character-counter" data-stimeo--character-counter-max-value="3">
+        <input id="secret" type="password" aria-describedby="cc"
+               data-stimeo--character-counter-target="input">
+        <span id="cc" data-stimeo--character-counter-target="output"></span>
+      </div>`);
+    const secret = query<HTMLInputElement>("#secret");
+    type("hunter2", secret);
+    expect(secret.getAttribute("aria-invalid")).toBe("true");
+
+    application = await restoreFromCache(
+      application as Application,
+      (restored) => {
+        // Turbo empties a password field in the copy it caches.
+        query<HTMLInputElement>("#secret").value = "";
+        restored.register("stimeo--announcer", AnnouncerController);
+        restored.register("stimeo--character-counter", CharacterCounterController);
+      },
+      () => vi.advanceTimersByTimeAsync(0),
+    );
+
+    const restored = query<HTMLInputElement>("#secret");
+    expect(restored.hasAttribute("aria-invalid")).toBe(false);
+    expect(restored.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+    expect(root().hasAttribute("data-over-limit")).toBe(false);
   });
 
   it("rebinds a replaced input and reports its changed derived state as reconciliation", async () => {
@@ -424,6 +469,53 @@ describe("CharacterCounterController", () => {
     type("okay", replacement);
     expect(output().textContent).toBe("-1");
     expect(changes.at(-1)).toEqual({ length: 4, remaining: -1, over: true });
+  });
+
+  it("releases the input listener of a replaced field", async () => {
+    await start('data-stimeo--character-counter-max-value="10"');
+    const previous = field();
+    const removed = vi.spyOn(previous, "removeEventListener");
+
+    const replacement = document.createElement("textarea");
+    replacement.setAttribute("data-stimeo--character-counter-target", "input");
+    previous.replaceWith(replacement);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(removed.mock.calls.filter(([type]) => type === "input")).toHaveLength(1);
+  });
+
+  it("keeps counting a new field while a composition runs in the field it replaced", async () => {
+    await start('data-stimeo--character-counter-max-value="10"');
+    const previous = field();
+    const replacement = document.createElement("textarea");
+    replacement.setAttribute("data-stimeo--character-counter-target", "input");
+    previous.removeAttribute("data-stimeo--character-counter-target");
+    root().prepend(replacement);
+    await vi.advanceTimersByTimeAsync(0);
+
+    previous.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    type("hello", replacement);
+
+    expect(output().textContent).toBe("5");
+  });
+
+  it("drops an announcement still pending for a field that is replaced", async () => {
+    await start(
+      'data-stimeo--character-counter-max-value="10" ' +
+        'data-stimeo--character-counter-announce-text-value="{remaining} remaining"',
+    );
+    const previous = field();
+    type("hello", previous);
+    await vi.advanceTimersByTimeAsync(ANNOUNCE_MS / 2);
+
+    const replacement = document.createElement("textarea");
+    replacement.value = "ok";
+    replacement.setAttribute("data-stimeo--character-counter-target", "input");
+    previous.replaceWith(replacement);
+    await vi.advanceTimersByTimeAsync(ANNOUNCE_MS * 2);
+
+    expect(output().textContent).toBe("8");
+    expect(announcementMessages).toEqual([]);
   });
 
   it("ignores stale input and composition events before a target swap reconciles", async () => {
@@ -474,6 +566,34 @@ describe("CharacterCounterController", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(output().textContent).toBe("7");
     expect(changes).toEqual([]);
+  });
+
+  it("clears the state hooks when the field over the limit is removed", async () => {
+    await start('data-stimeo--character-counter-max-value="3"', "", "hello");
+    expect(root().getAttribute("data-over-limit")).toBe("true");
+
+    field().remove();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(root().hasAttribute("data-over-limit")).toBe(false);
+  });
+
+  it("paints the next display when the first one is removed", async () => {
+    await boot(`
+      <div data-controller="stimeo--character-counter"
+           data-stimeo--character-counter-max-value="10">
+        <textarea data-stimeo--character-counter-target="input">hello</textarea>
+        <span id="cc" data-stimeo--character-counter-target="output"></span>
+        <span id="cc-next" data-stimeo--character-counter-target="output">stale</span>
+      </div>`);
+    const next = query<HTMLElement>("#cc-next");
+    expect(output().textContent).toBe("5");
+    expect(next.textContent).toBe("stale");
+
+    output().remove();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(next.textContent).toBe("5");
   });
 
   it("supports direct attachment to an input without targets", async () => {
@@ -527,6 +647,37 @@ describe("CharacterCounterController", () => {
     expect(reconciles).toEqual([{ length: 5, remaining: 15, over: false }]);
     expect(announcementMessages).toEqual([]);
     expect(announcer().textContent).toBe("");
+  });
+
+  it("repaints the warning hook, without a reconcile, when only warnAt changes", async () => {
+    await start(
+      'data-stimeo--character-counter-max-value="10" ' +
+        'data-stimeo--character-counter-warn-at-value="1"',
+      "",
+      "hello",
+    );
+    const reconciles = captureReconciles();
+    expect(root().hasAttribute("data-near-limit")).toBe(false);
+
+    root().setAttribute("data-stimeo--character-counter-warn-at-value", "5");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(root().getAttribute("data-near-limit")).toBe("true");
+    expect(reconciles).toEqual([]);
+  });
+
+  it("rewords a pending announcement with a template changed during the debounce", async () => {
+    await start(
+      'data-stimeo--character-counter-max-value="10" ' +
+        'data-stimeo--character-counter-announce-text-value="{remaining} remaining"',
+    );
+    type("hello");
+    await vi.advanceTimersByTimeAsync(ANNOUNCE_MS / 2);
+
+    root().setAttribute("data-stimeo--character-counter-announce-text-value", "{remaining} left");
+    await vi.advanceTimersByTimeAsync(ANNOUNCE_MS * 2);
+
+    expect(announcementMessages).toEqual(["5 left"]);
   });
 
   it("retargets a pending announcement at the settled count instead of dropping it", async () => {

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ScrollAreaController } from "../src/controllers/scroll_area_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -20,6 +20,47 @@ const markup = (inner = "") => `
        data-stimeo--scroll-area-orientation-value="vertical">
     <div data-stimeo--scroll-area-target="viewport" aria-label="Log output">${inner}</div>
   </div>`;
+
+/** Controllable ResizeObserver double: records what it observes and reports on demand. */
+class FakeResizeObserver implements ResizeObserver {
+  static instances: FakeResizeObserver[] = [];
+  readonly observed = new Set<Element>();
+  readonly #callback: ResizeObserverCallback;
+
+  constructor(callback: ResizeObserverCallback) {
+    this.#callback = callback;
+    FakeResizeObserver.instances.push(this);
+  }
+
+  observe(element: Element): void {
+    this.observed.add(element);
+  }
+
+  unobserve(element: Element): void {
+    this.observed.delete(element);
+  }
+
+  disconnect(): void {
+    this.observed.clear();
+  }
+
+  trigger(): void {
+    this.#callback([], this);
+  }
+}
+
+/** Installs an `EventTarget` as `document.fonts` for the duration of `run`. */
+const withDocumentFonts = async (run: (fonts: EventTarget) => Promise<void>): Promise<void> => {
+  const ownDescriptor = Object.getOwnPropertyDescriptor(document, "fonts");
+  const fonts = new EventTarget();
+  Object.defineProperty(document, "fonts", { configurable: true, value: fonts });
+  try {
+    await run(fonts);
+  } finally {
+    if (ownDescriptor) Object.defineProperty(document, "fonts", ownDescriptor);
+    else Reflect.deleteProperty(document, "fonts");
+  }
+};
 
 describe("ScrollAreaController", () => {
   let application: Application;
@@ -42,6 +83,25 @@ describe("ScrollAreaController", () => {
     document.querySelector<HTMLElement>(
       "[data-stimeo--scroll-area-target='viewport']",
     ) as HTMLElement;
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--scroll-area",
+    ) as ScrollAreaController | null;
+
+  /** A detached viewport target carrying the given geometry. */
+  const detachedViewport = (
+    attributes: Record<string, string>,
+    geometry: { scrollHeight: number; clientHeight: number; scrollTop: number },
+  ) => {
+    const element = document.createElement("div");
+    element.setAttribute("data-stimeo--scroll-area-target", "viewport");
+    for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+    for (const [key, value] of Object.entries(geometry)) {
+      Object.defineProperty(element, key, { configurable: true, value });
+    }
+    return element;
+  };
 
   /** Stubs viewport geometry and notifies the controller via a viewport resize. */
   const layout = (geometry: { scrollHeight: number; clientHeight: number; scrollTop: number }) => {
@@ -50,6 +110,70 @@ describe("ScrollAreaController", () => {
     }
     window.dispatchEvent(new Event("resize"));
   };
+
+  it.each(["root", "target"])(
+    "keeps its state and its morph work through turbo:before-cache, from %s",
+    async (origin) => {
+      // Turbo also dispatches the event on a page that stays (a promoted frame
+      // navigation, a popstate without Turbo state, a refresh of a cached URL).
+      await start(markup());
+      layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+      expect(root().getAttribute("data-overflow")).toBe("true");
+      expect(viewport().getAttribute("role")).toBe("region");
+      const source = origin === "root" ? root() : viewport();
+      source.dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+      document.dispatchEvent(new Event("turbo:before-cache"));
+      expect(root().getAttribute("data-overflow")).toBe("true");
+      viewport().removeAttribute("role");
+      source.dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+      await tick();
+      expect(root().getAttribute("data-overflow")).toBe("true");
+      expect(root().getAttribute("data-scroll")).toBe("start");
+      expect(viewport().getAttribute("role")).toBe("region");
+      expect(viewport().getAttribute("tabindex")).toBe("0");
+    },
+  );
+
+  it("gives back the tab stop and the role a restored viewport carries once it does not overflow", async () => {
+    await start(markup());
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--scroll-area", ScrollAreaController),
+    );
+
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+    expect(viewport().hasAttribute("role")).toBe(false);
+    expect(
+      viewport()
+        .getAttributeNames()
+        .filter((name) => /-(lease|loan)$/.test(name)),
+    ).toEqual([]);
+  });
+
+  it("takes over the tab stop and the role a restored viewport carries while it overflows", async () => {
+    await start(markup());
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    application = await restoreFromCache(application, (restored) => {
+      for (const [key, value] of Object.entries({
+        scrollHeight: 800,
+        clientHeight: 200,
+        scrollTop: 0,
+      })) {
+        Object.defineProperty(viewport(), key, { configurable: true, value });
+      }
+      restored.register("stimeo--scroll-area", ScrollAreaController);
+    });
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+    expect(viewport().getAttribute("role")).toBe("region");
+
+    layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
+    await tick();
+
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+    expect(viewport().hasAttribute("role")).toBe(false);
+  });
 
   it("marks the viewport keyboard-scrollable when content overflows", async () => {
     await start(markup());
@@ -132,6 +256,7 @@ describe("ScrollAreaController", () => {
     `);
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
     expect(viewport().getAttribute("role")).toBe("region");
+    await tick();
 
     const label = document.getElementById("log-label");
     if (!label) throw new Error("Expected the accessible-name source");
@@ -202,6 +327,55 @@ describe("ScrollAreaController", () => {
     expect(queries).not.toHaveBeenCalled();
   });
 
+  it("stops following a label source the viewport no longer references", async () => {
+    await start(`
+      <span id="old-label">Old</span>
+      <span id="new-label">New</span>
+      <div data-controller="stimeo--scroll-area">
+        <div data-stimeo--scroll-area-target="viewport" aria-labelledby="old-label"></div>
+      </div>
+    `);
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    await tick();
+    viewport().setAttribute("aria-labelledby", "new-label");
+    await tick();
+    const queries = vi.spyOn(viewport(), "querySelectorAll");
+
+    (document.getElementById("old-label") as HTMLElement).textContent = "Renamed";
+    await tick();
+
+    expect(queries).not.toHaveBeenCalled();
+  });
+
+  it("follows a late aria-labelledby source for a replacement viewport that references the same id", async () => {
+    await start(`
+      <div id="labels"></div>
+      <div data-controller="stimeo--scroll-area">
+        <div data-stimeo--scroll-area-target="viewport" aria-labelledby="late-label"></div>
+      </div>
+    `);
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    await tick();
+
+    const replacement = detachedViewport(
+      { "aria-labelledby": "late-label" },
+      { scrollHeight: 800, clientHeight: 200, scrollTop: 0 },
+    );
+    viewport().replaceWith(replacement);
+    controller()?.viewportTargetConnected();
+    await tick();
+    expect(replacement.getAttribute("tabindex")).toBe("0");
+    expect(replacement.hasAttribute("role")).toBe(false);
+
+    const label = document.createElement("span");
+    label.id = "late-label";
+    label.textContent = "Updates";
+    document.getElementById("labels")?.append(label);
+    await tick();
+
+    expect(replacement.getAttribute("role")).toBe("region");
+  });
+
   it("takes the tab stop when its only control is not rendered", async () => {
     // A button revealed on demand (a "jump to bottom" that appears only when there is
     // something to jump to) still matches the focusable selector while `display: none`.
@@ -251,6 +425,81 @@ describe("ScrollAreaController", () => {
     await tick();
 
     expect(viewport().hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("re-measures a host viewport when another script rewrites a hook to the value it last wrote", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-area"
+           data-stimeo--scroll-area-target="viewport" aria-label="Log output"></div>
+    `);
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    await tick();
+    expect(root().getAttribute("data-overflow")).toBe("true");
+
+    Object.defineProperty(viewport(), "scrollHeight", { configurable: true, value: 150 });
+    root().setAttribute("data-overflow", "true");
+    await tick();
+
+    expect(root().getAttribute("data-overflow")).toBe("false");
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
+  });
+
+  it.each([
+    "data-expanded",
+    "data-expanded-lease",
+    "data-expanded-tabindex-loan",
+    "data-expanded-hidden-region",
+  ])("re-measures content whose geometry changes with %s", async (attribute) => {
+    await start(markup('<div id="content">Content</div>'));
+    layout({ scrollHeight: 100, clientHeight: 100, scrollTop: 0 });
+    await tick();
+    expect(root().getAttribute("data-overflow")).toBe("false");
+    Object.defineProperty(viewport(), "scrollHeight", { configurable: true, value: 300 });
+    document.getElementById("content")?.setAttribute(attribute, "true");
+    await tick();
+
+    expect(root().getAttribute("data-overflow")).toBe("true");
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+  });
+
+  it("re-measures on an outside hook write after the viewport moves off the host and back", async () => {
+    await start(`
+      <div data-controller="stimeo--scroll-area"
+           data-stimeo--scroll-area-target="viewport" aria-label="Log output">
+        <div id="inner" aria-label="Inner log"></div>
+      </div>
+    `);
+    const inner = document.getElementById("inner") as HTMLElement;
+    const target = "data-stimeo--scroll-area-target";
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    await tick();
+
+    // The rebind is queued first, so it lets go of the host before the host's observer
+    // has delivered the records of the measurement that follows.
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 300 });
+    root().removeAttribute(target);
+    for (const [key, value] of Object.entries({
+      scrollHeight: 800,
+      clientHeight: 200,
+      scrollTop: 300,
+    })) {
+      Object.defineProperty(inner, key, { configurable: true, value });
+    }
+    inner.setAttribute(target, "viewport");
+    await tick();
+
+    inner.removeAttribute(target);
+    root().setAttribute(target, "viewport");
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await tick();
+    expect(root().getAttribute("data-scroll")).toBe("middle");
+
+    Object.defineProperty(root(), "scrollTop", { configurable: true, value: 600 });
+    root().setAttribute("data-scroll", "middle");
+    await tick();
+
+    expect(root().getAttribute("data-scroll")).toBe("end");
   });
 
   it("takes the tab stop back when the control is removed again", async () => {
@@ -352,7 +601,81 @@ describe("ScrollAreaController", () => {
     expect(root().hasAttribute("data-overflow")).toBe(false);
     expect(root().hasAttribute("data-scroll")).toBe(false);
     expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("");
-    expect(() => document.dispatchEvent(new Event("turbo:before-cache"))).not.toThrow();
+  });
+
+  it("binds a viewport target added at runtime", async () => {
+    await start('<div data-controller="stimeo--scroll-area"></div>');
+    const added = detachedViewport(
+      { "aria-label": "Log output" },
+      { scrollHeight: 800, clientHeight: 200, scrollTop: 0 },
+    );
+
+    root().append(added);
+    controller()?.viewportTargetConnected();
+    await tick();
+
+    expect(root().getAttribute("data-overflow")).toBe("true");
+    expect(added.getAttribute("tabindex")).toBe("0");
+    expect(added.getAttribute("role")).toBe("region");
+  });
+
+  it("releases the listeners and size observation of a viewport that leaves", async () => {
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+    try {
+      await start(markup());
+      layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+      await tick();
+      const former = viewport();
+      expect(FakeResizeObserver.instances.some((o) => o.observed.has(former))).toBe(true);
+      const releases = vi.spyOn(former, "removeEventListener");
+
+      former.remove();
+      controller()?.viewportTargetDisconnected();
+      await tick();
+      expect(root().hasAttribute("data-scroll")).toBe(false);
+
+      Object.defineProperty(former, "scrollTop", { configurable: true, value: 300 });
+      former.dispatchEvent(new Event("scroll"));
+      await tick();
+      expect(root().hasAttribute("data-scroll")).toBe(false);
+      expect(releases).toHaveBeenCalledWith("load", expect.any(Function), true);
+      expect(FakeResizeObserver.instances.some((o) => o.observed.has(former))).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+      FakeResizeObserver.instances = [];
+    }
+  });
+
+  it("drops a pending scroll frame when the viewport leaves", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextHandle = 1;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const handle = nextHandle++;
+      frames.set(handle, callback);
+      return handle;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (handle: number) => {
+      frames.delete(handle);
+    });
+
+    try {
+      await start(markup());
+      layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+      await tick();
+      Object.defineProperty(viewport(), "scrollTop", { configurable: true, value: 300 });
+      viewport().dispatchEvent(new Event("scroll"));
+      expect(frames.size).toBe(1);
+
+      viewport().remove();
+      controller()?.viewportTargetDisconnected();
+      await tick();
+      for (const callback of [...frames.values()]) callback(0);
+
+      expect(root().hasAttribute("data-scroll")).toBe(false);
+      expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("stops re-checking the content once disconnected", async () => {
@@ -455,6 +778,34 @@ describe("ScrollAreaController", () => {
     }
   });
 
+  it("drops a pending scroll frame when a full measurement pass supersedes it", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextHandle = 1;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const handle = nextHandle++;
+      frames.set(handle, callback);
+      return handle;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (handle: number) => {
+      frames.delete(handle);
+    });
+
+    try {
+      await start(markup());
+      layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+      Object.defineProperty(viewport(), "scrollTop", { configurable: true, value: 300 });
+      viewport().dispatchEvent(new Event("scroll"));
+      expect(frames.size).toBe(1);
+
+      layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 600 });
+
+      expect(root().getAttribute("data-scroll")).toBe("end");
+      expect(frames.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("re-measures when descendant media finishes loading", async () => {
     await start(markup('<img id="delayed" alt="">'));
     layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
@@ -465,6 +816,38 @@ describe("ScrollAreaController", () => {
 
     expect(root().getAttribute("data-overflow")).toBe("true");
     expect(viewport().getAttribute("tabindex")).toBe("0");
+  });
+
+  it("re-measures when the viewport's own box resizes", async () => {
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+    try {
+      await start(markup());
+      expect(root().getAttribute("data-overflow")).toBe("false");
+
+      for (const [key, value] of Object.entries({ scrollHeight: 800, clientHeight: 200 })) {
+        Object.defineProperty(viewport(), key, { configurable: true, value });
+      }
+      for (const observer of FakeResizeObserver.instances) {
+        if (observer.observed.has(viewport())) observer.trigger();
+      }
+
+      expect(root().getAttribute("data-overflow")).toBe("true");
+    } finally {
+      vi.unstubAllGlobals();
+      FakeResizeObserver.instances = [];
+    }
+  });
+
+  it("re-measures when document fonts fail to load", async () => {
+    await withDocumentFonts(async (fonts) => {
+      await start(markup());
+      layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
+      Object.defineProperty(viewport(), "scrollHeight", { configurable: true, value: 800 });
+
+      fonts.dispatchEvent(new Event("loadingerror"));
+
+      expect(root().getAttribute("data-overflow")).toBe("true");
+    });
   });
 
   it("re-measures when document fonts finish loading and releases the listener", async () => {
@@ -623,6 +1006,75 @@ describe("ScrollAreaController", () => {
     expect(viewport().hasAttribute("tabindex")).toBe(false);
   });
 
+  it("releases its window and font subscriptions on disconnect", async () => {
+    await withDocumentFonts(async (fonts) => {
+      const fontSubscriptions = vi.spyOn(fonts, "addEventListener");
+      const fontReleases = vi.spyOn(fonts, "removeEventListener");
+      const windowReleases = vi.spyOn(window, "removeEventListener");
+      try {
+        await start(markup());
+        const onFonts = fontSubscriptions.mock.calls[0]?.[1];
+        expect(onFonts).toBeTypeOf("function");
+
+        controller()?.disconnect();
+
+        expect(windowReleases).toHaveBeenCalledWith("resize", expect.any(Function));
+        expect(fontReleases).toHaveBeenCalledWith("loadingdone", onFonts);
+        expect(fontReleases).toHaveBeenCalledWith("loadingerror", onFonts);
+      } finally {
+        windowReleases.mockRestore();
+      }
+    });
+  });
+
+  it("keeps its window and font subscriptions through turbo:before-cache", async () => {
+    await withDocumentFonts(async (fonts) => {
+      const fontReleases = vi.spyOn(fonts, "removeEventListener");
+      const windowReleases = vi.spyOn(window, "removeEventListener");
+      try {
+        await start(markup());
+
+        document.dispatchEvent(new Event("turbo:before-cache"));
+
+        expect(windowReleases).not.toHaveBeenCalledWith("resize", expect.any(Function));
+        expect(fontReleases).not.toHaveBeenCalled();
+      } finally {
+        windowReleases.mockRestore();
+      }
+    });
+  });
+
+  it("disconnects every mutation observer it opened when disconnected", async () => {
+    const observes = vi.spyOn(MutationObserver.prototype, "observe");
+    const disconnects = vi.spyOn(MutationObserver.prototype, "disconnect");
+    observes.mockClear();
+    try {
+      await start(`
+        <span id="log-label">Updates</span>
+        <div data-controller="stimeo--scroll-area">
+          <div data-stimeo--scroll-area-target="viewport" aria-labelledby="log-label"></div>
+        </div>
+      `);
+      const label = document.getElementById("log-label");
+      const opened = observes.mock.contexts.filter((_, index) => {
+        const [target, options] = observes.mock.calls[index] ?? [];
+        return (
+          target === viewport() ||
+          target === label ||
+          (target === document.documentElement && options?.attributeFilter?.includes("id"))
+        );
+      });
+      expect(opened).toHaveLength(3);
+
+      controller()?.disconnect();
+
+      for (const observer of opened) expect(disconnects.mock.contexts).toContain(observer);
+    } finally {
+      observes.mockRestore();
+      disconnects.mockRestore();
+    }
+  });
+
   it("removes the tabindex/role it added when disconnected (no Turbo residue)", async () => {
     await start(markup());
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 }); // overflow → attrs added
@@ -657,23 +1109,23 @@ describe("ScrollAreaController", () => {
     expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("0.25");
   });
 
-  it("returns every borrowed hook before Turbo caches the page", async () => {
+  it("keeps every borrowed hook through turbo:before-cache and keeps measuring", async () => {
     await start(markup());
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 600 });
 
     document.dispatchEvent(new Event("turbo:before-cache"));
 
-    expect(viewport().hasAttribute("tabindex")).toBe(false);
-    expect(viewport().hasAttribute("role")).toBe(false);
-    expect(root().hasAttribute("data-overflow")).toBe(false);
-    expect(root().hasAttribute("data-scroll")).toBe(false);
-    expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("");
+    expect(viewport().getAttribute("tabindex")).toBe("0");
+    expect(viewport().getAttribute("role")).toBe("region");
+    expect(root().getAttribute("data-overflow")).toBe("true");
+    expect(root().getAttribute("data-scroll")).toBe("end");
+    expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("1");
 
     Object.defineProperty(viewport(), "scrollHeight", { configurable: true, value: 150 });
     viewport().append(document.createElement("button"));
     await tick();
-    expect(root().hasAttribute("data-overflow")).toBe(false);
-    expect(root().hasAttribute("data-scroll")).toBe(false);
+    expect(root().getAttribute("data-overflow")).toBe("false");
+    expect(viewport().hasAttribute("tabindex")).toBe(false);
   });
 
   it("preserves a consumer-provided role/tabindex it did not add", async () => {
@@ -695,6 +1147,83 @@ describe("ScrollAreaController", () => {
     expect(viewport().getAttribute("role")).toBe("log");
     expect(viewport().getAttribute("tabindex")).toBe("0");
   });
+
+  it("keeps a role the page wrote over the region once the content fits", async () => {
+    await start(markup());
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(viewport().getAttribute("role")).toBe("region");
+    viewport().setAttribute("role", "log");
+    layout({ scrollHeight: 801, clientHeight: 200, scrollTop: 0 });
+
+    layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
+
+    expect(viewport().getAttribute("role")).toBe("log");
+  });
+
+  it("keeps a role the page wrote over the region on disconnect", async () => {
+    await start(markup());
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    viewport().setAttribute("role", "log");
+    layout({ scrollHeight: 801, clientHeight: 200, scrollTop: 0 });
+
+    controller()?.disconnect();
+
+    expect(viewport().getAttribute("role")).toBe("log");
+  });
+
+  it("keeps a role the page wrote over the region on a restored viewport", async () => {
+    await start(markup());
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    viewport().setAttribute("role", "log");
+    application = await restoreFromCache(application, (restored) => {
+      for (const [key, value] of Object.entries({
+        scrollHeight: 800,
+        clientHeight: 200,
+        scrollTop: 0,
+      })) {
+        Object.defineProperty(viewport(), key, { configurable: true, value });
+      }
+      restored.register("stimeo--scroll-area", ScrollAreaController);
+    });
+    expect(viewport().getAttribute("role")).toBe("log");
+
+    layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
+
+    expect(viewport().getAttribute("role")).toBe("log");
+    expect(
+      viewport()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-lease")),
+    ).toEqual([]);
+  });
+
+  it.each(["the page that stays", "a restored page"])(
+    "treats a region role the page writes back over its own as the one it wrote, on %s",
+    async (where) => {
+      // The role is the lease's while it holds the value the lease wrote, whoever wrote it
+      // last; the restored page inherits that from the record, as the page that stays does.
+      await start(markup());
+      layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+      viewport().setAttribute("role", "log");
+      if (where === "a restored page") {
+        application = await restoreFromCache(application, (restored) => {
+          for (const [key, value] of Object.entries({
+            scrollHeight: 800,
+            clientHeight: 200,
+            scrollTop: 0,
+          })) {
+            Object.defineProperty(viewport(), key, { configurable: true, value });
+          }
+          restored.register("stimeo--scroll-area", ScrollAreaController);
+        });
+      }
+      viewport().setAttribute("role", "region");
+
+      layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
+
+      expect(viewport().hasAttribute("role")).toBe(false);
+    },
+  );
 
   it("has no machine-detectable a11y violations", async () => {
     await start(markup());

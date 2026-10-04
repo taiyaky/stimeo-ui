@@ -26,8 +26,12 @@
  *
  * A WeakMap keeps documents collectible; the listener is installed only while
  * a document's stack is non-empty, and controller lifecycle hooks guarantee
- * that disconnected layers never remain registered.
+ * that disconnected layers never remain registered. The map is one per page
+ * (`sharedRegistry`), so the layers of controllers imported from different
+ * files share one stack and one listener.
  */
+
+import { sharedRegistry } from "./shared_registry";
 
 /** Behavior a layer registers when it activates. */
 export interface EscapeLayerOptions {
@@ -47,10 +51,16 @@ export interface EscapeLayerOptions {
   claims?: () => boolean;
 }
 
+/** An active layer on its document's stack: what the resolver reads, from any copy. */
+interface LayerEntry {
+  readonly onDismiss: () => void;
+  readonly claims: (() => boolean) | null;
+}
+
 /** A document's stack plus the one shared listener bound to it. */
 interface EscapeLayerRegistry {
-  stack: EscapeLayer[];
-  onKeydown: (event: KeyboardEvent) => void;
+  readonly stack: LayerEntry[];
+  readonly onKeydown: (event: KeyboardEvent) => void;
 }
 
 /**
@@ -70,13 +80,13 @@ export function claimsWhileFocusWithin(element: Element): () => boolean {
 }
 
 export class EscapeLayer {
-  static readonly #registries = new WeakMap<Document, EscapeLayerRegistry>();
+  static readonly #registries = sharedRegistry(
+    "stimeo-ui.escape-layer.registry.v1",
+    () => new WeakMap<Document, EscapeLayerRegistry>(),
+  );
 
-  #ownerDocument: Document | null = null;
-  /** Dismissal callback while active; `null` when inactive. */
-  #onDismiss: (() => void) | null = null;
-  /** Live predicate deciding whether the layer claims a press; `null` = always. */
-  #claims: (() => boolean) | null = null;
+  /** The document and the entry of this layer while it is active. */
+  #active: { readonly document: Document; readonly entry: LayerEntry } | null = null;
 
   /**
    * Activates this layer at the top of its document's Escape stack, installing
@@ -91,10 +101,9 @@ export class EscapeLayer {
       EscapeLayer.#registries.set(ownerDocument, registry);
       ownerDocument.addEventListener("keydown", registry.onKeydown);
     }
-    registry.stack.push(this);
-    this.#ownerDocument = ownerDocument;
-    this.#onDismiss = options.onDismiss;
-    this.#claims = options.claims ?? null;
+    const entry = { onDismiss: options.onDismiss, claims: options.claims ?? null };
+    registry.stack.push(entry);
+    this.#active = { document: ownerDocument, entry };
   }
 
   /**
@@ -102,21 +111,19 @@ export class EscapeLayer {
    * shared listener when the stack empties. Safe to call when inactive.
    */
   deactivate(): void {
-    const ownerDocument = this.#ownerDocument;
-    if (!ownerDocument) return;
+    const active = this.#active;
+    if (!active) return;
 
-    const registry = EscapeLayer.#registries.get(ownerDocument);
+    const registry = EscapeLayer.#registries.get(active.document);
     if (registry) {
-      const index = registry.stack.lastIndexOf(this);
+      const index = registry.stack.lastIndexOf(active.entry);
       if (index >= 0) registry.stack.splice(index, 1);
       if (registry.stack.length === 0) {
-        ownerDocument.removeEventListener("keydown", registry.onKeydown);
-        EscapeLayer.#registries.delete(ownerDocument);
+        active.document.removeEventListener("keydown", registry.onKeydown);
+        EscapeLayer.#registries.delete(active.document);
       }
     }
-    this.#ownerDocument = null;
-    this.#onDismiss = null;
-    this.#claims = null;
+    this.#active = null;
   }
 
   /**
@@ -125,11 +132,11 @@ export class EscapeLayer {
    * and diagnostics — production dismissal goes through the shared listener.
    */
   get ownsEscape(): boolean {
-    const ownerDocument = this.#ownerDocument;
-    if (!ownerDocument) return false;
-    const registry = EscapeLayer.#registries.get(ownerDocument);
+    const active = this.#active;
+    if (!active) return false;
+    const registry = EscapeLayer.#registries.get(active.document);
     if (!registry) return false;
-    return EscapeLayer.#resolveOwner(registry.stack) === this;
+    return EscapeLayer.#resolveOwner(registry.stack) === active.entry;
   }
 
   /** Builds a document's registry with its shared resolver listener. */
@@ -141,18 +148,18 @@ export class EscapeLayer {
         const owner = EscapeLayer.#resolveOwner(registry.stack);
         if (!owner) return;
         event.preventDefault();
-        owner.#onDismiss?.();
+        owner.onDismiss();
       },
     };
     return registry;
   }
 
   /** The topmost stack layer whose claims predicate passes, or `null`. */
-  static #resolveOwner(stack: EscapeLayer[]): EscapeLayer | null {
+  static #resolveOwner(stack: readonly LayerEntry[]): LayerEntry | null {
     for (let index = stack.length - 1; index >= 0; index--) {
       const layer = stack[index];
       if (!layer) continue;
-      if (layer.#claims && !layer.#claims()) continue;
+      if (layer.claims && !layer.claims()) continue;
       return layer;
     }
     return null;

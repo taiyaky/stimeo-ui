@@ -1,5 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { LayoutObserver } from "../utils/layout_observer";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 
 /** Parses a CSS pixel length, defaulting to 0 for `auto` / empty / `normal`. */
 function px(value: string): number {
@@ -54,10 +56,18 @@ interface FontEventSource {
  * height vanished, so the controller's own height writes do not re-enter it.
  */
 export class TextareaAutosizeController extends Controller<HTMLTextAreaElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override values = {
     minRows: { type: Number, default: 1 },
     maxRows: { type: Number, default: 0 },
   };
+
+  static valueConstraints = {
+    minRows: { finite: true, min: 1 },
+    maxRows: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof TextareaAutosizeController.values>;
   static actions = ["resize"] as const;
   static events = ["resize"] as const;
 
@@ -149,10 +159,10 @@ export class TextareaAutosizeController extends Controller<HTMLTextAreaElement> 
     const contentHeight = Math.max(0, el.scrollHeight - paddingV);
     const rows = Math.max(1, Math.round(contentHeight / lineHeight));
 
-    let targetContent = Math.max(contentHeight, this.minRowsValue * lineHeight);
+    let targetContent = Math.max(contentHeight, this.#safeMinRows * lineHeight);
     let atMax = false;
-    if (this.maxRowsValue > 0) {
-      const maxContent = this.maxRowsValue * lineHeight;
+    if (this.#safeMaxRows > 0) {
+      const maxContent = this.#safeMaxRows * lineHeight;
       if (targetContent > maxContent) {
         targetContent = maxContent;
         atMax = true;
@@ -205,5 +215,26 @@ export class TextareaAutosizeController extends Controller<HTMLTextAreaElement> 
     this.#fonts?.removeEventListener("loadingdone", this.#remeasure);
     this.#fonts?.removeEventListener("loadingerror", this.#remeasure);
     this.#fonts = null;
+  }
+  /** Current `minRows` declaration resolved against its numeric contract. */
+  get #safeMinRows(): number {
+    return this.#numbers.read(
+      this,
+      "minRows",
+      this.minRowsValue,
+      TextareaAutosizeController.values.minRows.default,
+      TextareaAutosizeController.valueConstraints.minRows,
+    );
+  }
+
+  /** Current `maxRows` declaration resolved against its numeric contract. */
+  get #safeMaxRows(): number {
+    return this.#numbers.read(
+      this,
+      "maxRows",
+      this.maxRowsValue,
+      TextareaAutosizeController.values.maxRows.default,
+      TextareaAutosizeController.valueConstraints.maxRows,
+    );
   }
 }

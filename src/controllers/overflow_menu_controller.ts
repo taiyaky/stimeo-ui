@@ -1,8 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { ownerOf } from "../utils/event_owner";
 import { canTakeFocus } from "../utils/focus_candidate";
 import { LayoutObserver } from "../utils/layout_observer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { TabindexLoan } from "../utils/tabindex_loan";
 import type { MenuController } from "./menu_controller";
@@ -102,9 +104,9 @@ interface MovableParent {
  * Menu drives it — until the rest fit beside the More button. When nothing overflows the
  * More wrapper (button *and* menu) is `hidden`. The controller element carries
  * `data-overflowing` / `data-overflow-count`, and a `change` event fires on connect and
- * on every later transition.
+ * on later update or resize transitions; retained-element morphs report `reconcile`.
  *
- * `change` dispatches `{ overflowCount, total }`.
+ * `change` and `reconcile` dispatch `{ overflowCount, total }`.
  *
  * @remarks
  * **Measuring.** The container's width must not be derived from its content (give the bar
@@ -143,18 +145,34 @@ interface MovableParent {
  * **Turbo.** The managed set and the canonical order are rebuilt *from the DOM* every
  * pass, so a fresh `connect()` onto markup that already holds banked items (cache restore,
  * a morph, a clone, server-rendered overflow) re-adopts them instead of orphaning them
- * inside a wrapper it would then hide. Symmetrically, `disconnect()` and
- * `turbo:before-cache` return every item to the bar, collapse the composed menu (so it
- * releases its dismissal-stack membership rather than being snapshotted mid-gesture),
- * take back the More label the trigger still holds alone, and strip the items'
- * bookkeeping attributes, so a cached snapshot is the authored DOM. A trigger the
- * consumer added to after the label was written keeps the label and its marker:
- * taking either off would write to content that belongs to the consumer. The
- * `ResizeObserver` and debounce timer are released on `disconnect()` too.
+ * inside a wrapper it would then hide. Symmetrically, `disconnect()` returns every item
+ * to the bar, collapses the composed menu (so it releases its dismissal-stack
+ * membership), takes back the More label the trigger still holds alone, and strips the
+ * items' bookkeeping attributes. `turbo:before-cache` changes nothing: Turbo also
+ * dispatches it on pages that stay (a promoted frame navigation, a `popstate` without
+ * Turbo state, a refresh of a cached URL), where the bar stays balanced and an open
+ * More menu stays open, and a page restored from its cache is re-adopted and balanced
+ * by the connection that adopts it. A trigger the consumer added to after the label
+ * was written keeps the label and its marker: taking either off would write to content
+ * that belongs to the consumer. The `ResizeObserver` and debounce timer are released on
+ * `disconnect()` too.
+ *
+ * **Swapped targets.** An items row or a More wrapper that takes over — in one task,
+ * in front of the current one, or after an earlier one leaves in a later task — is
+ * balanced by a pass of its own, which reports `reconcile` only when the overflow count
+ * moved. The row and the wrapper balanced before are handed back first, so a banked item
+ * is neither lost nor counted twice. A row or a wrapper
+ * that stops resolving as the target is handed back the way `disconnect()` hands
+ * back the bar: the items banked from a row return to it, and a wrapper is hidden
+ * with its menu collapsed and its label taken back — after `disconnect()` too, since
+ * dropping the identifier leaves both on the page.
  *
  * Behavior only — no styling.
  */
 export class OverflowMenuController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   /** One bookkeeping attribute, in the namespace this controller is registered under. */
   #attr(name: string): string {
     return `data-${this.identifier}-${name}`;
@@ -165,11 +183,17 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     moreLabel: { type: String, default: "More" },
     debounce: { type: Number, default: 100 },
   };
+
+  static valueConstraints = {
+    debounce: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof OverflowMenuController.values>;
   static actions = ["update"] as const;
-  static events = ["change"] as const;
+  static events = ["change", "reconcile"] as const;
 
   declare readonly itemsTarget: HTMLElement;
+  declare readonly itemsTargets: HTMLElement[];
   declare readonly moreTarget: HTMLElement;
+  declare readonly moreTargets: HTMLElement[];
   declare readonly hasItemsTarget: boolean;
   declare readonly hasMoreTarget: boolean;
 
@@ -185,34 +209,82 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   #widths = new WeakMap<HTMLElement, number>();
   /** Last reported overflow count, so `change` fires only on transitions. */
   #lastHidden: number | null = null;
+  /**
+   * Counts the passes and restores begun on this instance. Moving focus and closing
+   * the composed Menu run page code, which can start a pass or a restore of its own;
+   * that one writes the whole state, so a pass that finds this count moved on after
+   * such a call writes and reports nothing more.
+   */
+  #pass = 0;
+  /**
+   * Whether every item is being returned to the bar. Closing the composed Menu there
+   * runs page code, and a pass it starts would bank items again behind the More
+   * wrapper that the restore then hides, so no pass runs until the restore ends —
+   * the outermost one, when that page code starts another restore inside it.
+   */
+  #restoring = false;
   /** The `tabindex` this instance lends the root for the focus fallback. */
-  readonly #tabindex = new TabindexLoan();
+  readonly #tabindex = new TabindexLoan("-1", this.identifier);
+  /** The items row the last pass balanced, until it or the wrapper is handed back. */
+  #bar: HTMLElement | null = null;
+  /** The More wrapper the last pass balanced, until it or the row is handed back. */
+  #wrapper: HTMLElement | null = null;
 
-  /** Hands Turbo a snapshot of the bar with every item back in place. */
-  readonly #beforeCache = new BeforeCacheReset(() => this.#restoreAll());
   /**
    * Whether `connect()` has run for this connection. Stimulus delivers Value
    * callbacks ahead of it, and the first pass writes the label anyway.
    */
   #connected = false;
 
+  readonly #morphRender = new MorphRenderWatcher(() => this.#reconcile());
+
   override connect(): void {
+    this.#tabindex.reclaim(this.element);
+    this.#morphRender.observe(this.element);
     this.#connected = true;
     if (!this.hasItemsTarget || !this.hasMoreTarget) return;
 
-    this.#beforeCache.activate();
     this.#layout.observe(this.element);
     this.#layout.observeViewport();
     this.update();
   }
 
   override disconnect(): void {
+    this.#morphRender.disconnect();
     this.#connected = false;
     this.#layout.disconnect();
     this.#timers.clearAll();
-    this.#beforeCache.deactivate();
     this.#restoreAll();
     this.#lastHidden = null;
+  }
+
+  /** Balances an items row that arrives after connect in front of the others. */
+  itemsTargetConnected(): void {
+    this.#followTargets();
+  }
+
+  /**
+   * Hands the items back to a row that no longer resolves as the target — after
+   * `disconnect()` too, since dropping the identifier leaves the element on the page — then
+   * balances the row that stays.
+   */
+  itemsTargetDisconnected(bar: HTMLElement): void {
+    if (bar === this.#bar && !this.itemsTargets.includes(bar)) this.#release();
+    this.#followTargets();
+  }
+
+  /** Balances a More wrapper that arrives after connect in front of the others. */
+  moreTargetConnected(): void {
+    this.#followTargets();
+  }
+
+  /**
+   * Hands the items banked in a More wrapper that no longer resolves as the target back to
+   * the row, and hides it — after `disconnect()` too — then balances the wrapper that stays.
+   */
+  moreTargetDisconnected(more: HTMLElement): void {
+    if (more === this.#wrapper && !this.moreTargets.includes(more)) this.#release();
+    this.#followTargets();
   }
 
   /**
@@ -227,11 +299,26 @@ export class OverflowMenuController extends Controller<HTMLElement> {
 
   /** Re-measures and rebalances items between the bar and the More menu. */
   update(): void {
-    if (!this.hasItemsTarget || !this.hasMoreTarget) return;
+    const detail = this.#render();
+    if (detail) this.dispatch("change", { detail });
+  }
+
+  /** Reports a published overflow count changed by a retained-element morph. */
+  #reconcile(): void {
+    const detail = this.#render();
+    if (detail) this.dispatch("reconcile", { detail });
+  }
+
+  /** Rebalances the current item set and returns a changed published count. */
+  #render(): { overflowCount: number; total: number } | null {
+    if (this.#restoring || !this.hasItemsTarget || !this.hasMoreTarget) return null;
+    const pass = ++this.#pass;
+    this.#bar = this.itemsTarget;
+    this.#wrapper = this.moreTarget;
     // The label is part of the More button's width, so it is in place before the
     // button is measured below.
     this.#syncLabel();
-    this.#syncItems();
+    this.#syncItems(this.itemsTarget, this.moreTarget);
 
     // Reveal More so its trigger is measurable, then refresh the widths of the items
     // currently in the bar (menu items keep their location-independent last value).
@@ -244,14 +331,14 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     if (
       this.#items.some((item) => item.parentElement !== this.itemsTarget && !this.#widths.has(item))
     ) {
-      this.#removeBoundary();
+      this.#removeBoundary(this.itemsTarget);
       for (const item of this.#items) this.#unbank(item);
       this.#reorder(this.itemsTarget, this.#items);
     }
     for (const item of this.#items) {
       if (item.parentElement === this.itemsTarget) this.#widths.set(item, item.offsetWidth);
     }
-    const moreWidth = (this.#trigger() ?? this.moreTarget).offsetWidth;
+    const moreWidth = (this.#trigger(this.moreTarget) ?? this.moreTarget).offsetWidth;
     const itemGap = this.#gap(this.itemsTarget); // between the items themselves
     const barGap = this.#gap(this.element); // between the items row and the More button
 
@@ -287,7 +374,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
       focused !== null &&
       hidden.has(focused) &&
       focused.parentElement === this.itemsTarget && // i.e. *starting* to retreat
-      !this.#menuExpanded();
+      !this.#menuExpanded(this.moreTarget);
     // The mirror image: the item holding focus is on its way *out* of an expanded
     // menu. Focus rides along with the node, but once it sits outside the More
     // wrapper the menu owns nothing that reaches it — the shared dismissal
@@ -298,12 +385,14 @@ export class OverflowMenuController extends Controller<HTMLElement> {
       focused !== null &&
       !hidden.has(focused) &&
       focused.parentElement !== this.itemsTarget && // i.e. *leaving* the menu
-      this.#menuExpanded();
+      this.#menuExpanded(this.moreTarget);
 
     // A fully-banked snapshot retains an inert split point so a fresh controller can
     // tell prepend from append. Once a real item remains in the bar, its saved index is
     // the stronger anchor and the boundary must not participate in DOM reordering.
-    if (hidden.size === 0 || hidden.size !== this.#items.length) this.#removeBoundary();
+    if (hidden.size === 0 || hidden.size !== this.#items.length) {
+      this.#removeBoundary(this.itemsTarget);
+    }
 
     // The menu pass runs first, so retreating items leave the bar before it is reordered
     // (otherwise every trailing item would be shuffled needlessly).
@@ -312,7 +401,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
       else this.#unbank(item);
     }
     this.#reorder(
-      this.#menuList(),
+      this.#menuList(this.moreTarget),
       this.#items.filter((item) => hidden.has(item)),
     );
     this.#reorder(
@@ -320,8 +409,9 @@ export class OverflowMenuController extends Controller<HTMLElement> {
       this.#items.filter((item) => !hidden.has(item)),
     );
 
-    if (retreating) (this.#trigger() ?? this.moreTarget).focus();
+    if (retreating) (this.#trigger(this.moreTarget) ?? this.moreTarget).focus();
     else if (active !== null && this.#lostFocus(active)) active.focus();
+    if (pass !== this.#pass) return null;
 
     const count = hidden.size;
     // Keep the canonical positions on both sides while overflow exists. If the bar is
@@ -332,7 +422,6 @@ export class OverflowMenuController extends Controller<HTMLElement> {
       else item.removeAttribute(this.#attr(INDEX));
     }
     if (count > 0 && count === this.#items.length) this.#ensureBoundary();
-    else this.#removeBoundary();
     const inMore =
       document.activeElement instanceof HTMLElement &&
       this.moreTarget.contains(document.activeElement);
@@ -344,8 +433,9 @@ export class OverflowMenuController extends Controller<HTMLElement> {
       // back focus the user is now holding on the returned item; `inMore` is false
       // in that case, so the rescue below stays out of the way. Items still banked
       // remain reachable by reopening from the trigger.
-      this.#closeMenu();
-      if (inMore) this.#rescueFocus();
+      this.#closeMenu(this.moreTarget);
+      if (inMore && pass === this.#pass) this.#rescueFocus();
+      if (pass !== this.#pass) return null;
     }
     this.moreTarget.hidden = count === 0;
     if (count > 0) this.element.setAttribute("data-overflowing", "true");
@@ -354,8 +444,9 @@ export class OverflowMenuController extends Controller<HTMLElement> {
 
     if (this.#lastHidden !== count) {
       this.#lastHidden = count;
-      this.dispatch("change", { detail: { overflowCount: count, total: this.#items.length } });
+      return { overflowCount: count, total: this.#items.length };
     }
+    return null;
   }
 
   /** The flex `column-gap` on `el` in px (0 when none / unsupported). */
@@ -380,15 +471,16 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   }
 
   /**
-   * Rebuilds the managed set and the canonical order from the DOM. The bar's children
-   * give the order of everything inline (so a leading insert is not silently appended)
-   * and {@link #merge} weaves the banked items back among them.
+   * Rebuilds the managed set and the canonical order from the DOM of the items row `row`
+   * and the More wrapper `more`. The row's children give the order of everything inline (so
+   * a leading insert is not silently appended) and {@link #merge} weaves the banked items
+   * back among them.
    */
-  #syncItems(): void {
+  #syncItems(row: HTMLElement, more: HTMLElement): void {
     const previous = this.#items;
     const bar: HTMLElement[] = [];
     let boundaryAt: number | undefined;
-    for (const el of this.itemsTarget.children) {
+    for (const el of row.children) {
       if (el instanceof HTMLTemplateElement && el.hasAttribute(this.#attr(BOUNDARY))) {
         boundaryAt ??= bar.length;
         continue;
@@ -397,7 +489,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     }
 
     const banked: HTMLElement[] = [];
-    for (const el of this.#menuList().children) {
+    for (const el of this.#menuList(more).children) {
       if (el instanceof HTMLElement && el.hasAttribute(this.#attr(BANKED))) banked.push(el);
     }
     banked.sort((a, b) => this.#bankedIndex(a) - this.#bankedIndex(b));
@@ -499,41 +591,55 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     return Number.isFinite(value) ? value : undefined;
   }
 
-  /** The inert split point written only when every managed item lives in More. */
-  #boundary(): HTMLTemplateElement | null {
-    for (const el of this.itemsTarget.children) {
+  /** The inert split point in `bar`, written only when every managed item lives in More. */
+  #boundary(bar: HTMLElement): HTMLTemplateElement | null {
+    for (const el of bar.children) {
       if (el instanceof HTMLTemplateElement && el.hasAttribute(this.#attr(BOUNDARY))) return el;
     }
     return null;
   }
 
   #ensureBoundary(): void {
-    if (this.#boundary() !== null) return;
+    if (this.#boundary(this.itemsTarget) !== null) return;
     const boundary = document.createElement("template");
     boundary.setAttribute(this.#attr(BOUNDARY), "");
     this.itemsTarget.appendChild(boundary);
   }
 
-  #removeBoundary(): void {
-    this.#boundary()?.remove();
+  #removeBoundary(bar: HTMLElement): void {
+    this.#boundary(bar)?.remove();
   }
 
   /** Debounced re-measure for resize-driven churn. */
   #scheduleUpdate(): void {
     this.#timers.clearAll();
-    this.#timers.set(() => this.update(), this.debounceValue);
+    this.#timers.set(() => this.update(), this.#safeDebounce);
   }
 
-  /** Returns the menu list the items are banked into (falls back to the More wrapper). */
-  #menuList(): HTMLElement {
-    return (
-      this.moreTarget.querySelector<HTMLElement>('[data-stimeo--menu-target="menu"]') ??
-      this.moreTarget
-    );
+  /**
+   * Hands back the row and the wrapper the last pass balanced and schedules a pass when the
+   * items row or the More wrapper that is first is not that one, so the pass gathers every
+   * item from the row and the wrapper that are first then. Only a bar that has published a
+   * count follows its targets — one missing a target since connect stays as inert as
+   * `connect()` left it — and none does during a restore, whose page code must not bank
+   * items again behind it.
+   */
+  #followTargets(): void {
+    if (this.#restoring || this.#lastHidden === null) return;
+    const bar = this.hasItemsTarget ? this.itemsTarget : null;
+    const more = this.hasMoreTarget ? this.moreTarget : null;
+    if (bar === this.#bar && more === this.#wrapper) return;
+    this.#release();
+    this.#morphRender.schedule();
   }
 
-  #trigger(): HTMLElement | null {
-    return this.moreTarget.querySelector<HTMLElement>('[data-stimeo--menu-target="trigger"]');
+  /** Returns the menu list `more` banks the items into (falls back to the wrapper itself). */
+  #menuList(more: HTMLElement): HTMLElement {
+    return more.querySelector<HTMLElement>('[data-stimeo--menu-target="menu"]') ?? more;
+  }
+
+  #trigger(more: HTMLElement): HTMLElement | null {
+    return more.querySelector<HTMLElement>('[data-stimeo--menu-target="trigger"]');
   }
 
   /**
@@ -546,7 +652,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #syncLabel(): void {
-    const trigger = this.#trigger();
+    const trigger = this.#trigger(this.moreTarget);
     if (trigger === null) return;
     const owned = this.#ownsLabel(trigger);
     if (!owned && !this.#isBareTrigger(trigger)) return;
@@ -613,32 +719,32 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   }
 
   /**
-   * Whether the More menu is expanded. Menu owns that state and reflects it on the
-   * trigger's `aria-expanded`, so read the contract rather than guess from `hidden`
+   * Whether the menu `more` composes is expanded. Menu owns that state and reflects it on
+   * the trigger's `aria-expanded`, so read the contract rather than guess from `hidden`
    * (which is absent until Menu connects).
    */
-  #menuExpanded(): boolean {
-    return this.#trigger()?.getAttribute("aria-expanded") === "true";
+  #menuExpanded(more: HTMLElement): boolean {
+    return this.#trigger(more)?.getAttribute("aria-expanded") === "true";
   }
 
   /**
-   * Collapses the More menu before its wrapper is hidden. Menu owns the state (and the
-   * Escape-stack membership that goes with it), so ask it; the DOM fallback covers markup
-   * that reached an expanded state with no Menu mounted.
+   * Collapses the menu `more` composes before the wrapper is hidden. Menu owns the state
+   * (and the Escape-stack membership that goes with it), so ask it; the DOM fallback covers
+   * markup that reached an expanded state with no Menu mounted.
    */
-  #closeMenu(): void {
-    if (!this.#menuExpanded()) return;
+  #closeMenu(more: HTMLElement): void {
+    if (!this.#menuExpanded(more)) return;
     const menu = this.application.getControllerForElementAndIdentifier(
-      this.moreTarget,
+      more,
       "stimeo--menu",
     ) as MenuController | null;
     if (menu) {
       menu.close();
       return;
     }
-    this.#trigger()?.setAttribute("aria-expanded", "false");
-    const list = this.#menuList();
-    if (list !== this.moreTarget) list.hidden = true;
+    this.#trigger(more)?.setAttribute("aria-expanded", "false");
+    const list = this.#menuList(more);
+    if (list !== more) list.hidden = true;
   }
 
   /** The managed item that is, or contains, `el` — focus rescue works on either. */
@@ -691,25 +797,44 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   /** Returns every item to the bar and removes all traces of this controller. */
   #restoreAll(): void {
     if (!this.hasItemsTarget || !this.hasMoreTarget) return;
-    this.#syncItems();
-    this.#removeBoundary();
-    this.#reorder(this.itemsTarget, this.#items);
+    this.#giveBack(this.itemsTarget, this.moreTarget);
+  }
+
+  /** Hands back the row and the wrapper the last pass balanced, when one did. */
+  #release(): void {
+    if (this.#bar && this.#wrapper) this.#giveBack(this.#bar, this.#wrapper);
+  }
+
+  /**
+   * Returns every item to `bar` and removes all traces of this controller from it, from
+   * `more` and from the root. Nothing counts as balanced afterwards, so the next pass
+   * balances whatever row and wrapper are first then.
+   */
+  #giveBack(bar: HTMLElement, more: HTMLElement): void {
+    this.#bar = null;
+    this.#wrapper = null;
+    const restoring = this.#restoring;
+    this.#restoring = true;
+    this.#pass++;
+    this.#syncItems(bar, more);
+    this.#removeBoundary(bar);
+    this.#reorder(bar, this.#items);
     for (const item of this.#items) {
       this.#unbank(item);
       item.removeAttribute(this.#attr(INDEX));
     }
     // The wrapper is being hidden for good, so the composed menu must not stay
-    // expanded behind it: an unclosed menu keeps its dismissal-stack membership
-    // and would be written into a Turbo snapshot mid-gesture. Focus is left
-    // exactly where it is — this path runs at teardown, where moving it would be
-    // the surprise.
-    this.#closeMenu();
-    const trigger = this.#trigger();
+    // expanded behind it: an unclosed menu keeps its dismissal-stack membership.
+    // Focus is left exactly where it is — this path runs at teardown, where moving
+    // it would be the surprise.
+    this.#closeMenu(more);
+    const trigger = this.#trigger(more);
     if (trigger !== null) this.#releaseLabel(trigger);
-    this.moreTarget.hidden = true;
+    more.hidden = true;
     this.element.removeAttribute("data-overflowing");
     this.element.removeAttribute("data-overflow-count");
     this.#tabindex.returnAll();
+    this.#restoring = restoring;
   }
 
   /**
@@ -791,5 +916,15 @@ export class OverflowMenuController extends Controller<HTMLElement> {
     if (raw === null || raw.trim() === "") return Number.POSITIVE_INFINITY;
     const value = Number(raw);
     return Number.isNaN(value) ? Number.POSITIVE_INFINITY : value;
+  }
+  /** Current `debounce` declaration resolved against its numeric contract. */
+  get #safeDebounce(): number {
+    return this.#numbers.read(
+      this,
+      "debounce",
+      this.debounceValue,
+      OverflowMenuController.values.debounce.default,
+      OverflowMenuController.valueConstraints.debounce,
+    );
   }
 }

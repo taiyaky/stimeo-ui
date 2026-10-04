@@ -4,7 +4,7 @@ import { ResizableController } from "../src/controllers/resizable_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
 describe("ResizableController", () => {
@@ -65,6 +65,54 @@ describe("ResizableController", () => {
 
       f6(secondary());
       expect(document.activeElement).toBe(primary());
+    });
+
+    it("gives back the pane tabindex a page restored from the cache carries", async () => {
+      f6(document.getElementById("splitter") as HTMLElement);
+      expect(primary().getAttribute("tabindex")).toBe("-1");
+
+      application = await restoreFromCache(application, (restored) =>
+        restored.register("stimeo--resizable", ResizableController),
+      );
+
+      expect(primary().hasAttribute("tabindex")).toBe(false);
+      expect(
+        primary()
+          .getAttributeNames()
+          .filter((name) => name.endsWith("-loan")),
+      ).toEqual([]);
+    });
+
+    it("gives back the tabindex a page restored from the cache carries on the second pane", async () => {
+      f6(document.getElementById("splitter") as HTMLElement);
+      f6(primary());
+      expect(secondary().getAttribute("tabindex")).toBe("-1");
+
+      application = await restoreFromCache(application, (restored) =>
+        restored.register("stimeo--resizable", ResizableController),
+      );
+
+      expect(secondary().hasAttribute("tabindex")).toBe(false);
+    });
+
+    it("gives back the tabindex a page restored from the cache carries on a pane that is no longer the primary", async () => {
+      f6(document.getElementById("splitter") as HTMLElement);
+      expect(primary().getAttribute("tabindex")).toBe("-1");
+      const ahead = document.createElement("div");
+      ahead.setAttribute("data-stimeo--resizable-target", "primary");
+      primary().before(ahead);
+      await tick();
+
+      application = await restoreFromCache(application, (restored) =>
+        restored.register("stimeo--resizable", ResizableController),
+      );
+
+      expect(primary().hasAttribute("tabindex")).toBe(false);
+      expect(
+        primary()
+          .getAttributeNames()
+          .filter((name) => name.endsWith("-loan")),
+      ).toEqual([]);
     });
 
     it("lends the pane a tabindex and takes it back on disconnect", () => {
@@ -440,6 +488,178 @@ describe("ResizableController", () => {
     expect(rootEl().hasAttribute("data-dragging")).toBe(false);
   });
 
+  /** Makes `element` refuse to release a capture, as an engine does for an ended pointer. */
+  const refuseRelease = (element: HTMLElement) =>
+    vi.spyOn(element, "releasePointerCapture").mockImplementation(() => {
+      throw new DOMException("No active pointer with the given id is found.", "NotFoundError");
+    });
+
+  it("finishes the teardown when the drag's pointer has already ended", async () => {
+    rootEl().getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 500, height: 100 }) as DOMRect;
+    const controller = controllerFor();
+    const splitter = splitterEl();
+    const primary = document.getElementById("pane-1") as HTMLElement;
+    press(splitter, "F6");
+    expect(primary.getAttribute("tabindex")).toBe("-1");
+    startDrag(9);
+    await tick();
+    refuseRelease(splitter);
+
+    let thrown: unknown = null;
+    try {
+      controller.disconnect();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(primary.hasAttribute("tabindex")).toBe(false);
+    expect(rootEl().hasAttribute("data-dragging")).toBe(false);
+    // Neither the drag's listener nor the pane cycle answers any more.
+    splitter.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, clientX: 350, pointerId: 9 }),
+    );
+    splitter.focus();
+    press(splitter, "F6");
+    expect(document.activeElement).toBe(splitter);
+    // The pass is closed: a Value change no longer repaints.
+    rootEl().setAttribute("data-stimeo--resizable-value-value", "70");
+    controller.valueValueChanged();
+    await flushMicrotasks();
+    expect(fraction()).toBe("0.5");
+    expect(thrown).toBeNull();
+  });
+
+  it("finishes ending the drag when its separator leaves after the pointer ended", async () => {
+    rootEl().getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 500, height: 100 }) as DOMRect;
+    const leaving = splitterEl();
+    const successor = leaving.cloneNode() as HTMLElement;
+    successor.id = "successor";
+    successor.setAttribute("aria-valuenow", "30");
+    leaving.after(successor);
+    await tick();
+    startDrag(10);
+    await tick();
+    leaving.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, clientX: 300, pointerId: 10 }),
+    );
+    await tick();
+    refuseRelease(leaving);
+
+    leaving.removeAttribute("data-stimeo--resizable-target");
+    await tick();
+
+    // The separator that stays is still brought to the position the drag left.
+    expect(successor.getAttribute("aria-valuenow")).toBe("60");
+    expect(rootEl().hasAttribute("data-dragging")).toBe(false);
+    leaving.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, clientX: 400, pointerId: 10 }),
+    );
+    expect(fraction()).toBe("0.6");
+  });
+
+  it("gives the drag back when its separator stops being the target mid-drag", async () => {
+    rootEl().getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 500, height: 100 }) as DOMRect;
+    const leaving = splitterEl();
+    const successor = leaving.cloneNode() as HTMLElement;
+    successor.id = "successor";
+    leaving.after(successor);
+    await tick();
+    startDrag(6);
+    await tick();
+    leaving.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, clientX: 300, pointerId: 6 }),
+    );
+    expect(fraction()).toBe("0.6");
+    const events = captureStateEvents("stimeo--resizable", ["change", "reconcile"]);
+
+    leaving.removeAttribute("data-stimeo--resizable-target");
+    await tick();
+
+    expect(rootEl().hasAttribute("data-dragging")).toBe(false);
+    expect(leaving.hasPointerCapture(6)).toBe(false);
+    // The departed separator's listeners are gone: its moves no longer steer the panes.
+    leaving.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, clientX: 400, pointerId: 6 }),
+    );
+    leaving.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 6 }));
+    expect(fraction()).toBe("0.6");
+    expect(events.seen).toEqual([]);
+    events.stop();
+  });
+
+  it("drags with the separator pressed while an earlier one is still in place", async () => {
+    rootEl().getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 500, height: 100 }) as DOMRect;
+    const controller = controllerFor();
+    const original = splitterEl();
+    const successor = original.cloneNode() as HTMLElement;
+    successor.id = "successor";
+    // happy-dom binds an action on an element appended at runtime unreliably, so the
+    // press is routed to the controller directly.
+    successor.removeAttribute("data-action");
+    successor.addEventListener("pointerdown", (event) => controller.onPointerDown(event));
+    original.after(successor);
+    await tick();
+    const captured = vi.spyOn(successor, "setPointerCapture");
+
+    successor.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 11 }),
+    );
+
+    expect(captured).toHaveBeenCalledWith(11);
+    expect(document.activeElement).toBe(successor);
+    original.remove();
+    await tick();
+    successor.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, clientX: 350, pointerId: 11 }),
+    );
+    expect(fraction()).toBe("0.7");
+    expect(rootEl().getAttribute("data-dragging")).toBe("true");
+    successor.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 11 }));
+    expect(rootEl().hasAttribute("data-dragging")).toBe(false);
+  });
+
+  it("drags the first separator for a press on an element that is not a separator", async () => {
+    rootEl().getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 500, height: 100 }) as DOMRect;
+    const controller = controllerFor();
+    const primary = document.getElementById("pane-1") as HTMLElement;
+    primary.addEventListener("pointerdown", (event) => controller.onPointerDown(event));
+    const captured = vi.spyOn(splitterEl(), "setPointerCapture");
+
+    primary.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 12 }),
+    );
+    splitterEl().dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, clientX: 300, pointerId: 12 }),
+    );
+
+    expect(captured).toHaveBeenCalledWith(12);
+    expect(fraction()).toBe("0.6");
+  });
+
+  it("keeps the drag going when its separator moves inside the element", async () => {
+    rootEl().getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 500, height: 100 }) as DOMRect;
+    const splitter = splitterEl();
+    startDrag(7);
+    await tick();
+
+    (document.getElementById("pane-1") as HTMLElement).before(splitter);
+    await tick();
+    splitter.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, clientX: 350, pointerId: 7 }),
+    );
+
+    expect(fraction()).toBe("0.7");
+    expect(rootEl().getAttribute("data-dragging")).toBe("true");
+    splitter.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 7 }));
+    expect(rootEl().hasAttribute("data-dragging")).toBe(false);
+  });
+
   it("ends the drag on pointercancel", async () => {
     startDrag(4);
     await tick();
@@ -462,6 +682,27 @@ describe("ResizableController", () => {
 
     controller.toggle();
     expect(controller.valueValue).toBe(30);
+  });
+
+  it("collapses and restores on Enter, consuming the key", () => {
+    splitterEl().focus();
+
+    expect(press(splitterEl(), "Enter").defaultPrevented).toBe(true);
+    expect(splitterEl().getAttribute("aria-valuenow")).toBe("20");
+
+    press(splitterEl(), "Enter");
+    expect(splitterEl().getAttribute("aria-valuenow")).toBe("50");
+  });
+
+  it("consumes the pointerdown that starts a drag", () => {
+    const event = new PointerEvent("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      pointerId: 11,
+    });
+    splitterEl().dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
   });
 
   it("opens fully when it has no collapsed-from position to restore", async () => {
@@ -666,6 +907,65 @@ describe("ResizableController", () => {
     expect(splitterEl().getAttribute("aria-valuemax")).toBe("80");
   });
 
+  it("publishes range and position onto a separator added after connect", async () => {
+    const original = splitterEl();
+    original.remove();
+    await tick();
+
+    // Only the separator arrives, so its own callback alone brings the repaint.
+    const late = original.cloneNode() as HTMLElement;
+    late.setAttribute("aria-valuenow", "30");
+    late.setAttribute("aria-valuemin", "0");
+    late.setAttribute("aria-valuemax", "100");
+    (document.getElementById("pane-1") as HTMLElement).after(late);
+    await tick();
+
+    expect(late.getAttribute("aria-valuenow")).toBe("50");
+    expect(late.getAttribute("aria-valuemin")).toBe("20");
+    expect(late.getAttribute("aria-valuemax")).toBe("80");
+  });
+
+  it("publishes range and position onto a separator that stays after an earlier one leaves", async () => {
+    const events = captureStateEvents("stimeo--resizable", ["change", "reconcile"]);
+    const original = splitterEl();
+    const successor = original.cloneNode() as HTMLElement;
+    successor.setAttribute("aria-valuenow", "30");
+    successor.setAttribute("aria-valuemin", "0");
+    successor.setAttribute("aria-valuemax", "100");
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(splitterEl()).toBe(successor);
+    expect(successor.getAttribute("aria-valuenow")).toBe("50");
+    expect(successor.getAttribute("aria-valuemin")).toBe("20");
+    expect(successor.getAttribute("aria-valuemax")).toBe("80");
+    // The separator that stays is brought to the position silently.
+    expect(events.seen).toEqual([]);
+    events.stop();
+  });
+
+  it("keeps publishing the position when the sole separator leaves", async () => {
+    const controller = controllerFor();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const leaving = splitterEl();
+      leaving.remove();
+      await tick();
+      expect(() => controller.separatorTargetDisconnected(leaving)).not.toThrow();
+      await tick();
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+
+    rootEl().setAttribute("data-stimeo--resizable-value-value", "70");
+    await tick();
+    await tick();
+    expect(fraction()).toBe("0.7");
+  });
+
   // --- Pane cycling and the guards around it -----------------------------------
 
   it("leaves an F6 that belongs to an IME composition alone", async () => {
@@ -781,6 +1081,21 @@ describe("ResizableController", () => {
     expect(fraction()).toBe("0.5");
   });
 
+  it("ignores a pointermove that arrives before the separator's leaving is delivered", async () => {
+    const splitter = splitterEl();
+    rootEl().getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 500, height: 100 }) as DOMRect;
+    startDrag(8);
+    await tick();
+    splitter.remove();
+    // Same task: the drag's listener is still there, and no separator resolves.
+    splitter.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, clientX: 350, pointerId: 8 }),
+    );
+
+    expect(fraction()).toBe("0.5");
+  });
+
   it("takes the declared defaults when no Values are written", async () => {
     await remount(markup(""));
     expect(splitterEl().getAttribute("aria-valuemin")).toBe("0");
@@ -859,6 +1174,15 @@ describe("ResizableController", () => {
       expect(declared()).toBe("70");
       expect(splitterEl().getAttribute("aria-valuenow")).toBe("60");
       expect(fraction()).toBe("0.6");
+      expect(reports()).toEqual([{ name: "reconcile", detail: { value: 60, fraction: 0.6 } }]);
+    });
+
+    it("reports a position a raised minimum clamps", async () => {
+      await declare("min", "60");
+
+      expect(declared()).toBe("50");
+      expect(splitterEl().getAttribute("aria-valuemin")).toBe("60");
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("60");
       expect(reports()).toEqual([{ name: "reconcile", detail: { value: 60, fraction: 0.6 } }]);
     });
 
@@ -1162,6 +1486,30 @@ describe("ResizableController", () => {
       expect(reports()).toEqual([{ name: "change", detail: { value: 70, fraction: 0.7 } }]);
     });
 
+    it("stops following the pointer once the drag ends", () => {
+      stubRect();
+
+      startDrag(38);
+      moveTo(350, 38);
+      release(38);
+      moveTo(150, 38);
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("70");
+      expect(reports()).toEqual([{ name: "change", detail: { value: 70, fraction: 0.7 } }]);
+    });
+
+    it("leaves nothing following the pointer once a restarted drag ends", () => {
+      stubRect();
+
+      startDrag(39);
+      startDrag(40);
+      release(40);
+      moveTo(150, 39);
+
+      expect(splitterEl().getAttribute("aria-valuenow")).toBe("50");
+      expect(reports()).toEqual([]);
+    });
+
     it("reports nothing for a toggle that cannot move the position", async () => {
       await remount(
         markup(
@@ -1280,4 +1628,48 @@ describe("ResizableController", () => {
       expect(reports()).toEqual([]);
     });
   });
+  for (const origin of ["own", "descendant"] as const) {
+    it(`repairs ${origin} active drag output without restarting capture or confirming the move`, async () => {
+      const root = document.getElementById("resizable") as HTMLElement;
+      const splitter = document.getElementById("splitter") as HTMLElement;
+      const controller = application.getControllerForElementAndIdentifier(
+        root,
+        "stimeo--resizable",
+      ) as ResizableController;
+      const rect = vi
+        .spyOn(root, "getBoundingClientRect")
+        .mockReturnValue(new DOMRect(0, 0, 500, 200));
+      const capture = vi.spyOn(splitter, "setPointerCapture");
+      controller.onPointerDown(new PointerEvent("pointerdown", { button: 0, pointerId: 73 }));
+      splitter.dispatchEvent(new PointerEvent("pointermove", { clientX: 350, pointerId: 73 }));
+      expect(root.dataset.dragging).toBe("true");
+      expect(splitter.getAttribute("aria-valuenow")).toBe("70");
+      const dispatch = vi.spyOn(controller, "dispatch");
+      root.removeAttribute("data-dragging");
+      root.style.removeProperty("--stimeo--resizable-fraction");
+      splitter.removeAttribute("aria-valuenow");
+      (origin === "own" ? root : splitter).dispatchEvent(
+        new Event("turbo:morph-element", { bubbles: true }),
+      );
+      await flushMicrotasks();
+      expect(root.dataset.dragging).toBe("true");
+      expect(root.style.getPropertyValue("--stimeo--resizable-fraction")).toBe("0.7");
+      expect(splitter.getAttribute("aria-valuenow")).toBe("70");
+      expect(capture).toHaveBeenCalledTimes(1);
+      expect(dispatch).not.toHaveBeenCalled();
+      splitter.dispatchEvent(new PointerEvent("pointerup", { pointerId: 73 }));
+      expect(dispatch).toHaveBeenCalledExactlyOnceWith("change", {
+        detail: { value: 70, fraction: 0.7 },
+      });
+      expect(root.hasAttribute("data-dragging")).toBe(false);
+      root.setAttribute("data-dragging", "true");
+      root.dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await flushMicrotasks();
+      expect(root.hasAttribute("data-dragging")).toBe(false);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      rect.mockRestore();
+      capture.mockRestore();
+      dispatch.mockRestore();
+    });
+  }
 });

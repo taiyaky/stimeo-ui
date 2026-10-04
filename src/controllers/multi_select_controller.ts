@@ -1,19 +1,30 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { announce, fillTemplate } from "../utils/announce";
 import { ensureId } from "../utils/aria_ids";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { ChipRow } from "../utils/chip_row";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { matchingPart, readLabel, writeLabel } from "../utils/element_part";
 import { commitField, writeFields } from "../utils/field_mirror";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { scrollOptionIntoView } from "../utils/option_scroll";
+import type { StateReason } from "../utils/state_reason";
 import { StateRegions } from "../utils/state_regions";
 import { TabindexLoan } from "../utils/tabindex_loan";
+import { targetSelector } from "../utils/target_selector";
 import { TemplateRow } from "../utils/template_row";
 
 /**
  * Headless, accessible multi-select combobox with chips.
+ *
+ * Selection fields, chips and keyboard stops are settled before notification.
+ * Confirmations compare with the last published selection; synchronous replacement
+ * selections suppress the older notifications and announcements still pending.
  *
  * Markup contract (identifier: `stimeo--multi-select`):
  *   <div data-controller="stimeo--multi-select"
@@ -83,10 +94,16 @@ import { TemplateRow } from "../utils/template_row";
  *   control does, so `stimeo--auto-submit` and form-level validation hear it;
  *   the rebuilds that follow connect, a replacement container, option churn, or
  *   a `name` / `form` change stay silent.
- * `change` and `reconcile` dispatch `{ values: string[] }`.
+ * `change` dispatches `{ values: string[], reason: StateReason }`; `reconcile` carries `{ values }`.
  * `filter` dispatches `{ query: string }`.
  */
 export class MultiSelectController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
+  /** Identifies the latest published state transition. */
+  readonly #moves = new MoveCounter();
+
   static override targets = [
     "input",
     "list",
@@ -106,11 +123,17 @@ export class MultiSelectController extends Controller<HTMLElement> {
     announceText: { type: String, default: "" },
     announceRemovedText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    max: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof MultiSelectController.values>;
   static actions = ["close", "filter", "onKeydown", "open", "toggleOption"] as const;
   static events = ["change", "filter", "reconcile"] as const;
 
   declare readonly inputTarget: HTMLInputElement;
+  declare readonly inputTargets: HTMLInputElement[];
   declare readonly listTarget: HTMLElement;
+  declare readonly listTargets: HTMLElement[];
   declare readonly optionTargets: HTMLElement[];
   declare readonly emptyTargets: HTMLElement[];
   declare readonly tagsTarget: HTMLElement;
@@ -135,15 +158,28 @@ export class MultiSelectController extends Controller<HTMLElement> {
   /** Stable id of the active option; the current target is resolved from the DOM. */
   #activeOptionId: string | null = null;
   /** Whether the root borrowed a tab stop to catch focus, so teardown can undo it. */
-  readonly #tabindex = new TabindexLoan();
+  readonly #tabindex = new TabindexLoan("-1", this.identifier);
   /** Last reconciled selection, used to distinguish state changes from derived-DOM repair. */
   #selectionValues: string[] = [];
   /** Whether initial normalization finished, so a fields callback cannot mirror stale state. */
   #connected = false;
   /** Owns `hidden` on the regions declared for the empty-result state. */
-  readonly #emptyRegion = new StateRegions({ whenTrue: () => this.emptyTargets });
+  readonly #emptyRegion = new StateRegions({ whenTrue: () => this.emptyTargets }, this.identifier);
+  /** Borrows `hidden` on the list, to give back when an element stops being the list. */
+  readonly #listHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Borrows `aria-expanded` on the input, to give back when an element stops being the input. */
+  readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
+  /** Borrows `aria-activedescendant` on the input, for the same return. */
+  readonly #activeDescendant = new AttributeLease<HTMLElement>(
+    "aria-activedescendant",
+    this.identifier,
+  );
+  /** Whether this widget holds the list open; a list that takes over is shown to match. */
+  #open = false;
+  /** The list the open state was last applied to; `null` once it stops being the list. */
+  #openList: HTMLElement | null = null;
   /** Collapses one batch of target callbacks into a single final-DOM reconciliation. */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileOptions());
+  readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileOptions());
   /** Owns IME lifecycle state; confirmed text emits one filter result. */
   readonly #composition = new CompositionTracker({
     // Apply the confirmed query even in browsers that omit a final input event;
@@ -172,6 +208,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Starts closed, syncs chips for any pre-selected options, and listens out. */
   override connect(): void {
+    this.#tabindex.reclaim(this.element);
     this.#rows.connect();
     // A fresh connection has no prior selection to preserve: deterministic DOM
     // order decides which authored selections survive a finite max.
@@ -187,7 +224,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     this.#syncFields();
     document.addEventListener("click", this.#onOutsideClick, true);
     this.#connected = true;
-    this.#reconcile.activate();
+    this.#reconcile.observe(this.element);
   }
 
   /**
@@ -211,7 +248,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
   /** Tears down document and chip listeners on disconnect (Turbo included). */
   override disconnect(): void {
     this.#connected = false;
-    this.#reconcile.cancel();
+    this.#reconcile.disconnect();
     this.#composition.disconnect();
     this.#chipRow.disconnect();
     document.removeEventListener("click", this.#onOutsideClick, true);
@@ -251,6 +288,38 @@ export class MultiSelectController extends Controller<HTMLElement> {
   /** Seeds a fields target inserted after connect from the current selection. */
   fieldsTargetConnected(): void {
     if (this.#connected) this.#syncFields();
+  }
+
+  /** Seeds the fields target that stays when an earlier one leaves, in the next reconcile. */
+  fieldsTargetDisconnected(): void {
+    this.#scheduleOptionReconcile();
+  }
+
+  /** Brings the list that is first to the open state, then reconciles options. */
+  listTargetConnected(_list: HTMLElement): void {
+    if (!this.#connected) return;
+    this.#reconcileOpenState();
+    this.#scheduleOptionReconcile();
+  }
+
+  /**
+   * Gives a list that no longer resolves as one back its `hidden` — after `disconnect()`
+   * too, since dropping the identifier leaves the element on the page — and, while
+   * connected, brings the list that stays to the open state. A departing list the state
+   * was applied to, found hidden while open, was closed by the page; that is read before
+   * its own `hidden` comes back.
+   */
+  listTargetDisconnected(list: HTMLElement): void {
+    if (!this.listTargets.includes(list)) {
+      if (list === this.#openList) {
+        this.#adoptPageClose();
+        this.#openList = null;
+      }
+      this.#listHidden.return(list);
+    }
+    if (!this.#connected) return;
+    this.#reconcileOpenState();
+    this.#scheduleOptionReconcile();
   }
 
   /** Reconciles a runtime max change, including dropping any newly invalid overflow. */
@@ -325,14 +394,17 @@ export class MultiSelectController extends Controller<HTMLElement> {
     const changed = !this.#sameSelection(previous, values);
     this.#selectionValues = values;
     if (!changed) return;
+    const token = this.#moves.record();
 
     const options = new Map(selected.map((option) => [this.#optionValue(option), option]));
     for (const value of previous) {
+      if (!this.#moves.isLatest(token)) return;
       if (!values.includes(value)) {
         this.#announceTransition(false, previousLabels.get(value) || value, value, values.length);
       }
     }
     for (const value of values) {
+      if (!this.#moves.isLatest(token)) return;
       if (previous.includes(value)) continue;
       // `values` is derived from `selected`, so this lookup is total.
       const option = options.get(value) as HTMLElement;
@@ -341,6 +413,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // Runtime option churn and the `max` cap move the selection by this
     // controller's rules, so the repair is reported apart from `change`, which
     // stays reserved for the user's own add and remove.
+    if (!this.#moves.isLatest(token)) return;
     this.dispatch("reconcile", { detail: { values } });
   }
 
@@ -386,15 +459,51 @@ export class MultiSelectController extends Controller<HTMLElement> {
    */
   inputTargetConnected(input: HTMLInputElement): void {
     this.#composition.observe(input);
-    input.setAttribute("aria-expanded", String(!this.#isClosed));
-    const active = this.#activeOption;
-    if (active) input.setAttribute("aria-activedescendant", ensureId(active, "stimeo-ms-opt"));
-    else input.removeAttribute("aria-activedescendant");
+    this.#describeInput(input);
   }
 
-  /** Removes composition listeners when the active input is replaced or removed. */
+  /**
+   * Removes the departing input's composition listeners and gives an input that no
+   * longer resolves as one back its `aria-expanded` and `aria-activedescendant`, after
+   * `disconnect()` too. While connected, it describes the widget to the input that
+   * stays, which the popup state may have moved past while both were present.
+   */
   inputTargetDisconnected(input: HTMLInputElement): void {
     this.#composition.unobserve(input);
+    if (!this.inputTargets.includes(input)) {
+      this.#expanded.return(input);
+      this.#activeDescendant.return(input);
+    }
+    if (this.#connected && this.hasInputTarget) this.#describeInput(this.inputTarget);
+  }
+
+  /** Writes the popup state and the active option onto `input`. */
+  #describeInput(input: HTMLInputElement): void {
+    this.#expanded.write(input, String(!this.#isClosed));
+    const active = this.#activeOption;
+    this.#activeDescendant.write(input, active ? ensureId(active, "stimeo-ms-opt") : null);
+  }
+
+  /**
+   * Brings the list and the input that are first to one open state. A list that takes
+   * over from the one the state was applied to is shown or hidden to match it; the list
+   * it was applied to, found hidden while open, was closed by the page. The input's
+   * `aria-expanded` then follows the list. With no list left, nothing is written.
+   */
+  #reconcileOpenState(): void {
+    if (!this.hasListTarget) return;
+    this.#adoptPageClose();
+    const list = this.listTarget;
+    if (list !== this.#openList) {
+      this.#showList(list, this.#open);
+      this.#openList = list;
+    }
+    if (this.hasInputTarget) this.#expanded.write(this.inputTarget, String(!list.hidden));
+  }
+
+  /** Treats the widget as closed when the list the open state was applied to is hidden. */
+  #adoptPageClose(): void {
+    if (this.#openList?.hidden) this.#open = false;
   }
 
   /** Filters confirmed input text, opens, and re-seeds the active option. */
@@ -409,7 +518,6 @@ export class MultiSelectController extends Controller<HTMLElement> {
     }
     this.open();
     const visible = this.#visibleOptions;
-    this.#reflectEmpty();
     this.#setActive(visible[0] ?? null);
     this.dispatch("filter", { detail: { query } });
   }
@@ -427,8 +535,10 @@ export class MultiSelectController extends Controller<HTMLElement> {
       this.#reflectEmpty();
       return;
     }
-    this.listTarget.hidden = false;
-    this.inputTarget.setAttribute("aria-expanded", "true");
+    this.#showList(this.listTarget, true);
+    this.#open = true;
+    this.#openList = this.listTarget;
+    this.#expanded.write(this.inputTarget, "true");
     if (!this.#activeOption) this.#setActive(this.#visibleOptions[0] ?? null);
     this.#reflectEmpty();
   }
@@ -445,9 +555,13 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * active option, so only the `aria-expanded` write is guarded.
    */
   close(): void {
-    if (this.hasListTarget) this.listTarget.hidden = true;
+    this.#open = false;
+    if (this.hasListTarget) {
+      this.#showList(this.listTarget, false);
+      this.#openList = this.listTarget;
+    }
     this.#setActive(null);
-    if (this.hasInputTarget) this.inputTarget.setAttribute("aria-expanded", "false");
+    if (this.hasInputTarget) this.#expanded.write(this.inputTarget, "false");
     this.#reflectEmpty();
   }
 
@@ -539,17 +653,22 @@ export class MultiSelectController extends Controller<HTMLElement> {
   }
 
   /**
-   * Toggles the clicked option's selection. Bound via `data-action`. Focus is
+   * Toggles an owned option or descendant. For action events, focus is
    * re-homed to the input afterwards: options are non-focusable, so the click blurs
    * the input to `body` — and with the list deliberately staying open, every
    * keyboard affordance (Escape, arrows, typing) is bound to the input and would
    * otherwise go dead until the user clicks back in ("focus stays on the input").
    */
-  toggleOption(event: Event): void {
-    const option = (event.currentTarget as HTMLElement).closest<HTMLElement>('[role="option"]');
+  toggleOption(source: Event | HTMLElement): void {
+    const { event, host, origin, reason } = actionSource(source);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const option = host?.closest<HTMLElement>(targetSelector(this.identifier, "option"));
     if (!option || !this.optionTargets.includes(option)) return;
-    this.#toggleSelection(option);
-    this.#focusInput();
+    const focus = event !== null || this.element.contains(document.activeElement);
+    if (!this.#toggleSelection(option, reason)) return;
+    if (focus && (event !== null || this.element.contains(document.activeElement)))
+      this.#focusInput();
   }
 
   /**
@@ -570,7 +689,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * Unlike the other {@link #focusInput} callers, the element that held focus has
    * just left the DOM, so "leave it alone" is not an option — the browser already
    * dropped it to `<body>`. The root borrows a `tabindex="-1"` just-in-time (not a
-   * Tab stop, handed back before Turbo caches or on teardown). Focus that landed
+   * Tab stop, returned on teardown or reclaimed on restoration). Focus that landed
    * on a real element is left alone, so a chip removed out of band never steals it.
    */
   #focusAfterLastTag(): void {
@@ -611,11 +730,11 @@ export class MultiSelectController extends Controller<HTMLElement> {
   }
 
   /** Selects/deselects `option`, honoring `max`, and syncs chip + announcement. */
-  #toggleSelection(option: HTMLElement): void {
+  #toggleSelection(option: HTMLElement, reason: StateReason = "user"): boolean {
     const selected = option.getAttribute("aria-selected") === "true";
     const limit = this.#selectionLimit;
     if (!selected && limit > 0 && this.#selectedOptions.length >= limit) {
-      return;
+      return true;
     }
     if (selected) {
       option.setAttribute("aria-selected", "false");
@@ -626,20 +745,16 @@ export class MultiSelectController extends Controller<HTMLElement> {
       // without a chip template still selects. An authored template that cannot
       // be completed is the opposite case — leaving a selection whose chip is
       // missing would be the half-applied state, so that one aborts instead.
-      if (this.hasTagTemplateTarget && !this.#appendTag(option)) return;
+      if (this.hasTagTemplateTarget && !this.#appendTag(option)) return true;
       option.setAttribute("aria-selected", "true");
     }
     this.#refreshRoving();
-    this.#syncFields(true);
-    const values = this.#values;
-    this.#selectionValues = values;
-    this.#announceTransition(
+    return this.#publishSelection(
       !selected,
       this.#optionLabel(option),
       this.#optionValue(option),
-      values.length,
+      reason,
     );
-    this.dispatch("change", { detail: { values } });
   }
 
   /**
@@ -735,16 +850,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // Prefer the option's display label for the announcement (e.g. "Apple"),
     // which can differ from its data-value (e.g. "apple").
     this.#refreshRoving();
-    this.#syncFields(true);
-    const values = this.#values;
-    this.#selectionValues = values;
-    this.#announceTransition(
-      false,
-      option ? this.#optionLabel(option) : value,
-      value,
-      values.length,
-    );
-    this.dispatch("change", { detail: { values } });
+    if (!this.#publishSelection(false, option ? this.#optionLabel(option) : value, value)) return;
 
     if (focus === "input") {
       this.#focusInput();
@@ -771,12 +877,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // Virtual focus never triggers the browser's native focus-scrolling, so a
     // scrollable list must follow the active option itself (list-only scroll).
     if (option && this.hasListTarget) scrollOptionIntoView(this.listTarget, option);
-    if (!this.hasInputTarget) return;
-    if (activeId !== null) {
-      this.inputTarget.setAttribute("aria-activedescendant", activeId);
-    } else {
-      this.inputTarget.removeAttribute("aria-activedescendant");
-    }
+    if (this.hasInputTarget) this.#activeDescendant.write(this.inputTarget, activeId);
   }
 
   /** Repairs only active identity before a key; the fallback waits for the target callback. */
@@ -810,12 +911,31 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * `form` value is set, each input gets a matching `form` attribute so the picker
    * can submit with a `<form>` it lives outside of.
    */
-  #syncFields(notify = false): void {
-    if (!this.hasFieldsTarget) return;
+  #syncFields(): boolean {
+    if (!this.hasFieldsTarget) return false;
     const options = { name: this.nameValue, form: this.formValue };
-    if (writeFields(this.fieldsTarget, this.#values, options) && notify) {
-      commitField(this.fieldsTarget);
-    }
+    return writeFields(this.fieldsTarget, this.#values, options);
+  }
+
+  /** Settles the selection before its field, announcement and custom reports. */
+  #publishSelection(
+    selected: boolean,
+    label: string,
+    value: string,
+    reason: StateReason = "user",
+  ): boolean {
+    const values = this.#values;
+    const changed = !this.#sameSelection(this.#selectionValues, values);
+    const fieldChanged = this.#syncFields();
+    this.#selectionValues = values;
+    if (!changed) return true;
+    const token = this.#moves.record();
+    if (fieldChanged) commitField(this.fieldsTarget);
+    if (!this.#moves.isLatest(token)) return false;
+    this.#announceTransition(selected, label, value, values.length);
+    if (!this.#moves.isLatest(token)) return false;
+    this.dispatch("change", { detail: { values, reason } });
+    return this.#moves.isLatest(token);
   }
 
   /** Keeps exactly one chip remove button tabbable after the set changes. */
@@ -878,12 +998,27 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Normalized cardinality cap: zero and below are unlimited; a positive value floors, never below 1. */
   get #selectionLimit(): number {
-    if (!Number.isFinite(this.maxValue) || this.maxValue <= 0) return 0;
-    return Math.max(1, Math.floor(this.maxValue));
+    if (this.#safeMax <= 0) return 0;
+    return Math.max(1, Math.floor(this.#safeMax));
+  }
+
+  /** Shows or hides `list` through the lease, so a departed list gets its authored value back. */
+  #showList(list: HTMLElement, open: boolean): void {
+    this.#listHidden.write(list, open ? null : "");
   }
 
   /** Whether the list is currently hidden. */
   get #isClosed(): boolean {
     return !this.hasListTarget || this.listTarget.hidden !== false;
+  }
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      MultiSelectController.values.max.default,
+      MultiSelectController.valueConstraints.max,
+    );
   }
 }

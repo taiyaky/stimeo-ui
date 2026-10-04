@@ -75,7 +75,7 @@ import { RatingController } from "./controllers/rating_controller";
 import { ReadMoreController } from "./controllers/read_more_controller";
 import { ReadingProgressController } from "./controllers/reading_progress_controller";
 import { RelativeTimeController } from "./controllers/relative_time_controller";
-import { ResetBeforeCacheController } from "./controllers/reset_before_cache_controller";
+import { ResetOnRestoreController } from "./controllers/reset_on_restore_controller";
 import { ResizableController } from "./controllers/resizable_controller";
 import { RovingController } from "./controllers/roving_controller";
 import { ScrollAreaController } from "./controllers/scroll_area_controller";
@@ -187,7 +187,7 @@ export {
   ReadingProgressController,
   ReadMoreController,
   RelativeTimeController,
-  ResetBeforeCacheController,
+  ResetOnRestoreController,
   ResizableController,
   RovingController,
   ScrollAreaController,
@@ -302,7 +302,7 @@ export const stimeoControllers = {
   "stimeo--read-more": ReadMoreController,
   "stimeo--reading-progress": ReadingProgressController,
   "stimeo--relative-time": RelativeTimeController,
-  "stimeo--reset-before-cache": ResetBeforeCacheController,
+  "stimeo--reset-on-restore": ResetOnRestoreController,
   "stimeo--resizable": ResizableController,
   "stimeo--roving": RovingController,
   "stimeo--scroll-area": ScrollAreaController,

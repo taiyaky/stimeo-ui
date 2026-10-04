@@ -1,12 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { ownerIndex } from "../utils/event_owner";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { TabindexLoan } from "../utils/tabindex_loan";
-import { TransientHooks } from "../utils/transient_hooks";
-
-/** The hook a connection may find written by an earlier, now-gone one. */
-const TRANSIENT = new TransientHooks({ attributes: ["data-dragging"] });
 
 /** Value defaults, reused when a declaration cannot be read as a percentage. */
 const DEFAULT_MIN = 0;
@@ -40,7 +38,7 @@ const DEFAULT_STEP = 1;
  *   `aria-orientation` names; `Home` / `End` jump to the ends of the range.
  * - `Enter` collapses the primary pane to the minimum and puts it back where it
  *   was, which is what the pattern means by restoring a previous position.
- * - Root-level CSS custom property `--stimeo--resizable-fraction` (0..1) driving
+ * - Root-level CSS custom property `--stimeo--resizable-fraction` (`position / 100`) driving
  *   presentation styles.
  * - `F6` cycles focus through the panes, which the pattern lists as optional.
  *
@@ -75,6 +73,9 @@ const DEFAULT_STEP = 1;
  * would make the announced axis and the answering arrow keys disagree.
  */
 export class ResizableController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["primary", "secondary", "separator"];
   static override values = {
     min: { type: Number, default: DEFAULT_MIN },
@@ -82,12 +83,20 @@ export class ResizableController extends Controller<HTMLElement> {
     step: { type: Number, default: DEFAULT_STEP },
     value: { type: Number, default: DEFAULT_VALUE },
   };
+
+  static valueConstraints = {
+    min: NUMBER_BOUNDS.finite,
+    max: NUMBER_BOUNDS.finite,
+    step: NUMBER_BOUNDS.positive,
+    value: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof ResizableController.values>;
   static actions = ["onKeydown", "onPointerDown", "toggle"] as const;
   static events = ["change", "reconcile"] as const;
 
   declare readonly primaryTarget: HTMLElement;
   declare readonly secondaryTarget: HTMLElement;
   declare readonly separatorTarget: HTMLElement;
+  declare readonly separatorTargets: HTMLElement[];
   declare readonly hasPrimaryTarget: boolean;
   declare readonly hasSecondaryTarget: boolean;
   declare readonly hasSeparatorTarget: boolean;
@@ -113,24 +122,28 @@ export class ResizableController extends Controller<HTMLElement> {
    */
   #confirmed = DEFAULT_VALUE;
 
-  /** Aborts in-progress pointer-drag listeners when the drag ends or on teardown. */
-  #dragAbort: AbortController | null = null;
+  /**
+   * The pointer drag in progress: the separator holding the pointer, the pointer's
+   * id, and the abort that ends the listeners the drag added to that separator.
+   */
+  #drag: {
+    readonly separator: HTMLElement;
+    readonly pointerId: number;
+    readonly abort: AbortController;
+  } | null = null;
 
   /** `tabindex` lent to a pane so `F6` can put focus on it; panes carry none. */
-  readonly #paneTabindex = new TabindexLoan();
+  readonly #paneTabindex = new TabindexLoan("-1", this.identifier);
 
   /** Releases the pane cycle listener bound in {@link connect}. */
   #cycleAbort: AbortController | null = null;
 
   /** Folds the range and position inputs of one morph batch into a single paint. */
-  readonly #repaint = new MicrotaskCoalescer(() => this.#render());
+  readonly #repaint = new MorphRenderWatcher(() => this.#render());
 
   override connect(): void {
-    // A drag cannot outlive a navigation, so a hook captured mid-drag is stale on
-    // arrival. Clearing is unconditional here because disconnect() aborts the
-    // drag, leaving no session that an in-page move could carry over.
-    TRANSIENT.reset(this.element);
-    this.#repaint.activate();
+    this.#paneTabindex.reclaimWithin(this.element);
+    this.#repaint.observe(this.element);
     // Stimulus fires the value callbacks before connect, where the coalescer
     // ignores them, so the first paint has to be asked for directly. The
     // position it publishes is taken as reported first, so connecting reports
@@ -148,13 +161,11 @@ export class ResizableController extends Controller<HTMLElement> {
 
   /** Cancels any active pointer drag so listeners never leak past disconnect. */
   override disconnect(): void {
-    this.#dragAbort?.abort();
-    this.#dragAbort = null;
+    this.#endDrag();
     this.#cycleAbort?.abort();
     this.#cycleAbort = null;
-    this.#repaint.cancel();
+    this.#repaint.disconnect();
     this.#paneTabindex.returnAll();
-    this.element.removeAttribute("data-dragging");
   }
 
   /** Moves focus to the next pane on `F6`, wrapping; entering at the first one. */
@@ -205,13 +216,30 @@ export class ResizableController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
-  /** Starts active pointer drag tracking and locks capture. */
+  /**
+   * Ends a drag whose separator stopped being a target, and brings the separator
+   * that stays to the current position. A separator still among the targets has
+   * only moved inside the element, and its drag goes on.
+   */
+  separatorTargetDisconnected(separator: HTMLElement): void {
+    if (this.#drag?.separator === separator && !this.separatorTargets.includes(separator)) {
+      this.#endDrag();
+    }
+    this.#repaint.schedule();
+  }
+
+  /**
+   * Starts active pointer drag tracking and locks capture on the separator pressed, so
+   * a separator that coexists behind an earlier one drags itself. A press that lands on
+   * no separator drags the first one.
+   */
   onPointerDown(event: PointerEvent): void {
     if (!this.hasSeparatorTarget || event.button !== 0) return;
 
     event.preventDefault();
 
-    const separator = this.separatorTarget;
+    const separators = this.separatorTargets;
+    const separator = separators[ownerIndex(separators, event.target)] ?? this.separatorTarget;
     separator.setPointerCapture(event.pointerId);
     // preventDefault() above suppresses the implicit focus, so move focus
     // explicitly — otherwise keyboard (arrow) adjustments never reach the
@@ -220,9 +248,9 @@ export class ResizableController extends Controller<HTMLElement> {
 
     this.element.setAttribute("data-dragging", "true");
 
-    this.#dragAbort?.abort();
+    this.#drag?.abort.abort();
     const abort = new AbortController();
-    this.#dragAbort = abort;
+    this.#drag = { separator, pointerId: event.pointerId, abort };
     separator.addEventListener("pointermove", this.#onPointerMove, { signal: abort.signal });
     separator.addEventListener("pointerup", this.#onPointerUp, { signal: abort.signal });
     separator.addEventListener("pointercancel", this.#onPointerUp, { signal: abort.signal });
@@ -318,19 +346,29 @@ export class ResizableController extends Controller<HTMLElement> {
     this.#move(Math.round(fraction * 100));
   };
 
-  readonly #onPointerUp = (event: PointerEvent): void => {
-    // Ending the drag must not depend on the separator still being there: a
-    // target removed mid-drag would otherwise strand the hook and the listeners.
-    this.element.removeAttribute("data-dragging");
-    this.#dragAbort?.abort();
-    this.#dragAbort = null;
-
-    if (this.hasSeparatorTarget) {
-      this.separatorTarget.releasePointerCapture(event.pointerId);
-    }
-
+  readonly #onPointerUp = (): void => {
+    this.#endDrag();
     this.#confirm();
   };
+
+  /**
+   * Ends the drag in progress: the `data-dragging` hook, the listeners on the
+   * separator that holds the pointer, and that separator's pointer capture. It
+   * reads nothing from the current targets, so a separator removed or replaced
+   * mid-drag cannot strand the hook or the listeners.
+   */
+  #endDrag(): void {
+    this.element.removeAttribute("data-dragging");
+    const drag = this.#drag;
+    this.#drag = null;
+    if (!drag) return;
+    drag.abort.abort();
+    try {
+      drag.separator.releasePointerCapture?.(drag.pointerId);
+    } catch {
+      // A pointer that has already ended holds no capture, and the engine throws for its id.
+    }
+  }
 
   /** Moves to a position the user chose and reports it if it moved. */
   #commit(raw: number): void {
@@ -375,6 +413,8 @@ export class ResizableController extends Controller<HTMLElement> {
    * the range assistive tech reads off the separator.
    */
   #paint(): void {
+    if (this.#drag) this.element.setAttribute("data-dragging", "true");
+    else this.element.removeAttribute("data-dragging");
     const { min, max } = this.#range;
     const position = this.#position;
 
@@ -406,8 +446,8 @@ export class ResizableController extends Controller<HTMLElement> {
 
   /** The declared range after validation; an unreadable bound uses its default. */
   get #range(): { readonly min: number; readonly max: number } {
-    const min = Number.isFinite(this.minValue) ? this.minValue : DEFAULT_MIN;
-    const max = Number.isFinite(this.maxValue) ? this.maxValue : DEFAULT_MAX;
+    const min = this.#safeMin;
+    const max = this.#safeMax;
     // A maximum below the minimum describes no range at all; collapsing it onto
     // the minimum keeps the position inside something that can be announced.
     return { min, max: Math.max(min, max) };
@@ -416,13 +456,13 @@ export class ResizableController extends Controller<HTMLElement> {
   /** The declared position, clamped into the validated range. */
   get #position(): number {
     const { min, max } = this.#range;
-    const value = Number.isFinite(this.valueValue) ? this.valueValue : DEFAULT_VALUE;
+    const value = this.#safeValue;
     return Math.max(min, Math.min(value, max));
   }
 
   /** The keyboard increment; a non-positive or unreadable one uses the default. */
   get #step(): number {
-    return Number.isFinite(this.stepValue) && this.stepValue > 0 ? this.stepValue : DEFAULT_STEP;
+    return this.#safeStep;
   }
 
   /** Whether the divider runs vertically; a separator that does not say is horizontal. */
@@ -430,6 +470,49 @@ export class ResizableController extends Controller<HTMLElement> {
     return (
       this.hasSeparatorTarget &&
       this.separatorTarget.getAttribute("aria-orientation") === "vertical"
+    );
+  }
+  /** Current `min` declaration resolved against its numeric contract. */
+  get #safeMin(): number {
+    return this.#numbers.read(
+      this,
+      "min",
+      this.minValue,
+      ResizableController.values.min.default,
+      ResizableController.valueConstraints.min,
+    );
+  }
+
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      ResizableController.values.max.default,
+      ResizableController.valueConstraints.max,
+    );
+  }
+
+  /** Current `step` declaration resolved against its numeric contract. */
+  get #safeStep(): number {
+    return this.#numbers.read(
+      this,
+      "step",
+      this.stepValue,
+      ResizableController.values.step.default,
+      ResizableController.valueConstraints.step,
+    );
+  }
+
+  /** Current `value` declaration resolved against its numeric contract. */
+  get #safeValue(): number {
+    return this.#numbers.read(
+      this,
+      "value",
+      this.valueValue,
+      ResizableController.values.value.default,
+      ResizableController.valueConstraints.value,
     );
   }
 }

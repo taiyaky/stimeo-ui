@@ -6,7 +6,7 @@ import { LiveCounterController } from "../src/cable/live_counter_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link LiveCounterController}: the DOM-sourced count,
@@ -267,6 +267,13 @@ describe("LiveCounterController", () => {
       expect(root().getAttribute("data-live-counter-rejected")).toBe("true");
     });
 
+    it("disables triggers when a confirmed subscription is refused", async () => {
+      await mount({ buttonAttrs: TRIGGER });
+      expect(button().disabled).toBe(false);
+      mixin?.rejected?.();
+      expect(button().disabled).toBe(true); // an increment now would be dropped
+    });
+
     it("shares one confirmed subscription between two counters for the same channel", async () => {
       const counter = (id: string) => `
         <div id="${id}" data-controller="stimeo--live-counter"
@@ -386,7 +393,7 @@ describe("LiveCounterController", () => {
   });
 
   it("keeps the gate shut when the subscription cannot be created", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {}); // the diagnostic is the point
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {}); // the diagnostic is the point
     setCableConsumer({
       subscriptions: {
         create() {
@@ -412,6 +419,9 @@ describe("LiveCounterController", () => {
     trigger().click();
     expect(value().textContent).toBe("128");
     expect(performMock).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]?.[0]).toContain("could not open its subscription");
+    warn.mockRestore();
   });
 
   // --- What the gate borrows, it returns ------------------------------------
@@ -478,6 +488,19 @@ describe("LiveCounterController", () => {
     expect(trigger().hasAttribute("disabled")).toBe(true);
   });
 
+  it("stops waiting for a focused trigger's blur once the gate reopens", async () => {
+    await mount({ buttonAttrs: 'data-stimeo--live-counter-target="trigger"' });
+    const added = vi.spyOn(trigger(), "addEventListener");
+    const removed = vi.spyOn(trigger(), "removeEventListener");
+    trigger().focus();
+    mixin?.disconnected?.(); // the disable waits for the blur
+    const onBlur = added.mock.calls.find(([type]) => type === "blur")?.[1];
+    expect(onBlur).toBeDefined();
+
+    mixin?.connected?.(); // nothing is left to hold back
+    expect(removed).toHaveBeenCalledWith("blur", onBlur);
+  });
+
   // --- The echo belongs to the send that caused it ---------------------------
 
   it("lets a sibling counter catch up on the echo of its neighbour's increment", async () => {
@@ -535,6 +558,16 @@ describe("LiveCounterController", () => {
 
     mixin?.received?.({ delta: -1, by: "alice" }); // its echo
     expect(value().textContent).toBe("127");
+  });
+
+  it("cancels one guess per echo, so a further own-id delta applies", async () => {
+    await mount();
+    trigger().click(); // guessed +1
+    mixin?.received?.({ delta: 1, by: "alice" }); // its echo
+    expect(value().textContent).toBe("129");
+
+    mixin?.received?.({ delta: 1, by: "alice" }); // this user's other tab: no guess left
+    expect(value().textContent).toBe("130");
   });
 
   it("applies an own-id delta that no guess of that size is waiting for", async () => {
@@ -638,6 +671,96 @@ describe("LiveCounterController", () => {
     root().setAttribute("data-stimeo--live-counter-channel-value", "OtherChannel");
     await tick();
     expect(root().hasAttribute("data-live-counter-rejected")).toBe(false);
+  });
+
+  /**
+   * Rewrites a declaration and delivers its Value callback directly, since happy-dom
+   * does not reliably run it for an attribute write.
+   */
+  const declare = (name: "channel" | "params", value: string) => {
+    root().setAttribute(`data-stimeo--live-counter-${name}-value`, value);
+    const owner = controller();
+    const callback: unknown = Reflect.get(owner ?? {}, `${name}ValueChanged`);
+    if (typeof callback === "function") callback.call(owner);
+  };
+
+  it("moves once when the channel and the params change together", async () => {
+    await mount({
+      attrs: `data-stimeo--live-counter-channel-value="LikesChannel"
+              data-stimeo--live-counter-params-value='{"post":1}'
+              data-stimeo--live-counter-id-value="alice"`,
+    });
+    declare("channel", "OtherChannel");
+    declare("params", '{"post":2}');
+    await flushMicrotasks();
+    // No subscribe goes out for the half-applied identifier the channel alone names.
+    expect(descriptors).toEqual([
+      { channel: "LikesChannel", post: 1 },
+      { channel: "OtherChannel", post: 2 },
+    ]);
+    expect(unsubscribeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the params the declaration holds when only the channel callback has run", async () => {
+    await mount({
+      attrs: `data-stimeo--live-counter-channel-value="LikesChannel"
+              data-stimeo--live-counter-params-value='{"post":1}'
+              data-stimeo--live-counter-id-value="alice"`,
+    });
+    root().setAttribute("data-stimeo--live-counter-params-value", '{"post":2}');
+    declare("channel", "OtherChannel");
+    await flushMicrotasks();
+    expect(descriptors).toEqual([
+      { channel: "LikesChannel", post: 1 },
+      { channel: "OtherChannel", post: 2 },
+    ]);
+  });
+
+  it("keeps the subscription and its gate when a callback repeats the declaration", async () => {
+    await mount({
+      attrs: `data-stimeo--live-counter-channel-value="LikesChannel"
+              data-stimeo--live-counter-params-value='{"post":1}'
+              data-stimeo--live-counter-id-value="alice"`,
+      buttonAttrs: 'data-stimeo--live-counter-target="trigger"',
+    });
+    trigger().click(); // a guess on the live identifier
+    declare("channel", "LikesChannel");
+    declare("params", '{ "post": 1 }'); // another spelling of the same parameters
+    await flushMicrotasks();
+    expect(descriptors).toHaveLength(1);
+    expect(unsubscribeMock).not.toHaveBeenCalled();
+    expect(trigger().hasAttribute("disabled")).toBe(false);
+
+    mixin?.received?.({ delta: 1, by: "alice" }); // the echo of the guess still cancels it
+    expect(value().textContent).toBe("129");
+  });
+
+  it("opens nothing for a callback delivered after disconnect", async () => {
+    await mount();
+    controller()?.disconnect();
+    declare("channel", "OtherChannel");
+    await flushMicrotasks();
+    expect(descriptors).toEqual([{ channel: "LikesChannel" }]);
+  });
+
+  it("opens one subscription per connection, whatever callbacks precede it", async () => {
+    // Stimulus delivers every Value callback before connect(), and the defaults of
+    // undeclared Values again on each reconnect.
+    await mount({
+      attrs: `data-stimeo--live-counter-channel-value="LikesChannel"
+              data-stimeo--live-counter-params-value='{"post":1}'`,
+    });
+    const instance = controller();
+    instance?.disconnect();
+    instance?.channelValueChanged();
+    instance?.paramsValueChanged();
+    instance?.connect();
+    await flushMicrotasks();
+    expect(descriptors).toEqual([
+      { channel: "LikesChannel", post: 1 },
+      { channel: "LikesChannel", post: 1 },
+    ]);
+    expect(unsubscribeMock).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the declared channel when the params name one too", async () => {
@@ -756,4 +879,30 @@ describe("LiveCounterController", () => {
     const after = await captureSpeech({ container, steps: 2 });
     expect(after).toEqual(["main", "200", "button, Like"]);
   });
+  for (const origin of ["own", "descendant"] as const) {
+    it(`repairs ${origin} morph send gate without resubscribing`, async () => {
+      await mount({ confirm: false, buttonAttrs: 'data-stimeo--live-counter-target="trigger"' });
+      expect(trigger().disabled).toBe(true);
+      const changed = vi.fn();
+      root().addEventListener("stimeo--live-counter:change", changed);
+      trigger().removeAttribute("disabled");
+      trigger().removeAttribute("data-live-counter-disabled");
+      (origin === "own" ? root() : trigger()).dispatchEvent(
+        new Event("turbo:morph-element", { bubbles: true }),
+      );
+      await tick();
+      expect(trigger().disabled).toBe(true);
+      expect(trigger().hasAttribute("data-live-counter-disabled")).toBe(true);
+      expect(descriptors).toHaveLength(1);
+      expect(changed).not.toHaveBeenCalled();
+      expect(performMock).not.toHaveBeenCalled();
+      controller()?.disconnect();
+      trigger().removeAttribute("disabled");
+      trigger().removeAttribute("data-live-counter-disabled");
+      root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await tick();
+      expect(trigger().disabled).toBe(false);
+      expect(trigger().hasAttribute("data-live-counter-disabled")).toBe(false);
+    });
+  }
 });

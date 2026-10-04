@@ -98,6 +98,25 @@ describe("SmartStickyHeaderController", () => {
         ) as SmartStickyHeaderController | null)
       : null;
 
+  it.each(["root", "target"])(
+    "repairs retained morph hidden state within scroll tolerance from %s",
+    async (origin) => {
+      await mount('data-stimeo--smart-sticky-header-tolerance-value="10"');
+      scrollTo(200);
+      expect(hidden()).toBe("true");
+      scrollY = 201;
+      const changes = vi.fn();
+      header().addEventListener("stimeo--smart-sticky-header:change", changes);
+      header().removeAttribute("data-header-hidden");
+      const source = origin === "root" ? header() : header().querySelector("nav");
+      if (!source) throw new Error("Expected the header navigation");
+      source.dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+      await tick();
+      expect(hidden()).toBe("true");
+      expect(changes).not.toHaveBeenCalled();
+    },
+  );
+
   it("starts visible and hides on a scroll-down past the offset", async () => {
     await mount();
     expect(hidden()).toBe("false");
@@ -235,6 +254,168 @@ describe("SmartStickyHeaderController", () => {
     expect(hidden()).toBe("false"); // the element is alive, not killed by the declaration
     scrollTo(400);
     expect(hidden()).toBe("true");
+  });
+
+  // --- A scroll source that changes at runtime ---------------------------------
+
+  /** Where each container fixture has scrolled to, read through its `scrollTop`. */
+  let positions: Record<string, number> = {};
+
+  /** Gives `el` a `scrollTop` read from `positions[el.id]`. */
+  const trackScrollTop = (el: HTMLElement) => {
+    Object.defineProperty(el, "scrollTop", {
+      configurable: true,
+      get: () => positions[el.id] ?? 0,
+    });
+  };
+
+  /** Mounts a header outside two containers, following the first. */
+  const mountWithTwoFrames = async (attrs = "") => {
+    positions = {};
+    document.body.innerHTML = `
+      <div id="frame-a"></div>
+      <div id="frame-b"></div>
+      <header data-controller="stimeo--smart-sticky-header"
+              data-stimeo--smart-sticky-header-container-selector-value="#frame-a" ${attrs}>
+        <nav aria-label="Site"><a href="#top">Home</a></nav>
+      </header>`;
+    trackScrollTop(document.querySelector("#frame-a") as HTMLElement);
+    trackScrollTop(document.querySelector("#frame-b") as HTMLElement);
+    application = Application.start();
+    application.register("stimeo--smart-sticky-header", SmartStickyHeaderController);
+    await tick();
+  };
+
+  const frameEl = (id: string) => document.getElementById(id) as HTMLElement;
+
+  /** Scrolls the container `el` to `y` and flushes the rAF-throttled measure. */
+  const scrollFrame = (el: HTMLElement, y: number) => {
+    positions[el.id] = y;
+    el.dispatchEvent(new Event("scroll"));
+    flush();
+  };
+
+  const recordStates = () => {
+    const states: boolean[] = [];
+    header().addEventListener("stimeo--smart-sticky-header:change", (event) => {
+      states.push((event as CustomEvent<{ hidden: boolean }>).detail.hidden);
+    });
+    return states;
+  };
+
+  it("moves to the container a changed containerSelector names, releasing the old one", async () => {
+    await mountWithTwoFrames();
+    scrollFrame(frameEl("frame-a"), 200);
+    expect(hidden()).toBe("true");
+    const states = recordStates();
+
+    header().setAttribute("data-stimeo--smart-sticky-header-container-selector-value", "#frame-b");
+    await tick();
+    // The new source sits inside the offset zone, so the header is revealed at once.
+    expect(hidden()).toBe("false");
+    expect(states).toEqual([false]);
+
+    // The container it left schedules no measurement at all.
+    positions["frame-a"] = 600;
+    frameEl("frame-a").dispatchEvent(new Event("scroll"));
+    expect(frames).toHaveLength(0);
+    expect(hidden()).toBe("false");
+    scrollFrame(frameEl("frame-b"), 200);
+    expect(hidden()).toBe("true");
+    expect(states).toEqual([false, true]);
+  });
+
+  it("releases the container it moved to on disconnect", async () => {
+    await mountWithTwoFrames();
+    header().setAttribute("data-stimeo--smart-sticky-header-container-selector-value", "#frame-b");
+    await tick();
+    scrollFrame(frameEl("frame-b"), 200);
+    expect(hidden()).toBe("true");
+    scrollFrame(frameEl("frame-b"), 0);
+
+    controller()?.disconnect();
+    scrollFrame(frameEl("frame-b"), 300);
+    expect(hidden()).toBe("false");
+  });
+
+  it("reads a position on the new container as a baseline, not a movement", async () => {
+    await mountWithTwoFrames();
+    scrollFrame(frameEl("frame-a"), 400);
+    expect(hidden()).toBe("true");
+    // Higher up than the first container had scrolled, which is not a scroll-up.
+    positions["frame-b"] = 300;
+
+    header().setAttribute("data-stimeo--smart-sticky-header-container-selector-value", "#frame-b");
+    await tick();
+    expect(hidden()).toBe("true");
+    scrollFrame(frameEl("frame-b"), 290); // a real scroll-up reveals
+    expect(hidden()).toBe("false");
+  });
+
+  it("moves to the node that replaced the container when a morph reaches the header", async () => {
+    await mountWithTwoFrames();
+    const original = frameEl("frame-a");
+    const replacement = document.createElement("div");
+    replacement.id = "frame-a";
+    trackScrollTop(replacement);
+    original.replaceWith(replacement);
+
+    // Same selector string, new node: the morph that swapped it reaches the
+    // retained header, and the container is resolved from the DOM again.
+    header().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await tick();
+    scrollFrame(replacement, 200);
+    expect(hidden()).toBe("true");
+  });
+
+  it("keeps the one listener when a pass resolves to the container it already has", async () => {
+    await mountWithTwoFrames();
+    const add = vi.spyOn(frameEl("frame-a"), "addEventListener");
+    header().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    header().setAttribute("data-stimeo--smart-sticky-header-offset-value", "100");
+    await tick();
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("decides a container and offset changed together once, from the new container", async () => {
+    await mountWithTwoFrames();
+    scrollFrame(frameEl("frame-a"), 200);
+    expect(hidden()).toBe("true");
+    positions["frame-b"] = 400;
+    const states = recordStates();
+
+    // Measured on the old container, the new offset alone would reveal the header
+    // for a moment; one pass after the batch reads the new container with both.
+    header().setAttribute("data-stimeo--smart-sticky-header-offset-value", "250");
+    header().setAttribute("data-stimeo--smart-sticky-header-container-selector-value", "#frame-b");
+    await tick();
+    expect(hidden()).toBe("true");
+    expect(states).toEqual([]);
+  });
+
+  it("keeps holding the header for focus on the container it moved to", async () => {
+    await mountWithTwoFrames();
+    header().setAttribute("data-stimeo--smart-sticky-header-container-selector-value", "#frame-b");
+    await tick();
+    (document.querySelector("header a") as HTMLAnchorElement).focus();
+    scrollFrame(frameEl("frame-b"), 400);
+    expect(hidden()).toBe("false");
+
+    (document.activeElement as HTMLElement).blur();
+    scrollFrame(frameEl("frame-b"), 500);
+    expect(hidden()).toBe("true");
+  });
+
+  it("does not move to a new container from a change outside the connected window", async () => {
+    await mountWithTwoFrames();
+    const instance = controller() as SmartStickyHeaderController;
+    instance.disconnect();
+
+    header().setAttribute("data-stimeo--smart-sticky-header-container-selector-value", "#frame-b");
+    instance.containerSelectorValueChanged();
+    await tick();
+    scrollFrame(frameEl("frame-b"), 400);
+    expect(hidden()).toBe("false");
   });
 
   it("re-renders when offset changes at runtime", async () => {

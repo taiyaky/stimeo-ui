@@ -55,6 +55,7 @@ export class ReadMoreController extends Controller<HTMLElement> {
 
   declare readonly contentTarget: HTMLElement;
   declare readonly triggerTarget: HTMLElement;
+  declare readonly triggerTargets: HTMLElement[];
   declare readonly expandedLabelTargets: HTMLElement[];
   declare readonly collapsedLabelTargets: HTMLElement[];
   declare readonly hasContentTarget: boolean;
@@ -73,10 +74,13 @@ export class ReadMoreController extends Controller<HTMLElement> {
   readonly #layout = new LayoutObserver(this.#update);
 
   /** Owns `hidden` on the trigger's two labels. */
-  readonly #labels = new StateRegions({
-    whenTrue: () => this.expandedLabelTargets,
-    whenFalse: () => this.collapsedLabelTargets,
-  });
+  readonly #labels = new StateRegions(
+    {
+      whenTrue: () => this.expandedLabelTargets,
+      whenFalse: () => this.collapsedLabelTargets,
+    },
+    this.identifier,
+  );
 
   /** Holds the trigger's hide back while it has focus; re-evaluates on blur. */
   readonly #deferredHide = new BlurDeferral(() => {
@@ -89,7 +93,8 @@ export class ReadMoreController extends Controller<HTMLElement> {
     // explicit `data-state="expanded"`/`"collapsed"` is honored verbatim so a block
     // the user expanded *or* collapsed survives a back-navigation, even when the
     // declarative `collapsed` Value disagrees. The Value seeds only a genuinely fresh
-    // render (no `data-state` yet).
+    // render (no `data-state` yet), and a declaration rewritten after connect moves
+    // nothing.
     this.#collapsed = this.#initialCollapsed();
     this.#syncTargets();
   }
@@ -112,8 +117,10 @@ export class ReadMoreController extends Controller<HTMLElement> {
     this.#syncTargets();
   }
 
+  /** Gives a button that no longer resolves as the trigger the label pair its author wrote. */
   triggerTargetDisconnected(trigger: HTMLElement): void {
     this.#deferredHide.release(trigger);
+    if (!this.triggerTargets.includes(trigger)) this.#labels.release(trigger);
     this.#syncTargets();
   }
 

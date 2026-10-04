@@ -1,5 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
 import { LayoutObserver } from "../utils/layout_observer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { prefersReducedMotion } from "../utils/reduced_motion";
 import { StateRegions } from "../utils/state_regions";
 
@@ -73,12 +76,19 @@ const countElements = (nodes: NodeList): number => {
  * passive scroll listener are released on `disconnect()` (Turbo navigation included).
  */
 export class StickToBottomController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["content", "hasNew"];
   static override values = {
     threshold: { type: Number, default: DEFAULT_THRESHOLD },
     behavior: { type: String, default: "auto" },
     pinOnConnect: { type: Boolean, default: false },
   };
+
+  static valueConstraints = {
+    threshold: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof StickToBottomController.values>;
   static actions = ["scrollToBottom"] as const;
   static events = ["pin", "new"] as const;
 
@@ -100,11 +110,20 @@ export class StickToBottomController extends Controller<HTMLElement> {
   #pinned = false;
   #hasNew = false;
   /** Owns `hidden` on the regions declared for the has-new state. */
-  readonly #hasNewRegion = new StateRegions({ whenTrue: () => this.hasNewTargets });
+  readonly #hasNewRegion = new StateRegions(
+    { whenTrue: () => this.hasNewTargets },
+    this.identifier,
+  );
 
   readonly #onScroll = (): void => this.#updatePinned();
 
+  readonly #morphRender = new MorphRenderWatcher(() => {
+    this.#updatePinned();
+    this.#setHasNew(this.#hasNew);
+  });
+
   override connect(): void {
+    this.#morphRender.observe(this.element);
     this.#connected = true;
     // Instant whatever `behavior` says, overriding a consumer's `scroll-behavior: smooth`:
     // an animated jump emits scroll events on the way down, each recomputing pinned from a
@@ -128,6 +147,7 @@ export class StickToBottomController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
+    this.#morphRender.disconnect();
     this.#connected = false;
     this.element.removeEventListener("scroll", this.#onScroll);
     this.#stopWatching();
@@ -205,10 +225,10 @@ export class StickToBottomController extends Controller<HTMLElement> {
    */
   #updatePinned(): void {
     const pinned = this.#isPinned();
-    if (pinned === this.#pinned) return;
+    const changed = pinned !== this.#pinned;
     this.#pinned = pinned;
     this.#reflectPinned();
-    this.dispatch("pin", { detail: { pinned } });
+    if (changed) this.dispatch("pin", { detail: { pinned } });
   }
 
   /** Mirrors the current `#pinned` onto the state hooks (clearing has-new once pinned). */
@@ -253,8 +273,7 @@ export class StickToBottomController extends Controller<HTMLElement> {
    * Zero is a real declaration: it pins at the exact bottom only.
    */
   get #threshold(): number {
-    const declared = this.thresholdValue;
-    return Number.isFinite(declared) && declared >= 0 ? declared : DEFAULT_THRESHOLD;
+    return this.#safeThreshold;
   }
 
   /**
@@ -344,5 +363,15 @@ export class StickToBottomController extends Controller<HTMLElement> {
   #behavior(): ScrollBehavior {
     if (prefersReducedMotion()) return "instant";
     return this.behaviorValue === "smooth" ? "smooth" : "auto";
+  }
+  /** Current `threshold` declaration resolved against its numeric contract. */
+  get #safeThreshold(): number {
+    return this.#numbers.read(
+      this,
+      "threshold",
+      this.thresholdValue,
+      StickToBottomController.values.threshold.default,
+      StickToBottomController.valueConstraints.threshold,
+    );
   }
 }

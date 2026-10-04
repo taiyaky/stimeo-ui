@@ -2,6 +2,9 @@ import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { DetachGate } from "../utils/detach_gate";
 import { ownerOf } from "../utils/event_owner";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { OwnedPointerSession, type OwnedPointerSessionEnd } from "../utils/owned_pointer_session";
 import { TransientHooks } from "../utils/transient_hooks";
 
@@ -79,8 +82,12 @@ interface KeyboardSession {
  * `translate` (a property independent of `transform`, so authored transforms
  * survive), commits the offset on drop and restores it on cancel — the exact
  * boilerplate every simple consumer would otherwise re-write. With `follow` the
- * element's inline `translate` belongs to this controller (`connect()` re-reads
- * a committed `<x>px <y>px` offset, so Turbo restores stay consistent). ARIA 1.1
+ * element's inline `translate` belongs to this controller. `follow` is read when a
+ * gesture starts and holds until that gesture ends, so switching it mid-drag
+ * describes the next gesture; the gesture's base is the committed `<x>px <y>px`
+ * offset read back from the inline `translate` at that moment, so a Turbo restore,
+ * a position the consumer wrote, or `follow` switched on later all continue from
+ * where the element sits. ARIA 1.1
  * deprecated `aria-grabbed`/`aria-dropeffect`, so the grabbed state is
  * published as `data-grabbed` and the *meaning* of a drag must be announced by
  * the consumer (pair with `stimeo--announcer`). `touch-action` on the handles is
@@ -93,6 +100,9 @@ interface KeyboardSession {
  * a navigation).
  */
 export class PointerDragController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["handle"];
   static override values = {
     axis: { type: String, default: "both" },
@@ -101,6 +111,11 @@ export class PointerDragController extends Controller<HTMLElement> {
     disabled: { type: Boolean, default: false },
     follow: { type: Boolean, default: false },
   };
+
+  static valueConstraints = {
+    threshold: NUMBER_BOUNDS.nonNegative,
+    keyboardStep: NUMBER_BOUNDS.positive,
+  } satisfies NumberValueConstraints<typeof PointerDragController.values>;
   static actions = ["reset"] as const;
   static events = ["start", "move", "end", "cancel"] as const;
 
@@ -119,12 +134,26 @@ export class PointerDragController extends Controller<HTMLElement> {
 
   #pointer: PointerSession | null = null;
   #keyboard: KeyboardSession | null = null;
-  /** Committed follow offset from past drops; a new drag's deltas add onto it. */
+  /** Committed follow offset the current gesture started from; its deltas add onto it. */
   #followBase = { x: 0, y: 0 };
+  /**
+   * Whether the gesture in flight applies its offset as a `translate`: `follow` as it
+   * read when that gesture started. Consulted only while a gesture runs or ends.
+   */
+  #gestureFollows = false;
+  /** Last offset written by this instance; absent while the inline value is only authored. */
+  #followOutput: { x: number; y: number } | null = null;
   /** Decides whether a mid-session disconnect() is an in-page move or a detach. */
   readonly #gate = new DetachGate();
 
+  readonly #morphRender = new MorphRenderWatcher(() => {
+    for (const handle of this.#handles()) this.#prepareHandle(handle);
+    this.#reflectSession();
+  });
+
   override connect(): void {
+    this.#morphRender.observe(this.element);
+    if (!this.#pointer && !this.#keyboard) this.#followOutput = null;
     // A reconnect disarms the probe a mid-session disconnect() armed — the
     // element was moved in-page and the session survives (see disconnect).
     this.#gate.cancel();
@@ -133,13 +162,6 @@ export class PointerDragController extends Controller<HTMLElement> {
     // session preserved across an in-page move keeps its hooks.
     if (!this.#pointer) TRANSIENT_DRAG.reset(this.element);
     if (!this.#keyboard) TRANSIENT_GRAB.reset(this.element);
-    // Follow mode owns the element's inline `translate`: re-read a committed
-    // offset so reconnects (Turbo cache restore included) keep accumulating from
-    // where the element visually sits. A session surviving an in-page move keeps
-    // its base — mid-drag inline state must not be committed as a new base.
-    if (this.followValue && !this.#pointer && !this.#keyboard) {
-      this.#followBase = this.#parseFollowBase();
-    }
     // Delegated on the container so dynamically added handles need no per-element
     // data-action.
     this.element.addEventListener("pointerdown", this.#onPointerDown);
@@ -148,6 +170,7 @@ export class PointerDragController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
+    this.#morphRender.disconnect();
     this.element.removeEventListener("pointerdown", this.#onPointerDown);
     this.element.removeEventListener("keydown", this.#onKeydown);
     // A mid-session disconnect on a STILL-connected element is ambiguous: an
@@ -172,11 +195,9 @@ export class PointerDragController extends Controller<HTMLElement> {
    * Returns the element to its origin: drops the committed follow offset and the
    * inline `translate` that carries it.
    *
-   * In follow mode the inline `translate` belongs to this controller, and the
-   * committed offset lives in a field the DOM cannot reach — so a consumer that
-   * wants the element back at the start, or that has written a position of its
-   * own, needs this to make the two agree again. An in-flight drag is cancelled
-   * first, or its deltas would land on top of the offset just cleared.
+   * In follow mode the inline `translate` belongs to this controller, so this is the
+   * way to put the element back at the start. An in-flight drag is cancelled first,
+   * or its deltas would land on top of the offset just cleared.
    */
   reset(): void {
     // Cancel first, then clear: the cancel contract snaps back to the committed
@@ -280,6 +301,7 @@ export class PointerDragController extends Controller<HTMLElement> {
     // stay reachable right after a pointer interaction (WCAG 2.1.1).
     event.preventDefault();
     handle.focus();
+    this.#beginGesture();
 
     const session: PointerSession = {
       pointer: null,
@@ -312,7 +334,7 @@ export class PointerDragController extends Controller<HTMLElement> {
       event.clientY - session.originY,
     );
     if (!session.started) {
-      if (Math.hypot(dx, dy) < this.thresholdValue) return;
+      if (Math.hypot(dx, dy) < this.#safeThreshold) return;
       session.started = true;
       this.element.setAttribute("data-dragging", "true");
       this.dispatch("start", {
@@ -432,6 +454,7 @@ export class PointerDragController extends Controller<HTMLElement> {
 
   /** Enters the grabbed mode: `data-grabbed` on element + handle, then `start`. */
   #grabKeyboard(handle: HTMLElement): void {
+    this.#beginGesture();
     this.#keyboard = { handle, dx: 0, dy: 0 };
     this.element.setAttribute("data-grabbed", "true");
     handle.setAttribute("data-grabbed", "true");
@@ -448,7 +471,7 @@ export class PointerDragController extends Controller<HTMLElement> {
 
   /** Maps an arrow key to a raw (unfiltered) `keyboardStep` delta. */
   #keyboardDelta(key: string): [number, number] | null {
-    const step = this.keyboardStepValue;
+    const step = this.#safeKeyboardStep;
     switch (key) {
       case "ArrowRight":
         return [step, 0];
@@ -495,10 +518,6 @@ export class PointerDragController extends Controller<HTMLElement> {
    * bookkeeping forever.
    */
   #teardown(): void {
-    // Disarm any probe still queued: without this, an immediate teardown
-    // (element removed right after a deferring disconnect) would let the
-    // orphaned probe run #teardown a second time — a double cancel.
-    this.#gate.cancel();
     const interrupted = this.#pointer?.started
       ? this.#pointer.pointerType
       : this.#keyboard
@@ -507,8 +526,10 @@ export class PointerDragController extends Controller<HTMLElement> {
     this.#teardownSessions();
     for (const handle of this.#handles()) this.#restoreHandle(handle);
     // An in-flight offset must leave the DOM even where nobody is listening: a
-    // re-inserted element would have `connect()` read it back as a committed base.
-    this.#followReset();
+    // re-inserted element would have the next gesture read it back as a committed
+    // base. An idle element carries no in-flight offset, and its translate is left
+    // as it is.
+    if (interrupted) this.#followReset();
     if (interrupted && this.element.isConnected) this.#dispatchCancel(interrupted);
   }
 
@@ -530,37 +551,57 @@ export class PointerDragController extends Controller<HTMLElement> {
   }
 
   /**
-   * Applies the in-flight offset to the element's `translate` (follow only).
+   * Reads `follow` for the gesture that is starting; with it on, takes the committed
+   * offset back from the inline `translate` the element shows now.
    *
-   * @stimeoRuntimeOnly `follow` decides whether this one move writes the offset as a translate; the
-   *   offset itself comes from the gesture.
+   * @stimeoRuntimeOnly `follow` decides whether this one gesture writes its offset as a translate.
    */
+  #beginGesture(): void {
+    this.#gestureFollows = this.followValue;
+    if (this.#gestureFollows) this.#followBase = this.#parseFollowBase();
+  }
+
+  /** Applies the in-flight offset to the element's `translate` (following gestures only). */
   #followMove(dx: number, dy: number): void {
-    if (!this.followValue) return;
+    if (!this.#gestureFollows) return;
     this.#applyFollow(this.#followBase.x + dx, this.#followBase.y + dy);
   }
 
-  /**
-   * Folds a drop's deltas into the committed base offset (follow only).
-   *
-   * @stimeoRuntimeOnly `follow` decides whether the end of this one gesture keeps the offset as a
-   *   translate.
-   */
+  /** Folds a drop's deltas into the committed base offset (following gestures only). */
   #followCommit(dx: number, dy: number): void {
-    if (!this.followValue) return;
+    if (!this.#gestureFollows) return;
     this.#followBase = { x: this.#followBase.x + dx, y: this.#followBase.y + dy };
     this.#applyFollow(this.#followBase.x, this.#followBase.y);
   }
 
-  /**
-   * Snaps back to the committed position (follow only) — the cancel contract.
-   *
-   * @stimeoRuntimeOnly `follow` decides whether cancelling this one gesture clears the translate it
-   *   wrote.
-   */
+  /** Snaps back to the committed position (following gestures only) — the cancel contract. */
   #followReset(): void {
-    if (!this.followValue) return;
+    if (!this.#gestureFollows) return;
     this.#applyFollow(this.#followBase.x, this.#followBase.y);
+  }
+
+  /**
+   * Repairs live-session hooks and owned follow output without advancing or ending a gesture.
+   * A gesture in flight keeps the `follow` it started with; an idle element answers to the
+   * current declaration.
+   *
+   * @stimeoRuntimeOnly `follow` gates the gesture's opt-in translate ownership; the held
+   *   output is not a newly derived offset.
+   */
+  #reflectSession(): void {
+    if (this.#pointer?.started) this.element.setAttribute("data-dragging", "true");
+    else this.element.removeAttribute("data-dragging");
+    if (this.#keyboard) {
+      this.element.setAttribute("data-grabbed", "true");
+      this.#keyboard.handle.setAttribute("data-grabbed", "true");
+    } else {
+      this.element.removeAttribute("data-grabbed");
+      for (const handle of this.#handles()) handle.removeAttribute("data-grabbed");
+    }
+    const follows = this.#pointer || this.#keyboard ? this.#gestureFollows : this.followValue;
+    if (follows && this.#followOutput) {
+      this.#applyFollow(this.#followOutput.x, this.#followOutput.y);
+    }
   }
 
   /**
@@ -569,6 +610,7 @@ export class PointerDragController extends Controller<HTMLElement> {
    * clobbered. At the origin the property is removed to keep the DOM clean.
    */
   #applyFollow(x: number, y: number): void {
+    this.#followOutput = { x, y };
     if (x === 0 && y === 0) this.element.style.removeProperty("translate");
     else this.element.style.setProperty("translate", `${x}px ${y}px`);
   }
@@ -673,5 +715,26 @@ export class PointerDragController extends Controller<HTMLElement> {
       // record and the borrowed tab stop is never given back.
       if (!ours) handle.removeAttribute(PointerDragController.#TABINDEX_MARKER);
     }
+  }
+  /** Current `threshold` declaration resolved against its numeric contract. */
+  get #safeThreshold(): number {
+    return this.#numbers.read(
+      this,
+      "threshold",
+      this.thresholdValue,
+      PointerDragController.values.threshold.default,
+      PointerDragController.valueConstraints.threshold,
+    );
+  }
+
+  /** Current `keyboardStep` declaration resolved against its numeric contract. */
+  get #safeKeyboardStep(): number {
+    return this.#numbers.read(
+      this,
+      "keyboardStep",
+      this.keyboardStepValue,
+      PointerDragController.values.keyboardStep.default,
+      PointerDragController.valueConstraints.keyboardStep,
+    );
   }
 }

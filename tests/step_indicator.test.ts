@@ -168,6 +168,7 @@ describe("StepIndicatorController", () => {
     const seen = recordChanges();
     setStep(2);
     expect(seen).toEqual([]);
+    expect(root().getAttribute("data-stimeo--step-indicator-index-value")).toBe("0");
     expect(ratio()).toBe("0");
   });
 

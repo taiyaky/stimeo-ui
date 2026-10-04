@@ -26,13 +26,13 @@ describe("ComboboxController", () => {
         <ul id="listbox" role="listbox" data-stimeo--combobox-target="list" hidden>
           <li role="option" id="opt-apple" data-value="apple"
               data-stimeo--combobox-target="option"
-              data-action="click->stimeo--combobox#selectByClick">Apple</li>
+              data-action="click->stimeo--combobox#select">Apple</li>
           <li role="option" id="opt-apricot" data-value="apricot"
               data-stimeo--combobox-target="option"
-              data-action="click->stimeo--combobox#selectByClick">Apricot</li>
+              data-action="click->stimeo--combobox#select">Apricot</li>
           <li role="option" id="opt-banana" data-value="banana"
               data-stimeo--combobox-target="option"
-              data-action="click->stimeo--combobox#selectByClick">Banana</li>
+              data-action="click->stimeo--combobox#select">Banana</li>
         </ul>
       </div>`;
     application = Application.start();
@@ -65,6 +65,298 @@ describe("ComboboxController", () => {
   const press = (key: string) =>
     input().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
   const clickInput = () => input().dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  /** Runs `act`, lets Stimulus deliver the callbacks, and returns the writes to `attributes`. */
+  const attributeWrites = async (element: Element, attributes: string[], act: () => void) => {
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((batch) => records.push(...batch));
+    observer.observe(element, {
+      attributes: true,
+      attributeOldValue: true,
+      attributeFilter: attributes,
+    });
+    act();
+    await tick();
+    records.push(...observer.takeRecords());
+    observer.disconnect();
+    return records;
+  };
+
+  it("element API reentry reports the newest native-field commit with its own reason", () => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--combobox']");
+    if (!element) throw new Error("Missing root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--combobox",
+    ) as ComboboxController;
+    const first = instance.optionTargets[0];
+    const second = instance.optionTargets[1];
+    if (!first || !second) throw new Error("Missing options");
+    let replaced = false;
+    input().addEventListener("change", () => {
+      if (replaced) return;
+      replaced = true;
+      instance.select(second);
+    });
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--combobox:selected", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    instance.select(first);
+    expect(input().value).toBe(second.dataset.value);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail).toMatchObject({ value: second.dataset.value, reason: "api" });
+  });
+
+  it("rejects nested-origin action events while accepting owned descendants", async () => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--combobox']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--combobox",
+    ) as ComboboxController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--combobox-target='option']",
+    )[1];
+    if (!target) throw new Error("Missing target");
+
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--combobox");
+    const inner = target.cloneNode(true) as HTMLElement;
+    inner.removeAttribute("data-action");
+    nested.append(inner);
+    target.append(nested);
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--combobox:selected", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener("pointerup", (event) => instance.select(event));
+    inner.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(0);
+    nested.remove();
+    const owned = document.createElement("span");
+    target.append(owned);
+    owned.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe("user");
+  });
+
+  it.each([false, true])(
+    "element API focus respects an inside caller and a subscriber's handoff (handoff=%s)",
+    async (handoff) => {
+      const element = document.querySelector<HTMLElement>("[data-controller='stimeo--combobox']");
+      if (!element) throw new Error("Missing controller root");
+      const instance = application.getControllerForElementAndIdentifier(
+        element,
+        "stimeo--combobox",
+      ) as ComboboxController;
+      instance.open();
+      const inside = document.createElement("button");
+      element.append(inside);
+      inside.focus();
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      if (handoff)
+        element.addEventListener("stimeo--combobox:selected", () => outside.focus(), {
+          once: true,
+        });
+      const target = instance.optionTargets[1];
+      if (!target) throw new Error("Missing option");
+      instance.select(target);
+      expect(document.activeElement).toBe(handoff ? outside : input());
+    },
+  );
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+  ])("preserves action event modality %s", async (type, reason) => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--combobox']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--combobox",
+    ) as ComboboxController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--combobox-target='option']",
+    )[1];
+    if (!target) throw new Error("Missing action target");
+
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--combobox:selected", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener(type, (event) => instance.select(event), { once: true });
+    target.dispatchEvent(new Event(type));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe(reason);
+  });
+
+  it.each([false, true])(
+    "accepts an owned element API source (descendant=%s) without stealing outside focus",
+    async (descendant) => {
+      const element = document.querySelector<HTMLElement>("[data-controller='stimeo--combobox']");
+      if (!element) throw new Error("Missing controller root");
+      const instance = application.getControllerForElementAndIdentifier(
+        element,
+        "stimeo--combobox",
+      ) as ComboboxController;
+      const target = element.querySelectorAll<HTMLElement>(
+        "[data-stimeo--combobox-target='option']",
+      )[1];
+      if (!target) throw new Error("Missing action target");
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      outside.focus();
+      const reports: CustomEvent[] = [];
+      element.addEventListener("stimeo--combobox:selected", (event) =>
+        reports.push(event as CustomEvent),
+      );
+
+      const child = document.createElement("span");
+      target.append(child);
+      const foreign = target.cloneNode(true) as HTMLElement;
+      foreign.removeAttribute("data-action");
+      const nested = document.createElement("div");
+      nested.setAttribute("data-controller", "stimeo--combobox");
+      const nestedTarget = foreign.cloneNode(true) as HTMLElement;
+      nested.append(nestedTarget);
+      element.append(nested);
+      const before = element.innerHTML;
+      instance.select(foreign);
+      document.body.append(foreign);
+      instance.select(foreign);
+      instance.select(nestedTarget);
+      expect(element.innerHTML).toBe(before);
+      expect(reports).toHaveLength(0);
+      instance.select(descendant ? child : target);
+      expect(input().value).toBe("apricot");
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.detail.reason).toBe("api");
+      expect(document.activeElement).toBe(outside);
+    },
+  );
+
+  it("re-filters an open popup when its input target is replaced", async () => {
+    controller().open();
+    const replacement = input().cloneNode(true) as HTMLInputElement;
+    replacement.value = "Ban";
+    input().replaceWith(replacement);
+    controller().inputTargetConnected(replacement);
+    await tick();
+    expect(option("opt-apple").hidden).toBe(true);
+    expect(option("opt-banana").hidden).toBe(false);
+  });
+
+  it("re-filters an open popup against an input that arrives after the only one left", async () => {
+    controller().open();
+    const original = input();
+    original.remove();
+    await tick();
+    const arrival = original.cloneNode(true) as HTMLInputElement;
+    arrival.value = "Ban";
+    root().prepend(arrival);
+    controller().inputTargetConnected(arrival);
+    await tick();
+
+    expect(option("opt-apple").hidden).toBe(true);
+    expect(option("opt-banana").hidden).toBe(false);
+  });
+
+  it("reconciles an option that arrives after the only ones left", async () => {
+    type("Ban");
+    for (const id of ["opt-apple", "opt-apricot", "opt-banana"]) option(id).remove();
+    await tick();
+    const arrival = document.createElement("li");
+    arrival.id = "opt-avocado";
+    arrival.setAttribute("role", "option");
+    arrival.setAttribute("aria-selected", "true");
+    arrival.setAttribute("data-stimeo--combobox-target", "option");
+    arrival.textContent = "Avocado";
+    list().append(arrival);
+    await tick();
+
+    expect(arrival.hidden).toBe(true);
+    expect(arrival.getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("filters a newly added option against the open input", async () => {
+    type("Ban");
+    const added = option("opt-apple").cloneNode(true) as HTMLElement;
+    added.id = "opt-new";
+    added.hidden = false;
+    list().append(added);
+    controller().optionTargetConnected(added);
+    await tick();
+    expect(added.hidden).toBe(true);
+  });
+
+  it("uses an authored active descendant as the starting option for navigation", () => {
+    controller().open();
+    input().setAttribute("aria-activedescendant", "opt-apricot");
+    press("ArrowDown");
+    expect(input().getAttribute("aria-activedescendant")).toBe("opt-banana");
+  });
+
+  it("keeps navigation safe after the input leaves an open popup", () => {
+    controller().open();
+    input().remove();
+    expect(() =>
+      controller().onKeydown(new KeyboardEvent("keydown", { key: "ArrowDown" })),
+    ).not.toThrow();
+    expect(option("opt-apple").getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("omits a selection superseded by a native change listener", () => {
+    const values: string[] = [];
+    root().addEventListener("stimeo--combobox:selected", (event) =>
+      values.push((event as CustomEvent).detail.value),
+    );
+    let replaced = false;
+    input().addEventListener(
+      "change",
+      () => {
+        if (replaced) return;
+        replaced = true;
+        option("opt-banana").click();
+      },
+      { once: true },
+    );
+    option("opt-apple").click();
+    expect(values).toEqual(["banana"]);
+    expect(input().value).toBe("banana");
+  });
+
+  it.each(["", "apple"])("omits a selection superseded while returning focus (%s)", (initial) => {
+    input().value = initial;
+    const values: string[] = [];
+    const native: string[] = [];
+    input().addEventListener("change", () => native.push(input().value));
+    root().addEventListener("stimeo--combobox:selected", (event) =>
+      values.push((event as CustomEvent).detail.value),
+    );
+    input().addEventListener("focus", () => option("opt-banana").click(), { once: true });
+    option("opt-apple").click();
+    expect(values).toEqual(["banana"]);
+    expect(native).toEqual(["banana"]);
+    expect(input().value).toBe("banana");
+  });
+
+  it("keeps selection reports for readers and unchanged reentrant selections", () => {
+    const values: string[] = [];
+    root().addEventListener("stimeo--combobox:selected", (event) =>
+      values.push((event as CustomEvent).detail.value),
+    );
+    input().addEventListener(
+      "change",
+      () => {
+        expect(input().value).toBe("apple");
+        option("opt-apple").click();
+      },
+      { once: true },
+    );
+    option("opt-apple").click();
+    expect(values).toEqual(["apple", "apple"]);
+  });
 
   it("starts closed", () => {
     expect(list().hidden).toBe(true);
@@ -550,7 +842,7 @@ describe("ComboboxController", () => {
       <ul id="listbox-2" role="listbox" data-stimeo--combobox-target="list" hidden>
         <li role="option" id="opt-2-apple" data-value="apple"
             data-stimeo--combobox-target="option"
-            data-action="click->stimeo--combobox#selectByClick">Apple</li>
+            data-action="click->stimeo--combobox#select">Apple</li>
       </ul>`;
     document.body.appendChild(second);
     await tick();
@@ -600,8 +892,7 @@ describe("ComboboxController", () => {
   });
 
   it("dispatches stimeo--combobox:selected carrying the committed value", () => {
-    // Committing an option is a public event with a `{ value }` detail; this is
-    // the only case that observes the dispatch itself.
+    // Committing an option is a public event carrying the committed value.
     const details: unknown[] = [];
     root().addEventListener("stimeo--combobox:selected", (event) => {
       details.push((event as CustomEvent).detail);
@@ -613,7 +904,7 @@ describe("ComboboxController", () => {
     press("Enter");
 
     expect(input().value).toBe("apple");
-    expect(details).toEqual([{ value: "apple" }]);
+    expect(details).toEqual([{ value: "apple", reason: "user" }]);
   });
 
   it("no-ops instead of throwing when the list target is absent", () => {
@@ -674,7 +965,7 @@ describe("ComboboxController", () => {
       <ul id="listbox-late" role="listbox" data-stimeo--combobox-target="list" hidden>
         <li role="option" id="opt-late-apple" data-value="apple"
             data-stimeo--combobox-target="option"
-            data-action="click->stimeo--combobox#selectByClick">Apple</li>
+            data-action="click->stimeo--combobox#select">Apple</li>
       </ul>`;
     document.body.appendChild(late);
     await tick();
@@ -696,6 +987,479 @@ describe("ComboboxController", () => {
 
     document.body.click();
     expect(lateList.hidden).toBe(true);
+  });
+
+  it("closes a popup a restored snapshot left open when it connects", async () => {
+    const restored = document.createElement("div");
+    restored.setAttribute("data-controller", "stimeo--combobox");
+    restored.innerHTML = `
+      <input type="text" role="combobox" aria-expanded="true" aria-label="Restored"
+             aria-autocomplete="list" aria-controls="listbox-restored"
+             aria-activedescendant="opt-restored-kiwi"
+             data-stimeo--combobox-target="input" />
+      <ul id="listbox-restored" role="listbox" data-stimeo--combobox-target="list">
+        <li role="option" id="opt-restored-kiwi" aria-selected="true" data-value="kiwi"
+            data-stimeo--combobox-target="option">Kiwi</li>
+      </ul>`;
+    document.body.appendChild(restored);
+    await tick();
+
+    const restoredInput = restored.querySelector("input") as HTMLInputElement;
+    expect((restored.querySelector("ul") as HTMLElement).hidden).toBe(true);
+    expect(restoredInput.getAttribute("aria-expanded")).toBe("false");
+    expect(restoredInput.hasAttribute("aria-activedescendant")).toBe(false);
+  });
+
+  it("runs no option reconciliation still pending when it disconnects", async () => {
+    type("Ban");
+    const added = option("opt-apple").cloneNode(true) as HTMLElement;
+    added.id = "opt-new";
+    added.hidden = false;
+    list().append(added);
+    controller().optionTargetConnected(added);
+
+    controller().disconnect();
+    await tick();
+
+    expect(added.hidden).toBe(false);
+  });
+
+  it("tracks IME composition on an input that replaces the original after connect", () => {
+    const replacement = input().cloneNode(true) as HTMLInputElement;
+    input().replaceWith(replacement);
+    controller().inputTargetConnected(replacement);
+    replacement.value = "ap";
+    controller().open();
+    controller().onKeydown(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+
+    replacement.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+
+    expect(replacement.value).toBe("ap");
+    expect(list().hidden).toBe(false);
+  });
+
+  it("lets a replacement input commit after the original leaves mid-composition", () => {
+    const original = input();
+    original.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    const replacement = original.cloneNode(true) as HTMLInputElement;
+    original.replaceWith(replacement);
+    controller().inputTargetDisconnected(original);
+    controller().inputTargetConnected(replacement);
+
+    replacement.value = "ap";
+    controller().open();
+    controller().onKeydown(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+
+    expect(replacement.value).toBe("apple");
+  });
+
+  it("marks an option added to the open popup as not active", async () => {
+    type("a");
+    press("ArrowDown"); // Apple active
+    const late = document.createElement("li");
+    late.id = "opt-late";
+    late.setAttribute("role", "option");
+    late.dataset.value = "avocado";
+    late.setAttribute("data-stimeo--combobox-target", "option");
+    late.textContent = "Avocado";
+    list().append(late);
+    controller().optionTargetConnected(late);
+    await tick();
+
+    expect(
+      Array.from(root().querySelectorAll('[role="option"]'), (candidate) =>
+        candidate.getAttribute("aria-selected"),
+      ),
+    ).toEqual(["true", "false", "false", "false"]);
+  });
+
+  it("drops the active option when typing filters it out", () => {
+    type("a");
+    press("ArrowDown"); // Apple active
+    type("b");
+
+    expect(option("opt-apple").hidden).toBe(true);
+    expect(input().hasAttribute("aria-activedescendant")).toBe(false);
+    expect(option("opt-apple").getAttribute("aria-selected")).toBe("false");
+  });
+
+  it.each(["Escape", "Enter"])("leaves no active option behind when %s closes the popup", (key) => {
+    type("a");
+    press("ArrowDown"); // Apple active
+    press(key);
+
+    expect(list().hidden).toBe(true);
+    expect(input().hasAttribute("aria-activedescendant")).toBe(false);
+    expect(root().querySelectorAll('[role="option"][aria-selected="true"]')).toHaveLength(0);
+  });
+
+  it.each(["ArrowDown", "ArrowUp", "Home", "End", "Enter"])(
+    "consumes %s when it acts on the open popup",
+    (key) => {
+      type("a");
+      press("ArrowDown"); // Apple active
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      input().dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(true);
+    },
+  );
+
+  it("drops an active descendant a replacement input brings to the closed popup", async () => {
+    const replacement = input().cloneNode(true) as HTMLInputElement;
+    replacement.setAttribute("aria-activedescendant", "opt-apple");
+    input().replaceWith(replacement);
+    controller().inputTargetConnected(replacement);
+    await tick();
+
+    expect(list().hidden).toBe(true);
+    expect(replacement.hasAttribute("aria-activedescendant")).toBe(false);
+  });
+
+  describe("an input that stays after an earlier one leaves", () => {
+    /** Opens the popup with Apple active and inserts a stale copy of the input after it. */
+    const insertSuccessor = async (): Promise<[HTMLInputElement, HTMLInputElement]> => {
+      controller().open();
+      press("ArrowDown"); // Apple active
+      const original = input();
+      const successor = original.cloneNode(true) as HTMLInputElement;
+      successor.setAttribute("aria-expanded", "false");
+      successor.removeAttribute("aria-activedescendant");
+      original.after(successor);
+      await tick();
+      return [original, successor];
+    };
+
+    it("reflects the open popup into the input that stays", async () => {
+      const [original, successor] = await insertSuccessor();
+      original.remove();
+      await tick();
+
+      expect(input()).toBe(successor);
+      expect(list().hidden).toBe(false);
+      expect(successor.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("reflects the open popup into a replacement delivered in one task", async () => {
+      controller().open();
+      const replacement = input().cloneNode(true) as HTMLInputElement;
+      replacement.setAttribute("aria-expanded", "false");
+      input().replaceWith(replacement);
+      await tick();
+
+      expect(input()).toBe(replacement);
+      expect(replacement.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it.each([
+      ["authors it", 'aria-expanded="true"'],
+      ["omits it", ""],
+    ])("writes aria-expanded once at connect when the markup %s", async (_label, attribute) => {
+      const late = document.createElement("div");
+      late.setAttribute("data-controller", "stimeo--combobox");
+      late.innerHTML = `
+        <input type="text" role="combobox" ${attribute} aria-label="Late"
+               data-stimeo--combobox-target="input" />
+        <ul role="listbox" data-stimeo--combobox-target="list">
+          <li role="option" id="opt-late-kiwi" data-stimeo--combobox-target="option">Kiwi</li>
+        </ul>`;
+      const lateInput = late.querySelector("input") as HTMLInputElement;
+      const writes: Array<string | null> = [];
+      const observer = new MutationObserver((records) => {
+        for (const _record of records) writes.push(lateInput.getAttribute("aria-expanded"));
+      });
+      observer.observe(lateInput, { attributes: true, attributeFilter: ["aria-expanded"] });
+      document.body.appendChild(late);
+      await tick();
+      await tick();
+      observer.disconnect();
+
+      expect(writes).toEqual(["false"]);
+    });
+
+    it("points the input that stays at the active option", async () => {
+      const [original, successor] = await insertSuccessor();
+      original.remove();
+      await tick();
+
+      expect(input()).toBe(successor);
+      expect(successor.getAttribute("aria-activedescendant")).toBe("opt-apple");
+      expect(option("opt-apple").getAttribute("aria-selected")).toBe("true");
+    });
+
+    it("reports nothing while it synchronizes the input that stays", async () => {
+      const [original] = await insertSuccessor();
+      const events = captureStateEvents("stimeo--combobox", ["selected"]);
+      const commits = captureFieldCommits();
+      original.remove();
+      await tick();
+
+      expect(events.names()).toEqual([]);
+      expect(commits.seen).toEqual([]);
+      events.stop();
+      commits.stop();
+    });
+
+    it("tolerates the removal of the only input", async () => {
+      controller().open();
+      const only = input();
+      only.remove();
+
+      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      expect(() => controller().inputTargetDisconnected(only)).not.toThrow();
+      await tick();
+      expect(list().hidden).toBe(false);
+    });
+
+    it("writes nothing into the input that stays once it has disconnected", async () => {
+      const [original, successor] = await insertSuccessor();
+      const instance = controller();
+      instance.disconnect();
+      original.remove();
+      instance.inputTargetDisconnected(original);
+      await tick();
+
+      expect(successor.hasAttribute("aria-activedescendant")).toBe(false);
+    });
+
+    it("gives the authored ARIA back to an input that stops being the input", async () => {
+      controller().open();
+      press("ArrowDown");
+      const former = input();
+      expect(former.getAttribute("aria-activedescendant")).toBe("opt-apple");
+
+      // The element stays; only the attribute naming it the input goes.
+      former.removeAttribute("data-stimeo--combobox-target");
+      await tick();
+
+      expect(former.getAttribute("aria-expanded")).toBe("false");
+      expect(former.hasAttribute("aria-activedescendant")).toBe(false);
+    });
+
+    it("gives the input back its own ARIA when the combobox loses its controller", async () => {
+      controller().open();
+      press("ArrowDown");
+      const departed = input();
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(departed.getAttribute("aria-expanded")).toBe("false");
+      expect(departed.hasAttribute("aria-activedescendant")).toBe(false);
+    });
+
+    it("keeps what it wrote on an input that moves within the combobox", async () => {
+      controller().open();
+      press("ArrowDown");
+      const moving = input();
+
+      const writes = await attributeWrites(moving, ["aria-expanded", "aria-activedescendant"], () =>
+        root().append(moving),
+      );
+
+      expect(moving.getAttribute("aria-expanded")).toBe("true");
+      expect(moving.getAttribute("aria-activedescendant")).toBe("opt-apple");
+      // A write that replaced a value other than the final one means the input was
+      // handed back on the way; a rewrite of the same value does not.
+      const transient = writes.filter(
+        (write) => write.oldValue !== moving.getAttribute(write.attributeName ?? ""),
+      );
+      expect(transient.map((write) => write.attributeName)).toEqual([]);
+    });
+
+    it("keeps what it wrote on the input and list when the whole combobox leaves the page", async () => {
+      controller().open();
+      press("ArrowDown");
+      const keptInput = input();
+      const keptList = list();
+
+      root().remove();
+      await tick();
+
+      expect(keptInput.getAttribute("aria-expanded")).toBe("true");
+      expect(keptInput.getAttribute("aria-activedescendant")).toBe("opt-apple");
+      expect(keptList.hidden).toBe(false);
+    });
+  });
+
+  describe("a list that replaces the current one", () => {
+    /** A server-rendered copy of the list with `hidden` as given. */
+    const listCopy = (hidden: boolean): HTMLElement => {
+      const copy = list().cloneNode(true) as HTMLElement;
+      copy.hidden = hidden;
+      return copy;
+    };
+
+    it("keeps the popup open on a replacement delivered in one task", async () => {
+      controller().open();
+      const successor = listCopy(true);
+      list().replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(false);
+      expect(input().getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("keeps the popup open on the list that stays after an earlier one leaves", async () => {
+      controller().open();
+      const original = list();
+      const successor = listCopy(true);
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(successor.hidden).toBe(false);
+      expect(input().getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("keeps the popup closed on a replacement authored open", async () => {
+      const successor = listCopy(false);
+      list().replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(true);
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("closes the popup when the only list leaves, and a later list arrives closed", async () => {
+      controller().open();
+      const arrival = listCopy(false);
+      list().remove();
+      await tick();
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+
+      root().append(arrival);
+      await tick();
+      expect(arrival.hidden).toBe(true);
+    });
+
+    it("hides a list left in the page without its target token", async () => {
+      controller().open();
+      const original = list();
+      const successor = listCopy(true);
+      original.after(successor);
+      await tick();
+      original.removeAttribute("data-stimeo--combobox-target");
+      await tick();
+
+      expect(original.hidden).toBe(true);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("closes the popup when the only list loses its target token", async () => {
+      controller().open();
+      list().removeAttribute("data-stimeo--combobox-target");
+      await tick();
+
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+      expect(list().hidden).toBe(true);
+    });
+
+    it("keeps a hidden value the page wrote on a list that stops being the target", async () => {
+      controller().open();
+      const original = list();
+      original.setAttribute("hidden", "until-found");
+      original.removeAttribute("data-stimeo--combobox-target");
+      await tick();
+
+      expect(original.getAttribute("hidden")).toBe("until-found");
+    });
+
+    it("gives the list back its own hidden when the combobox loses its controller", async () => {
+      controller().open();
+      const departed = list();
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("keeps the open state on a list that moves within the combobox", async () => {
+      controller().open();
+      const moving = list();
+
+      const writes = await attributeWrites(moving, ["hidden"], () => root().prepend(moving));
+
+      expect(moving.hidden).toBe(false);
+      expect(writes.map((write) => write.attributeName)).toEqual([]);
+    });
+
+    it("writes nothing into the input when a list arrives behind the current one", async () => {
+      controller().open();
+      const writes: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => writes.push(...records));
+      observer.observe(input(), { attributes: true });
+      const behind = document.createElement("ul");
+      behind.setAttribute("role", "listbox");
+      behind.setAttribute("data-stimeo--combobox-target", "list");
+      behind.hidden = true;
+      list().after(behind);
+      await tick();
+      observer.disconnect();
+
+      expect(writes).toEqual([]);
+      expect(behind.hidden).toBe(true);
+    });
+
+    it("writes nothing into the widget when a list arrives behind the open one", async () => {
+      // A filter is in force, so a pass that ran anyway would write the filtered
+      // option's `hidden` again, which queues a record even when the value is the same.
+      type("ap");
+      expect(option("opt-banana").hidden).toBe(true);
+      const behind = document.createElement("ul");
+      behind.setAttribute("role", "listbox");
+      behind.setAttribute("data-stimeo--combobox-target", "list");
+      behind.hidden = true;
+      const writes: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => writes.push(...records));
+      observer.observe(root(), { attributes: true, subtree: true });
+
+      list().after(behind);
+      await tick();
+      writes.push(...observer.takeRecords());
+      observer.disconnect();
+
+      expect(writes.map((write) => write.attributeName)).toEqual([]);
+    });
+
+    it("reports nothing while it moves the open state", async () => {
+      controller().open();
+      const events = captureStateEvents("stimeo--combobox", ["selected"]);
+      const commits = captureFieldCommits();
+      list().replaceWith(listCopy(true));
+      await tick();
+
+      expect(events.names()).toEqual([]);
+      expect(commits.seen).toEqual([]);
+      events.stop();
+      commits.stop();
+    });
+
+    it("tolerates the removal of the only list", () => {
+      controller().open();
+      const only = list();
+      only.remove();
+
+      expect(() => controller().listTargetDisconnected(only)).not.toThrow();
+    });
+
+    it("moves nothing once it has disconnected", async () => {
+      controller().open();
+      const original = list();
+      const successor = listCopy(true);
+      original.after(successor);
+      await tick();
+      const instance = controller();
+      instance.disconnect();
+      original.remove();
+      instance.listTargetDisconnected(original);
+
+      expect(successor.hidden).toBe(true);
+    });
   });
 
   describe("runtime option removal reconciliation", () => {
@@ -766,7 +1530,7 @@ describe("ComboboxController", () => {
       replacement.setAttribute("role", "option");
       replacement.dataset.value = "apricot-next";
       replacement.setAttribute("data-stimeo--combobox-target", "option");
-      replacement.setAttribute("data-action", "click->stimeo--combobox#selectByClick");
+      replacement.setAttribute("data-action", "click->stimeo--combobox#select");
       replacement.textContent = "Apricot Next";
 
       original.replaceWith(replacement);
@@ -790,7 +1554,7 @@ describe("ComboboxController", () => {
       replacement.setAttribute("aria-selected", "true");
       replacement.dataset.value = "replacement";
       replacement.setAttribute("data-stimeo--combobox-target", "option");
-      replacement.setAttribute("data-action", "click->stimeo--combobox#selectByClick");
+      replacement.setAttribute("data-action", "click->stimeo--combobox#select");
       replacement.textContent = "Replacement";
       const selections: unknown[] = [];
       root().addEventListener("stimeo--combobox:selected", (event) => selections.push(event));
@@ -854,7 +1618,7 @@ describe("ComboboxController", () => {
       late.setAttribute("role", "option");
       late.dataset.value = "avocado";
       late.setAttribute("data-stimeo--combobox-target", "option");
-      late.setAttribute("data-action", "click->stimeo--combobox#selectByClick");
+      late.setAttribute("data-action", "click->stimeo--combobox#select");
       late.textContent = "Avocado";
       list().prepend(late);
       await tick();
@@ -895,7 +1659,7 @@ describe("ComboboxController", () => {
         <ul id="listbox-berry" role="listbox" data-stimeo--combobox-target="list" hidden>
           <li role="option" id="opt-berry" data-value="berry"
               data-stimeo--combobox-target="option"
-              data-action="click->stimeo--combobox#selectByClick">Berry</li>
+              data-action="click->stimeo--combobox#select">Berry</li>
         </ul>
         ${regionMarkup}`;
       document.body.appendChild(host);
@@ -970,6 +1734,22 @@ describe("ComboboxController", () => {
       late.hidden = true;
       late.setAttribute("data-stimeo--combobox-target", "empty");
       late.textContent = "No fruit matches.";
+      host.appendChild(late);
+      await tick();
+
+      expect(late.hidden).toBe(false);
+    });
+
+    it("settles a region that arrives after the only one left", async () => {
+      const host = await mountWithRegion(
+        `<p hidden data-stimeo--combobox-target="empty">No fruit matches.</p>`,
+      );
+      typeInto(host, "zz");
+      emptyRegion(host).remove();
+      await tick();
+      const late = document.createElement("p");
+      late.hidden = true;
+      late.setAttribute("data-stimeo--combobox-target", "empty");
       host.appendChild(late);
       await tick();
 

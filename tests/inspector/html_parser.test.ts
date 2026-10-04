@@ -6,6 +6,7 @@ import {
   type SyntheticElement,
   walk,
 } from "../../src/inspector/html_parser";
+import { withinTimeLimit } from "../helpers/time_limit";
 
 /** Collects every element node (excluding the synthetic root) into a flat list. */
 function flatten(root: ElementNode): ElementNode[] {
@@ -82,6 +83,43 @@ describe("parseHtml", () => {
     expect(div?.opaque).toBe(false);
   });
 
+  it("reads a lone < at the end of the input as text", () => {
+    expect(flatten(parseHtml("<div></div><")).map((n) => n.tag)).toEqual(["div"]);
+  });
+
+  it("resumes parsing after a comment, a declaration and a raw-text element", () => {
+    const source = `<!-- note --><a></a><!DOCTYPE html><b></b><?xml v?><i></i><script></script><p></p>`;
+    expect(flatten(parseHtml(source)).map((n) => n.tag)).toEqual(["a", "b", "i", "script", "p"]);
+  });
+
+  /**
+   * A construct the input never closes runs to the end of the input, so nothing
+   * after its opener is read as markup. Each parse runs under a time limit: a
+   * construct that moved the scan backwards would otherwise never return.
+   */
+  describe("constructs left open", () => {
+    /** The tags parsed from `source`, failing rather than hanging on a stalled scan. */
+    function tags(source: string): string[] {
+      return withinTimeLimit(() => flatten(parseHtml(source)).map((n) => n.tag));
+    }
+
+    it("treats an unclosed comment as running to the end of the input", () => {
+      expect(tags(`<!-- <div data-controller="stimeo--menu">`)).toEqual([]);
+    });
+
+    it("treats an unclosed declaration as running to the end of the input", () => {
+      expect(tags("<a></a><!DOCTYPE html <b")).toEqual(["a"]);
+    });
+
+    it("treats an unclosed end tag as running to the end of the input", () => {
+      expect(tags("<a></a></b <i")).toEqual(["a"]);
+    });
+
+    it("treats a raw-text element whose end tag never closes as running to the end", () => {
+      expect(tags("<a></a><script>x</script <b")).toEqual(["a", "script"]);
+    });
+  });
+
   /**
    * Splicing puts elements the parser cannot tokenize — a Rails helper's
    * rendered tag — at their source offset, so the caller's decoded wiring lands
@@ -137,6 +175,24 @@ describe("parseHtml", () => {
       expect(flatten(root).map((n) => n.tag)).toEqual(["script"]);
     });
 
+    it("drops one that falls inside a comment", () => {
+      const source = `<!--        --><b></b>`;
+      const root = parseHtml(source, [synthetic(5, 10)]);
+      expect(flatten(root).map((n) => n.tag)).toEqual(["b"]);
+    });
+
+    it("drops one that falls inside a markup declaration", () => {
+      const source = `<!DOCTYPE        ><b></b>`;
+      const root = parseHtml(source, [synthetic(10, 15)]);
+      expect(flatten(root).map((n) => n.tag)).toEqual(["b"]);
+    });
+
+    it("drops one that falls inside an end tag", () => {
+      const source = `<div></div       ><b></b>`;
+      const root = parseHtml(source, [synthetic(11, 15)]);
+      expect(flatten(root).map((n) => n.tag)).toEqual(["div", "b"]);
+    });
+
     it("carries the opaque flag through", () => {
       const root = parseHtml("  ", [{ ...synthetic(0, 2), opaque: true }]);
       expect(root.children[0]?.opaque).toBe(true);
@@ -162,6 +218,20 @@ describe("parseHtml", () => {
       expect(inner?.tag).toBe(ERB_ELEMENT_TAG);
       expect(inner?.children.map((c) => c.tag)).toEqual(["p"]);
       expect(bold?.tag).toBe("b");
+    });
+
+    it("splices one that begins at the end of the input", () => {
+      const root = parseHtml("<b></b>", [synthetic(7, 7)]);
+      expect(root.children.map((c) => c.tag)).toEqual(["b", ERB_ELEMENT_TAG]);
+    });
+
+    it("closes a container that ends with the input before splicing one at the end", () => {
+      // The container covers the blanked helper and the <p>; the leaf sits at the end.
+      const source = `      <p></p>`;
+      const root = parseHtml(source, [synthetic(0, 13, true), synthetic(13, 13)]);
+      const [container, leaf] = root.children;
+      expect(container?.children.map((c) => c.tag)).toEqual(["p"]);
+      expect(leaf?.tag).toBe(ERB_ELEMENT_TAG);
     });
 
     it("reports the source span of the token that introduced it", () => {

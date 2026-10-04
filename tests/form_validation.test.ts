@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FormFieldController } from "../src/controllers/form_field_controller";
 import { FormValidationController } from "../src/controllers/form_validation_controller";
 import { ListboxController } from "../src/controllers/listbox_controller";
@@ -121,6 +121,25 @@ describe("FormValidationController", () => {
     email.dispatchEvent(new Event("change", { bubbles: true }));
 
     expect(email.getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("removes the document-level focusout listener on disconnect", () => {
+    application.unload("stimeo--form-validation");
+
+    blur(emailInput());
+
+    expect(emailInput().getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("removes the document-level input listener on disconnect", () => {
+    blur(emailInput());
+    expect(emailInput().getAttribute("aria-invalid")).toBe("true");
+    application.unload("stimeo--form-validation");
+
+    emailInput().value = "person@example.com";
+    input(emailInput());
+
+    expect(emailInput().getAttribute("aria-invalid")).toBe("true");
   });
 
   it("leaves an author-set novalidate untouched on disconnect", async () => {
@@ -260,6 +279,54 @@ describe("FormValidationController", () => {
     // writing its mirror — so it validates without a prior blur.
     emailInput().dispatchEvent(new Event("change", { bubbles: true }));
     expect(emailInput().getAttribute("aria-invalid")).toBe("true");
+  });
+
+  it("re-validates on input a field a change already touched", () => {
+    emailInput().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(emailInput().getAttribute("aria-invalid")).toBe("true");
+
+    emailInput().value = "person@example.com";
+    input(emailInput());
+
+    expect(emailInput().getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("re-validates on input a field an invalid submit touched", () => {
+    submit();
+    expect(nameInput().getAttribute("aria-invalid")).toBe("true");
+
+    nameInput().value = "Ada";
+    input(nameInput());
+
+    expect(nameInput().getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("keeps later submit listeners from running on an invalid submit", () => {
+    const later = vi.fn();
+    form().addEventListener("submit", later);
+
+    submit();
+    expect(later).not.toHaveBeenCalled();
+
+    emailInput().value = "person@example.com";
+    nameInput().value = "Ada";
+    submit();
+    expect(later).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a cleared field once and stays silent on later valid input", () => {
+    const field = emailInput().closest(OUTLET) as HTMLElement;
+    const reports: boolean[] = [];
+    field.addEventListener("stimeo--form-field:validate", (event) => {
+      reports.push((event as CustomEvent<{ valid: boolean }>).detail.valid);
+    });
+    blur(emailInput());
+
+    emailInput().value = "person@example.com";
+    input(emailInput());
+    input(emailInput());
+
+    expect(reports).toEqual([false, true]);
   });
 
   it("does not validate on change when validateOnChange is false", () => {
@@ -881,6 +948,28 @@ describe("FormValidationController with an unwired native radio group", () => {
 
     expect(invalidEvents).toBeGreaterThan(0);
   });
+
+  it("keeps a field-less radio group touched across a reconnect of the same instance", () => {
+    const form = document.querySelector<HTMLFormElement>("form") as HTMLFormElement;
+    const first = document.querySelector<HTMLInputElement>("#size-s") as HTMLInputElement;
+    const outside = form.querySelector<HTMLButtonElement>("button") as HTMLButtonElement;
+    const controller = application.getControllerForElementAndIdentifier(
+      form,
+      "stimeo--form-validation",
+    ) as FormValidationController;
+    let invalidEvents = 0;
+    first.addEventListener("invalid", () => {
+      invalidEvents += 1;
+    });
+    first.dispatchEvent(new FocusEvent("focusout", { relatedTarget: outside, bubbles: true }));
+    controller.disconnect();
+    controller.connect();
+    invalidEvents = 0;
+
+    first.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(invalidEvents).toBeGreaterThan(0);
+  });
 });
 
 /**
@@ -1233,6 +1322,54 @@ describe("FormValidationController declarative messages and custom rules", () =>
 
     expect(body.validationMessage).toBe("Consumer owns this now");
     expect(body.validity.customError).toBe(true);
+  });
+
+  it("does not treat a consumer error as its own once its rule has passed", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-validation-disallow="whitespace"
+               data-stimeo--form-validation-message-whitespace="Enter a real value"
+               data-stimeo--form-field-target="control" />
+        <p hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    body.value = "   ";
+    submit();
+    body.value = "real content";
+    expect(submit().defaultPrevented).toBe(false);
+
+    body.setCustomValidity("Enter a real value");
+    const event = submit();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(body.validationMessage).toBe("Enter a real value");
+  });
+
+  it("does not treat a consumer error as its own after reconnecting", async () => {
+    await mountForm(`
+      <div data-controller="stimeo--form-field">
+        <input id="body" name="body"
+               data-stimeo--form-validation-disallow="whitespace"
+               data-stimeo--form-validation-message-whitespace="Enter a real value"
+               data-stimeo--form-field-target="control" />
+        <p hidden data-stimeo--form-field-target="error"></p>
+      </div>`);
+    const body = document.querySelector<HTMLInputElement>("#body") as HTMLInputElement;
+    const controller = application.getControllerForElementAndIdentifier(
+      form(),
+      "stimeo--form-validation",
+    ) as FormValidationController;
+    body.value = "   ";
+    expect(controller.validate()).toBe(false);
+    controller.disconnect();
+    controller.connect();
+
+    body.value = "real content";
+    body.setCustomValidity("Enter a real value");
+
+    expect(controller.validate()).toBe(false);
+    expect(body.validationMessage).toBe("Enter a real value");
   });
 
   it("treats blank authored messages as absent and falls through", async () => {

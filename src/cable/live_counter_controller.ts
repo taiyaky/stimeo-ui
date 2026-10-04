@@ -2,11 +2,14 @@ import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { authoredInteger } from "../utils/authored_integer";
 import { BlurDeferral } from "../utils/blur_deferral";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { TransientHooks } from "../utils/transient_hooks";
 import {
   type ConfirmedCableSubscription,
   createConfirmedSubscription,
+  identifierOf,
   parseSubscriptionParams,
 } from "./consumer";
 
@@ -83,9 +86,10 @@ const DISABLED_MARKER = "data-live-counter-disabled";
  * (local-only) counters never disable their triggers. `announceText` is opt-in
  * and empty by default; when set, reconciled counts reach the page's shared
  * announcer, debounced so a burst is one message. The subscription follows the
- * declaration — a `channel` or `params` change moves it — and is released on
- * `disconnect()` (Turbo navigation included) along with any pending
- * announcement.
+ * declaration — a `channel` or `params` change moves it, once per batch of
+ * changes and only when the identifier they name differs from the one it was
+ * opened for — and is released on `disconnect()` (Turbo navigation included)
+ * along with any pending announcement.
  */
 export class LiveCounterController extends Controller<HTMLElement> {
   static override targets = ["value", "trigger"];
@@ -108,11 +112,12 @@ export class LiveCounterController extends Controller<HTMLElement> {
   declare idValue: string;
   declare announceTextValue: string;
 
-  /** Identifier parameters parsed once from their declaration, never in the hot path. */
-  #params: Record<string, unknown> = {};
-
   #subscription: ConfirmedCableSubscription | null = null;
-  #connected = false;
+  /** Collapses the `channel` / `params` callbacks of one batch into one move. */
+  readonly #follow = new MicrotaskCoalescer(() => this.#followDeclaration());
+  /** The identifier the subscription was last opened for. */
+  #identifier = "";
+  readonly #morphRender = new MorphRenderWatcher(() => this.#syncTriggers());
   /**
    * The optimistic bumps this client has yet to see echoed back, in the order it
    * sent them. An echo belongs to the send that caused it, and the amount is what
@@ -125,25 +130,19 @@ export class LiveCounterController extends Controller<HTMLElement> {
   readonly #focusedTriggers = new BlurDeferral((trigger) => this.#syncTrigger(trigger));
   readonly #timers = new SafeTimeout();
 
-  /**
-   * Re-parses the identifier parameters and moves the subscription to the
-   * identifier they now name.
-   *
-   * A malformed declaration falls back to no parameters, so the identifier keeps
-   * naming the channel instead of the subscription never being created at all.
-   */
+  /** Moves the subscription to the identifier the parameters now name. */
   paramsValueChanged(): void {
-    this.#params = parseSubscriptionParams(this.paramsValue);
-    this.#resubscribe();
+    this.#follow.schedule();
   }
 
   /** Moves the subscription when the declaration names a different channel. */
   channelValueChanged(): void {
-    this.#resubscribe();
+    this.#follow.schedule();
   }
 
   override connect(): void {
-    this.#connected = true;
+    this.#morphRender.observe(this.element);
+    this.#follow.activate();
     this.#subscribe();
   }
 
@@ -154,14 +153,16 @@ export class LiveCounterController extends Controller<HTMLElement> {
    * resurrect it — the fresh subscription re-decides it. An outstanding guess
    * belongs to the identifier that is going away, so it is dropped with it.
    *
-   * @stimeoRuntimeOnly `channel` decides whether this call opens a subscription at all; the
-   *   rejected hook it clears does not depend on it.
+   * @stimeoRuntimeOnly `channel` and `params` name the identifier this call opens, and whether it
+   *   opens one at all; the rejected hook it clears does not depend on them.
    */
   #subscribe(): void {
     TRANSIENT.reset(this.element);
     this.#outstanding.length = 0;
+    const descriptor = this.#descriptor;
+    this.#identifier = identifierOf(descriptor);
     if (this.channelValue) {
-      this.#subscription = this.#open();
+      this.#subscription = this.#open(descriptor);
     }
     // Also covers a Turbo cache restore that snapshotted a disabled trigger:
     // the fresh (unconfirmed or absent) subscription re-decides the state.
@@ -177,12 +178,11 @@ export class LiveCounterController extends Controller<HTMLElement> {
    * the declaration, so a null subscription keeps it shut and the display never
    * moves past what the server can receive.
    *
-   * @stimeoRuntimeOnly `channel` and its params choose the one subscription this call opens; `id`
-   *   is read by the handlers it wires.
+   * @stimeoRuntimeOnly `id` is read by the handlers it wires, as each broadcast arrives.
    */
-  #open(): ConfirmedCableSubscription | null {
+  #open(descriptor: Record<string, unknown>): ConfirmedCableSubscription | null {
     try {
-      return createConfirmedSubscription(this.#descriptor, {
+      return createConfirmedSubscription(descriptor, {
         connected: () => this.#syncTriggers(),
         // A drop closes the send window (the shared subscription tracks it)
         // until Action Cable reconnects and re-confirms — an increment during
@@ -209,23 +209,34 @@ export class LiveCounterController extends Controller<HTMLElement> {
    *
    * `channel` comes first so the identifier text matches what Action Cable
    * builds, and a `channel` key inside `params` cannot displace the declared
-   * one — `params` names *additional* identifier parameters.
+   * one — `params` names *additional* identifier parameters. A malformed `params`
+   * declaration falls back to no parameters, so the identifier keeps naming the
+   * channel instead of the subscription never being created at all.
    */
   get #descriptor(): Record<string, unknown> {
-    const { channel: _ignored, ...rest } = this.#params;
+    const { channel: _ignored, ...rest } = parseSubscriptionParams(this.paramsValue);
     return { channel: this.channelValue, ...rest };
   }
 
-  /** Moves to the identifier the declaration now names. */
-  #resubscribe(): void {
-    if (!this.#connected) return; // value callbacks run before connect()
+  /**
+   * Moves to the identifier the declaration now names, once the batch of `channel` /
+   * `params` changes has settled. A callback that repeats the identifier — the same
+   * parameters spelled differently, or a Value written back unchanged — keeps the
+   * subscription, its gate and the guesses outstanding on it.
+   *
+   * @stimeoRuntimeOnly `channel` and `params` are compared with the identifier the subscription
+   *   was opened for.
+   */
+  #followDeclaration(): void {
+    if (identifierOf(this.#descriptor) === this.#identifier) return;
     this.#subscription?.unsubscribe();
     this.#subscription = null;
     this.#subscribe();
   }
 
   override disconnect(): void {
-    this.#connected = false;
+    this.#morphRender.disconnect();
+    this.#follow.cancel();
     this.#timers.clearAll();
     this.#focusedTriggers.releaseAll();
     this.#subscription?.unsubscribe();

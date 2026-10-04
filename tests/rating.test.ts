@@ -1,10 +1,10 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RatingController } from "../src/controllers/rating_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
@@ -120,6 +120,119 @@ describe("RatingController", () => {
     symbol.tabIndex = -1;
     return symbol;
   };
+
+  it.each(["replace", "read", "repeat"])(
+    "settles the fill before field reports and keeps only current reports: %s",
+    async (mode) => {
+      await start();
+      const seen = reports();
+      const snapshots: boolean[][] = [];
+      let handled = false;
+      field().addEventListener(
+        "change",
+        () => {
+          if (handled) return;
+          handled = true;
+          snapshots.push(fill());
+          if (mode === "replace") key(2, "Home");
+          if (mode === "repeat") key(2, "End");
+        },
+        { once: true },
+      );
+      key(1, "End");
+      expect(snapshots).toEqual([[true, true, true]]);
+      expect(seen).toEqual([{ type: "change", value: mode === "replace" ? 0 : 3 }]);
+      expect(fill()).toEqual(mode === "replace" ? [false, false, false] : [true, true, true]);
+    },
+  );
+
+  it.each(["a", "b"])(
+    "compares a pending rating declaration with the last publication: %s",
+    async (mode) => {
+      await start();
+      const seen = reports();
+      root().setAttribute("data-stimeo--rating-value-value", mode === "a" ? "3" : "1");
+      key(1, mode === "a" ? "End" : "ArrowUp");
+      expect(field().value).toBe(mode === "a" ? "3" : "2");
+      expect(seen).toEqual(mode === "a" ? [{ type: "change", value: 3 }] : []);
+    },
+  );
+
+  it("reports only the nested field confirmation after focus selects another rating", async () => {
+    await start();
+    const native: string[] = [];
+    field().addEventListener("change", () => native.push(field().value));
+    symbols()[2]?.addEventListener("focus", () => key(2, "Home"), { once: true });
+    key(1, "End");
+    expect(native).toEqual(["0"]);
+  });
+
+  it("suppresses a page reconciliation replaced while returning from readonly focus", async () => {
+    await start();
+    symbols()[1]?.focus();
+    root().setAttribute("data-stimeo--rating-readonly-value", "true");
+    await tick();
+    const seen = reports();
+    symbols()[2]?.addEventListener("focus", () => key(2, "Home"), { once: true });
+    root().setAttribute("data-stimeo--rating-value-value", "3");
+    root().setAttribute("data-stimeo--rating-readonly-value", "false");
+    await tick();
+    expect(seen).toEqual([{ type: "change", value: 0 }]);
+    expect(field().value).toBe("0");
+  });
+
+  it("writes the committed fill before a focus capture listener observes the selection", async () => {
+    await start();
+    const snapshots: unknown[] = [];
+    root().addEventListener("focus", () => snapshots.push([field().value, fill()]), {
+      capture: true,
+      once: true,
+    });
+    key(1, "End");
+    expect(snapshots).toEqual([["3", [true, true, true]]]);
+  });
+
+  it("keeps a newer selection made by a focus listener before reporting", async () => {
+    await start();
+    const seen = reports();
+    const snapshots: unknown[] = [];
+    symbols()[2]?.addEventListener(
+      "focus",
+      () => {
+        snapshots.push([field().value, fill()]);
+        key(2, "Home");
+      },
+      { once: true },
+    );
+    key(1, "End");
+    expect(snapshots).toEqual([["3", [true, true, true]]]);
+    expect(seen).toEqual([{ type: "change", value: 0 }]);
+    expect(field().value).toBe("0");
+    expect(fill()).toEqual([false, false, false]);
+  });
+
+  it("stops an obsolete readonly reflection after a rescued-focus listener commits a selection", async () => {
+    await start();
+    symbols()[1]?.focus();
+    root().addEventListener(
+      "focus",
+      () => {
+        root().setAttribute("data-stimeo--rating-readonly-value", "false");
+        key(1, "Home");
+      },
+      { once: true },
+    );
+    root().setAttribute("data-stimeo--rating-readonly-value", "true");
+    controller().readonlyValueChanged();
+    await flushMicrotasks();
+    expect(field().value).toBe("0");
+    expect(root().getAttribute("role")).toBe("radiogroup");
+    expect(symbols().map((symbol) => symbol.getAttribute("aria-hidden"))).toEqual([
+      null,
+      null,
+      null,
+    ]);
+  });
 
   it("declares the public actions, events, and three render Values", () => {
     expect(RatingController.actions).toEqual(["endPreview", "onKeydown", "preview", "select"]);
@@ -473,6 +586,34 @@ describe("RatingController", () => {
     expect(seen).toEqual([{ type: "change", value: 3 }]);
   });
 
+  it.each([false, true])(
+    "canonicalizes an invalid rating Value before reports (published: %s)",
+    async (published) => {
+      await start({ value: published ? "NaN" : "2.6" });
+      root().setAttribute("data-stimeo--rating-value-value", "NaN");
+      const readings: Array<[string, number, string]> = [];
+      const read = (event: string) =>
+        readings.push([event, controller().valueValue, field().value]);
+      field().addEventListener("change", () => read("native"));
+      root().addEventListener("stimeo--rating:change", () => read("change"));
+      expect(declared()).toBe("NaN");
+
+      key(0, "Home");
+
+      expect(declared()).toBe("0");
+      expect(field().value).toBe("0");
+      expect(checked()).toEqual(["false", "false", "false"]);
+      expect(readings).toEqual(
+        published
+          ? []
+          : [
+              ["native", 0, "0"],
+              ["change", 0, "0"],
+            ],
+      );
+    },
+  );
+
   it("writes the user's value into the value Value before the field's native change and change report it", async () => {
     await start({ value: "1" });
     const readings: string[] = [];
@@ -607,26 +748,42 @@ describe("RatingController", () => {
     expect(symbols()[0]?.getAttribute("aria-hidden")).toBe("false");
   });
 
-  it("rewinds readonly borrowings before the Turbo snapshot", async () => {
+  it("keeps a symbol role a consumer wrote while readonly through a reconciliation", async () => {
+    await start({ rootAttributes: 'data-stimeo--rating-readonly-value="true"' });
+    symbols()[0]?.setAttribute("role", "presentation");
+
+    root().setAttribute("data-stimeo--rating-value-value", "3");
+    await tick();
+    expect(symbols()[0]?.hasAttribute("role")).toBe(false);
+
+    root().setAttribute("data-stimeo--rating-readonly-value", "false");
+    await tick();
+
+    expect(symbols()[0]?.getAttribute("role")).toBe("presentation");
+    expect(symbols()[1]?.getAttribute("role")).toBe("radio");
+  });
+
+  it("keeps a readonly rating a readonly image through turbo:before-cache", async () => {
+    // Turbo also dispatches the event on a page that stays (a promoted frame
+    // navigation, a popstate without Turbo state, a refresh of a cached URL).
     await start({ rootAttributes: 'data-stimeo--rating-readonly-value="true"' });
 
-    // Turbo clones the page at `turbo:before-cache`, while the controller is
-    // still connected: anything left borrowed is what a restored page treats as
-    // the authored markup.
     document.dispatchEvent(new Event("turbo:before-cache"));
-    const snapshot = document.body.innerHTML;
 
-    // The rewound Tab stop is the selected symbol, so the cached page is
-    // reachable by Tab without waiting for an interaction.
-    expect(tabindexes().indexOf(0)).toBe(1);
-    expect(snapshot).not.toContain('role="img"');
-    expect(snapshot).not.toContain('aria-hidden="true"');
+    expect(root().getAttribute("role")).toBe("img");
+    expect(symbols().every((symbol) => symbol.getAttribute("aria-hidden") === "true")).toBe(true);
+    expect(symbols().every((symbol) => !symbol.hasAttribute("role"))).toBe(true);
+    expect(tabindexes()).toEqual([-1, -1, -1]);
+  });
 
-    disconnectAndStopApplication(app());
-    document.body.innerHTML = snapshot;
-    application = Application.start();
-    application.register("stimeo--rating", RatingController);
-    await tick();
+  it("returns a readonly rating restored from the cache to the authored radiogroup once it is interactive", async () => {
+    await start({ rootAttributes: 'data-stimeo--rating-readonly-value="true"' });
+
+    application = await restoreFromCache(app(), (restored) =>
+      restored.register("stimeo--rating", RatingController),
+    );
+    expect(root().getAttribute("role")).toBe("img");
+    expect(tabindexes()).toEqual([-1, -1, -1]);
 
     root().setAttribute("data-stimeo--rating-readonly-value", "false");
     await tick();
@@ -634,14 +791,29 @@ describe("RatingController", () => {
     expect(root().getAttribute("role")).toBe("radiogroup");
     expect(symbols()[0]?.getAttribute("role")).toBe("radio");
     expect(symbols()[0]?.hasAttribute("aria-hidden")).toBe(false);
+    expect(tabindexes().indexOf(0)).toBe(1);
   });
 
-  it("rewinds the Tab stop to the first symbol for an unrated snapshot", async () => {
-    await start({ value: "0", rootAttributes: 'data-stimeo--rating-readonly-value="true"' });
+  it("gives back the role and aria-hidden a restored copy carries when it connects interactive", async () => {
+    await start({ rootAttributes: 'data-stimeo--rating-readonly-value="true"' });
+    expect(symbols()[0]?.getAttribute("aria-hidden")).toBe("true");
 
-    document.dispatchEvent(new Event("turbo:before-cache"));
+    // The copy was taken after the page declared the rating interactive, before the
+    // earlier instance had applied it.
+    application = await restoreFromCache(app(), (restored) => {
+      root().setAttribute("data-stimeo--rating-readonly-value", "false");
+      restored.register("stimeo--rating", RatingController);
+    });
 
-    expect(tabindexes().indexOf(0)).toBe(0);
+    expect(root().getAttribute("role")).toBe("radiogroup");
+    expect(symbols().every((symbol) => symbol.getAttribute("role") === "radio")).toBe(true);
+    expect(symbols().every((symbol) => !symbol.hasAttribute("aria-hidden"))).toBe(true);
+    expect(
+      [root(), ...symbols()].flatMap((element) =>
+        element.getAttributeNames().filter((name) => name.endsWith("-lease")),
+      ),
+    ).toEqual([]);
+    expect(tabindexes().filter((tabindex) => tabindex === 0)).toHaveLength(1);
   });
 
   it("does not overwrite consumer attribute changes made while readonly", async () => {
@@ -683,6 +855,25 @@ describe("RatingController", () => {
 
     expect(document.activeElement).toBe(symbols()[1]);
     expect(root().hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("gives back the rescue tabindex a page restored from the cache carries", async () => {
+    await start();
+    (symbols()[1] as HTMLElement).focus();
+    root().setAttribute("data-stimeo--rating-readonly-value", "true");
+    await tick();
+    expect(root().getAttribute("tabindex")).toBe("-1");
+
+    application = await restoreFromCache(app(), (restored) =>
+      restored.register("stimeo--rating", RatingController),
+    );
+
+    expect(root().hasAttribute("tabindex")).toBe(false);
+    expect(
+      root()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-loan")),
+    ).toEqual([]);
   });
 
   it("leaves an authored root Tab stop alone while rescuing focus", async () => {
@@ -838,6 +1029,31 @@ describe("RatingController", () => {
     expect(repairs).toEqual([{ value: 2 }]);
   });
 
+  it("hands a symbol removed while readonly its authored semantics back at once", async () => {
+    await start({ rootAttributes: 'data-stimeo--rating-readonly-value="true"' });
+    const removed = symbols()[2] as HTMLElement;
+    expect(removed.hasAttribute("role")).toBe(false);
+    expect(removed.getAttribute("aria-hidden")).toBe("true");
+
+    removed.remove();
+    await tick();
+
+    expect(root().getAttribute("role")).toBe("img");
+    expect(removed.getAttribute("role")).toBe("radio");
+    expect(removed.hasAttribute("aria-hidden")).toBe(false);
+  });
+
+  it("reflects the current value into a field added after settlement", async () => {
+    await start({ field: false });
+    const added = document.createElement("input");
+    added.type = "hidden";
+    added.setAttribute("data-stimeo--rating-target", "field");
+    root().append(added);
+    await tick();
+
+    expect(added.value).toBe("2");
+  });
+
   it("reflects the current value into a field replaced after settlement", async () => {
     await start();
     const replacement = field().cloneNode() as HTMLInputElement;
@@ -847,6 +1063,20 @@ describe("RatingController", () => {
 
     expect(field()).toBe(replacement);
     expect(replacement.value).toBe("2");
+  });
+
+  it("reflects the current value into a field that stays after an earlier one leaves", async () => {
+    await start();
+    const original = field();
+    const successor = original.cloneNode() as HTMLInputElement;
+    successor.value = "";
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(field()).toBe(successor);
+    expect(successor.value).toBe("2");
   });
 
   it("supports a missing optional field", async () => {
@@ -891,6 +1121,32 @@ describe("RatingController", () => {
     ]);
     expect(root().hasAttribute("tabindex")).toBe(false);
   });
+
+  it.each(["removed", "unmarked"])(
+    "returns readonly leases before a %s symbol's target callback is delivered",
+    async (departure) => {
+      await start({ rootAttributes: 'data-stimeo--rating-readonly-value="true"' });
+      const instance = controller();
+      const departed = symbols()[0];
+      if (!departed) throw new Error("Missing rating symbol");
+
+      expect(departed.hasAttribute("role")).toBe(false);
+      expect(departed.getAttribute("aria-hidden")).toBe("true");
+      expect(departed.hasAttribute("data-stimeo--rating-role-lease")).toBe(true);
+      expect(departed.hasAttribute("data-stimeo--rating-aria-hidden-lease")).toBe(true);
+
+      if (departure === "removed") departed.remove();
+      else departed.removeAttribute("data-stimeo--rating-target");
+      expect(instance.symbolTargets).not.toContain(departed);
+      instance.disconnect();
+
+      expect(root().getAttribute("role")).toBe("radiogroup");
+      expect(departed.getAttribute("role")).toBe("radio");
+      expect(departed.hasAttribute("aria-hidden")).toBe(false);
+      expect(departed.hasAttribute("data-stimeo--rating-role-lease")).toBe(false);
+      expect(departed.hasAttribute("data-stimeo--rating-aria-hidden-lease")).toBe(false);
+    },
+  );
 
   it("leaves readonly attributes a consumer rewrote alone when unloaded", async () => {
     await start({ rootAttributes: 'data-stimeo--rating-readonly-value="true"' });
@@ -976,5 +1232,197 @@ describe("RatingController", () => {
       expect(field().value).toBe("2");
       expect(commits.seen).toEqual([]);
     });
+  });
+});
+
+/** Explicit target calls share the DOM action while retaining their own provenance. */
+describe("RatingController target API", () => {
+  let application: Application;
+  const element = (id: string): HTMLElement => {
+    const found = document.getElementById(id);
+    if (!found) throw new Error(`Missing API fixture ${id}`);
+    return found;
+  };
+  const instance = (): RatingController =>
+    application.getControllerForElementAndIdentifier(
+      element("api-root"),
+      "stimeo--rating",
+    ) as RatingController;
+  beforeEach(async () => {
+    document.body.innerHTML = `<button id="api-outside">Outside</button><div id="api-root" data-controller="stimeo--rating" role="radiogroup" data-stimeo--rating-value-value="1"><span id="api-a" data-stimeo--rating-target="symbol" role="radio" tabindex="-1" aria-checked="false" data-action="click->stimeo--rating#select"><span>a</span></span><span id="api-b" data-stimeo--rating-target="symbol" role="radio" tabindex="-1" aria-checked="false" data-action="click->stimeo--rating#select"><span>b</span></span><input type="hidden" data-stimeo--rating-target="field"></div>`;
+    application = Application.start();
+    application.register("stimeo--rating", RatingController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it("retains the existing DOM Event success as a positive control", () => {
+    const reports: Array<{ reason?: string }> = [];
+    element("api-root").addEventListener("stimeo--rating:change", (event) => {
+      reports.push((event as CustomEvent<{ reason?: string }>).detail);
+    });
+    element("api-b").click();
+    expect(element("api-b").getAttribute("aria-checked")).toBe("true");
+    expect(reports).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    "accepts an owned target or its descendant (%s) after an Event positive control",
+    (descendant) => {
+      const reports: Array<{ reason?: string }> = [];
+      element("api-root").addEventListener("stimeo--rating:change", (event) => {
+        reports.push((event as CustomEvent<{ reason?: string }>).detail);
+      });
+      element("api-b").click();
+      expect(element("api-b").getAttribute("aria-checked")).toBe("true");
+      expect(reports).toHaveLength(1);
+      element("api-outside").focus();
+      const target = descendant ? element("api-a").querySelector("span") : element("api-a");
+      if (!(target instanceof HTMLElement)) throw new Error("Missing API descendant");
+      instance().select(target);
+      expect(element("api-a").getAttribute("aria-checked")).toBe("true");
+      expect(document.activeElement).toBe(element("api-outside"));
+      expect(reports.at(-1)?.reason).toBe("api");
+      expect(reports[0]?.reason).toBe("user");
+    },
+  );
+  it.each(["foreign", "undeclared", "detached", "nested"])(
+    "rejects %s targets through element and Event entry points before accepting an owned target",
+    (kind) => {
+      const reports: unknown[] = [];
+      element("api-root").addEventListener("stimeo--rating:change", (event) => {
+        reports.push((event as CustomEvent<unknown>).detail);
+      });
+      const invalid = element("api-b").cloneNode(true);
+      if (!(invalid instanceof HTMLElement)) throw new Error("Missing cloned target");
+      invalid.id = "api-invalid";
+      invalid.removeAttribute("data-action");
+      if (kind === "foreign") document.body.append(invalid);
+      if (kind === "undeclared") {
+        invalid.removeAttribute("data-stimeo--rating-target");
+        element("api-root").append(invalid);
+      }
+      if (kind === "nested") {
+        const nested = document.createElement("div");
+        nested.setAttribute("data-controller", "stimeo--rating");
+        nested.append(invalid);
+        element("api-a").append(nested);
+      }
+      element("api-outside").focus();
+      const before = element("api-root").innerHTML;
+      instance().select(invalid);
+      invalid.addEventListener("probe", (event) => instance().select(event));
+      invalid.dispatchEvent(new Event("probe"));
+      expect(element("api-root").innerHTML).toBe(before);
+      expect(reports).toEqual([]);
+      expect(document.activeElement).toBe(element("api-outside"));
+      instance().select(element("api-b"));
+      expect(element("api-b").getAttribute("aria-checked")).toBe("true");
+      expect(reports).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+    ["click", "user"],
+  ])("retains %s Event provenance for an action bound on a target descendant", (type, reason) => {
+    const reports: Array<{ reason: string }> = [];
+    element("api-root").addEventListener("stimeo--rating:change", (event) => {
+      reports.push((event as CustomEvent<{ reason: string }>).detail);
+    });
+    const child = element("api-b").querySelector("span");
+    if (!(child instanceof HTMLElement)) throw new Error("Missing action descendant");
+    child.addEventListener(type, (event) => instance().select(event));
+    child.dispatchEvent(new Event(type));
+    expect(element("api-b").getAttribute("aria-checked")).toBe("true");
+    expect(reports.map((detail) => detail.reason)).toEqual([reason]);
+  });
+
+  it.each([false, true])(
+    "clears through API while limiting focus return to the component (%s)",
+    (inside) => {
+      instance().select(element("api-b"));
+      (inside ? element("api-b") : element("api-outside")).focus();
+      instance().select(element("api-b"));
+      expect(instance().valueValue).toBe(0);
+      expect(element("api-a").tabIndex).toBe(0);
+      expect(element("api-b").tabIndex).toBe(-1);
+      expect(document.activeElement).toBe(inside ? element("api-a") : element("api-outside"));
+    },
+  );
+
+  it("previews an owned descendant without committing, and refuses a foreign preview", () => {
+    const change = vi.fn();
+    element("api-root").addEventListener("stimeo--rating:change", change);
+    const child = element("api-b").querySelector("span");
+    if (!(child instanceof HTMLElement)) throw new Error("Missing symbol descendant");
+    element("api-outside").focus();
+    instance().preview(child);
+    expect(element("api-b").hasAttribute("data-rating-hover")).toBe(true);
+    expect(instance().valueValue).toBe(1);
+    expect(element("api-a").getAttribute("aria-checked")).toBe("true");
+    expect(change).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(element("api-outside"));
+    instance().endPreview();
+    const foreign = element("api-b").cloneNode(true);
+    if (!(foreign instanceof HTMLElement)) throw new Error("Missing foreign symbol");
+    document.body.append(foreign);
+    instance().preview(foreign);
+    expect(element("api-b").hasAttribute("data-rating-hover")).toBe(false);
+  });
+
+  it("rejects a nested origin even when the Event handler belongs to an owned outer target", () => {
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--rating");
+    const child = document.createElement("span");
+    child.setAttribute("data-stimeo--rating-target", "symbol");
+    nested.append(child);
+    element("api-b").append(nested);
+    const reports = vi.fn();
+    element("api-root").addEventListener("stimeo--rating:change", reports);
+    const before = element("api-root").innerHTML;
+    element("api-b").addEventListener("probe", (event) => instance().select(event));
+    child.dispatchEvent(new Event("probe", { bubbles: true }));
+    expect(element("api-root").innerHTML).toBe(before);
+    expect(reports).not.toHaveBeenCalled();
+    instance().select(element("api-b"));
+    expect(reports).toHaveBeenCalledOnce();
+  });
+  it("keeps native field publication ahead of a reentrant API report and discards the replaced outer report", async () => {
+    const seen: string[] = [];
+    const submitted = (): string =>
+      element("api-root").querySelector<HTMLInputElement>("input")?.value ?? "";
+    let reentered = false;
+    element("api-root").addEventListener("change", () => {
+      seen.push(`native:${submitted()}`);
+      if (reentered) return;
+      reentered = true;
+      instance().select(element("api-a"));
+    });
+    element("api-root").addEventListener("stimeo--rating:change", (event) => {
+      const detail = (event as CustomEvent<{ reason: string }>).detail;
+      seen.push(`${detail.reason}:${submitted()}`);
+    });
+    element("api-b").click();
+    await tick();
+    expect(seen).toEqual(["native:2", "native:1", "api:1"]);
+    expect(submitted()).toBe("1");
+  });
+  it("rejects an unmarked preview inside a nested scope before previewing the owned symbol", () => {
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--rating");
+    const child = document.createElement("span");
+    nested.append(child);
+    element("api-b").append(nested);
+    instance().preview(child);
+    expect(element("api-b").hasAttribute("data-rating-hover")).toBe(false);
+    expect(instance().valueValue).toBe(1);
+    instance().preview(element("api-b"));
+    expect(element("api-b").hasAttribute("data-rating-hover")).toBe(true);
+    expect(instance().valueValue).toBe(1);
   });
 });

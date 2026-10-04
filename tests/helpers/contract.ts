@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { matchesNumberBounds, type NumberBounds } from "../../src/utils/number_bounds";
 
 /**
  * Shared drift guard for the co-located public-API declarations
@@ -35,13 +36,15 @@ const CALLBACK_SUFFIXES = [
 const isCallback = (name: string): boolean => CALLBACK_SUFFIXES.some((s) => name.endsWith(s));
 
 interface DeclaringController {
+  readonly values?: Readonly<Record<string, unknown>>;
+  readonly valueConstraints?: Readonly<Record<string, NumberBounds>>;
   readonly actions?: readonly string[];
   readonly events?: readonly string[];
   readonly prototype: Record<string, unknown>;
 }
 
 /**
- * Registers the three contract-drift `it`s for every controller in `controllers`.
+ * Registers the contract-drift `it`s for every controller in `controllers`.
  *
  * @param controllers - Identifier → class map (a manifest-reflected registry).
  * @param sourceFor - Resolves a controller identifier to its TypeScript source
@@ -58,6 +61,35 @@ export function describeContractGuard(
     const klass = ctor as unknown as DeclaringController;
 
     describe(identifier, () => {
+      it("declares a numeric contract for every Number Value and accepts its default", () => {
+        const values = klass.values ?? {};
+        const numbers = Object.entries(values).filter(
+          ([, declaration]) =>
+            declaration === Number ||
+            (typeof declaration === "object" &&
+              declaration !== null &&
+              "type" in declaration &&
+              declaration.type === Number),
+        );
+        expect(Object.keys(klass.valueConstraints ?? {}).sort()).toEqual(
+          numbers.map(([name]) => name).sort(),
+        );
+        for (const [name, declaration] of numbers) {
+          const defaultValue =
+            typeof declaration === "object" && declaration !== null && "default" in declaration
+              ? declaration.default
+              : 0;
+          const bounds = klass.valueConstraints?.[name];
+          expect(typeof defaultValue, `${identifier}.${name} default`).toBe("number");
+          expect(bounds, `${identifier}.${name} contract`).toBeDefined();
+          if (typeof defaultValue === "number" && bounds) {
+            expect(matchesNumberBounds(defaultValue, bounds), `${identifier}.${name} default`).toBe(
+              true,
+            );
+          }
+        }
+      });
+
       it("declares static actions that resolve to real prototype methods", () => {
         for (const action of klass.actions ?? []) {
           expect(

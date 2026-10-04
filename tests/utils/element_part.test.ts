@@ -79,6 +79,15 @@ describe("label slot", () => {
     expect(root.querySelector("button")).not.toBeNull();
   });
 
+  it("keeps one text node for the label when the slot's text is split around an element", () => {
+    const root = mount(`<li data-part="label">Green <button>×</button>Apple</li>`);
+
+    writeLabel(root, "Red Apple");
+
+    expect(readLabel(root)).toBe("Red Apple");
+    expect(root.textContent).toBe("Red Apple×");
+  });
+
   it("round-trips a row whose text has not been written yet", () => {
     const root = mount(`<li data-part="label"><button>×</button></li>`);
 

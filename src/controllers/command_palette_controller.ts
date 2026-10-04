@@ -1,9 +1,15 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { syncActiveOption } from "../utils/active_option";
 import { isReservedArrowChord } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { FocusTrap } from "../utils/focus_trap";
+import { LivedMark } from "../utils/lived_mark";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import type { StateReason } from "../utils/state_reason";
+import { targetSelector } from "../utils/target_selector";
 
 /**
  * Headless, highly accessible Command Palette behavior.
@@ -21,7 +27,7 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  *                           keydown->stimeo--command-palette#onKeydown" />
  *       <ul id="cmdk-list" data-stimeo--command-palette-target="list" role="listbox">
  *         <li id="cmd-new" role="option" data-stimeo--command-palette-target="option"
- *             data-action="click->stimeo--command-palette#selectByClick">New…</li>
+ *             data-action="click->stimeo--command-palette#select">New…</li>
  *         <li id="cmd-heading" role="option" data-stimeo--command-palette-target="option"
  *             data-disabled="true">Disabled command (shown but not selectable)</li>
  *       </ul>
@@ -45,7 +51,9 @@ import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
  * focus (input, close button, …), because the trap listens at the document level.
  * IME composition is tracked from start to end: intermediate input does not filter,
  * and conversion-confirming keys never select a command. Styling, transitions, and
- * the actual command handlers remain the consumer's.
+ * the actual command handlers remain the consumer's. A Turbo morph that puts the
+ * server's markup back over the palette is answered by writing the palette back: an
+ * open palette stays open with its query's matches and its active option.
  */
 export class CommandPaletteController extends Controller<HTMLElement> {
   static readonly #ORIGINAL_ARIA_DISABLED = "data-command-palette-original-aria-disabled";
@@ -62,16 +70,19 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     "filter",
     "onKeydown",
     "open",
-    "selectByClick",
+    "select",
     "toggle",
   ] as const;
   static events = ["select"] as const;
 
   declare readonly dialogTarget: HTMLElement;
+  declare readonly dialogTargets: HTMLElement[];
   declare readonly inputTarget: HTMLInputElement;
+  declare readonly inputTargets: HTMLInputElement[];
   declare readonly listTarget: HTMLElement;
   declare readonly optionTargets: HTMLElement[];
   declare readonly emptyTarget: HTMLElement;
+  declare readonly emptyTargets: HTMLElement[];
 
   declare readonly hasDialogTarget: boolean;
   declare readonly hasInputTarget: boolean;
@@ -86,8 +97,30 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   /** Visible/selectable target ID order captured for removal fallback. */
   #activeOrder: string[] = [];
   #connected = false;
-  /** Collapses one mutation batch of target callbacks into a single pass. */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileActive());
+  /**
+   * Marks the element at each connection and tells a new instance on a copy of the page Turbo
+   * restores from its cache from a fresh render and from a reconnect of this instance.
+   */
+  readonly #lived = new LivedMark(this.identifier);
+  /** The dialog the open state was last applied to. */
+  #dialog: HTMLElement | null = null;
+  /** Borrows `hidden` on the dialog and the empty region, to give back when one stops being a target. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Borrows `aria-expanded` on the input, to give back when an element stops being the input. */
+  readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
+  /** Borrows `aria-activedescendant` on the input, for the same return. */
+  readonly #activeDescendant = new AttributeLease<HTMLElement>(
+    "aria-activedescendant",
+    this.identifier,
+  );
+  /** One pass per batch of target callbacks: `aria-expanded`, then the active option. */
+  readonly #reconcile = new MicrotaskCoalescer(() => {
+    if (this.hasInputTarget) this.#expanded.write(this.inputTarget, String(this.#isOpen));
+    this.#reconcileActive();
+  });
+
+  /** Writes the palette back after a Turbo morph put the server's markup in its place. */
+  readonly #morphRender = new MorphRenderWatcher(() => this.#repair());
 
   /** Owns IME lifecycle state; confirmed text re-filters an open palette once. */
   readonly #composition = new CompositionTracker({
@@ -98,44 +131,63 @@ export class CommandPaletteController extends Controller<HTMLElement> {
 
   /**
    * Owns the modal side effects (focus trap, scroll lock, background `inert`, focus
-   * restore). Escape closes; focus on open goes to the input, and is restored to
-   * whatever opened the palette on close.
+   * restore). Escape closes; focus on open goes to the first input inside the dialog the
+   * trap is taken on, and is restored to whatever opened the palette on close.
    */
   readonly #trap = new FocusTrap(() => this.dialogTarget, {
     onEscape: () => this.close(),
-    initialFocus: () => (this.hasInputTarget ? this.inputTarget : null),
+    initialFocus: () => {
+      const dialog = this.dialogTarget;
+      return this.inputTargets.find((input) => dialog.contains(input)) ?? null;
+    },
   });
 
   /**
    * Initializes the global hotkey handler and establishes the initial open state.
    *
-   * The DOM is the source of truth on reconnect (Turbo cache restore / morph): if
-   * the restored snapshot already shows the dialog open, honor that rather than
-   * re-deriving from the declarative `open` Value (which would slam a user-opened
-   * palette shut). The `open` Value only seeds the initial state of a genuinely
-   * fresh render. We normalize to a clean closed baseline first so
-   * {@link CommandPaletteController.open | open} runs its full setup — the
-   * `FocusTrap` is a fresh instance after a reconnect and must be re-activated.
+   * A dialog the server renders without `hidden` opens, and so does an `open` Value of
+   * `true`, which only seeds that first render. A reconnect of this instance (an in-page
+   * move, a permanent element carried to the next page) keeps an open palette open, its
+   * query and active option included, and takes the `FocusTrap` again. A copy of the page
+   * Turbo restores from its cache comes back closed, whatever opened the palette — the
+   * server's markup, the `open` Value or the user — and the `open` Value is written
+   * `false`: every connection leaves `data-<identifier>-lived` on the element, a copy
+   * carries it, and a new instance that finds it is on such a copy. Otherwise the baseline
+   * is normalized closed first, so {@link CommandPaletteController.open | open} runs its
+   * full setup.
    */
   override connect(): void {
+    const connection = this.#lived.connect(this.element);
+    this.#trap.connect();
     document.addEventListener("keydown", this.#onGlobalKeydown);
     if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
     this.#syncOptionSemantics();
-    const shouldOpen = this.#isOpen || this.openValue;
-    this.#resetToClosedState();
-    if (shouldOpen) this.open();
+    if (connection === "reconnect" && this.#isOpen) {
+      this.#trap.activate();
+    } else {
+      const shouldOpen = connection !== "restored" && (this.#isOpen || this.openValue);
+      this.#resetToClosedState();
+      if (shouldOpen) this.open();
+    }
+    this.#dialog = this.hasDialogTarget ? this.dialogTarget : null;
     this.#connected = true;
     this.#reconcile.activate();
+    this.#morphRender.observe(this.element);
   }
 
-  /** Tears down the global hotkey listener and reverts the modal side effects. */
+  /**
+   * Tears down the global hotkey listener and reverts the modal side effects. The open
+   * state stays on the element: an in-page move reconnects this instance onto it, and a
+   * restored copy of the page is closed by the instance that connects to it.
+   */
   override disconnect(): void {
     this.#connected = false;
+    this.#lived.disconnect();
+    this.#morphRender.disconnect();
     this.#reconcile.cancel();
     document.removeEventListener("keydown", this.#onGlobalKeydown);
     this.#composition.disconnect();
-    this.#trap.deactivate({ restoreFocus: false });
-    this.#resetToClosedState();
+    this.#trap.disconnect(this);
   }
 
   /** Initializes semantics for an option added before or after the controller connects. */
@@ -163,9 +215,48 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     if (this.#connected) this.#queueOptionReconciliation();
   }
 
-  /** Removes controller-owned listeners when the input target is replaced or removed. */
+  /**
+   * Removes composition listeners, gives an input that no longer resolves as one back its
+   * `aria-expanded` and `aria-activedescendant` — after `disconnect()` too, since dropping
+   * the identifier leaves the element on the page — and reconciles the input that stays.
+   */
   inputTargetDisconnected(input: HTMLInputElement): void {
     this.#composition.unobserve(input);
+    if (!this.inputTargets.includes(input)) {
+      this.#expanded.return(input);
+      this.#activeDescendant.return(input);
+    }
+    this.#queueOptionReconciliation();
+  }
+
+  /** Applies the open state to a dialog that arrives after connect in front of the others. */
+  dialogTargetConnected(): void {
+    if (this.#connected) this.#adoptDialog();
+  }
+
+  /**
+   * Gives a dialog that no longer resolves as the target its own `hidden` back — after
+   * `disconnect()` too, since dropping the identifier leaves the element on the page — and,
+   * while connected, applies the open state to the dialog left.
+   */
+  dialogTargetDisconnected(dialog: HTMLElement): void {
+    if (this.dialogTargets.includes(dialog)) return;
+    this.#hidden.return(dialog);
+    if (this.#connected) this.#adoptDialog();
+  }
+
+  /** Reflects the empty state onto a region that arrives after connect. */
+  emptyTargetConnected(): void {
+    this.#queueOptionReconciliation();
+  }
+
+  /**
+   * Gives a region that no longer resolves as the target its own `hidden` back, after
+   * `disconnect()` too, and reflects the empty state onto the region left.
+   */
+  emptyTargetDisconnected(empty: HTMLElement): void {
+    if (!this.emptyTargets.includes(empty)) this.#hidden.return(empty);
+    this.#queueOptionReconciliation();
   }
 
   /** Toggles the open state of the command palette. */
@@ -180,18 +271,47 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   /** Opens the palette, traps focus, and shifts focus to the input. */
   open(): void {
     if (!this.hasDialogTarget || this.#isOpen) return;
-    this.dialogTarget.hidden = false;
+    this.#hidden.write(this.dialogTarget, null);
     this.openValue = true;
-    if (this.hasInputTarget) this.inputTarget.setAttribute("aria-expanded", "true");
+    if (this.hasInputTarget) this.#expanded.write(this.inputTarget, "true");
     this.#resetFilter();
     this.#trap.activate();
   }
 
   /** Closes the palette and restores focus back to the opener. */
   close(): void {
+    this.#close(true);
+  }
+
+  /**
+   * Applies the open state to the dialog that is now first, when that dialog changed. An
+   * open palette moves its modal trap onto it, keeping the trap's place among the page's
+   * modals and the opener focus returns to; focus moves inside unless it is already there or
+   * a modal opened over this one takes `Tab`. An open palette left with no dialog closes,
+   * `open` included.
+   */
+  #adoptDialog(): void {
+    const dialog = this.hasDialogTarget ? this.dialogTarget : null;
+    if (dialog === this.#dialog) return;
+    this.#dialog = dialog;
+    if (!this.#trap.active) {
+      if (dialog) this.#hidden.write(dialog, "");
+      return;
+    }
+    if (!dialog) {
+      this.#resetToClosedState();
+      this.#trap.deactivate();
+      return;
+    }
+    this.#hidden.write(dialog, null);
+    this.#trap.refreshContainer();
+  }
+
+  /** Releases the modal resources, optionally restoring the opener's focus. */
+  #close(restoreFocus: boolean): void {
     if (!this.hasDialogTarget || !this.#isOpen) return;
     this.#resetToClosedState();
-    this.#trap.deactivate();
+    this.#trap.deactivate({ restoreFocus });
   }
 
   /** Filters option elements in-memory matching the input value. Bound to input target. */
@@ -199,7 +319,14 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     // Match the library's Character Counter policy: do not react to intermediate
     // pre-conversion text. `compositionend` applies the confirmed query once.
     if (!this.hasInputTarget || this.#composition.isComposing(event)) return;
-    this.#syncOptionSemantics();
+    this.#setActiveIndex(this.#applyQuery() ? 0 : -1);
+  }
+
+  /**
+   * Shows the options that match the input's query, hides the rest and reflects the empty
+   * state; says whether a match can be run.
+   */
+  #applyQuery(): boolean {
     const query = this.inputTarget.value.trim().toLowerCase();
     // `data-disabled` options (e.g. group headings) may still be shown, but they
     // do not count toward the empty state and are never navigable. An authored
@@ -223,22 +350,40 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     }
 
     if (this.hasEmptyTarget) {
-      this.emptyTarget.hidden = hasSelectableMatch;
+      this.#hidden.write(this.emptyTarget, hasSelectableMatch ? "" : null);
     }
-
-    this.#setActiveIndex(hasSelectableMatch ? 0 : -1);
+    return hasSelectableMatch;
   }
 
-  /** Selects the clicked option. Bound to option targets. */
-  selectByClick(event: MouseEvent): void {
-    const target = event.currentTarget as HTMLElement | null;
-    if (!target) return;
-    const option = target.closest("[role='option']") as HTMLElement | null;
+  /**
+   * Writes the palette back over the server's markup a Turbo morph put in its place: the
+   * dialog shown while the trap is active and hidden otherwise and, while open, the matches
+   * of the query the input still holds. The reconcile pass it schedules puts `aria-expanded`,
+   * the option semantics and the active option back.
+   */
+  #repair(): void {
+    if (!this.hasDialogTarget) return;
+    const open = this.#trap.active;
+    this.#hidden.write(this.dialogTarget, open ? null : "");
+    if (open && this.hasInputTarget) this.#applyQuery();
+    this.#reconcile.schedule();
+  }
+
+  /** Selects an owned option or descendant; API calls preserve external focus. */
+  select(source: Event | HTMLElement): void {
+    const { event, host, origin, reason } = actionSource(source);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const option = host?.closest<HTMLElement>(targetSelector(this.identifier, "option"));
     if (!option || !this.optionTargets.includes(option)) return;
     this.#syncOptionSemanticsFor(option);
     // Ignore clicks on disabled options (e.g. group headings) so they never fire select.
     if (!option.hasAttribute("hidden") && !this.#isDisabled(option)) {
-      this.#confirmSelection(option);
+      this.#confirmSelection(
+        option,
+        reason,
+        event !== null || this.element.contains(document.activeElement),
+      );
     }
   }
 
@@ -325,11 +470,7 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     this.#activeOrder = activeOption ? visible.map((option) => option.id).filter(Boolean) : [];
 
     if (this.hasInputTarget) {
-      if (activeOption?.id) {
-        this.inputTarget.setAttribute("aria-activedescendant", activeOption.id);
-      } else {
-        this.inputTarget.removeAttribute("aria-activedescendant");
-      }
+      this.#activeDescendant.write(this.inputTarget, activeOption?.id || null);
     }
   }
 
@@ -405,7 +546,9 @@ export class CommandPaletteController extends Controller<HTMLElement> {
 
   /** Reflects whether any visible, navigable command remains. */
   #reflectEmptyState(): void {
-    if (this.hasEmptyTarget) this.emptyTarget.hidden = this.#visibleOptions.length > 0;
+    if (this.hasEmptyTarget) {
+      this.#hidden.write(this.emptyTarget, this.#visibleOptions.length > 0 ? "" : null);
+    }
   }
 
   /** Coalesces all target callbacks from one MutationObserver batch. */
@@ -422,11 +565,13 @@ export class CommandPaletteController extends Controller<HTMLElement> {
    * options — which stay within the keyboard's reach — runnable from whichever
    * path forgets to consult the predicate.
    */
-  #confirmSelection(option: HTMLElement): void {
+  #confirmSelection(option: HTMLElement, reason: StateReason = "user", restoreFocus = true): void {
     if (this.#isDisabled(option)) return;
     const value = option.dataset.value || option.textContent || "";
-    this.dispatch("select", { detail: { value, option } });
-    this.close();
+    this.dispatch("select", { detail: { value, option, reason } });
+    this.#close(
+      restoreFocus && (reason !== "api" || this.element.contains(document.activeElement)),
+    );
   }
 
   #resetFilter(): void {
@@ -471,21 +616,14 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     return option.dataset.disabled === "true" || option.getAttribute("aria-disabled") === "true";
   }
 
-  /** Synchronizes every option's controller-owned selection and disabled semantics. */
+  /** Synchronizes every option's controller-owned disabled semantics. */
   #syncOptionSemantics(): void {
     for (const option of this.optionTargets) this.#syncOptionSemanticsFor(option);
   }
 
   /**
-   * Reflects `data-disabled` to ARIA without losing a pre-existing authored value,
-   * and puts `aria-selected` back to its baseline.
-   *
-   * Here `aria-selected` marks the *active* option, not a committed choice — the
-   * palette runs a command and keeps nothing selected — so an authored value is
-   * meaningless and is overwritten rather than preserved. Every caller either
-   * establishes the active option straight after (`filter`, `#setActiveIndex`) or
-   * is handling an option that cannot be the active one yet
-   * (`optionTargetConnected`).
+   * Reflects `data-disabled` to ARIA without losing a pre-existing authored value.
+   * Active-option synchronization owns `aria-selected` separately.
    */
   #syncOptionSemanticsFor(option: HTMLElement): void {
     // `aria-selected` is deliberately NOT written here. This runs over every
@@ -571,12 +709,12 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     }
 
     if (this.hasDialogTarget) {
-      this.dialogTarget.hidden = true;
+      this.#hidden.write(this.dialogTarget, "");
     }
 
     if (this.hasInputTarget) {
-      this.inputTarget.setAttribute("aria-expanded", "false");
-      this.inputTarget.removeAttribute("aria-activedescendant");
+      this.#expanded.write(this.inputTarget, "false");
+      this.#activeDescendant.write(this.inputTarget, null);
     }
   }
 }

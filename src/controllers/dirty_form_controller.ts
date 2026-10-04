@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { ListenerSet } from "../utils/listener_set";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { sharedRegistry } from "../utils/shared_registry";
 import { TransientHooks } from "../utils/transient_hooks";
 
 /** The hook a connection may find written by an earlier, now-gone one. */
@@ -33,8 +34,17 @@ type SerializedControl = readonly [
   checked?: 0 | 1,
 ];
 
+/** The registration surface shared by every entry copy. */
+interface VisitCoordinator {
+  add(participant: VisitParticipant): void;
+  remove(participant: VisitParticipant): boolean;
+}
+
 /** The coordinator of each document, dropped once its last participant leaves. */
-const visitCoordinators = new WeakMap<Document, TurboVisitCoordinator>();
+const visitCoordinators = sharedRegistry(
+  "stimeo-ui.dirty-form.registry.v1",
+  () => new WeakMap<Document, VisitCoordinator>(),
+);
 
 /**
  * Coordinates native Turbo confirmations for every dirty form in one document.
@@ -241,7 +251,6 @@ export class DirtyFormController extends Controller<HTMLFormElement> {
   };
 
   override connect(): void {
-    this.#resetSubmission();
     this.#baseline = this.#serialize();
     this.#setDirty(false);
     // Re-baselining means the restored values ARE the clean state, so a hook a

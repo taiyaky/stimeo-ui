@@ -1,11 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { AttributeLease } from "../utils/attribute_lease";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { hasTabStop } from "../utils/focus_candidate";
 import { FrameCoalescer } from "../utils/frame_coalescer";
 import { LayoutObserver } from "../utils/layout_observer";
 import { logicalScrollMetrics } from "../utils/logical_scroll";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { StylePropertyLease } from "../utils/style_property_lease";
 import { TabindexLoan } from "../utils/tabindex_loan";
 
@@ -49,9 +48,13 @@ interface FontEventSource {
  * Behavior only. Scroll work is coalesced to one animation frame and never scans
  * descendants. Resize, content, accessible-name source, descendant-load, and font
  * completion changes run the full measurement pass. Every listener, observer,
- * animation frame, borrowed attribute, and state hook is released on disconnect
- * and before Turbo caches the page. Runtime viewport replacement rebinds the whole
- * resource set as one lifecycle unit.
+ * animation frame, borrowed attribute, and state hook is released on disconnect.
+ * Nothing is released on `turbo:before-cache`, which Turbo also dispatches on pages
+ * that stay (a promoted frame navigation, a state-less `popstate`, a refresh of a cached
+ * URL): the viewport keeps its Tab stop and its state there. A copy of the page Turbo
+ * restores from its cache is measured afresh by the connection that adopts it, which
+ * gives back what the copy carries from an earlier instance. Runtime viewport
+ * replacement rebinds the whole resource set as one lifecycle unit.
  */
 export class ScrollAreaController extends Controller<HTMLElement> {
   static override targets = ["viewport"];
@@ -66,13 +69,15 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   declare orientationValue: string;
 
   readonly #layout = new LayoutObserver(() => this.#refresh());
-  readonly #rebind = new MicrotaskCoalescer(() => this.#syncViewport());
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
-  readonly #tabindex = new TabindexLoan("0");
-  readonly #role = new AttributeLease<HTMLElement>("role");
-  readonly #overflowState = new AttributeLease<HTMLElement>("data-overflow");
-  readonly #scrollState = new AttributeLease<HTMLElement>("data-scroll");
-  readonly #progress = new StylePropertyLease<HTMLElement>("--stimeo--scroll-progress");
+  readonly #rebind = new MorphRenderWatcher(() => this.#syncViewport());
+  readonly #tabindex = new TabindexLoan("0", this.identifier);
+  readonly #role = new AttributeLease<HTMLElement>("role", this.identifier);
+  readonly #overflowState = new AttributeLease<HTMLElement>("data-overflow", this.identifier);
+  readonly #scrollState = new AttributeLease<HTMLElement>("data-scroll", this.identifier);
+  readonly #progress = new StylePropertyLease<HTMLElement>(
+    "--stimeo--scroll-progress",
+    this.identifier,
+  );
 
   #viewport: HTMLElement | null = null;
   #content: MutationObserver | null = null;
@@ -99,17 +104,14 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   };
 
   override connect(): void {
-    this.#beforeCache.activate();
-    this.#rebind.activate();
+    this.#rebind.observe(this.element);
     this.#layout.observeViewport();
     this.#bindFonts();
     this.#syncViewport();
   }
 
   override disconnect(): void {
-    this.#beforeCache.deactivate();
-    this.#rebind.cancel();
-    this.#frames.cancel();
+    this.#rebind.disconnect();
     if (this.#viewport) this.#unbindViewport(this.#viewport);
     this.#layout.disconnect();
     this.#unbindFonts();
@@ -136,7 +138,6 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     const next = this.hasViewportTarget ? this.viewportTarget : null;
     if (next === this.#viewport) {
       if (next) this.#refresh();
-      else this.#clearHostState();
       return;
     }
 
@@ -243,16 +244,22 @@ export class ScrollAreaController extends Controller<HTMLElement> {
 
   /** Writes one leased host attribute and records self-generated observer input. */
   #writeHostAttribute(lease: AttributeLease<HTMLElement>, attribute: string, value: string): void {
+    const record = `data-${this.identifier}-${attribute}-lease`;
     const before = this.element.getAttribute(attribute);
+    const recordBefore = this.element.getAttribute(record);
     lease.write(this.element, value);
     this.#recordOwnedHostMutation(attribute, before);
+    this.#recordOwnedHostMutation(record, recordBefore);
   }
 
   /** Writes the leased progress property and records its serialized style mutation. */
   #writeHostProgress(value: string): void {
+    const record = `data-${this.identifier}-style---stimeo--scroll-progress-lease`;
     const before = this.element.getAttribute("style");
+    const recordBefore = this.element.getAttribute(record);
     this.#progress.write(this.element, value);
     this.#recordOwnedHostMutation("style", before);
+    this.#recordOwnedHostMutation(record, recordBefore);
   }
 
   /** Records an exact host mutation only when the host is also the observed viewport. */
@@ -267,7 +274,6 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     this.#overflowState.returnAll();
     this.#scrollState.returnAll();
     this.#progress.returnAll();
-    this.#ownedHostMutations.clear();
     this.#overflowing = false;
     this.#lastEdge = null;
   }
@@ -315,13 +321,22 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     if (this.#hasAccessibleName(viewport)) {
       if (!viewport.hasAttribute("role")) this.#role.write(viewport, "region");
     } else {
-      this.#role.return(viewport);
+      this.#returnRole(viewport);
     }
   }
 
-  /** Returns only the viewport attributes borrowed by this controller. */
+  /**
+   * Returns only the viewport attributes borrowed by this controller, including the ones
+   * an earlier connection recorded on a restored copy of the viewport.
+   */
   #clearViewportAttributes(viewport: HTMLElement): void {
     this.#tabindex.returnAll();
+    this.#tabindex.reclaim(viewport);
+    this.#returnRole(viewport);
+  }
+
+  /** Gives the viewport its authored `role` back, also from a restored copy's record. */
+  #returnRole(viewport: HTMLElement): void {
     this.#role.return(viewport);
   }
 
@@ -341,13 +356,9 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   #resolveNameSources(viewport: HTMLElement): Element[] {
     const ids = this.#nameReferenceIds(viewport);
     const sources: Element[] = [];
-    const seen = new Set<Element>();
     for (const id of ids) {
       const source = viewport.ownerDocument.getElementById(id);
-      if (source && !seen.has(source)) {
-        seen.add(source);
-        sources.push(source);
-      }
+      if (source) sources.push(source);
     }
     return sources;
   }
@@ -452,7 +463,6 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   #bindFonts(): void {
     const fonts = (this.element.ownerDocument as Document & { fonts?: FontEventSource }).fonts;
     if (!fonts || this.#fonts === fonts) return;
-    this.#unbindFonts();
     this.#fonts = fonts;
     fonts.addEventListener("loadingdone", this.#onFontsSettled);
     fonts.addEventListener("loadingerror", this.#onFontsSettled);
@@ -463,15 +473,5 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     this.#fonts?.removeEventListener("loadingdone", this.#onFontsSettled);
     this.#fonts?.removeEventListener("loadingerror", this.#onFontsSettled);
     this.#fonts = null;
-  }
-
-  /** Suspends live resources and returns all derived state before snapshotting. */
-  #rewindForCache(): void {
-    this.#rebind.cancel();
-    this.#frames.cancel();
-    if (this.#viewport) this.#unbindViewport(this.#viewport);
-    this.#layout.disconnect();
-    this.#unbindFonts();
-    this.#clearHostState();
   }
 }

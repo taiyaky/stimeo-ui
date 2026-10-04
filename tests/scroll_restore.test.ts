@@ -272,9 +272,8 @@ describe("ScrollRestoreController", () => {
   });
 
   it("does not scroll when the stored entry holds nothing for the tracked axis", async () => {
-    // Asking the element to scroll with neither offset set still moves nothing,
-    // but it is a write the engine reports back as a scroll. Nothing was
-    // restored, so there is nothing to report.
+    // A stored entry with no offset for the tracked axis has nothing to restore,
+    // so no scroll call is made.
     sessionStorage.setItem("stimeo--scroll-restore:pane", JSON.stringify({ left: 900 }));
     mount(`
       <div id="box" data-controller="stimeo--scroll-restore"
@@ -433,6 +432,21 @@ describe("ScrollRestoreController", () => {
     expect(stored("old")).toEqual({ top: 100 }); // the old namespace is left alone
   });
 
+  it("drops a frame a scroll queued before the key changed", async () => {
+    const entry = JSON.stringify({ top: 10, extra: 1 });
+    sessionStorage.setItem("stimeo--scroll-restore:second", entry);
+    await start(markup("first"));
+    box().scrollTop = 50;
+    box().dispatchEvent(new Event("scroll"));
+
+    box().setAttribute("data-stimeo--scroll-restore-key-value", "second");
+    await tick();
+    await settle();
+    await settle();
+
+    expect(sessionStorage.getItem("stimeo--scroll-restore:second")).toBe(entry);
+  });
+
   it("re-derives the tracked axes when axis changes at runtime", async () => {
     sessionStorage.setItem("stimeo--scroll-restore:pane", JSON.stringify({ top: 12, left: 34 }));
     await start(`
@@ -456,6 +470,19 @@ describe("ScrollRestoreController", () => {
     // An offset for an untracked axis is not applied, which reads as "left where
     // it is" rather than "discarded on the next save".
     expect(stored("pane")).toEqual({ top: 20, left: 900 });
+  });
+
+  it("keeps the saved vertical offset while tracking only the horizontal axis", async () => {
+    sessionStorage.setItem("stimeo--scroll-restore:row", JSON.stringify({ top: 900, left: 12 }));
+    await start(`
+      <div id="box" data-controller="stimeo--scroll-restore"
+           data-stimeo--scroll-restore-key-value="row"
+           data-stimeo--scroll-restore-axis-value="horizontal">content</div>`);
+    expect(box().scrollTop).toBe(0);
+    box().scrollLeft = 40;
+    box().dispatchEvent(new Event("scroll"));
+    await settle();
+    expect(stored("row")).toEqual({ top: 900, left: 40 });
   });
 
   it("writes nothing for an element that was never restored or scrolled", async () => {

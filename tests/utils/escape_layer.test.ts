@@ -118,6 +118,26 @@ describe("EscapeLayer", () => {
     expect(dismiss).not.toHaveBeenCalled();
   });
 
+  it("installs one document listener while any layer is active and removes it with the last", () => {
+    const added = vi.spyOn(document, "addEventListener");
+    const removed = vi.spyOn(document, "removeEventListener");
+    const keydown = (spy: typeof added) =>
+      spy.mock.calls.filter(([type]) => type === "keydown").length;
+    const first = layer();
+    const second = layer();
+
+    first.activate();
+    second.activate();
+    expect(keydown(added)).toBe(1);
+
+    second.instance.deactivate();
+    expect(keydown(removed)).toBe(0);
+    first.instance.deactivate();
+    expect(keydown(removed)).toBe(1);
+    added.mockRestore();
+    removed.mockRestore();
+  });
+
   it("moves a reactivated layer back to the top without duplicating it", () => {
     const first = layer();
     const second = layer();

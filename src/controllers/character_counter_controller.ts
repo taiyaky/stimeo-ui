@@ -1,9 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { AttributeLease } from "../utils/attribute_lease";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { CompositionTracker } from "../utils/composition_tracker";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 type CharacterCounterField = HTMLInputElement | HTMLTextAreaElement;
@@ -35,7 +36,13 @@ type CharacterCounterDetail = Pick<CharacterCountReading, "length" | "remaining"
  * Watches the field's UTF-16 code-unit length, writes the remaining/used count
  * into `output`, and toggles the `data-near-limit` / `data-over-limit` state
  * hooks. While over the limit it temporarily leases `aria-invalid="true"` on
- * the field and returns the consumer's authored value on recovery or teardown.
+ * the field and, on recovery or teardown, gives the field back the value beneath
+ * it: the consumer's authored value, or the latest value of a `stimeo--form-field`
+ * whose control is the same field. The lease records the authored value on the
+ * field, so the connection that adopts a copy of the page Turbo restores from its
+ * cache gives it back once the field is within the limit — a password field comes
+ * back empty. Nothing is undone on `turbo:before-cache`, which Turbo also
+ * dispatches on pages that stay: an over-limit field stays invalid there.
  * The field is the first `input` target, or — when the controller is attached
  * straight onto an `<input>`/`<textarea>` — the controller element itself.
  *
@@ -59,6 +66,9 @@ type CharacterCounterDetail = Pick<CharacterCountReading, "length" | "remaining"
  * changes, and never announces.
  */
 export class CharacterCounterController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["input", "output"];
   static override values = {
     max: { type: Number, default: 0 },
@@ -66,6 +76,11 @@ export class CharacterCounterController extends Controller<HTMLElement> {
     mode: { type: String, default: "remaining" },
     announceText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    max: NUMBER_BOUNDS.nonNegative,
+    warnAt: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof CharacterCounterController.values>;
   static events = ["change", "reconcile"] as const;
 
   declare readonly inputTarget: CharacterCounterField;
@@ -82,9 +97,11 @@ export class CharacterCounterController extends Controller<HTMLElement> {
   static readonly #announceDelay = 200;
 
   readonly #timeouts = new SafeTimeout();
-  readonly #ariaInvalid = new AttributeLease<CharacterCounterField>("aria-invalid");
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
-  readonly #repaint = new MicrotaskCoalescer(() => this.#reconcile(true));
+  readonly #ariaInvalid = new AttributeLease<CharacterCounterField>(
+    "aria-invalid",
+    this.identifier,
+  );
+  readonly #repaint = new MorphRenderWatcher(() => this.#reconcile(true));
   readonly #composition = new CompositionTracker({
     onEnd: (event) => this.#commitFrom(event.currentTarget),
   });
@@ -106,18 +123,15 @@ export class CharacterCounterController extends Controller<HTMLElement> {
 
   /** Reflects the current DOM state and opens the mutation-reconciliation window. */
   override connect(): void {
-    this.#repaint.activate();
-    this.#beforeCache.activate();
+    this.#repaint.observe(this.element);
     this.#reconcile(false);
   }
 
   /** Releases listeners, timers, borrowed ARIA, and controller-owned state hooks. */
   override disconnect(): void {
-    this.#repaint.cancel();
-    this.#beforeCache.deactivate();
+    this.#repaint.disconnect();
     this.#cancelAnnouncement();
     this.#bindField(null);
-    this.#composition.disconnect();
     this.#clearStateHooks();
     this.#lastLength = null;
     this.#lastDetail = null;
@@ -242,8 +256,8 @@ export class CharacterCounterController extends Controller<HTMLElement> {
    */
   #render(field: CharacterCounterField): CharacterCountReading {
     const length = field.value.length;
-    const max = this.#normalizeCount(this.maxValue);
-    const warnAt = this.#normalizeCount(this.warnAtValue);
+    const max = this.#normalizeCount(this.#safeMax);
+    const warnAt = this.#normalizeCount(this.#safeWarnAt);
     const remaining = max > 0 ? max - length : null;
     const over = remaining !== null && remaining < 0;
     const near = remaining !== null && warnAt > 0 && !over && remaining <= warnAt;
@@ -259,7 +273,6 @@ export class CharacterCounterController extends Controller<HTMLElement> {
 
   /** Clears derived output when the declarative input set has no usable field. */
   #renderEmpty(): void {
-    this.#ariaInvalid.returnAll();
     this.#reflectedOver = null;
     this.#clearStateHooks();
     this.#writeOutput("");
@@ -285,9 +298,9 @@ export class CharacterCounterController extends Controller<HTMLElement> {
     this.#composition.observe(field);
   }
 
-  /** Leases `aria-invalid` only on the edge into over-limit, then returns it. */
+  /** Leases invalid state on an over-limit edge or missing output, preserving authored values. */
   #reflectInvalid(field: CharacterCounterField, over: boolean): void {
-    if (this.#reflectedOver === over) return;
+    if (this.#reflectedOver === over && (!over || field.hasAttribute("aria-invalid"))) return;
     this.#reflectedOver = over;
     if (over) this.#ariaInvalid.write(field, "true");
     else this.#ariaInvalid.return(field);
@@ -356,17 +369,8 @@ export class CharacterCounterController extends Controller<HTMLElement> {
     this.#toggle("data-near-limit", false);
   }
 
-  /** Returns borrowed ARIA and transient hooks before Turbo snapshots the page. */
-  #rewindForCache(): void {
-    this.#cancelAnnouncement();
-    this.#ariaInvalid.returnAll();
-    this.#reflectedOver = null;
-    this.#clearStateHooks();
-  }
-
-  /** Converts a public count Value into a finite non-negative integer. */
+  /** Normalizes a finite count into a non-negative integer. */
   #normalizeCount(raw: number): number {
-    if (!Number.isFinite(raw)) return 0;
     return Math.max(0, Math.trunc(raw));
   }
 
@@ -383,5 +387,26 @@ export class CharacterCounterController extends Controller<HTMLElement> {
     if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)
       return element;
     return null;
+  }
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      CharacterCounterController.values.max.default,
+      CharacterCounterController.valueConstraints.max,
+    );
+  }
+
+  /** Current `warnAt` declaration resolved against its numeric contract. */
+  get #safeWarnAt(): number {
+    return this.#numbers.read(
+      this,
+      "warnAt",
+      this.warnAtValue,
+      CharacterCounterController.values.warnAt.default,
+      CharacterCounterController.valueConstraints.warnAt,
+    );
   }
 }

@@ -2,7 +2,10 @@ import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { commitField, writeField } from "../utils/field_mirror";
 import { isRtl } from "../utils/logical_scroll";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { OwnedPointerSession } from "../utils/owned_pointer_session";
 import { rangeFraction } from "../utils/range";
 import { type SteppedRange, snapSteppedValue, stepSteppedValue } from "../utils/stepped_value";
@@ -37,6 +40,12 @@ const DEFAULT_MAX = 100;
  *            data-action="keydown->stimeo--range-slider#onKeydown"></div>
  *     </div>
  *   </div>
+ *
+ * All published state is settled before its reports. A synchronous listener
+ * that confirms another value leaves that newer confirmation to report itself;
+ * reports still pending for the replaced value are not sent. A read-only listener
+ * or a confirmation that moves no published value leaves pending reports intact.
+ * An event already being dispatched still reaches its remaining listeners.
  *
  * @remarks
  * Behavior only — the consumer owns all layout (positioning the thumbs and the
@@ -98,6 +107,14 @@ const DEFAULT_MAX = 100;
  * writing direction. Left unset, nothing here reads `direction`.
  */
 export class RangeSliderController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
+  readonly #fieldWrites = new WeakMap<HTMLInputElement, number>();
+
+  readonly #moves = new MoveCounter();
+  #move = 0;
+
   static override targets = ["track", "startThumb", "endThumb", "startField", "endField"];
   static override values = {
     min: { type: Number, default: DEFAULT_MIN },
@@ -107,12 +124,22 @@ export class RangeSliderController extends Controller<HTMLElement> {
     end: { type: Number, default: 100 },
     logicalTrack: { type: Boolean, default: false },
   };
+
+  static valueConstraints = {
+    min: NUMBER_BOUNDS.finite,
+    max: NUMBER_BOUNDS.finite,
+    step: NUMBER_BOUNDS.positive,
+    start: NUMBER_BOUNDS.finite,
+    end: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof RangeSliderController.values>;
   static actions = ["onKeydown", "onPointerDown"] as const;
   static events = ["change", "reconcile"] as const;
 
   declare readonly trackTarget: HTMLElement;
   declare readonly startThumbTarget: HTMLElement;
+  declare readonly startThumbTargets: HTMLElement[];
   declare readonly endThumbTarget: HTMLElement;
+  declare readonly endThumbTargets: HTMLElement[];
   declare readonly startFieldTarget: HTMLInputElement;
   declare readonly endFieldTarget: HTMLInputElement;
   declare readonly hasTrackTarget: boolean;
@@ -145,21 +172,21 @@ export class RangeSliderController extends Controller<HTMLElement> {
    * Collapses a morph that swaps render inputs into one repaint, and refuses the
    * pass Stimulus delivers before `connect()`.
    */
-  readonly #repaint = new MicrotaskCoalescer(() => this.#render());
+  readonly #repaint = new MorphRenderWatcher(() => this.#render());
 
   /**
    * Renders the normalized, ordered pair without writing it back, and takes it
    * as the baseline, so connecting reports nothing.
    */
   override connect(): void {
-    this.#repaint.activate();
+    this.#repaint.observe(this.element);
     this.#settled = this.#currentPair(this.#effectiveRange);
     this.#render();
   }
 
   /** Cancels any active pointer drag so document listeners never leak. */
   override disconnect(): void {
-    this.#repaint.cancel();
+    this.#repaint.disconnect();
     this.#endDrag();
   }
 
@@ -201,9 +228,13 @@ export class RangeSliderController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
-  /** Drops a stale start-thumb reference without orphaning the track gesture. */
+  /**
+   * Drops a stale start-thumb reference without orphaning the track gesture, and
+   * brings the start thumb that stays to the current pair.
+   */
   startThumbTargetDisconnected(thumb: HTMLElement): void {
     if (this.#drag?.kind === "start" && this.#drag.thumb === thumb) this.#drag.thumb = null;
+    this.#repaint.schedule();
   }
 
   /** Hydrates a replacement end thumb and restores live-drag focus ownership. */
@@ -224,14 +255,28 @@ export class RangeSliderController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
+  /** Brings the start field that stays to the current pair when an earlier one leaves. */
+  startFieldTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
   /** Fills an end field inserted or replaced at runtime on the next repaint. */
   endFieldTargetConnected(): void {
     this.#repaint.schedule();
   }
 
-  /** Drops a stale end-thumb reference without orphaning the track gesture. */
+  /** Brings the end field that stays to the current pair when an earlier one leaves. */
+  endFieldTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /**
+   * Drops a stale end-thumb reference without orphaning the track gesture, and
+   * brings the end thumb that stays to the current pair.
+   */
   endThumbTargetDisconnected(thumb: HTMLElement): void {
     if (this.#drag?.kind === "end" && this.#drag.thumb === thumb) this.#drag.thumb = null;
+    this.#repaint.schedule();
   }
 
   /** Ends a gesture whose geometry target disappeared or ceased being a target. */
@@ -239,12 +284,16 @@ export class RangeSliderController extends Controller<HTMLElement> {
     if (this.#drag?.track === track) this.#endDrag();
   }
 
-  /** Keyboard stepping for whichever thumb is focused (the action's element). */
+  /**
+   * Keyboard stepping for whichever thumb is focused (the action's element). The
+   * end it moves is read from that element among every start and end thumb, so a
+   * thumb that coexists behind an earlier one answers its keys too.
+   */
   onKeydown(event: KeyboardEvent): void {
     if (isReservedArrowChord(event)) return;
     const thumb = event.currentTarget as HTMLElement;
-    const isStart = this.hasStartThumbTarget && thumb === this.startThumbTarget;
-    const isEnd = this.hasEndThumbTarget && thumb === this.endThumbTarget;
+    const isStart = this.startThumbTargets.includes(thumb);
+    const isEnd = this.endThumbTargets.includes(thumb);
     const effectiveRange = this.#effectiveRange;
     const pair = this.#currentPair(effectiveRange);
     let kind: RangeThumb;
@@ -409,12 +458,18 @@ export class RangeSliderController extends Controller<HTMLElement> {
     const pair = { start: nextStart, end: nextEnd };
     const reported = this.#settled;
     this.#settled = pair;
+    const changed = nextStart !== reported.start || nextEnd !== reported.end;
+    if (changed) this.#move = this.#moves.record();
+    const move = this.#move;
     if (!Object.is(this.startValue, nextStart)) this.startValue = nextStart;
     if (!Object.is(this.endValue, nextEnd)) this.endValue = nextEnd;
     this.#renderPair(pair, range);
-    this.#mirrorFields(pair, true);
-
-    if (nextStart !== reported.start || nextEnd !== reported.end) {
+    const fields = this.#mirrorFields(pair);
+    for (const [field, value, write] of fields) {
+      if (field.value === value && this.#fieldWrites.get(field) === write) commitField(field);
+    }
+    if (!this.#moves.isLatest(move)) return;
+    if (changed) {
       this.dispatch("change", { detail: { start: nextStart, end: nextEnd } });
     }
   }
@@ -430,27 +485,41 @@ export class RangeSliderController extends Controller<HTMLElement> {
     const range = this.#effectiveRange;
     const pair = this.#currentPair(range);
     this.#renderPair(pair, range);
-    this.#mirrorFields(pair, false);
+    this.#mirrorFields(pair);
     const settled = this.#settled;
     if (pair.start === settled.start && pair.end === settled.end) return;
     this.#settled = pair;
+    this.#move = this.#moves.record();
     this.dispatch("reconcile", { detail: { start: pair.start, end: pair.end } });
   }
 
+  /** Records each field write so a later write back to the same value supersedes it. */
+  #writeField(field: HTMLInputElement, value: string): boolean {
+    if (!writeField(field, value)) return false;
+    this.#fieldWrites.set(field, (this.#fieldWrites.get(field) ?? 0) + 1);
+    return true;
+  }
+
   /**
-   * Mirrors the pair into the optional form fields, reporting only a user's
-   * move. Each end is compared on its own, so dragging one thumb never reports
-   * a commit from the field the other thumb owns.
+   * Writes both optional fields before any listener observes the pair. Each
+   * moved field is returned with its value so a user commit can report it while
+   * that value remains current, even when a listener replaces only the other end.
    */
-  #mirrorFields(pair: RangePair, notify: boolean): void {
+  #mirrorFields(pair: RangePair): [HTMLInputElement, string, number][] {
+    const fields: [HTMLInputElement, string, number][] = [];
     if (this.hasStartFieldTarget) {
       const field = this.startFieldTarget;
-      if (writeField(field, String(pair.start)) && notify) commitField(field);
+      const value = String(pair.start);
+      if (this.#writeField(field, value))
+        fields.push([field, value, this.#fieldWrites.get(field) ?? 0]);
     }
     if (this.hasEndFieldTarget) {
       const field = this.endFieldTarget;
-      if (writeField(field, String(pair.end)) && notify) commitField(field);
+      const value = String(pair.end);
+      if (this.#writeField(field, value))
+        fields.push([field, value, this.#fieldWrites.get(field) ?? 0]);
     }
+    return fields;
   }
 
   /** Reflects one normalized pair onto both thumbs and CSS properties. */
@@ -498,8 +567,8 @@ export class RangeSliderController extends Controller<HTMLElement> {
 
   /** Current normalized and ordered pair derived from live declarative Values. */
   #currentPair(range: SteppedRange): RangePair {
-    const rawStart = Number.isFinite(this.startValue) ? this.startValue : range.min;
-    const rawEnd = Number.isFinite(this.endValue) ? this.endValue : range.max;
+    const rawStart = this.#safeStart;
+    const rawEnd = this.#safeEnd;
     const start = snapSteppedValue(rawStart, range);
     const end = snapSteppedValue(rawEnd, range);
     if (start <= end) return { start, end };
@@ -512,9 +581,9 @@ export class RangeSliderController extends Controller<HTMLElement> {
    * below `min` collapses to the finite minimum.
    */
   get #effectiveRange(): SteppedRange {
-    const min = Number.isFinite(this.minValue) ? this.minValue : DEFAULT_MIN;
-    const authoredMax = Number.isFinite(this.maxValue) ? this.maxValue : DEFAULT_MAX;
-    return { min, max: Math.max(min, authoredMax), step: this.stepValue, base: min };
+    const min = this.#safeMin;
+    const authoredMax = this.#safeMax;
+    return { min, max: Math.max(min, authoredMax), step: this.#safeStep, base: min };
   }
 
   /** Ends the current pointer session without dispatching another change. */
@@ -522,6 +591,60 @@ export class RangeSliderController extends Controller<HTMLElement> {
     const drag = this.#drag;
     this.#drag = null;
     drag?.pointer?.end();
+  }
+  /** Current `min` declaration resolved against its numeric contract. */
+  get #safeMin(): number {
+    return this.#numbers.read(
+      this,
+      "min",
+      this.minValue,
+      RangeSliderController.values.min.default,
+      RangeSliderController.valueConstraints.min,
+    );
+  }
+
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      RangeSliderController.values.max.default,
+      RangeSliderController.valueConstraints.max,
+    );
+  }
+
+  /** Current `step` declaration resolved against its numeric contract. */
+  get #safeStep(): number {
+    return this.#numbers.read(
+      this,
+      "step",
+      this.stepValue,
+      RangeSliderController.values.step.default,
+      RangeSliderController.valueConstraints.step,
+    );
+  }
+
+  /** Current `start` declaration resolved against its numeric contract. */
+  get #safeStart(): number {
+    return this.#numbers.read(
+      this,
+      "start",
+      this.startValue,
+      this.#effectiveRange.min,
+      RangeSliderController.valueConstraints.start,
+    );
+  }
+
+  /** Current `end` declaration resolved against its numeric contract. */
+  get #safeEnd(): number {
+    return this.#numbers.read(
+      this,
+      "end",
+      this.endValue,
+      this.#effectiveRange.max,
+      RangeSliderController.valueConstraints.end,
+    );
   }
 }
 

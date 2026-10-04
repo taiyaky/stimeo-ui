@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OtpController } from "../src/controllers/otp_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 interface FixtureOptions {
@@ -11,6 +11,8 @@ interface FixtureOptions {
   /** `null` omits the declaration so the Value's default is exercised. */
   readonly pattern?: string | null;
   readonly withError?: boolean;
+  /** `false` authors the error target in view, without `hidden`. */
+  readonly errorHidden?: boolean;
   readonly withValue?: boolean;
   readonly inForm?: boolean;
   readonly fieldAttrs?: (index: number) => string;
@@ -21,6 +23,7 @@ function markup(options: FixtureOptions = {}): string {
     count = 4,
     pattern = "[0-9]",
     withError = true,
+    errorHidden = true,
     withValue = true,
     inForm = false,
     fieldAttrs = () => "",
@@ -37,12 +40,13 @@ function markup(options: FixtureOptions = {}): string {
                             pointerdown->stimeo--otp#onPointerDown" />`,
   ).join("");
 
+  const hidden = errorHidden ? " hidden" : "";
   const group = `
       <div id="otp" data-controller="stimeo--otp"
            ${pattern === null ? "" : `data-stimeo--otp-pattern-value="${pattern}"`}
            role="group" aria-label="PIN passcode">
         ${fields}
-        ${withError ? '<div id="error" data-stimeo--otp-target="error" hidden>Error</div>' : ""}
+        ${withError ? `<div id="error" data-stimeo--otp-target="error"${hidden}>Error</div>` : ""}
         ${
           withValue
             ? '<input type="hidden" id="otp-value" data-stimeo--otp-target="value" name="otp" />'
@@ -77,12 +81,16 @@ function press(field: HTMLElement, key: string, init: KeyboardEventInit = {}): K
   return event;
 }
 
-function paste(field: HTMLElement, text: string): void {
+function paste(field: HTMLElement, text: string): ClipboardEvent {
   const dataTransfer = new DataTransfer();
   dataTransfer.setData("text", text);
-  field.dispatchEvent(
-    new ClipboardEvent("paste", { clipboardData: dataTransfer, bubbles: true, cancelable: true }),
-  );
+  const event = new ClipboardEvent("paste", {
+    clipboardData: dataTransfer,
+    bubbles: true,
+    cancelable: true,
+  });
+  field.dispatchEvent(event);
+  return event;
 }
 
 /** The events a handler from {@link listen} received, as `[name, detail]` in dispatch order. */
@@ -133,6 +141,87 @@ function restoredErrorMarkup(): string {
 
 describe("OtpController", () => {
   let application: Application;
+
+  it("omits completion superseded by synchronous composition reconciliation", async () => {
+    paste(fields()[0] as HTMLInputElement, "123");
+    const first = fields()[0] as HTMLInputElement;
+    first.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    controller().patternValue = "[1-9]";
+    await tick();
+    const seen = listen("change", "reconcile", "complete");
+    root().addEventListener(
+      "stimeo--otp:change",
+      () => {
+        fields()[3]?.remove();
+        first.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "1" }));
+      },
+      { once: true },
+    );
+    paste(fields()[3] as HTMLInputElement, "4");
+    expect(combined()).toBe("123");
+    expect(root().getAttribute("data-state")).toBe("complete");
+    expect(order(seen)).toEqual([
+      ["change", { value: "1234" }],
+      ["reconcile", { value: "123" }],
+    ]);
+  });
+
+  it("keeps completion when a change listener only reads the published state", () => {
+    const completed: string[] = [];
+    root().addEventListener("stimeo--otp:complete", (event) =>
+      completed.push((event as CustomEvent).detail.value),
+    );
+    root().addEventListener("stimeo--otp:change", () => expect(combined()).toBe("1234"));
+    paste(fields()[0] as HTMLInputElement, "1234");
+    expect(completed).toEqual(["1234"]);
+  });
+
+  it("does not complete a value superseded inside its change listener", () => {
+    const completed: string[] = [];
+    root().addEventListener("stimeo--otp:complete", (event) =>
+      completed.push((event as CustomEvent).detail.value),
+    );
+    root().addEventListener(
+      "stimeo--otp:change",
+      () => paste(fields()[0] as HTMLInputElement, "5678"),
+      { once: true },
+    );
+    paste(fields()[0] as HTMLInputElement, "1234");
+    expect(completed).toEqual(["5678"]);
+    expect(combined()).toBe("5678");
+  });
+
+  it("keeps completion when a change listener repeats the committed value", () => {
+    const completed: string[] = [];
+    root().addEventListener("stimeo--otp:complete", (event) =>
+      completed.push((event as CustomEvent).detail.value),
+    );
+    root().addEventListener(
+      "stimeo--otp:change",
+      () => paste(fields()[0] as HTMLInputElement, "1234"),
+      { once: true },
+    );
+    paste(fields()[0] as HTMLInputElement, "1234");
+    expect(completed).toEqual(["1234"]);
+  });
+
+  it("reports the page's same-task field writes in the user's commit", () => {
+    const seen: string[] = [];
+    root().addEventListener("stimeo--otp:change", (event) =>
+      seen.push((event as CustomEvent).detail.value),
+    );
+    (fields()[0] as HTMLInputElement).value = "1";
+    type(fields()[1] as HTMLInputElement, "2");
+    expect(seen).toEqual(["12"]);
+  });
+
+  it("keeps a user operation ending at the published value silent", () => {
+    const seen: Event[] = [];
+    root().addEventListener("stimeo--otp:change", (event) => seen.push(event));
+    (fields()[0] as HTMLInputElement).value = "1";
+    type(fields()[0] as HTMLInputElement, "");
+    expect(seen).toEqual([]);
+  });
 
   it("leaves an association the consumer changed while the error showed", async () => {
     await remount({ fieldAttrs: (index) => (index === 0 ? 'aria-describedby="hint"' : "") });
@@ -335,6 +424,42 @@ describe("OtpController", () => {
     expect(document.getElementById("error")?.hasAttribute("hidden")).toBe(false);
   });
 
+  it("rolls a rejected keystroke back to the digit the field was rendered with", async () => {
+    await remount({ fieldAttrs: (index) => (index === 0 ? 'value="5"' : "") });
+    const first = fields()[0] as HTMLInputElement;
+
+    type(first, "x");
+
+    expect(first.value).toBe("5");
+    expect(first.getAttribute("data-filled")).toBe("true");
+  });
+
+  it("publishes the page's field writes when rejected input lands nowhere", () => {
+    const changeHandler = listen("change");
+    (fields()[0] as HTMLInputElement).value = "1";
+
+    type(fields()[1] as HTMLInputElement, "x");
+
+    expect(combined()).toBe("1");
+    expect(root().getAttribute("data-state")).toBe("partial");
+    expect(changeHandler).not.toHaveBeenCalled();
+  });
+
+  it("takes emptying a field as an edit that clears a shown error", () => {
+    const first = fields()[0] as HTMLInputElement;
+    type(first, "5");
+    type(fields()[1] as HTMLInputElement, "x");
+    expect(document.getElementById("error")?.hidden).toBe(false);
+    const changeHandler = listen("change");
+
+    type(first, "");
+
+    expect(first.hasAttribute("data-filled")).toBe(false);
+    expect(document.getElementById("error")?.hidden).toBe(true);
+    expect(combined()).toBe("");
+    expect(order(changeHandler)).toEqual([["change", { value: "" }]]);
+  });
+
   it("auto-selects digit on focus for seamless overwrites", async () => {
     const input = fields()[0] as HTMLInputElement;
     input.value = "9";
@@ -384,6 +509,33 @@ describe("OtpController", () => {
     expect(document.activeElement).toBe(digits[2]); // stays put
     expect(digits[1]?.value).toBe("2"); // the previous digit is untouched
     expect(combined()).toBe("124");
+  });
+
+  it("clears a shown error when Backspace empties a filled field", () => {
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "12");
+    type(digits[1] as HTMLInputElement, "x");
+    expect(document.getElementById("error")?.hidden).toBe(false);
+
+    press(digits[1] as HTMLElement, "Backspace");
+
+    expect(digits[1]?.value).toBe("");
+    expect(document.getElementById("error")?.hidden).toBe(true);
+    expect(digits.some((field) => field.hasAttribute("aria-invalid"))).toBe(false);
+  });
+
+  it("consumes Backspace on an empty field and clears a shown error as it steps back", () => {
+    const digits = fields();
+    type(digits[0] as HTMLInputElement, "1");
+    type(digits[1] as HTMLInputElement, "x");
+    expect(document.getElementById("error")?.hidden).toBe(false);
+
+    const event = press(digits[1] as HTMLElement, "Backspace");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(digits[0]?.value).toBe("");
+    expect(document.getElementById("error")?.hidden).toBe(true);
+    expect(digits.some((field) => field.hasAttribute("aria-invalid"))).toBe(false);
   });
 
   it("leaves a modified arrow to the browser", async () => {
@@ -443,6 +595,16 @@ describe("OtpController", () => {
     expect(document.activeElement).toBe(digits[0]);
   });
 
+  it("consumes the arrow, Home and End presses that move focus", () => {
+    const digits = fields();
+    digits[0]?.focus();
+
+    expect(press(digits[0] as HTMLElement, "ArrowRight").defaultPrevented).toBe(true);
+    expect(press(digits[1] as HTMLElement, "ArrowLeft").defaultPrevented).toBe(true);
+    expect(press(digits[0] as HTMLElement, "End").defaultPrevented).toBe(true);
+    expect(press(digits[3] as HTMLElement, "Home").defaultPrevented).toBe(true);
+  });
+
   it("intercepts Paste, divides numeric characters, and triggers complete event", async () => {
     const digits = fields();
     const completeHandler = listen("complete");
@@ -469,6 +631,13 @@ describe("OtpController", () => {
     expect(combined()).toBe("8372");
     expect(completeHandler).toHaveBeenCalledOnce();
     expect(completeHandler.mock.calls[0]?.[0]?.detail).toEqual({ value: "8372" });
+  });
+
+  it("consumes the paste it distributes", () => {
+    const event = paste(fields()[0] as HTMLElement, "12");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(combined()).toBe("12");
   });
 
   it("keeps focus on the last field when a paste fills the whole passcode", async () => {
@@ -1380,6 +1549,20 @@ describe("OtpController", () => {
     expect(fields()).toHaveLength(5);
   });
 
+  it("marks a field that arrives with a digit as entered", async () => {
+    const arrived = document.createElement("input");
+    arrived.className = "field";
+    arrived.setAttribute("data-stimeo--otp-target", "field");
+    arrived.setAttribute("aria-label", "Digit 5");
+    arrived.setAttribute("value", "5");
+    root().insertBefore(arrived, document.getElementById("error"));
+    controller().fieldTargetConnected(arrived);
+    await tick();
+
+    expect(arrived.getAttribute("data-filled")).toBe("true");
+    expect(combined()).toBe("5");
+  });
+
   it("follows the digit count when a field is removed at runtime", async () => {
     const digits = fields();
     paste(digits[0] as HTMLElement, "1234");
@@ -1542,6 +1725,15 @@ describe("OtpController", () => {
     await tick();
 
     expect(event.defaultPrevented).toBe(false); // already the right landing spot
+  });
+
+  it("moves focus to the earliest empty field when a pointer lands past it", () => {
+    const digits = fields();
+    expect(document.activeElement).not.toBe(digits[0]);
+
+    digits[2]?.dispatchEvent(new Event("pointerdown", { bubbles: true, cancelable: true }));
+
+    expect(document.activeElement).toBe(digits[0]);
   });
 
   it("never writes disabled or readonly fields", async () => {
@@ -1786,6 +1978,88 @@ describe("OtpController", () => {
     }
   });
 
+  it("rewires every field when it reconnects", () => {
+    const instance = controller();
+    instance.disconnect();
+    instance.connect();
+
+    const first = fields()[0] as HTMLInputElement;
+    const selectSpy = vi.spyOn(first, "select");
+    first.focus();
+
+    expect(selectSpy).toHaveBeenCalledOnce();
+  });
+
+  it("releases the composition watch of an input that stopped being a field", () => {
+    const first = fields()[0] as HTMLInputElement;
+    const former = fields()[1] as HTMLInputElement;
+    former.removeAttribute("data-stimeo--otp-target");
+    const instance = controller();
+    instance.disconnect();
+
+    former.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    instance.connect();
+    type(first, "5");
+
+    expect(combined()).toBe("5");
+    expect(first.getAttribute("data-filled")).toBe("true");
+  });
+
+  it("stops reading a reset back once disconnected", async () => {
+    await remount({ inForm: true });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "1234");
+    controller().disconnect();
+
+    (document.getElementById("form") as HTMLFormElement).reset();
+    await tick();
+
+    expect(digits.every((field) => field.getAttribute("data-filled") === "true")).toBe(true);
+  });
+
+  it("keeps a shown error through turbo:before-cache, which also fires on a page that stays", async () => {
+    const digits = fields();
+    const errorEl = document.getElementById("error") as HTMLElement;
+    digits[0]?.focus();
+    type(digits[0] as HTMLInputElement, "あ");
+    await tick();
+    expect(errorEl.hasAttribute("hidden")).toBe(false);
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(errorEl.hasAttribute("hidden")).toBe(false);
+    expect(digits[0]?.getAttribute("aria-invalid")).toBe("true");
+    expect(digits[0]?.getAttribute("aria-errormessage")).toBe("error");
+  });
+
+  it("gives the author's error attributes back on a page restored from the cache", async () => {
+    const digits = fields();
+    digits[0]?.focus();
+    type(digits[0] as HTMLInputElement, "あ");
+    await tick();
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--otp", OtpController),
+    );
+    const errorEl = document.getElementById("error") as HTMLElement;
+
+    controller().disconnect();
+
+    expect(errorEl.hasAttribute("hidden")).toBe(true);
+    expect(fields().some((field) => field.hasAttribute("aria-invalid"))).toBe(false);
+    expect(errorEl.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
+
+  it("publishes nothing from the target callbacks that follow its disconnect", async () => {
+    paste(fields()[0] as HTMLElement, "12");
+    const handler = listen("change", "complete", "reconcile");
+
+    application.unload("stimeo--otp");
+    await tick();
+
+    expect(root().hasAttribute("data-state")).toBe(false);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("returns the error leases on disconnect", async () => {
     const digits = fields();
     type(digits[0] as HTMLInputElement, "あ");
@@ -1800,15 +2074,199 @@ describe("OtpController", () => {
     expect(root().hasAttribute("data-state")).toBe(false);
   });
 
-  it("returns the error leases before the page is cached", async () => {
-    const digits = fields();
-    type(digits[0] as HTMLInputElement, "あ");
+  it("hides an error target authored in view again once the rejected input is corrected", async () => {
+    await remount({ errorHidden: false });
+    const first = fields()[0] as HTMLInputElement;
+    const errorEl = document.getElementById("error") as HTMLElement;
+    expect(errorEl.hidden).toBe(true);
+    type(first, "あ");
+    await tick();
+    expect(errorEl.hidden).toBe(false);
+
+    type(first, "7");
     await tick();
 
-    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(first.hasAttribute("aria-invalid")).toBe(false);
+    expect(errorEl.hidden).toBe(true);
+  });
 
-    expect(document.getElementById("error")?.getAttribute("hidden")).toBe("");
-    expect(digits.some((field) => field.hasAttribute("aria-errormessage"))).toBe(false);
+  it("gives an error target authored in view its own visibility back on disconnect", async () => {
+    await remount({ errorHidden: false });
+    const errorEl = document.getElementById("error") as HTMLElement;
+    type(fields()[0] as HTMLInputElement, "あ");
+    await tick();
+    type(fields()[0] as HTMLInputElement, "7");
+    await tick();
+    expect(errorEl.hidden).toBe(true);
+
+    controller().disconnect();
+
+    expect(errorEl.hidden).toBe(false);
+    expect(errorEl.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
+
+  it("gives an error target authored in view its own visibility back on a restored page", async () => {
+    await remount({ errorHidden: false });
+    type(fields()[0] as HTMLInputElement, "あ");
+    await tick();
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--otp", OtpController),
+    );
+    const errorEl = document.getElementById("error") as HTMLElement;
+    expect(errorEl.hidden).toBe(true);
+
+    controller().disconnect();
+
+    expect(errorEl.hidden).toBe(false);
+  });
+
+  it("hides again an error target the report showed once another error target is first", async () => {
+    const first = fields()[0] as HTMLInputElement;
+    const original = document.getElementById("error") as HTMLElement;
+    type(first, "あ");
+    await tick();
+    const ahead = original.cloneNode(true) as HTMLElement;
+    ahead.id = "error-ahead";
+    original.before(ahead);
+    controller().errorTargetConnected();
+    expect([ahead.hidden, original.hidden]).toEqual([false, false]);
+
+    type(first, "7");
+    await tick();
+
+    expect([ahead.hidden, original.hidden]).toEqual([true, true]);
+  });
+
+  describe("error targets after the first", () => {
+    const HIDDEN_RECORD = "data-stimeo--otp-hidden-lease";
+    const records = (element: Element) =>
+      element.getAttributeNames().filter((name) => name.endsWith("-lease"));
+
+    /** Connects a fresh group whose markup `arrange` rewrote first, as a restored page arrives. */
+    async function connectRestored(arrange: () => void): Promise<void> {
+      disconnectAndStopApplication(application);
+      document.body.innerHTML = markup();
+      arrange();
+      application = Application.start();
+      application.register("stimeo--otp", OtpController);
+      await tick();
+    }
+
+    /** An error target placed before the authored one, carrying the given `hidden`. */
+    function errorAhead(hidden: boolean): HTMLElement {
+      const ahead = document.createElement("div");
+      ahead.id = "error-ahead";
+      ahead.hidden = hidden;
+      ahead.setAttribute("data-stimeo--otp-target", "error");
+      document.getElementById("error")?.before(ahead);
+      return ahead;
+    }
+
+    it("gives a later error target a restored page carries hidden by the lease its own visibility back", async () => {
+      await connectRestored(() => {
+        errorAhead(true);
+        const later = document.getElementById("error") as HTMLElement;
+        later.setAttribute(HIDDEN_RECORD, '[null,""]');
+      });
+      const later = document.getElementById("error") as HTMLElement;
+
+      expect(later.hidden).toBe(false);
+      expect(records(later)).toEqual([]);
+    });
+
+    it("hides again a later error target a restored page carries shown by a report", async () => {
+      await connectRestored(() => {
+        errorAhead(true);
+        const later = document.getElementById("error") as HTMLElement;
+        later.removeAttribute("hidden");
+        later.setAttribute(HIDDEN_RECORD, '["",null]');
+      });
+      const later = document.getElementById("error") as HTMLElement;
+
+      expect(later.hidden).toBe(true);
+      expect(records(later)).toEqual([]);
+    });
+
+    it("gives a former first error target its own hidden back on a page restored while a report stood", async () => {
+      type(fields()[0] as HTMLInputElement, "あ");
+      await tick();
+      errorAhead(true);
+      controller().errorTargetConnected();
+      application = await restoreFromCache(application, (restored) =>
+        restored.register("stimeo--otp", OtpController),
+      );
+      const ahead = document.getElementById("error-ahead") as HTMLElement;
+      const former = document.getElementById("error") as HTMLElement;
+
+      expect([ahead.hidden, former.hidden]).toEqual([true, true]);
+      expect(records(former)).toEqual([]);
+      controller().disconnect();
+      expect([ahead.hidden, former.hidden]).toEqual([true, true]);
+      expect([...records(ahead), ...records(former)]).toEqual([]);
+    });
+
+    it("hides an error target authored in view that replaces the first while nothing is reported", async () => {
+      const original = document.getElementById("error") as HTMLElement;
+      const successor = document.createElement("div");
+      successor.id = "error-next";
+      successor.setAttribute("data-stimeo--otp-target", "error");
+
+      original.replaceWith(successor);
+      await tick();
+      controller().errorTargetDisconnected(original);
+      controller().errorTargetConnected();
+
+      expect(successor.hidden).toBe(true);
+      controller().disconnect();
+      expect(successor.hidden).toBe(false);
+      expect(records(successor)).toEqual([]);
+    });
+
+    it("hides an error target authored in view that becomes first when the first leaves while nothing is reported", async () => {
+      const original = document.getElementById("error") as HTMLElement;
+      const later = document.createElement("div");
+      later.id = "error-later";
+      later.setAttribute("data-stimeo--otp-target", "error");
+      original.after(later);
+      await tick();
+      expect(later.hidden).toBe(false);
+
+      original.remove();
+      await tick();
+      controller().errorTargetDisconnected(original);
+
+      expect(later.hidden).toBe(true);
+    });
+
+    it("hides nothing on the error target left once another leaves after disconnect", async () => {
+      await remount({ errorHidden: false });
+      const original = document.getElementById("error") as HTMLElement;
+      const later = document.createElement("div");
+      later.id = "error-later";
+      later.setAttribute("data-stimeo--otp-target", "error");
+      original.after(later);
+      await tick();
+      const instance = controller();
+
+      instance.disconnect();
+      original.remove();
+      instance.errorTargetDisconnected(original);
+
+      expect(later.hidden).toBe(false);
+      expect(records(later)).toEqual([]);
+    });
+
+    it("gives a former first error target its own visibility back once another is first while nothing is reported", async () => {
+      await remount({ errorHidden: false });
+      const original = document.getElementById("error") as HTMLElement;
+      expect(original.hidden).toBe(true);
+      const ahead = errorAhead(false);
+      await tick();
+      controller().errorTargetConnected();
+
+      expect([ahead.hidden, original.hidden]).toEqual([true, false]);
+      expect(records(original)).toEqual([]);
+    });
   });
 
   it("returns the error leases of an input that stops being a field", async () => {
@@ -1829,5 +2287,312 @@ describe("OtpController", () => {
     expect(first.hasAttribute("data-otp-describedby-lease")).toBe(false);
     // The error still stands on the fields that remain.
     expect(digits[1]?.getAttribute("aria-invalid")).toBe("true");
+  });
+
+  describe("a value target that changes", () => {
+    const valueField = () => document.getElementById("otp-value") as HTMLInputElement;
+
+    it("writes the combined value into a value field that replaces the current one", async () => {
+      paste(fields()[0] as HTMLInputElement, "12");
+      const successor = valueField().cloneNode() as HTMLInputElement;
+      successor.value = "stale";
+
+      valueField().replaceWith(successor);
+      await tick();
+
+      expect(successor.value).toBe("12");
+    });
+
+    it("writes the combined value into a value field that stays after an earlier one leaves", async () => {
+      const original = valueField();
+      const successor = original.cloneNode() as HTMLInputElement;
+      successor.removeAttribute("id");
+      original.after(successor);
+      await tick();
+      paste(fields()[0] as HTMLInputElement, "12");
+      await tick();
+      // While both are present the first one is the target, so the entry went there.
+      expect([original.value, successor.value]).toEqual(["12", ""]);
+
+      original.remove();
+      await tick();
+
+      expect(successor.value).toBe("12");
+    });
+
+    it("writes the combined value into a value field that arrives after the only one left", async () => {
+      valueField().remove();
+      await tick();
+      paste(fields()[0] as HTMLInputElement, "12");
+      await tick();
+
+      const late = document.createElement("input");
+      late.type = "hidden";
+      late.setAttribute("data-stimeo--otp-target", "value");
+      root().append(late);
+      await tick();
+
+      expect(late.value).toBe("12");
+    });
+
+    it("brings a value field up to date without a report or a native change", async () => {
+      paste(fields()[0] as HTMLInputElement, "12");
+      await tick();
+      const seen = listen("change", "complete", "invalid", "reconcile");
+      const native: Event[] = [];
+      root().addEventListener("change", (event) => native.push(event));
+      const original = valueField();
+      const behind = original.cloneNode() as HTMLInputElement;
+      behind.removeAttribute("id");
+      behind.value = "stale";
+      original.after(behind);
+      const replacing = original.cloneNode() as HTMLInputElement;
+      replacing.value = "stale";
+
+      original.replaceWith(replacing);
+      await tick();
+      replacing.remove();
+      await tick();
+
+      expect(behind.value).toBe("12");
+      expect(order(seen)).toEqual([]);
+      expect(native).toEqual([]);
+    });
+
+    it("keeps working when its only value field leaves", async () => {
+      const errors: unknown[] = [];
+      application.handleError = (error) => {
+        errors.push(error);
+      };
+      valueField().remove();
+      await tick();
+      paste(fields()[0] as HTMLInputElement, "1234");
+      await tick();
+
+      expect(errors).toEqual([]);
+      expect(root().getAttribute("data-state")).toBe("complete");
+    });
+
+    it("writes nothing into a value field once disconnected", async () => {
+      paste(fields()[0] as HTMLInputElement, "12");
+      await tick();
+      const instance = controller();
+      const original = valueField();
+      const survivor = original.cloneNode() as HTMLInputElement;
+      survivor.removeAttribute("id");
+      survivor.value = "page";
+      original.after(survivor);
+      await tick();
+
+      instance.disconnect();
+      original.remove();
+      instance.valueTargetDisconnected();
+      await tick();
+
+      expect(survivor.value).toBe("page");
+    });
+  });
+
+  describe("an error target that changes", () => {
+    const errorElement = () => document.getElementById("error") as HTMLElement;
+
+    it("shows rejected input on an error target that replaces the current one", async () => {
+      await remount({ fieldAttrs: (index) => (index === 0 ? 'aria-describedby="hint"' : "") });
+      const first = fields()[0] as HTMLInputElement;
+      type(first, "あ");
+      await tick();
+      const successor = errorElement().cloneNode(true) as HTMLElement;
+      successor.id = "error-next";
+      successor.hidden = true;
+
+      errorElement().replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(false);
+      expect(first.getAttribute("aria-errormessage")).toBe("error-next");
+      expect(first.getAttribute("aria-describedby")).toBe("hint error-next");
+      expect(fields()[1]?.getAttribute("aria-errormessage")).toBe("error-next");
+    });
+
+    it("shows rejected input on an error target that stays after an earlier one leaves", async () => {
+      await remount({ fieldAttrs: (index) => (index === 0 ? 'aria-describedby="hint"' : "") });
+      const first = fields()[0] as HTMLInputElement;
+      const original = errorElement();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.id = "error-next";
+      original.after(successor);
+      await tick();
+      type(first, "あ");
+      await tick();
+      // While both are present the first one is the target, so the report went there.
+      expect([original.hidden, successor.hidden]).toEqual([false, true]);
+
+      original.remove();
+      await tick();
+
+      expect(successor.hidden).toBe(false);
+      expect(first.getAttribute("aria-errormessage")).toBe("error-next");
+      expect(first.getAttribute("aria-describedby")).toBe("hint error-next");
+    });
+
+    it("shows rejected input on an error target that arrives after the only one left", async () => {
+      const first = fields()[0] as HTMLInputElement;
+      type(first, "あ");
+      await tick();
+      const late = errorElement().cloneNode(true) as HTMLElement;
+      late.id = "error-late";
+      late.hidden = true;
+      errorElement().remove();
+      await tick();
+
+      root().append(late);
+      await tick();
+
+      expect(late.hidden).toBe(false);
+      expect(first.getAttribute("aria-errormessage")).toBe("error-late");
+      expect(first.getAttribute("aria-describedby")).toBe("error-late");
+    });
+
+    it("gives the authored reference back once the error that took over clears", async () => {
+      await remount({ fieldAttrs: (index) => (index === 0 ? 'aria-describedby="hint"' : "") });
+      const first = fields()[0] as HTMLInputElement;
+      type(first, "あ");
+      await tick();
+      const successor = errorElement().cloneNode(true) as HTMLElement;
+      successor.id = "error-next";
+      successor.hidden = true;
+      errorElement().replaceWith(successor);
+      await tick();
+
+      type(first, "7");
+      await tick();
+
+      expect(successor.hidden).toBe(true);
+      expect(first.getAttribute("aria-describedby")).toBe("hint");
+      expect(first.hasAttribute("aria-errormessage")).toBe(false);
+      expect(first.hasAttribute("aria-invalid")).toBe(false);
+    });
+
+    it("leaves an error target that arrives while nothing is rejected hidden", async () => {
+      const first = fields()[0] as HTMLInputElement;
+      const successor = errorElement().cloneNode(true) as HTMLElement;
+      successor.id = "error-next";
+
+      errorElement().replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(true);
+      expect(first.hasAttribute("aria-errormessage")).toBe(false);
+      expect(first.hasAttribute("aria-invalid")).toBe(false);
+    });
+
+    it("moves the report to another error target without an event", async () => {
+      type(fields()[0] as HTMLInputElement, "あ");
+      await tick();
+      const seen = listen("change", "complete", "invalid", "reconcile");
+      const native: Event[] = [];
+      root().addEventListener("change", (event) => native.push(event));
+      const successor = errorElement().cloneNode(true) as HTMLElement;
+      successor.id = "error-next";
+      successor.hidden = true;
+
+      errorElement().replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(false);
+      expect(order(seen)).toEqual([]);
+      expect(native).toEqual([]);
+    });
+
+    it("keeps working when its only error target leaves", async () => {
+      const errors: unknown[] = [];
+      application.handleError = (error) => {
+        errors.push(error);
+      };
+      type(fields()[0] as HTMLInputElement, "あ");
+      await tick();
+      errorElement().remove();
+      await tick();
+      type(fields()[0] as HTMLInputElement, "い");
+      await tick();
+
+      expect(errors).toEqual([]);
+      expect(fields()[0]?.getAttribute("aria-invalid")).toBe("true");
+    });
+
+    it("hides an error target that loses its token while rejected input shows", async () => {
+      type(fields()[0] as HTMLInputElement, "あ");
+      await tick();
+      const original = errorElement();
+
+      original.removeAttribute("data-stimeo--otp-target");
+      await tick();
+
+      expect(original.isConnected).toBe(true);
+      expect(original.hidden).toBe(true);
+    });
+
+    it("keeps an error the page reveals after losing its token", async () => {
+      type(fields()[0] as HTMLInputElement, "あ");
+      await tick();
+      const original = errorElement();
+      // The page took the attribute over, so it is no longer this component's to give back.
+      original.setAttribute("hidden", "until-found");
+
+      original.removeAttribute("data-stimeo--otp-target");
+      await tick();
+
+      expect(original.getAttribute("hidden")).toBe("until-found");
+    });
+
+    it("hides the error target when the identifier leaves while rejected input shows", async () => {
+      type(fields()[0] as HTMLInputElement, "あ");
+      await tick();
+      const original = errorElement();
+
+      root().setAttribute("data-controller", "");
+      await tick();
+
+      expect(original.hidden).toBe(true);
+      expect(fields()[0]?.hasAttribute("aria-invalid")).toBe(false);
+    });
+
+    it("keeps an error target that moves within the group shown", async () => {
+      type(fields()[0] as HTMLInputElement, "あ");
+      await tick();
+      const original = errorElement();
+      const flips: boolean[] = [];
+      const observer = new MutationObserver(() => flips.push(original.hasAttribute("hidden")));
+      observer.observe(original, { attributes: true, attributeFilter: ["hidden"] });
+
+      root().prepend(original);
+      await tick();
+      observer.disconnect();
+
+      // Not hidden and shown again: the error stays the target, so nothing is given back.
+      expect(flips).toEqual([]);
+      expect(original.hidden).toBe(false);
+      expect(fields()[0]?.getAttribute("aria-errormessage")).toBe("error");
+    });
+
+    it("shows nothing on an error target once disconnected", async () => {
+      type(fields()[0] as HTMLInputElement, "あ");
+      await tick();
+      const instance = controller();
+      const original = errorElement();
+      const survivor = original.cloneNode(true) as HTMLElement;
+      survivor.id = "error-next";
+      survivor.hidden = true;
+      original.after(survivor);
+      await tick();
+
+      instance.disconnect();
+      original.remove();
+      instance.errorTargetDisconnected(original);
+      await tick();
+
+      expect(survivor.hidden).toBe(true);
+      expect(fields()[0]?.hasAttribute("aria-errormessage")).toBe(false);
+    });
   });
 });

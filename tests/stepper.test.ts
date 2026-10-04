@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { StepperController } from "../src/controllers/stepper_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
@@ -82,6 +82,33 @@ describe("StepperController", () => {
     return { previousValues, stop: () => observer.disconnect() };
   };
 
+  it("does not rewrite the step collection when the current step is confirmed", async () => {
+    await start();
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((batch) => records.push(...batch));
+    observer.observe(root(), { attributes: true, subtree: true });
+    try {
+      buttons()[1]?.click();
+      await tick();
+      expect(records.length).toBeGreaterThan(0);
+      records.length = 0;
+      buttons()[1]?.click();
+      await tick();
+      expect(records).toEqual([]);
+    } finally {
+      observer.disconnect();
+    }
+  });
+  it("renders state for a step whose button is absent", async () => {
+    await start();
+    steps()[1]?.querySelector("button")?.remove();
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--stepper",
+    ) as StepperController;
+    expect(() => instance.next()).not.toThrow();
+    expect(states()).toEqual(["complete", "current", "upcoming"]);
+  });
   type ChangeDetail = { index: number; previous: number; total: number; step: HTMLElement };
   const recordChanges = () => {
     const details: ChangeDetail[] = [];
@@ -279,6 +306,19 @@ describe("StepperController", () => {
     },
   );
 
+  it("decodes numeric-string params but ignores whitespace and nonnumeric JSON", async () => {
+    await start();
+    const target = buttons()[1];
+    target?.setAttribute("data-stimeo--stepper-index-param", '"1"');
+    target?.click();
+    expect(currents()).toEqual([null, "step", null]);
+    for (const invalid of [" ", '"  "', "true", "[0]", "null", "Infinity", "0_0"]) {
+      target?.setAttribute("data-stimeo--stepper-index-param", invalid);
+      target?.click();
+      expect(currents()).toEqual([null, "step", null]);
+    }
+  });
+
   it("clamps non-finite, fractional, and negative initial indexes for display only", async () => {
     await start('data-stimeo--stepper-index-value="NaN"');
     expect(states()).toEqual(["current", "upcoming", "upcoming"]);
@@ -353,7 +393,7 @@ describe("StepperController", () => {
     ]);
   });
 
-  it("gives the declared step back once added steps reach it", async () => {
+  it("follows added steps toward an out-of-range declared index", async () => {
     await start('data-stimeo--stepper-index-value="5"');
     const reports = recordReports();
 
@@ -577,5 +617,55 @@ describe("StepperController", () => {
   it("has no machine-detectable a11y violations", async () => {
     await start();
     await expectNoA11yViolations(root());
+  });
+});
+
+/** Verifies that user navigation is compared with the last published position. */
+describe("StepperController pending page writes", () => {
+  let application: Application;
+  const root = () =>
+    document.querySelector<HTMLElement>('[data-controller="stimeo--stepper"]') as HTMLElement;
+  const act = (index: number) =>
+    root().querySelectorAll<HTMLButtonElement>("button")[index]?.click();
+  const reports = () => {
+    const seen: Array<{ name: string; current: number; previous: number }> = [];
+    for (const name of ["change", "reconcile"])
+      root().addEventListener(`stimeo--stepper:${name}`, (event) => {
+        const detail = (event as CustomEvent<{ index: number; previous: number }>).detail;
+        seen.push({ name, current: detail.index, previous: detail.previous });
+      });
+    return seen;
+  };
+  beforeEach(async () => {
+    document.body.innerHTML = `<div data-controller="stimeo--stepper" data-stimeo--stepper-index-value="0" data-stimeo--stepper-total-value="3"><li data-stimeo--stepper-target="step"><button data-stimeo--stepper-index-param="0" data-action="click->stimeo--stepper#goto">0</button></li><li data-stimeo--stepper-target="step"><button data-stimeo--stepper-index-param="1" data-action="click->stimeo--stepper#goto">1</button></li><li data-stimeo--stepper-target="step"><button data-stimeo--stepper-index-param="2" data-action="click->stimeo--stepper#goto">2</button></li></div>`;
+    application = Application.start();
+    application.register("stimeo--stepper", StepperController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+  it("reports selecting the pending page as a user change", async () => {
+    const seen = reports();
+    root().setAttribute("data-stimeo--stepper-index-value", "1");
+    act(1);
+    await tick();
+    expect(seen).toEqual([{ name: "change", current: 1, previous: 0 }]);
+  });
+  it("reports the last published position as previous", async () => {
+    const seen = reports();
+    root().setAttribute("data-stimeo--stepper-index-value", "1");
+    act(2);
+    await tick();
+    expect(seen).toEqual([{ name: "change", current: 2, previous: 0 }]);
+  });
+  it("keeps a return to the last published position silent", async () => {
+    const seen = reports();
+    root().setAttribute("data-stimeo--stepper-index-value", "1");
+    act(0);
+    await tick();
+    expect(seen).toEqual([]);
+    expect(root().getAttribute("data-stimeo--stepper-index-value")).toBe("0");
   });
 });

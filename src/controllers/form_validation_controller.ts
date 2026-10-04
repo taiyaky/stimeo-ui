@@ -260,7 +260,6 @@ export class FormValidationController extends Controller<HTMLFormElement> {
       if (control.validationMessage === message) control.setCustomValidity("");
     }
     this.#ownedCustomErrors.clear();
-    this.#touchedRadioGroups.clear();
     if (this.element.hasAttribute(this.#novalidateMarker)) {
       this.element.removeAttribute("novalidate");
       this.element.removeAttribute(this.#novalidateMarker);

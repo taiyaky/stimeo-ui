@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { CompositionTracker } from "../utils/composition_tracker";
 
 /**
@@ -61,7 +62,9 @@ export class EditableController extends Controller<HTMLElement> {
   static events = ["cancel", "change"] as const;
 
   declare readonly displayTarget: HTMLElement;
+  declare readonly displayTargets: HTMLElement[];
   declare readonly inputTarget: HTMLInputElement | HTMLTextAreaElement;
+  declare readonly inputTargets: HTMLElement[];
   declare readonly hasDisplayTarget: boolean;
   declare readonly hasInputTarget: boolean;
 
@@ -82,6 +85,12 @@ export class EditableController extends Controller<HTMLElement> {
    * a composition (cancel or confirm) is never treated as an edit command.
    */
   readonly #composition = new CompositionTracker();
+
+  /** Owns the `hidden` written on both elements, so one that departs gets its own back. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+
+  /** Whether `connect()` has run and `disconnect()` has not since. */
+  #connected = false;
 
   /**
    * Watches focus leaving the editor from wherever it currently sits.
@@ -113,6 +122,7 @@ export class EditableController extends Controller<HTMLElement> {
 
   /** Establishes the initial display mode (display shown, input hidden). */
   override connect(): void {
+    this.#connected = true;
     // The tracker is idempotent, so observing here and in the target callback
     // keeps IME tracking correct whichever of the two the framework runs first.
     if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
@@ -123,6 +133,7 @@ export class EditableController extends Controller<HTMLElement> {
 
   /** Releases the composition and focus listeners so nothing outlives the element. */
   override disconnect(): void {
+    this.#connected = false;
     this.#composition.disconnect();
     this.element.removeEventListener("focusout", this.#onFocusOut);
   }
@@ -133,14 +144,29 @@ export class EditableController extends Controller<HTMLElement> {
     this.#applyMode();
   }
 
-  /** Removes composition listeners when the active input is replaced or removed. */
+  /**
+   * Removes the departing input's composition listeners, gives one that no longer
+   * resolves its own `hidden` back, even after `disconnect()`, and while connected
+   * re-derives the visibility of the input that stays.
+   */
   inputTargetDisconnected(input: HTMLElement): void {
     this.#composition.unobserve(input);
+    if (!this.inputTargets.includes(input)) this.#hidden.return(input);
+    if (this.#connected) this.#applyMode();
   }
 
   /** Re-hides or re-shows a display element that arrived after the mode was set. */
   displayTargetConnected(): void {
     this.#applyMode();
+  }
+
+  /**
+   * Gives a display element that no longer resolves its own `hidden` back, even after
+   * `disconnect()`, and while connected re-hides or re-shows the one that stays.
+   */
+  displayTargetDisconnected(display: HTMLElement): void {
+    if (!this.displayTargets.includes(display)) this.#hidden.return(display);
+    if (this.#connected) this.#applyMode();
   }
 
   /** Enters edit mode: seeds the input from the declared value, focuses, selects. */
@@ -246,8 +272,8 @@ export class EditableController extends Controller<HTMLElement> {
   /** Derives both elements' visibility from the mode currently in the DOM. */
   #applyMode(): void {
     const editing = this.#isEditing;
-    if (this.hasDisplayTarget) this.displayTarget.hidden = editing;
-    if (this.hasInputTarget) this.inputTarget.hidden = !editing;
+    if (this.hasDisplayTarget) this.#hidden.write(this.displayTarget, editing ? "" : null);
+    if (this.hasInputTarget) this.#hidden.write(this.inputTarget, editing ? null : "");
   }
 
   /** Records the mode, then brings both elements in line with it. */

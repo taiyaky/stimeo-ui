@@ -152,6 +152,67 @@ describe("SkeletonController", () => {
     expect(content().hidden).toBe(false);
   });
 
+  // --- `minDuration` belongs to one held reveal --------------------------------------
+
+  /**
+   * Rewrites `minDuration` and delivers its Value callback directly when the
+   * controller defines one, since happy-dom does not reliably run it for an attribute
+   * write.
+   */
+  const declareMinDuration = (value: number) => {
+    root().setAttribute("data-stimeo--skeleton-min-duration-value", String(value));
+    const callback: unknown = Reflect.get(instance(), "minDurationValueChanged");
+    if (typeof callback === "function") callback.call(instance());
+  };
+
+  it.each([
+    { direction: "shrinks", next: 50 },
+    { direction: "grows", next: 5000 },
+  ])(
+    "keeps a held reveal's deadline when minDuration $direction, and floors the next load anew",
+    async ({ next }) => {
+      await start('data-stimeo--skeleton-min-duration-value="300"');
+      vi.advanceTimersByTime(100);
+      instance().ready(); // held back until t=300
+
+      declareMinDuration(next);
+      vi.advanceTimersByTime(199);
+      expect(root().getAttribute("data-state")).toBe("loading");
+      vi.advanceTimersByTime(1);
+      expect(root().getAttribute("data-state")).toBe("ready");
+
+      instance().reset(); // the next load measures from here
+      instance().ready();
+      vi.advanceTimersByTime(next - 1);
+      expect(content().hidden).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(content().hidden).toBe(false);
+    },
+  );
+
+  it("measures the floor from when the placeholder appeared when minDuration changes before ready", async () => {
+    await start('data-stimeo--skeleton-min-duration-value="300"');
+    vi.advanceTimersByTime(100);
+    declareMinDuration(150);
+    instance().ready(); // 50 ms of the new floor are left, counted from the loading start
+    vi.advanceTimersByTime(49);
+    expect(content().hidden).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(content().hidden).toBe(false);
+  });
+
+  it("reveals and reports nothing from a minDuration change alone", async () => {
+    await start('data-stimeo--skeleton-min-duration-value="300"');
+    const events: string[] = [];
+    root().addEventListener("stimeo--skeleton:ready", (event) => events.push(event.type));
+    declareMinDuration(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(root().getAttribute("data-state")).toBe("loading");
+    expect(root().getAttribute("aria-busy")).toBe("true");
+    expect(content().hidden).toBe(true);
+    expect(events).toEqual([]);
+  });
+
   it("cancels a pending reveal on reset", async () => {
     await start('data-stimeo--skeleton-min-duration-value="300"');
     instance().ready();
@@ -287,6 +348,241 @@ describe("SkeletonController", () => {
     expect(el.hidden).toBe(true);
     expect(host.getAttribute("data-state")).toBe("loading");
     expect(events).toEqual([]);
+  });
+
+  describe("placeholder and content that arrive or stay", () => {
+    const TARGET = "data-stimeo--skeleton-target";
+    const settle = () => vi.advanceTimersByTimeAsync(0);
+    /** An element like the current `name` target, showing as `shown`. */
+    const like = (name: "placeholder" | "content", shown: boolean) => {
+      const fresh = query(`[${TARGET}='${name}']`).cloneNode(true) as HTMLElement;
+      fresh.hidden = !shown;
+      return fresh;
+    };
+
+    it("shows a placeholder that replaces the current one while loading", async () => {
+      await start();
+      const successor = like("placeholder", false);
+
+      placeholder().replaceWith(successor);
+      await settle();
+
+      expect(placeholder()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("shows content that replaces the current one once ready", async () => {
+      await start();
+      instance().ready();
+      const successor = like("content", false);
+
+      content().replaceWith(successor);
+      await settle();
+
+      expect(content()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("hides a placeholder that stays after an earlier one leaves once ready", async () => {
+      await start();
+      const original = placeholder();
+      const successor = like("placeholder", true);
+      original.after(successor);
+      await settle();
+      instance().ready();
+      original.remove();
+      await settle();
+
+      expect(placeholder()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+    });
+
+    it("shows content that stays after an earlier one leaves once ready", async () => {
+      await start();
+      const original = content();
+      const successor = like("content", false);
+      original.after(successor);
+      await settle();
+      instance().ready();
+      original.remove();
+      await settle();
+
+      expect(content()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("hides content that stays after an earlier one leaves once reset", async () => {
+      await start();
+      instance().ready();
+      const original = content();
+      const successor = like("content", true);
+      original.after(successor);
+      await settle();
+      instance().reset();
+      original.remove();
+      await settle();
+
+      expect(content()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+    });
+
+    it("brings the placeholder and content up to date without an event or an announcement", async () => {
+      await start('data-stimeo--skeleton-announce-ready-text-value="Content loaded"');
+      instance().ready();
+      const events: string[] = [];
+      root().addEventListener("stimeo--skeleton:ready", () => events.push("ready"));
+      root().addEventListener("change", () => events.push("native change"));
+      const shell = like("placeholder", true);
+      const body = like("content", false);
+
+      const spoken = await captureAnnouncements(async () => {
+        placeholder().replaceWith(shell);
+        content().replaceWith(body);
+        await settle();
+      });
+
+      expect(shell.hidden).toBe(true);
+      expect(body.hidden).toBe(false);
+      expect(root().getAttribute("data-state")).toBe("ready");
+      expect(events).toEqual([]);
+      expect(spoken).toEqual([]);
+    });
+
+    it.each(["placeholder", "content"] as const)(
+      "keeps working when its only %s leaves",
+      async (name) => {
+        await start();
+        const errors: unknown[] = [];
+        application.handleError = (error) => {
+          errors.push(error);
+        };
+        query(`[${TARGET}='${name}']`).remove();
+        await settle();
+        instance().ready();
+        instance().reset();
+        await settle();
+
+        expect(errors).toEqual([]);
+        expect(root().getAttribute("data-state")).toBe("loading");
+      },
+    );
+
+    it("hides a placeholder that arrives after the only one left once ready", async () => {
+      await start();
+      instance().ready();
+      const template = like("placeholder", true);
+      placeholder().remove();
+      await settle();
+
+      root().prepend(template);
+      await settle();
+
+      expect(template.hidden).toBe(true);
+    });
+
+    it("shows content that arrives after the only one left once ready", async () => {
+      await start();
+      instance().ready();
+      const template = like("content", false);
+      content().remove();
+      await settle();
+
+      root().append(template);
+      await settle();
+
+      expect(template.hidden).toBe(false);
+    });
+
+    it("gives content that stops being one back the hidden it was authored with", async () => {
+      await start();
+      instance().ready();
+      const departed = content();
+      expect(departed.hidden).toBe(false);
+
+      departed.removeAttribute(TARGET);
+      await settle();
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("removes the hidden it wrote on a departed placeholder that was authored without one", async () => {
+      await start();
+      instance().ready();
+      const departed = placeholder();
+      expect(departed.hidden).toBe(true);
+
+      departed.removeAttribute(TARGET);
+      await settle();
+
+      expect(departed.hasAttribute("hidden")).toBe(false);
+    });
+
+    it("keeps a hidden the page wrote on the content after the last write", async () => {
+      await start();
+      instance().ready();
+      const departed = content();
+      departed.hidden = true;
+
+      departed.removeAttribute(TARGET);
+      await settle();
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("gives the placeholder and content back their own hidden when the skeleton loses its controller", async () => {
+      await start();
+      instance().ready();
+      const shell = placeholder();
+      const body = content();
+
+      root().removeAttribute("data-controller");
+      await settle();
+
+      expect(shell.hasAttribute("hidden")).toBe(false);
+      expect(body.hidden).toBe(true);
+    });
+
+    it("keeps content that moves within the skeleton shown without touching it", async () => {
+      await start();
+      instance().ready();
+      const moving = content();
+      const writes: string[] = [];
+      new MutationObserver((records) => {
+        for (const record of records) {
+          if (record.attributeName === "hidden") writes.push(String(record.oldValue));
+        }
+      }).observe(moving, { attributes: true, attributeOldValue: true });
+
+      root().prepend(moving);
+      await settle();
+
+      expect(content()).toBe(moving);
+      expect(moving.hidden).toBe(false);
+      expect(writes).toEqual([]);
+    });
+
+    it("keeps what it wrote on the content when the whole skeleton leaves the page", async () => {
+      await start();
+      instance().ready();
+      const kept = content();
+
+      root().remove();
+      await settle();
+
+      expect(kept.hidden).toBe(false);
+    });
+
+    it("writes nothing onto the placeholder or content while Stimulus tears the controller down", async () => {
+      await start();
+      instance().ready();
+      // A value the page wrote after the last write stays where it was left.
+      content().hidden = true;
+
+      application.unload("stimeo--skeleton");
+      await settle();
+
+      expect(content().hidden).toBe(true);
+    });
   });
 });
 

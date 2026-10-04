@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ToolbarController } from "../src/controllers/toolbar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
@@ -89,6 +89,71 @@ describe("ToolbarController", () => {
     controls(toolbar)[index]?.dispatchEvent(event);
     return event;
   };
+
+  it("leaves disconnected target changes untouched until reconnect", async () => {
+    await start();
+    const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--toolbar");
+    if (!(instance instanceof ToolbarController)) throw new Error("Expected toolbar controller");
+    expect(tabindexes()).toEqual([0, -1, -1]);
+    instance.disconnect();
+    const first = controls()[0];
+    if (!first) throw new Error("Expected first control");
+    first.tabIndex = -1;
+    instance.controlTargetDisconnected();
+    expect(tabindexes()).toEqual([-1, -1, -1]);
+    instance.connect();
+    expect(tabindexes()).toEqual([0, -1, -1]);
+  });
+
+  it("keeps the current tab stop when a non-navigable control reports focus", async () => {
+    await start();
+    const second = controls()[1];
+    if (!second) throw new Error("Expected second control");
+    second.hidden = true;
+    second.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    expect(tabindexes()).toEqual([0, -1, -1]);
+    second.hidden = false;
+    second.focus();
+    expect(tabindexes()).toEqual([-1, 0, -1]);
+  });
+
+  it("leaves navigation keys on a non-control descendant unclaimed", async () => {
+    await start();
+    const auxiliary = document.createElement("button");
+    root().appendChild(auxiliary);
+    auxiliary.focus();
+    const event = new KeyboardEvent("keydown", {
+      key: "Home",
+      bubbles: true,
+      cancelable: true,
+    });
+    auxiliary.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(auxiliary);
+    expect(tabindexes()).toEqual([0, -1, -1]);
+    key(1, "Home");
+    expect(document.activeElement).toBe(controls()[0]);
+  });
+
+  it("moves backward with ArrowUp in a vertical toolbar", async () => {
+    await start({ attrs: 'data-stimeo--toolbar-orientation-value="vertical"' });
+    controls()[1]?.focus();
+    expect(key(1, "ArrowUp").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(controls()[0]);
+    expect(tabindexes()).toEqual([0, -1, -1]);
+  });
+
+  it("escapes an unavailable origin at the clamped end", async () => {
+    await start({ attrs: 'data-stimeo--toolbar-wrap-value="false"' });
+    const last = controls()[2];
+    if (!last) throw new Error("Expected last control");
+    last.focus();
+    expect(tabindexes()).toEqual([-1, -1, 0]);
+    last.hidden = true;
+    expect(key(2, "ArrowRight").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(controls()[0]);
+    expect(tabindexes()).toEqual([0, -1, -1]);
+  });
 
   it("reverses the horizontal arrows under RTL", async () => {
     // Logical direction: APG describes these as "next / previous", so the pair
@@ -529,6 +594,103 @@ describe("ToolbarController", () => {
     (controls()[0] as HTMLButtonElement).disabled = true;
     await tick();
     expect(tabindexes()).toEqual([0, -1, -1]);
+  });
+
+  /** The live controller instance on the first toolbar. */
+  const controllerFor = (): ToolbarController => {
+    const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--toolbar");
+    if (!(instance instanceof ToolbarController)) throw new Error("Expected toolbar controller");
+    return instance;
+  };
+
+  it("leaves arrow keys to a composition that started on a control", async () => {
+    await start();
+    controls()[0]?.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    expect(key(0, "ArrowRight").defaultPrevented).toBe(false);
+    expect(tabindexes()).toEqual([0, -1, -1]);
+
+    controls()[0]?.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    expect(key(0, "ArrowRight").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(controls()[1]);
+  });
+
+  it("stops following focus once disconnected", async () => {
+    await start();
+    controllerFor().disconnect();
+    controls()[2]?.focus();
+    expect(tabindexes()).toEqual([0, -1, -1]);
+  });
+
+  it("starts a reconnect free of a composition the disconnect interrupted", async () => {
+    await start();
+    controls()[0]?.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    const instance = controllerFor();
+    instance.disconnect();
+    instance.connect();
+    expect(key(0, "ArrowRight").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(controls()[1]);
+  });
+
+  it("stops observing its subtree on disconnect", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe");
+    await start();
+    const index = observe.mock.calls.findIndex(
+      ([target, options]) =>
+        target === root() && options?.attributeFilter?.includes("disabled") === true,
+    );
+    const observer = observe.mock.contexts[index];
+    observe.mockRestore();
+    if (!(observer instanceof MutationObserver)) throw new Error("expected the state observer");
+
+    controllerFor().disconnect();
+    (controls()[0] as HTMLButtonElement).disabled = true;
+
+    expect(observer.takeRecords()).toEqual([]);
+  });
+
+  it("gives the tab stop to an element that becomes a control at runtime", async () => {
+    // Gaining the target attribute adds no node and flips no watched state, so
+    // the target callback alone sees the new control.
+    await startMarkup(`
+      <div data-controller="stimeo--toolbar" role="toolbar" aria-label="Text formatting">
+        <button type="button" tabindex="-1" id="tb-late">Bold</button>
+      </div>`);
+    document.getElementById("tb-late")?.setAttribute("data-stimeo--toolbar-target", "control");
+    await tick();
+    expect(tabindexes()).toEqual([0]);
+  });
+
+  it("moves the tab stop when the control holding it stops being a control", async () => {
+    await start();
+    controls()[0]?.removeAttribute("data-stimeo--toolbar-target");
+    await tick();
+    expect(tabindexes()).toEqual([0, -1]);
+  });
+
+  it("navigates through the per-control action when a wrapper stops the key", async () => {
+    await startMarkup(`
+      <div data-controller="stimeo--toolbar" role="toolbar" aria-label="Text formatting">
+        <div id="tb-wrapper">
+          <button type="button" tabindex="0" data-stimeo--toolbar-target="control"
+                  data-action="keydown->stimeo--toolbar#onKeydown">Bold</button>
+          <button type="button" tabindex="-1" data-stimeo--toolbar-target="control"
+                  data-action="keydown->stimeo--toolbar#onKeydown">Italic</button>
+        </div>
+      </div>`);
+    document
+      .getElementById("tb-wrapper")
+      ?.addEventListener("keydown", (event) => event.stopPropagation());
+
+    expect(key(0, "ArrowRight").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(controls()[1]);
+    expect(tabindexes()).toEqual([-1, 0]);
+  });
+
+  it("re-establishes the tab stop on a key that arrives before the observer runs", async () => {
+    await start();
+    (controls()[0] as HTMLButtonElement).disabled = true;
+    key(1, "Tab");
+    expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
   it("announces role, name, and orientation in order", async () => {

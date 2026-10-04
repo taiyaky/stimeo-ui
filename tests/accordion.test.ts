@@ -51,6 +51,193 @@ describe("AccordionController", () => {
     return element;
   };
 
+  it.each(["unowned", "hidden"])(
+    "ignores keyboard navigation from a %s header and retains a visible positive control",
+    (kind) => {
+      const root = document.querySelector<HTMLElement>("[data-controller='stimeo--accordion']");
+      if (!root) throw new Error("Missing root");
+      const controller = application.getControllerForElementAndIdentifier(
+        root,
+        "stimeo--accordion",
+      ) as AccordionController;
+      const first = document.getElementById("b1");
+      const second = document.getElementById("b2");
+      if (!(first instanceof HTMLButtonElement) || !(second instanceof HTMLButtonElement))
+        throw new Error("Missing triggers");
+      const current = kind === "hidden" ? first : document.createElement("button");
+      if (kind === "hidden") current.hidden = true;
+      else root.append(current);
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      outside.focus();
+      current.addEventListener("probe", (event) => controller.onKeydown(event as KeyboardEvent));
+      const ignored = new KeyboardEvent("probe", { key: "ArrowDown", cancelable: true });
+      current.dispatchEvent(ignored);
+      expect(ignored.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(outside);
+      current.hidden = false;
+      first.focus();
+      const accepted = new KeyboardEvent("keydown", {
+        key: "End",
+        bubbles: true,
+        cancelable: true,
+      });
+      first.dispatchEvent(accepted);
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(second);
+    },
+  );
+
+  it("does not resolve an empty controls reference to an unnamed panel", () => {
+    const root = document.querySelector<HTMLElement>("[data-controller='stimeo--accordion']");
+    if (!root) throw new Error("Missing root");
+    const controller = application.getControllerForElementAndIdentifier(
+      root,
+      "stimeo--accordion",
+    ) as AccordionController;
+    const first = document.getElementById("b1");
+    if (!(first instanceof HTMLButtonElement)) throw new Error("Missing trigger");
+    const controlled = panel("p1");
+    first.click();
+    expect(controlled.hidden).toBe(false);
+    first.click();
+    expect(controlled.hidden).toBe(true);
+    controlled.removeAttribute("id");
+    first.setAttribute("aria-controls", "");
+    const reports: Event[] = [];
+    root.addEventListener("stimeo--accordion:open", (event) => reports.push(event));
+    controller.toggle(first);
+    expect(controlled.hidden).toBe(true);
+    expect(first.getAttribute("aria-expanded")).toBe("false");
+    expect(reports).toEqual([]);
+  });
+
+  it("element API and events both require an authored trigger target", () => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--accordion']");
+    if (!element) throw new Error("Missing root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--accordion",
+    ) as AccordionController;
+    const unmarked = document.createElement("button");
+    unmarked.setAttribute("aria-controls", "p1");
+    unmarked.setAttribute("aria-expanded", "false");
+    element.append(unmarked);
+    const reports: Event[] = [];
+    element.addEventListener("stimeo--accordion:open", (event) => reports.push(event));
+    instance.toggle(unmarked);
+    unmarked.addEventListener("pointerup", (event) => instance.toggle(event));
+    unmarked.dispatchEvent(new Event("pointerup"));
+    expect(panel("p1").hidden).toBe(true);
+    expect(unmarked.getAttribute("aria-expanded")).toBe("false");
+    expect(reports).toHaveLength(0);
+    triggers()[0]?.click();
+    expect(panel("p1").hidden).toBe(false);
+  });
+
+  it("rejects nested-origin action events while accepting owned descendants", async () => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--accordion']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--accordion",
+    ) as AccordionController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--accordion-target='trigger']",
+    )[1];
+    if (!target) throw new Error("Missing target");
+
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--accordion");
+    const inner = target.cloneNode(true) as HTMLElement;
+    inner.removeAttribute("data-action");
+    nested.append(inner);
+    target.append(nested);
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--accordion:open", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener("pointerup", (event) => instance.toggle(event));
+    inner.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(0);
+    nested.remove();
+    const owned = document.createElement("span");
+    target.append(owned);
+    owned.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe("user");
+  });
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+  ])("preserves action event modality %s", async (type, reason) => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--accordion']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--accordion",
+    ) as AccordionController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--accordion-target='trigger']",
+    )[1];
+    if (!target) throw new Error("Missing action target");
+
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--accordion:open", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener(type, (event) => instance.toggle(event), { once: true });
+    target.dispatchEvent(new Event(type));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe(reason);
+  });
+
+  it.each([false, true])(
+    "accepts an owned element API source (descendant=%s) without stealing outside focus",
+    async (descendant) => {
+      const element = document.querySelector<HTMLElement>("[data-controller='stimeo--accordion']");
+      if (!element) throw new Error("Missing controller root");
+      const instance = application.getControllerForElementAndIdentifier(
+        element,
+        "stimeo--accordion",
+      ) as AccordionController;
+      const target = element.querySelectorAll<HTMLElement>(
+        "[data-stimeo--accordion-target='trigger']",
+      )[1];
+      if (!target) throw new Error("Missing action target");
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      outside.focus();
+      const reports: CustomEvent[] = [];
+      element.addEventListener("stimeo--accordion:open", (event) =>
+        reports.push(event as CustomEvent),
+      );
+
+      const child = document.createElement("span");
+      target.append(child);
+      const foreign = target.cloneNode(true) as HTMLElement;
+      foreign.removeAttribute("data-action");
+      const nested = document.createElement("div");
+      nested.setAttribute("data-controller", "stimeo--accordion");
+      const nestedTarget = foreign.cloneNode(true) as HTMLElement;
+      nested.append(nestedTarget);
+      element.append(nested);
+      const before = element.innerHTML;
+      instance.toggle(foreign);
+      document.body.append(foreign);
+      instance.toggle(foreign);
+      instance.toggle(nestedTarget);
+      expect(element.innerHTML).toBe(before);
+      expect(reports).toHaveLength(0);
+      instance.toggle(descendant ? child : target);
+      expect(target.getAttribute("aria-expanded")).toBe("true");
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.detail.reason).toBe("api");
+      expect(document.activeElement).toBe(outside);
+    },
+  );
+
   it("yields a key a descendant widget already consumed", () => {
     // A composed widget that claims the key must not ALSO act on it —
     // composition depends on this yield.

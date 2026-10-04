@@ -50,7 +50,7 @@ describe("CalendarController", () => {
         </div>
         <table role="grid" aria-labelledby="label">
           <tbody data-stimeo--calendar-target="grid"
-                 data-action="keydown->stimeo--calendar#onKeydown click->stimeo--calendar#selectByClick">
+                 data-action="keydown->stimeo--calendar#onKeydown click->stimeo--calendar#select">
             ${generateCellsHTML()}
           </tbody>
         </table>
@@ -66,6 +66,184 @@ describe("CalendarController", () => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     await delay(50);
+  });
+
+  it("rejects nested-origin action events while accepting owned descendants", async () => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--calendar']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--calendar",
+    ) as CalendarController;
+    const target = element.querySelector<HTMLElement>("[data-date='2026-05-15']");
+    if (!target) throw new Error("Missing target");
+
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--calendar");
+    const inner = document.createElement("span");
+    nested.append(inner);
+    target.append(nested);
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--calendar:select", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener("pointerup", (event) => instance.select(event));
+    inner.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(0);
+    nested.remove();
+    const owned = document.createElement("span");
+    target.append(owned);
+    owned.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe("user");
+  });
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+  ])("preserves action event modality %s", async (type, reason) => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--calendar']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--calendar",
+    ) as CalendarController;
+    const target = element.querySelector<HTMLElement>("[data-date='2026-05-15']");
+    if (!target) throw new Error("Missing action target");
+
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--calendar:select", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener(type, (event) => instance.select(event), { once: true });
+    target.dispatchEvent(new Event(type));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe(reason);
+  });
+
+  it.each([false, true])(
+    "accepts an owned element API source (descendant=%s) without stealing outside focus",
+    async (descendant) => {
+      const element = document.querySelector<HTMLElement>("[data-controller='stimeo--calendar']");
+      if (!element) throw new Error("Missing controller root");
+      const instance = application.getControllerForElementAndIdentifier(
+        element,
+        "stimeo--calendar",
+      ) as CalendarController;
+      const target = element.querySelector<HTMLElement>("[data-date='2026-05-15']");
+      if (!target) throw new Error("Missing action target");
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      outside.focus();
+      const reports: CustomEvent[] = [];
+      element.addEventListener("stimeo--calendar:select", (event) =>
+        reports.push(event as CustomEvent),
+      );
+
+      const child = document.createElement("span");
+      target.append(child);
+      const foreign = target.cloneNode(true) as HTMLElement;
+      foreign.removeAttribute("data-action");
+      const nested = document.createElement("div");
+      nested.setAttribute("data-controller", "stimeo--calendar");
+      const nestedTarget = foreign.cloneNode(true) as HTMLElement;
+      nested.append(nestedTarget);
+      element.append(nested);
+      const before = element.innerHTML;
+      instance.select(foreign);
+      document.body.append(foreign);
+      instance.select(foreign);
+      instance.select(nestedTarget);
+      expect(element.innerHTML).toBe(before);
+      expect(reports).toHaveLength(0);
+      instance.select(descendant ? child : target);
+      expect(target.getAttribute("aria-selected")).toBe("true");
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.detail.reason).toBe("api");
+      expect(document.activeElement).toBe(outside);
+    },
+  );
+
+  it.each(["a", "b"])("compares a picked date with the last published selection: %s", (mode) => {
+    const root = document.getElementById("calendar") as HTMLElement;
+    const seen: unknown[] = [];
+    root.addEventListener("stimeo--calendar:select", (event) =>
+      seen.push((event as CustomEvent).detail),
+    );
+    root.setAttribute("data-stimeo--calendar-selected-value", "2026-05-20");
+    root
+      .querySelector<HTMLElement>(
+        mode === "a" ? "[data-date='2026-05-20']" : "[data-date='2026-05-31']",
+      )
+      ?.click();
+    expect(seen).toEqual(mode === "a" ? [{ date: "2026-05-20", reason: "user" }] : []);
+  });
+
+  it("leaves a pending bounds reconciliation deferred when the month declaration becomes empty", async () => {
+    const root = document.getElementById("calendar") as HTMLElement;
+    const controller = application.getControllerForElementAndIdentifier(
+      root,
+      "stimeo--calendar",
+    ) as CalendarController;
+    const seen: unknown[] = [];
+    root.addEventListener("stimeo--calendar:reconcile", (event) =>
+      seen.push((event as CustomEvent).detail),
+    );
+    root.setAttribute("data-stimeo--calendar-min-value", "2026-06-01");
+    controller.minValueChanged();
+    root.setAttribute("data-stimeo--calendar-month-value", "");
+    controller.monthValueChanged();
+    expect(seen).toEqual([]);
+    await tick();
+    expect(seen).toEqual([{ date: "" }]);
+  });
+
+  it("does not report selecting the published date again", () => {
+    const root = document.getElementById("calendar") as HTMLElement;
+    const seen: unknown[] = [];
+    root.addEventListener("stimeo--calendar:select", (event) =>
+      seen.push((event as CustomEvent).detail),
+    );
+    root.querySelector<HTMLElement>("[data-date='2026-05-31']")?.click();
+    expect(seen).toEqual([]);
+  });
+
+  it("aligns the tab stop when pending keyboard navigation returns to the painted month", async () => {
+    const root = document.getElementById("calendar") as HTMLElement;
+    const controller = application.getControllerForElementAndIdentifier(
+      root,
+      "stimeo--calendar",
+    ) as CalendarController;
+    const lastDay = root.querySelector<HTMLElement>("[data-date='2026-05-31']") as HTMLElement;
+    lastDay.focus();
+    lastDay.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    controller.prev();
+    expect(root.querySelector("[data-date='2026-05-01']")?.getAttribute("tabindex")).toBe("0");
+    expect(root.querySelector("[data-date='2026-06-01']")?.getAttribute("tabindex")).toBe("-1");
+    await tick();
+    expect(root.querySelector("[data-date='2026-05-01']")?.getAttribute("tabindex")).toBe("0");
+  });
+
+  it("consumes a same-task month return without leaking its user cause into a later page repaint", async () => {
+    const root = document.getElementById("calendar") as HTMLElement;
+    const controller = application.getControllerForElementAndIdentifier(
+      root,
+      "stimeo--calendar",
+    ) as CalendarController;
+    const field = document.createElement("input");
+    field.type = "hidden";
+    field.setAttribute("data-stimeo--calendar-target", "monthField");
+    root.append(field);
+    await tick();
+    const seen: string[] = [];
+    field.addEventListener("change", () => seen.push(field.value));
+    root.setAttribute("data-stimeo--calendar-month-value", "2026-06");
+    controller.prev();
+    await tick();
+    root.setAttribute("data-stimeo--calendar-month-value", "2026-07");
+    await tick();
+    expect(field.value).toBe("2026-07");
+    expect(seen).toEqual([]);
   });
 
   it("initializes month grid cells correctly", () => {
@@ -139,15 +317,15 @@ describe("CalendarController", () => {
     expect(targetCell.getAttribute("aria-selected")).toBe("false");
 
     // Selecting repaints in the same call, so the grid is read straight after it.
-    controller.selectDayElement(targetCell);
+    controller.select(targetCell);
 
     expect(targetCell.getAttribute("aria-selected")).toBe("true");
     expect(selectHandler).toHaveBeenCalledOnce();
-    expect(selectHandler.mock.calls[0]?.[0]?.detail).toEqual({ date: "2026-05-15" });
+    expect(selectHandler.mock.calls[0]?.[0]?.detail).toEqual({ date: "2026-05-15", reason: "api" });
 
     // Disabled day cannot be selected
     const disabledCell = days[0] as HTMLElement; // April 26 (disabled)
-    controller.selectDayElement(disabledCell);
+    controller.select(disabledCell);
     expect(disabledCell.getAttribute("aria-selected")).toBe("false");
   });
 
@@ -318,7 +496,7 @@ describe("CalendarController", () => {
 
     // Select a different day (May 15, index 19). Selecting repaints in the same call.
     const newTarget = days[19] as HTMLElement;
-    controller.selectDayElement(newTarget);
+    controller.select(newTarget);
 
     // After selection, May 15 is selected and May 31 is no longer selected.
     const afterSelectedPhrases = await captureSpeech({ container: newTarget, steps: 0 });
@@ -444,7 +622,7 @@ describe("CalendarController", () => {
            data-stimeo--calendar-selected-value="2026-06-20">
         <table role="grid">
           <tbody data-stimeo--calendar-target="grid"
-                 data-action="keydown->stimeo--calendar#onKeydown click->stimeo--calendar#selectByClick">
+                 data-action="keydown->stimeo--calendar#onKeydown click->stimeo--calendar#select">
             ${generateCellsHTML()}
           </tbody>
         </table>
@@ -469,7 +647,7 @@ describe("CalendarController", () => {
              data-stimeo--calendar-month-value="2026-05">
           <table role="grid">
             <tbody data-stimeo--calendar-target="grid"
-                   data-action="keydown->stimeo--calendar#onKeydown click->stimeo--calendar#selectByClick">
+                   data-action="keydown->stimeo--calendar#onKeydown click->stimeo--calendar#select">
               ${generateCellsHTML()}
             </tbody>
           </table>
@@ -562,6 +740,24 @@ describe("CalendarController", () => {
     expect(roving()?.getAttribute("data-date")).toBe(before);
   });
 
+  it.each([
+    "ArrowRight",
+    "ArrowLeft",
+    "ArrowDown",
+    "ArrowUp",
+    "PageDown",
+    "PageUp",
+    "Home",
+    "End",
+    "t",
+    "Enter",
+    " ",
+  ])("claims %j pressed on a day", async (key) => {
+    const event = press(roving() as HTMLElement, key);
+    await delay(20);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
   it("Shift+PageUp moves back one year", async () => {
     const cell = roving() as HTMLElement;
     cell.focus();
@@ -581,7 +777,7 @@ describe("CalendarController", () => {
     sendKey(" ");
     await delay(20);
 
-    expect(details).toEqual([{ date: "2026-05-31" }]);
+    expect(details).toEqual([]);
     expect(roving()?.getAttribute("aria-selected")).toBe("true");
   });
 
@@ -631,7 +827,7 @@ describe("CalendarController", () => {
            data-stimeo--calendar-week-start-value="1">
         <table role="grid">
           <tbody data-stimeo--calendar-target="grid"
-                 data-action="keydown->stimeo--calendar#onKeydown click->stimeo--calendar#selectByClick">
+                 data-action="keydown->stimeo--calendar#onKeydown click->stimeo--calendar#select">
             ${generateCellsHTML()}
           </tbody>
         </table>
@@ -684,9 +880,7 @@ describe("CalendarController", () => {
     });
 
     it("keeps a consumer-authored aria-disabled across a same-month repaint", async () => {
-      // Selecting another day repaints the same month, so the await is
-      // load-bearing: reading the DOM synchronously after a Value change lands
-      // before the repaint and would assert nothing.
+      // Selecting another day repaints the same month; authored disabled state survives.
       const target = days().find((el) => el.dataset.date === "2026-05-20") as HTMLElement;
       target.setAttribute("aria-disabled", "true");
 
@@ -799,7 +993,7 @@ describe("CalendarController", () => {
           <button id="btn-next" data-action="click->stimeo--calendar#next">›</button>
           <table role="grid" aria-labelledby="label">
             <tbody data-stimeo--calendar-target="grid"
-                   data-action="click->stimeo--calendar#selectByClick">
+                   data-action="click->stimeo--calendar#select">
               ${generateCellsHTML()}
             </tbody>
           </table>
@@ -871,6 +1065,168 @@ describe("CalendarController", () => {
       expect(monthField().value).toBe("2026-07");
       expect(commits.seen).toEqual([]);
     });
+
+    /** Inserts a copy of a field after it and lets Stimulus connect the copy. */
+    const addSuccessor = async (original: HTMLInputElement) => {
+      const successor = original.cloneNode() as HTMLInputElement;
+      original.after(successor);
+      await tick();
+      return successor;
+    };
+
+    it("fills a selected-day field that stays after an earlier one leaves", async () => {
+      await withFields();
+      const original = field();
+      const successor = await addSuccessor(original);
+      expect(successor.value).toBe("2026-05-31");
+      cellFor("2026-05-14").click();
+      await delay(50);
+      original.remove();
+      await tick();
+
+      expect(field()).toBe(successor);
+      expect(successor.value).toBe("2026-05-14");
+    });
+
+    it("fills a painted-month field that stays after an earlier one leaves", async () => {
+      await withFields();
+      const original = monthField();
+      const successor = await addSuccessor(original);
+      expect(successor.value).toBe("2026-05");
+      (document.getElementById("btn-next") as HTMLButtonElement).click();
+      await delay(50);
+      original.remove();
+      await tick();
+
+      expect(monthField()).toBe(successor);
+      expect(successor.value).toBe("2026-06");
+    });
+
+    it("fills the staying fields without a commit or an event", async () => {
+      await withFields();
+      const originalDay = field();
+      const originalMonth = monthField();
+      const successorDay = await addSuccessor(originalDay);
+      const successorMonth = await addSuccessor(originalMonth);
+      (document.getElementById("btn-next") as HTMLButtonElement).click();
+      await delay(50);
+      cellFor("2026-06-10").click();
+      await delay(50);
+      commits.clear();
+      const root = document.getElementById("calendar") as HTMLElement;
+      const events: string[] = [];
+      for (const type of ["monthchange", "reconcile", "select"]) {
+        root.addEventListener(`stimeo--calendar:${type}`, () => events.push(type));
+      }
+
+      originalDay.remove();
+      originalMonth.remove();
+      await tick();
+
+      expect(successorDay.value).toBe("2026-06-10");
+      expect(successorMonth.value).toBe("2026-06");
+      expect(commits.seen).toEqual([]);
+      expect(events).toEqual([]);
+    });
+
+    it("keeps working when its only fields leave", async () => {
+      await withFields();
+      const errors: unknown[] = [];
+      application.handleError = (error) => {
+        errors.push(error);
+      };
+      field().remove();
+      monthField().remove();
+      await tick();
+      cellFor("2026-05-14").click();
+      await delay(50);
+
+      expect(errors).toEqual([]);
+      expect(cellFor("2026-05-14").getAttribute("aria-selected")).toBe("true");
+    });
+  });
+
+  describe("month label target", () => {
+    const label = () =>
+      document.querySelector<HTMLElement>("[data-stimeo--calendar-target='label']") as HTMLElement;
+    const next = () => (document.getElementById("btn-next") as HTMLButtonElement).click();
+
+    it("writes the month on screen into a label that replaces the current one", async () => {
+      const original = label();
+      const shown = original.textContent;
+      const successor = original.cloneNode() as HTMLElement;
+      successor.textContent = "Stale";
+
+      original.replaceWith(successor);
+      await tick();
+
+      expect(label()).toBe(successor);
+      expect(successor.textContent).toBe(shown);
+    });
+
+    it("writes the month on screen into a label inserted ahead of the current one", async () => {
+      const current = label();
+      const shown = current.textContent;
+      const incoming = current.cloneNode() as HTMLElement;
+      incoming.removeAttribute("id");
+
+      current.before(incoming);
+      await tick();
+
+      expect(label()).toBe(incoming);
+      expect(incoming.textContent).toBe(shown);
+    });
+
+    it("writes the month on screen into a label that stays after an earlier one leaves", async () => {
+      const original = label();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.removeAttribute("id");
+      original.after(successor);
+      await tick();
+      const before = successor.textContent;
+      next();
+      await delay(50);
+      const shown = original.textContent;
+      expect(shown).not.toBe(before);
+
+      original.remove();
+      await tick();
+
+      expect(label()).toBe(successor);
+      expect(successor.textContent).toBe(shown);
+    });
+
+    it("writes the label without a report or a native change", async () => {
+      const root = document.getElementById("calendar") as HTMLElement;
+      const events: string[] = [];
+      for (const type of ["monthchange", "reconcile", "select"]) {
+        root.addEventListener(`stimeo--calendar:${type}`, () => events.push(type));
+      }
+      root.addEventListener("change", () => events.push("change"));
+      const original = label();
+      const shown = original.textContent;
+      const successor = original.cloneNode() as HTMLElement;
+
+      original.replaceWith(successor);
+      await tick();
+
+      expect(successor.textContent).toBe(shown);
+      expect(events).toEqual([]);
+    });
+
+    it("keeps working when its only label leaves", async () => {
+      const errors: unknown[] = [];
+      application.handleError = (error) => {
+        errors.push(error);
+      };
+      label().remove();
+      await tick();
+      next();
+      await delay(50);
+
+      expect(errors).toEqual([]);
+      expect(document.querySelector("[data-date='2026-06-15']")).not.toBeNull();
+    });
   });
 });
 
@@ -907,7 +1263,7 @@ describe("CalendarController off-contract input", () => {
         <table role="grid" aria-labelledby="cal-label">
           <tbody data-stimeo--calendar-target="grid"
                  data-action="keydown->stimeo--calendar#onKeydown
-                              click->stimeo--calendar#selectByClick">${cells()}</tbody>
+                              click->stimeo--calendar#select">${cells()}</tbody>
         </table>
       </div>
       ${close}`;
@@ -1187,7 +1543,7 @@ describe("CalendarController off-contract cell counts", () => {
         <table role="grid" aria-labelledby="cal-label">
           <tbody data-stimeo--calendar-target="grid"
                  data-action="keydown->stimeo--calendar#onKeydown
-                              click->stimeo--calendar#selectByClick">${cells(count)}</tbody>
+                              click->stimeo--calendar#select">${cells(count)}</tbody>
         </table>
       </div>`;
     application = Application.start();
@@ -1288,7 +1644,7 @@ describe("CalendarController month announcements", () => {
         <table role="grid" aria-labelledby="cal-label">
           <tbody data-stimeo--calendar-target="grid"
                  data-action="keydown->stimeo--calendar#onKeydown
-                              click->stimeo--calendar#selectByClick">${cells()}</tbody>
+                              click->stimeo--calendar#select">${cells()}</tbody>
         </table>
       </div>`;
     document.addEventListener("stimeo--calendar:monthchange", record);
@@ -1546,7 +1902,7 @@ describe("CalendarController month announcements", () => {
  * cell each date lands in. A runtime change — from application code, or from a
  * Turbo morph that swaps the attribute on an element it keeps, where `connect()`
  * does not run again — has to reach the grid on screen without moving the
- * month, reporting anything, or losing the place the user's focus was on.
+ * month, reporting a user navigation, or losing the place the user's focus was on.
  */
 describe("CalendarController runtime bounds and week start", () => {
   let application: Application | undefined;
@@ -1580,7 +1936,7 @@ describe("CalendarController runtime bounds and week start", () => {
         <table role="grid" aria-labelledby="cal-label">
           <tbody data-stimeo--calendar-target="grid"
                  data-action="keydown->stimeo--calendar#onKeydown
-                              click->stimeo--calendar#selectByClick">${cells()}</tbody>
+                              click->stimeo--calendar#select">${cells()}</tbody>
         </table>
       </div>`;
     // Every paint writes the month label once, so the label's additions count
@@ -1886,6 +2242,31 @@ describe("CalendarController runtime bounds and week start", () => {
     expect(paints()).toBe(paintsAtConnect + 1);
   });
 
+  it.each([
+    ["the layout stays", "2026-05-20", null, null, "2026-05-20"],
+    ["week start moves the date", "2026-04-28", "week-start", "1", "2026-04-28"],
+    ["the date leaves the grid", "2026-04-26", "week-start", "1", "2026-05-31"],
+    ["the month moves", "2026-06-03", "month", "2026-06", "2026-06-30"],
+  ] as const)(
+    "retains the painted focus date through a missing date attribute when %s",
+    async (_label, date, valueName, value, destination) => {
+      await mount();
+      const held = cellFor(date);
+      held.focus();
+      const focusCalls = vi.spyOn(HTMLElement.prototype, "focus");
+      held.removeAttribute("data-date");
+      held.setAttribute("tabindex", "-1");
+      if (valueName !== null) setValue(valueName, value);
+      held.dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await tick();
+      expect(document.activeElement).toBe(cellFor(destination));
+      if (valueName === null) {
+        expect(document.activeElement).toBe(held);
+        expect(focusCalls).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it("keeps focus on the day it was on when weekStart moves that day to another cell", async () => {
     await mount();
     const before = cellFor("2026-05-31");
@@ -2034,7 +2415,7 @@ describe("CalendarController selection held to the bounds", () => {
         <table role="grid" aria-labelledby="cal-label">
           <tbody data-stimeo--calendar-target="grid"
                  data-action="keydown->stimeo--calendar#onKeydown
-                              click->stimeo--calendar#selectByClick">${cells()}</tbody>
+                              click->stimeo--calendar#select">${cells()}</tbody>
         </table>
       </div>`;
     // Listening before the application starts is what lets a report made while
@@ -2292,7 +2673,7 @@ describe("CalendarController selection held to the bounds", () => {
     expect(field().value).toBe("2026-05-18");
     expect(heard).toEqual([
       reconciled("2026-05-15"),
-      { type: "stimeo--calendar:select", detail: { date: "2026-05-18" } },
+      { type: "stimeo--calendar:select", detail: { date: "2026-05-18", reason: "user" } },
     ]);
     expect(commits?.seen).toEqual([field()]);
   });
@@ -2305,14 +2686,16 @@ describe("CalendarController selection held to the bounds", () => {
 
     expect(selected()).toEqual(["2026-05-14"]);
     expect(field().value).toBe("2026-05-14");
-    expect(heard).toEqual([{ type: "stimeo--calendar:select", detail: { date: "2026-05-14" } }]);
+    expect(heard).toEqual([
+      { type: "stimeo--calendar:select", detail: { date: "2026-05-14", reason: "user" } },
+    ]);
     expect(commits?.seen).toEqual([field()]);
   });
 
   it("does not report a withheld selection a monthchange listener has already replaced", async () => {
     await mount({ month: "2026-05", selected: "2026-05-10", min: "2026-05-01" });
     root().addEventListener("stimeo--calendar:monthchange", () => {
-      controller().selectDayElement(cellFor("2026-06-10"));
+      controller().select(cellFor("2026-06-10"));
     });
 
     // One batch: the paint of June already sees the min that withholds 05-10.
@@ -2323,7 +2706,7 @@ describe("CalendarController selection held to the bounds", () => {
     expect(selected()).toEqual(["2026-06-10"]);
     expect(heard).toContainEqual({
       type: "stimeo--calendar:select",
-      detail: { date: "2026-06-10" },
+      detail: { date: "2026-06-10", reason: "api" },
     });
     expect(heard.filter((entry) => entry.type === "stimeo--calendar:reconcile")).toEqual([]);
   });
@@ -2378,7 +2761,7 @@ describe("CalendarController month moves and focus", () => {
         <table role="grid" aria-labelledby="cal-label">
           <tbody data-stimeo--calendar-target="grid"
                  data-action="keydown->stimeo--calendar#onKeydown
-                              click->stimeo--calendar#selectByClick">${cells()}</tbody>
+                              click->stimeo--calendar#select">${cells()}</tbody>
         </table>
       </div>`;
     application = Application.start();
@@ -2651,7 +3034,7 @@ describe("CalendarController reports of a pick", () => {
         <table role="grid" aria-labelledby="cal-label">
           <tbody data-stimeo--calendar-target="grid"
                  data-action="keydown->stimeo--calendar#onKeydown
-                              click->stimeo--calendar#selectByClick">${cells()}</tbody>
+                              click->stimeo--calendar#select">${cells()}</tbody>
         </table>
       </div>`;
     application = Application.start();
@@ -2728,6 +3111,28 @@ describe("CalendarController reports of a pick", () => {
     await delay(50);
   });
 
+  it("does not repeat a month field report after nested picks return to its value", async () => {
+    await mount({ month: "invalid", selected: "2026-05-31" });
+    const native: string[] = [];
+    const months: string[] = [];
+    root().addEventListener("stimeo--calendar:monthchange", (event) =>
+      months.push((event as CustomEvent<{ month: string }>).detail.month),
+    );
+    input("monthField").addEventListener("change", () => native.push(input("monthField").value));
+    input("field").addEventListener(
+      "change",
+      firstOnly(() => {
+        cellFor("2026-05-31").click();
+        cellFor("2026-06-01").click();
+      }),
+    );
+    cellFor("2026-06-01").click();
+    expect({ native, months }).toEqual({
+      native: ["2026-05", "2026-06"],
+      months: ["2026-05", "2026-06"],
+    });
+  });
+
   it("reports a pick after painting it, and a bound tightened meanwhile after select", async () => {
     await mount({ month: "2026-05", selected: "2026-05-10" });
     input("field").addEventListener(
@@ -2740,7 +3145,11 @@ describe("CalendarController reports of a pick", () => {
 
     expect(reports).toEqual([
       { type: "field:change", detail: "2026-05-20", ...showing("2026-05-20", "2026-05") },
-      { type: "select", detail: { date: "2026-05-20" }, ...showing("2026-05-20", "2026-05") },
+      {
+        type: "select",
+        detail: { date: "2026-05-20", reason: "user" },
+        ...showing("2026-05-20", "2026-05"),
+      },
       { type: "reconcile", detail: { date: "" }, ...showing("", "2026-05") },
     ]);
   });
@@ -2758,7 +3167,11 @@ describe("CalendarController reports of a pick", () => {
     expect(reports).toEqual([
       { type: "field:change", detail: "2026-05-20", ...showing("2026-05-20", "2026-05") },
       { type: "field:change", detail: "2026-05-25", ...showing("2026-05-25", "2026-05") },
-      { type: "select", detail: { date: "2026-05-25" }, ...showing("2026-05-25", "2026-05") },
+      {
+        type: "select",
+        detail: { date: "2026-05-25", reason: "user" },
+        ...showing("2026-05-25", "2026-05"),
+      },
     ]);
   });
 
@@ -2817,7 +3230,7 @@ describe("CalendarController reports of a pick", () => {
       { type: "field:change", detail: "2026-07-03", ...july },
       { type: "monthField:change", detail: "2026-07", ...july },
       { type: "monthchange", detail: { month: "2026-07" }, ...july },
-      { type: "select", detail: { date: "2026-07-03" }, ...july },
+      { type: "select", detail: { date: "2026-07-03", reason: "user" }, ...july },
     ]);
     expect(input("monthField").value).toBe("2026-07");
     // The painted month moved under the focused cell, so focus goes to the tab stop.

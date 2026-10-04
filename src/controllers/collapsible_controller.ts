@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { type StateReason, stateReasonFor } from "../utils/state_reason";
 import { StateRegions } from "../utils/state_regions";
 import { TransitionCompletion } from "../utils/transition_completion";
@@ -57,7 +58,9 @@ export class CollapsibleController extends Controller<HTMLElement> {
   static events = ["close", "open"] as const;
 
   declare readonly triggerTarget: HTMLElement;
+  declare readonly triggerTargets: HTMLElement[];
   declare readonly contentTarget: HTMLElement;
+  declare readonly contentTargets: HTMLElement[];
   declare readonly expandedLabelTargets: HTMLElement[];
   declare readonly collapsedLabelTargets: HTMLElement[];
   declare readonly hasTriggerTarget: boolean;
@@ -65,13 +68,22 @@ export class CollapsibleController extends Controller<HTMLElement> {
 
   declare openValue: boolean;
 
+  /** Owns the `aria-expanded` written on each trigger, so one that departs gets its own back. */
+  readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
+  /** Owns the `hidden` written on each content, so one that departs gets its own back. */
+  readonly #contentHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Owns the `data-state` written on each content, so one that departs gets its own back. */
+  readonly #contentState = new AttributeLease<HTMLElement>("data-state", this.identifier);
   /** Owns the cancellable close-transition wait and its bounded fallback. */
   readonly #transition = new TransitionCompletion();
   /** Owns `hidden` on the trigger's label pair, which follows `aria-expanded`. */
-  readonly #labels = new StateRegions({
-    whenTrue: () => this.expandedLabelTargets,
-    whenFalse: () => this.collapsedLabelTargets,
-  });
+  readonly #labels = new StateRegions(
+    {
+      whenTrue: () => this.expandedLabelTargets,
+      whenFalse: () => this.collapsedLabelTargets,
+    },
+    this.identifier,
+  );
   /** Distinguishes dynamic target churn from the callbacks that precede `connect()`. */
   #connected = false;
   /** Whether state moves are reported: set once `connect()` settled the baseline. */
@@ -86,8 +98,8 @@ export class CollapsibleController extends Controller<HTMLElement> {
    * user opened *or* closed survives a back-navigation, even when the declarative
    * `open` Value disagrees. An already-open region remains open without a
    * close/reopen cycle. The Value only seeds a genuinely fresh render where no
-   * state attribute is present yet; any opening animation in that case belongs to
-   * the consumer's CSS.
+   * state attribute is present yet, and a declaration rewritten after connect moves
+   * nothing; any opening animation in the seeded case belongs to the consumer's CSS.
    */
   override connect(): void {
     this.#connected = true;
@@ -117,10 +129,30 @@ export class CollapsibleController extends Controller<HTMLElement> {
 
   /** Reconciles a replacement trigger target with the content's live state. */
   triggerTargetConnected(trigger: HTMLElement): void {
-    if (!this.#connected) return;
+    if (this.#connected) this.#reconcileTrigger(trigger);
+  }
+
+  /**
+   * Gives a trigger that no longer resolves as one its own values back, even after
+   * `disconnect()` (a dropped identifier leaves it on the page), and while connected
+   * reconciles the trigger that stays. One that still resolves keeps its state.
+   */
+  triggerTargetDisconnected(trigger: HTMLElement): void {
+    if (!this.triggerTargets.includes(trigger)) {
+      this.#expanded.return(trigger);
+      this.#labels.release(trigger);
+    }
+    if (this.#connected && this.hasTriggerTarget) this.#reconcileTrigger(this.triggerTarget);
+  }
+
+  /**
+   * Writes the content's live state onto one trigger and settles its label pair. With
+   * no content target the trigger's own `aria-expanded` is the state.
+   */
+  #reconcileTrigger(trigger: HTMLElement): void {
     if (this.hasContentTarget) {
-      trigger.setAttribute(
-        "aria-expanded",
+      this.#expanded.write(
+        trigger,
         this.contentTarget.getAttribute("data-state") === "open" ? "true" : "false",
       );
     }
@@ -150,15 +182,32 @@ export class CollapsibleController extends Controller<HTMLElement> {
   contentTargetConnected(content: HTMLElement): void {
     if (!this.#connected) return;
     this.#transition.cancel();
+    this.#reconcileContent(content);
+  }
+
+  /**
+   * Cancels a wait tied to a departing content, gives one that no longer resolves its
+   * own values back, even after `disconnect()`, and while connected reconciles the
+   * content that stays.
+   */
+  contentTargetDisconnected(content: HTMLElement): void {
+    this.#transition.cancel();
+    if (!this.contentTargets.includes(content)) {
+      this.#contentHidden.return(content);
+      this.#contentState.return(content);
+    }
+    if (this.#connected && this.hasContentTarget) this.#reconcileContent(this.contentTarget);
+  }
+
+  /**
+   * Reflects the live state onto one content target, closing it without waiting for a
+   * transition. With no trigger target the content's own `data-state` is the state.
+   */
+  #reconcileContent(content: HTMLElement): void {
     const open = this.hasTriggerTarget
       ? this.triggerTarget.getAttribute("aria-expanded") === "true"
       : content.getAttribute("data-state") === "open";
     this.#applyContent(content, open, false);
-  }
-
-  /** Cancels a wait tied to a content target that was removed or replaced. */
-  contentTargetDisconnected(): void {
-    this.#transition.cancel();
   }
 
   /** Toggles the region open/closed. Bound via `data-action` (click). */
@@ -192,7 +241,7 @@ export class CollapsibleController extends Controller<HTMLElement> {
   #apply(open: boolean, waitForCloseTransition: boolean, reason: StateReason): void {
     const was = this.#isOpen;
     if (this.hasTriggerTarget) {
-      this.triggerTarget.setAttribute("aria-expanded", open ? "true" : "false");
+      this.#expanded.write(this.triggerTarget, open ? "true" : "false");
       // The label belongs to `aria-expanded`, so it moves with it rather than with
       // the content's `hidden`, which a close transition defers.
       this.#labels.reflect(this.triggerTarget, open);
@@ -210,22 +259,22 @@ export class CollapsibleController extends Controller<HTMLElement> {
   /** Reflects one content target without relying on a later target lookup. */
   #applyContent(content: HTMLElement, open: boolean, waitForCloseTransition: boolean): void {
     if (open) {
-      content.hidden = false;
+      this.#contentHidden.write(content, null);
       // Measure the natural height only once it is laid out (hidden removed) so
       // the consumer's `height` transition has a concrete target to animate to.
       content.style.setProperty(
         "--stimeo--collapsible-content-height",
         `${content.scrollHeight}px`,
       );
-      content.setAttribute("data-state", "open");
+      this.#contentState.write(content, "open");
       return;
     }
 
-    content.setAttribute("data-state", "closed");
+    this.#contentState.write(content, "closed");
     if (waitForCloseTransition) {
       this.#applyHiddenAfterTransition(content);
     } else {
-      content.hidden = true;
+      this.#contentHidden.write(content, "");
     }
   }
 
@@ -237,7 +286,7 @@ export class CollapsibleController extends Controller<HTMLElement> {
   #applyHiddenAfterTransition(content: HTMLElement): void {
     this.#transition.wait(content, () => {
       if (content.getAttribute("data-state") === "closed") {
-        content.hidden = true;
+        this.#contentHidden.write(content, "");
       }
     });
   }

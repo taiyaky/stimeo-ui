@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReadingProgressController } from "../src/controllers/reading_progress_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -264,18 +264,99 @@ describe("ReadingProgressController", () => {
       expect(rootProp()).toBe("0.9");
     });
 
-    it("returns the property for the cache snapshot and republishes after it", async () => {
+    it.each(["the later", "the earlier"])(
+      "keeps the other instance's live root value when %s one disconnects",
+      async (which) => {
+        document.body.innerHTML = `
+          <main>
+            <article id="a" data-controller="stimeo--reading-progress"><p>A</p></article>
+            <article id="b" data-controller="stimeo--reading-progress"><p>B</p></article>
+          </main>`;
+        const tops = { a: -1000, b: -500 };
+        for (const id of ["a", "b"] as const) {
+          vi.spyOn(
+            document.getElementById(id) as HTMLElement,
+            "getBoundingClientRect",
+          ).mockImplementation(() => ({ top: tops[id], height: 2600, width: 800 }) as DOMRect);
+        }
+        application = Application.start();
+        application.register("stimeo--reading-progress", ReadingProgressController);
+        await tick();
+        flushFrames();
+        // The earlier article publishes first, so the root holds the later one's value.
+        expect(rootProp()).toBe("0.25");
+        const instance = (id: string) =>
+          application.getControllerForElementAndIdentifier(
+            document.getElementById(id) as HTMLElement,
+            "stimeo--reading-progress",
+          ) as ReadingProgressController;
+        const rootRecords = () =>
+          document.documentElement.getAttributeNames().filter((name) => name.endsWith("-lease"));
+
+        instance(which === "the later" ? "b" : "a").disconnect();
+
+        expect(rootProp()).toBe(which === "the later" ? "0.5" : "0.25");
+        expect(rootRecords()).toHaveLength(1);
+        instance(which === "the later" ? "a" : "b").disconnect();
+        expect(rootProp()).toBe("");
+        expect(rootRecords()).toEqual([]);
+      },
+    );
+
+    it("keeps the property through turbo:before-cache, which also fires on a page that stays", async () => {
       await mount();
       scrollTo(-1000);
-      document.dispatchEvent(new Event("turbo:before-cache"));
-      expect(rootProp()).toBe("");
-      expect(el().style.getPropertyValue(PROP)).toBe("");
 
-      // The visit can be cancelled and leave the page on screen: the next
-      // measurement has to publish again rather than sit behind the same-value guard.
-      scrollTo(-1000);
+      document.dispatchEvent(new Event("turbo:before-cache"));
+      flushFrames();
+
       expect(rootProp()).toBe("0.5");
+      expect(el().style.getPropertyValue(PROP)).toBe("0.5");
     });
+
+    it("gives the author's declaration back on a page restored from the cache", async () => {
+      await mount();
+      scrollTo(-1000);
+      application = await restoreFromCache(application, (restored) => {
+        vi.spyOn(el(), "getBoundingClientRect").mockImplementation(
+          () => ({ top: rect.top, height: rect.height, width: rect.width }) as DOMRect,
+        );
+        restored.register("stimeo--reading-progress", ReadingProgressController);
+      });
+      expect(el().style.getPropertyValue(PROP)).toBe("0.5");
+
+      controller()?.disconnect();
+
+      expect(el().style.getPropertyValue(PROP)).toBe("");
+      expect(
+        el()
+          .getAttributeNames()
+          .filter((name) => name.endsWith("-lease")),
+      ).toEqual([]);
+    });
+  });
+
+  it("gives the author's declaration back on a restored page where the article has no box", async () => {
+    await mount();
+    scrollTo(-1000);
+    expect(el().style.getPropertyValue(PROP)).toBe("0.5");
+    application = await restoreFromCache(application, (restored) => {
+      // The restored article sits in a hidden tab: an empty rect, so nothing is measured.
+      vi.spyOn(el(), "getBoundingClientRect").mockImplementation(
+        () => ({ top: 0, height: 0, width: 0 }) as DOMRect,
+      );
+      restored.register("stimeo--reading-progress", ReadingProgressController);
+    });
+    flushFrames();
+
+    controller()?.disconnect();
+
+    expect(el().style.getPropertyValue(PROP)).toBe("");
+    expect(
+      el()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-lease")),
+    ).toEqual([]);
   });
 
   describe("the contract the suite has to hold", () => {

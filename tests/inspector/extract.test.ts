@@ -60,6 +60,17 @@ describe("extract helpers", () => {
     expect(parsed?.identifier).toBeNull();
   });
 
+  it("splits an unknown identifier at the first segment after the prefix", () => {
+    const known = ["stimeo--menu"];
+    expect(parseValueAttr("data-stimeo--menoo-open-now-value", known)).toEqual({
+      identifier: null,
+      valueToken: "open-now",
+    });
+    // With no segment left for a value name, the guessed identifier stands in.
+    expect(parseValueAttr("data-stimeo--menoo-value", known)?.valueToken).toBe("stimeo--menoo");
+    expect(parseValueAttr("data-stimeo--menoo--value", known)?.valueToken).toBe("stimeo--menoo");
+  });
+
   it("returns null for non-value attributes", () => {
     expect(parseValueAttr("data-stimeo--menu-target", ["stimeo--menu"])).toBeNull();
   });
@@ -163,6 +174,14 @@ describe("extract helpers", () => {
     expect(actionDescriptors("keydown->stimeo--menu#activate", { tag: "form" })[0]?.eventType).toBe(
       "keydown",
     );
+  });
+
+  it("skips a token that names no method", () => {
+    // Without `#` a token is no descriptor, so no part of it names a controller.
+    expect(actionDescriptors("click->stimeo--menu stimeo--menu")).toEqual([]);
+    expect(actionIdentifiers("click->stimeo--menu click->stimeo--otp#onInput")).toEqual([
+      "stimeo--otp",
+    ]);
   });
 
   it("leaves the event empty when no host element is given", () => {

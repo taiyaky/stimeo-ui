@@ -18,7 +18,7 @@ import { flushMicrotasks, tick } from "./helpers/timing";
 const item = (label: string, attrs: string, children = "") => `
   <li role="treeitem" ${attrs}
       data-stimeo--tree-view-target="item"
-      data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+      data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#select">
     <span>${label}</span>
     ${children}
   </li>`;
@@ -102,6 +102,37 @@ describe("TreeViewController", () => {
     for (const gone of removed) instance.itemTargetDisconnected(gone);
   };
 
+  it.each(["root", "descendant"])(
+    "restores group visibility from authored expansion after a %s morph",
+    async (origin) => {
+      await mount(markup);
+      const parent = byLabel("src");
+      const group = parent.querySelector<HTMLElement>("[role='group']");
+      if (!group) throw new Error("Expected child group");
+      const toggles = listen("toggle");
+      const reports = listen("reconcile");
+      expect(parent.getAttribute("aria-expanded")).toBe("false");
+      expect(group.hidden).toBe(true);
+      parent.focus();
+      group.hidden = false;
+      const source = origin === "root" ? root() : group;
+      source.dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await tick();
+      expect(group.hidden).toBe(true);
+      expect(parent.getAttribute("aria-expanded")).toBe("false");
+      expect(document.activeElement).toBe(parent);
+      expect(toggles).toEqual([]);
+      expect(reports).toEqual([]);
+      parent.setAttribute("aria-expanded", "true");
+      source.dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await tick();
+      expect(group.hidden).toBe(false);
+      expect(parent.getAttribute("aria-expanded")).toBe("true");
+      expect(toggles).toEqual([]);
+      expect(reports).toEqual([]);
+    },
+  );
+
   describe("navigation and selection", () => {
     beforeEach(async () => {
       await mount(markup);
@@ -137,7 +168,7 @@ describe("TreeViewController", () => {
       key(src, "ArrowRight"); // expand
       expect(src.getAttribute("aria-expanded")).toBe("true");
       expect(byLabel("index.ts").closest<HTMLElement>("[role='group']")?.hidden).toBe(false);
-      expect(toggles).toEqual([{ item: src, expanded: true }]);
+      expect(toggles).toEqual([{ item: src, expanded: true, reason: "user" }]);
     });
 
     it("steps into the first child with ArrowRight when already expanded", () => {
@@ -159,8 +190,8 @@ describe("TreeViewController", () => {
       expect(src.getAttribute("aria-expanded")).toBe("false");
       expect(group.hidden).toBe(true);
       expect(toggles).toEqual([
-        { item: src, expanded: true },
-        { item: src, expanded: false },
+        { item: src, expanded: true, reason: "user" },
+        { item: src, expanded: false, reason: "user" },
       ]);
     });
 
@@ -203,7 +234,10 @@ describe("TreeViewController", () => {
       key(byLabel("readme.md"), "Enter");
       expect(byLabel("src").getAttribute("aria-selected")).toBe("false");
       expect(byLabel("readme.md").getAttribute("aria-selected")).toBe("true");
-      expect(selects).toEqual([{ item: byLabel("src") }, { item: byLabel("readme.md") }]);
+      expect(selects).toEqual([
+        { item: byLabel("src"), reason: "user" },
+        { item: byLabel("readme.md"), reason: "user" },
+      ]);
     });
 
     it("selects an item with Space", () => {
@@ -211,7 +245,7 @@ describe("TreeViewController", () => {
       key(byLabel("src"), "ArrowDown");
       key(byLabel("readme.md"), " ");
       expect(byLabel("readme.md").getAttribute("aria-selected")).toBe("true");
-      expect(selects).toEqual([{ item: byLabel("readme.md") }]);
+      expect(selects).toEqual([{ item: byLabel("readme.md"), reason: "user" }]);
     });
 
     it("selects on click, focuses the item, and makes it the tab stop", () => {
@@ -221,7 +255,7 @@ describe("TreeViewController", () => {
       expect(byLabel("readme.md").tabIndex).toBe(0);
       expect(tabbable()).toHaveLength(1);
       expect(document.activeElement).toBe(byLabel("readme.md"));
-      expect(selects).toEqual([{ item: byLabel("readme.md") }]);
+      expect(selects).toEqual([{ item: byLabel("readme.md"), reason: "user" }]);
     });
 
     it("selects nothing when the click lands on a child group's own box", () => {
@@ -282,6 +316,18 @@ describe("TreeViewController", () => {
       expect(src.getAttribute("aria-expanded")).toBe("false"); // still collapsed
       expect(document.activeElement).toBe(src);
     });
+
+    // Every key the tree acts on is consumed: left alone, an arrow, Home, End or
+    // Space scrolls the page under the tree, and a typeahead character starts the
+    // browser's find-as-you-type.
+    it.each(["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Home", "End", "Enter", " ", "r"])(
+      "consumes the %j key it acts on",
+      (k) => {
+        const src = byLabel("src");
+        src.focus();
+        expect(key(src, k, { cancelable: true })).toBe(false);
+      },
+    );
 
     it("announces the tree and its items", async () => {
       const phrases = await captureSpeech({ container: root(), steps: 2 });
@@ -611,14 +657,14 @@ describe("TreeViewController", () => {
         <li role="none">
           <a href="#one" role="treeitem" aria-selected="false" tabindex="0"
              data-stimeo--tree-view-target="item"
-             data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+             data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#select">
             <span>one</span>
           </a>
         </li>
         <li role="none">
           <a href="#two" role="treeitem" aria-selected="false" tabindex="-1"
              data-stimeo--tree-view-target="item"
-             data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#onClick">
+             data-action="keydown->stimeo--tree-view#onKeydown click->stimeo--tree-view#select">
             <span>two</span>
           </a>
         </li>
@@ -679,8 +725,8 @@ describe("TreeViewController", () => {
       expect(src.getAttribute("aria-expanded")).toBe("false");
       expect(group.hidden).toBe(true);
       expect(toggles).toEqual([
-        { item: src, expanded: true },
-        { item: src, expanded: false },
+        { item: src, expanded: true, reason: "user" },
+        { item: src, expanded: false, reason: "user" },
       ]);
     });
 
@@ -807,6 +853,23 @@ describe("TreeViewController", () => {
       instance.connect();
       expect(byLabel("package.json").tabIndex).toBe(0);
       expect(tabbable()).toHaveLength(1);
+    });
+
+    it("unregisters the focus trackers it registered", () => {
+      const instance = controller();
+      instance.disconnect();
+      const added = vi.spyOn(root(), "addEventListener");
+      const removed = vi.spyOn(root(), "removeEventListener");
+      instance.connect();
+      const onFocusIn = added.mock.calls.find(([type]) => type === "focusin")?.[1];
+      const onFocusOut = added.mock.calls.find(([type]) => type === "focusout")?.[1];
+      expect(onFocusIn).toBeDefined();
+      expect(onFocusOut).toBeDefined();
+
+      instance.disconnect();
+
+      expect(removed).toHaveBeenCalledWith("focusin", onFocusIn);
+      expect(removed).toHaveBeenCalledWith("focusout", onFocusOut);
     });
   });
 
@@ -983,6 +1046,29 @@ describe("TreeViewController", () => {
 
       expect(document.activeElement).toBe(byLabel("charlie"));
       expect(byLabel("charlie").tabIndex).toBe(0);
+      expect(tabbable()).toHaveLength(1);
+    });
+
+    it("recovers into the neighbour of a removed item that was added after connect", async () => {
+      await mount(
+        tree(`
+          ${item("alpha", 'aria-selected="false" tabindex="0"')}
+          ${item("bravo", 'aria-selected="false" tabindex="-1"')}`),
+      );
+      root().insertAdjacentHTML(
+        "beforeend",
+        item("charlie", 'aria-selected="false" tabindex="-1"'),
+      );
+      controller().itemTargetConnected();
+      const alpha = byLabel("alpha");
+      alpha.focus();
+      key(alpha, "End"); // charlie holds focus and the tab stop
+      expect(document.activeElement).toBe(byLabel("charlie"));
+
+      removeItem(byLabel("charlie"));
+
+      expect(document.activeElement).toBe(byLabel("bravo"));
+      expect(byLabel("bravo").tabIndex).toBe(0);
       expect(tabbable()).toHaveLength(1);
     });
 
@@ -1626,6 +1712,59 @@ describe("TreeViewController", () => {
       expect(seen).toEqual([]);
     });
 
+    it("seeds a field added after connect without reporting", async () => {
+      await mount(flat(["a", "b"], "b"));
+      field().remove();
+      await tick();
+      const seen = record();
+
+      // Only the field arrives, so its own callback alone brings the pass.
+      const late = document.createElement("input");
+      late.type = "hidden";
+      late.name = "path";
+      late.setAttribute("data-stimeo--tree-view-target", "field");
+      root().prepend(late);
+      controller().fieldTargetConnected();
+      await tick();
+
+      expect(late.value).toBe("b");
+      expect(seen).toEqual([]);
+    });
+
+    it("reflects the selection into a field that stays after an earlier one leaves", async () => {
+      await mount(flat(["a", "b"], "b"));
+      const seen = record();
+      const original = field();
+      const successor = original.cloneNode() as HTMLInputElement;
+      successor.value = "";
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(field()).toBe(successor);
+      expect(successor.value).toBe("b");
+      // The field that stays is brought to the selection silently.
+      expect(seen).toEqual([]);
+    });
+
+    it("keeps selecting when the sole field leaves", async () => {
+      await mount(flat(["a", "b"], "b"));
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        field().remove();
+        await tick();
+        expect(() => controller().fieldTargetDisconnected()).not.toThrow();
+        await tick();
+        expect(errors).not.toHaveBeenCalled();
+      } finally {
+        errors.mockRestore();
+      }
+
+      controller().select(items()[0] as HTMLElement);
+      expect(selectedValues()).toEqual(["a"]);
+    });
+
     it("reports nothing on connect, whatever the authored selection", async () => {
       document.body.innerHTML = flat(["a", "b"], null).replace(
         'data-value="b" aria-selected="false"',
@@ -1877,5 +2016,592 @@ describe("TreeViewController typeahead naming", () => {
 
     expect(document.activeElement).toBe(child);
     expect(document.activeElement).not.toBe(parent);
+  });
+});
+
+/** Verifies settled-state comparisons and synchronous nested commits. */
+describe("TreeViewController settled reports", () => {
+  let application: Application;
+  const root = () =>
+    document.querySelector<HTMLElement>('[data-controller="stimeo--tree-view"]') as HTMLElement;
+  const items = () =>
+    Array.from(root().querySelectorAll<HTMLElement>('[data-stimeo--tree-view-target="item"]'));
+  const act = (index: number) => {
+    items()[index]?.click();
+  };
+  const write = (index: number) => {
+    items().forEach((item, position) => {
+      item.setAttribute("aria-selected", String(position === index));
+    });
+  };
+  const submitted = () =>
+    Array.from(root().querySelectorAll<HTMLInputElement>("input"))
+      .map((field) => field.value)
+      .join(",");
+  const record = () => {
+    const seen: string[] = [];
+    for (const name of ["select", "reconcile"])
+      root().addEventListener(`stimeo--tree-view:${name}`, (event) => {
+        const detail = (event as CustomEvent<{ item: HTMLElement | null }>).detail;
+        seen.push(`${name}:${detail.item?.dataset.value ?? ""}`);
+      });
+    return seen;
+  };
+  beforeEach(async () => {
+    document.body.innerHTML = `<div role="tree" data-controller="stimeo--tree-view"><li role="treeitem" aria-selected="true" tabindex="0" data-value="a" data-stimeo--tree-view-target="item" data-action="click->stimeo--tree-view#select">a</li><li role="treeitem" aria-selected="false" tabindex="-1" data-value="b" data-stimeo--tree-view-target="item" data-action="click->stimeo--tree-view#select">b</li><li role="treeitem" aria-selected="false" tabindex="-1" data-value="c" data-stimeo--tree-view-target="item" data-action="click->stimeo--tree-view#select">c</li><input type="hidden" data-stimeo--tree-view-target="field"></div>`;
+    application = Application.start();
+    application.register("stimeo--tree-view", TreeViewController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+  it("leaves composing arrows and activation untouched", () => {
+    const first = items()[0] as HTMLElement;
+    first.focus();
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--tree-view",
+    ) as TreeViewController;
+    first.addEventListener("keydown", (event) => instance.onKeydown(event));
+    first.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(first);
+  });
+  it("leaves descendants of a native control to that control", () => {
+    const seen = record();
+    const second = items()[1] as HTMLElement;
+    second.insertAdjacentHTML("beforeend", "<button><span>Nested action</span></button>");
+    second.querySelector("span")?.click();
+    expect(seen).toEqual([]);
+    expect(submitted()).toBe("a");
+  });
+  it("leaves an inherited editing surface to the editor", () => {
+    const seen = record();
+    root().setAttribute("contenteditable", "true");
+    act(1);
+    expect(seen).toEqual([]);
+    expect(submitted()).toBe("a");
+  });
+  it("ignores a toggle whose target is outside this tree", () => {
+    const outside = document.createElement("div");
+    outside.setAttribute("role", "treeitem");
+    outside.setAttribute("aria-expanded", "false");
+    outside.innerHTML = '<div role="group" hidden></div>';
+    document.body.append(outside);
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--tree-view",
+    ) as TreeViewController;
+    outside.addEventListener("click", (event) => instance.toggle(event));
+    outside.click();
+    expect(outside.getAttribute("aria-expanded")).toBe("false");
+  });
+  it("ignores focus leaving the root outside any row", async () => {
+    root().tabIndex = -1;
+    root().focus();
+    const external = document.createElement("button");
+    document.body.append(external);
+    external.focus();
+    await tick();
+    expect(document.activeElement).toBe(external);
+  });
+  it("preserves focus in an external row when an owned row disappears", async () => {
+    const element = root();
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--tree-view",
+    ) as TreeViewController;
+    instance.disconnect();
+    const outside = document.createElement("div");
+    outside.setAttribute("role", "treeitem");
+    outside.tabIndex = 0;
+    document.body.append(outside);
+    outside.focus();
+    instance.connect();
+    items()[0]?.remove();
+    await tick();
+    expect(document.activeElement).toBe(outside);
+  });
+  it("does not normalize a target callback after disconnect", () => {
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--tree-view",
+    ) as TreeViewController;
+    instance.disconnect();
+    items().forEach((item) => {
+      item.tabIndex = 0;
+    });
+    instance.itemTargetConnected();
+    expect(items().map((item) => item.tabIndex)).toEqual([0, 0, 0]);
+  });
+  it("forgets focus lost with the final row before that node is reused", async () => {
+    const first = items()[0] as HTMLElement;
+    const second = items()[1] as HTMLElement;
+    for (const item of items().slice(1)) item.remove();
+    await tick();
+    first.focus();
+    first.remove();
+    await tick();
+    root().append(first, second);
+    await tick();
+    first.remove();
+    await tick();
+    expect(document.activeElement).toBe(document.body);
+  });
+  it("retains the focused row while focus moves into its nested control", async () => {
+    const first = items()[0] as HTMLElement;
+    const second = items()[1] as HTMLElement;
+    first.insertAdjacentHTML("beforeend", "<button>Nested</button>");
+    first.focus();
+    first.querySelector("button")?.focus();
+    await tick();
+    first.remove();
+    await tick();
+    expect(document.activeElement).toBe(second);
+  });
+  it("does not relocate a tab stop outside a collapsed group before toggle delivery", () => {
+    const first = items()[0] as HTMLElement;
+    const second = items()[1] as HTMLElement;
+    first.setAttribute("aria-expanded", "true");
+    first.insertAdjacentHTML(
+      "beforeend",
+      '<div role="group"><div role="treeitem">Child</div></div>',
+    );
+    second.focus();
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--tree-view",
+    ) as TreeViewController;
+    second.addEventListener("keydown", (event) => instance.onKeydown(event));
+    second.dispatchEvent(new KeyboardEvent("keydown", { key: "Home" }));
+    second.dispatchEvent(new KeyboardEvent("keydown", { key: "End" }));
+    const last = items()[2] as HTMLElement;
+    const external = document.createElement("button");
+    document.body.append(external);
+    external.focus();
+    const observed: number[] = [];
+    root().addEventListener("stimeo--tree-view:toggle", () => observed.push(last.tabIndex));
+    first.addEventListener("dblclick", (event) => instance.toggle(event));
+    first.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    expect(observed).toEqual([0]);
+  });
+  it("does not create expanded state when a leaf receives the child arrow", () => {
+    const second = items()[1] as HTMLElement;
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--tree-view",
+    ) as TreeViewController;
+    second.addEventListener("keydown", (event) => instance.onKeydown(event));
+    second.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(second.hasAttribute("aria-expanded")).toBe(false);
+  });
+  it("does not enter a child group the page explicitly hides", () => {
+    const first = items()[0] as HTMLElement;
+    first.setAttribute("aria-expanded", "true");
+    first.insertAdjacentHTML(
+      "beforeend",
+      '<div role="group" hidden><div role="treeitem" data-stimeo--tree-view-target="item" tabindex="-1">Child</div></div>',
+    );
+    first.focus();
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--tree-view",
+    ) as TreeViewController;
+    first.addEventListener("keydown", (event) => instance.onKeydown(event));
+    first.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(document.activeElement).toBe(first);
+    expect(first.tabIndex).toBe(0);
+  });
+  it("includes an undelivered page write in the user's settled change", async () => {
+    const seen = record();
+    write(1);
+    act(1);
+    await tick();
+    expect(seen).toEqual(["select:b"]);
+    expect(submitted()).toBe("b");
+  });
+  it("publishes nothing when the action returns to the last settled selection", async () => {
+    const seen = record();
+    let native = 0;
+    root().addEventListener("change", () => {
+      native += 1;
+    });
+    write(1);
+    act(0);
+    await tick();
+    expect(seen).toEqual([]);
+    expect(native).toBe(0);
+    expect(submitted()).toBe("a");
+  });
+  it("mirrors a replacement field before an unchanged selection returns", async () => {
+    const seen = record();
+    const field = root().querySelector('[data-stimeo--tree-view-target="field"]');
+    const replacement = document.createElement("input");
+    replacement.type = "hidden";
+    replacement.setAttribute("data-stimeo--tree-view-target", "field");
+    field?.replaceWith(replacement);
+    let native = 0;
+    replacement.addEventListener("change", () => {
+      native += 1;
+    });
+    write(1);
+    act(0);
+    expect(replacement.value).toBe("a");
+    expect(native).toBe(0);
+    expect(seen).toEqual([]);
+    await tick();
+    expect(submitted()).toBe("a");
+    expect(native).toBe(0);
+    expect(seen).toEqual([]);
+  });
+  it("drops the outer report after a native subscriber commits a newer selection", async () => {
+    const seen = record();
+    let spent = false;
+    root().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      act(2);
+    });
+    act(1);
+    await tick();
+    expect(seen).toEqual(["select:c"]);
+    expect(submitted()).toBe("c");
+  });
+  it("keeps the outer report when a native subscriber only reads the selection", async () => {
+    const seen = record();
+    const reads: string[] = [];
+    root().addEventListener("change", () => reads.push(submitted()));
+    act(1);
+    await tick();
+    expect(reads).toEqual(["b"]);
+    expect(seen).toEqual(["select:b"]);
+  });
+  it("keeps the outer report when a native subscriber confirms the same selection", async () => {
+    const seen = record();
+    let spent = false;
+    root().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      act(1);
+    });
+    act(1);
+    await tick();
+    expect(seen).toEqual(["select:b"]);
+    expect(submitted()).toBe("b");
+  });
+});
+
+/** Explicit target calls share the DOM action while retaining their own provenance. */
+describe("TreeViewController target API", () => {
+  let application: Application;
+  const element = (id: string): HTMLElement => {
+    const found = document.getElementById(id);
+    if (!found) throw new Error(`Missing API fixture ${id}`);
+    return found;
+  };
+  const instance = (): TreeViewController =>
+    application.getControllerForElementAndIdentifier(
+      element("api-root"),
+      "stimeo--tree-view",
+    ) as TreeViewController;
+  beforeEach(async () => {
+    document.body.innerHTML = `<button id="api-outside">Outside</button><div id="api-root" data-controller="stimeo--tree-view" role="tree"><div id="api-a" data-stimeo--tree-view-target="item" role="treeitem" tabindex="-1" aria-selected="false" data-action="click->stimeo--tree-view#select"><span>a</span></div><div id="api-b" data-stimeo--tree-view-target="item" role="treeitem" tabindex="-1" aria-selected="false" data-action="click->stimeo--tree-view#select"><span>b</span></div><input type="hidden" data-stimeo--tree-view-target="field"></div>`;
+    application = Application.start();
+    application.register("stimeo--tree-view", TreeViewController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it("retains the existing DOM Event success as a positive control", () => {
+    const reports: Array<{ reason?: string }> = [];
+    element("api-root").addEventListener("stimeo--tree-view:select", (event) => {
+      reports.push((event as CustomEvent<{ reason?: string }>).detail);
+    });
+    element("api-b").click();
+    expect(element("api-b").getAttribute("aria-selected")).toBe("true");
+    expect(reports).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    "accepts an owned target or its descendant (%s) after an Event positive control",
+    (descendant) => {
+      const reports: Array<{ reason?: string }> = [];
+      element("api-root").addEventListener("stimeo--tree-view:select", (event) => {
+        reports.push((event as CustomEvent<{ reason?: string }>).detail);
+      });
+      element("api-b").click();
+      expect(element("api-b").getAttribute("aria-selected")).toBe("true");
+      expect(reports).toHaveLength(1);
+      element("api-outside").focus();
+      const target = descendant ? element("api-a").querySelector("span") : element("api-a");
+      if (!(target instanceof HTMLElement)) throw new Error("Missing API descendant");
+      instance().select(target);
+      expect(element("api-a").getAttribute("aria-selected")).toBe("true");
+      expect(document.activeElement).toBe(element("api-outside"));
+      expect(reports.at(-1)?.reason).toBe("api");
+      expect(reports[0]?.reason).toBe("user");
+    },
+  );
+  it.each(["foreign", "undeclared", "detached", "nested"])(
+    "rejects %s targets through element and Event entry points before accepting an owned target",
+    (kind) => {
+      const reports: unknown[] = [];
+      element("api-root").addEventListener("stimeo--tree-view:select", (event) => {
+        reports.push((event as CustomEvent<unknown>).detail);
+      });
+      const invalid = element("api-b").cloneNode(true);
+      if (!(invalid instanceof HTMLElement)) throw new Error("Missing cloned target");
+      invalid.id = "api-invalid";
+      invalid.removeAttribute("data-action");
+      if (kind === "foreign") document.body.append(invalid);
+      if (kind === "undeclared") {
+        invalid.removeAttribute("data-stimeo--tree-view-target");
+        element("api-root").append(invalid);
+      }
+      if (kind === "nested") {
+        const nested = document.createElement("div");
+        nested.setAttribute("data-controller", "stimeo--tree-view");
+        nested.append(invalid);
+        element("api-a").append(nested);
+      }
+      element("api-outside").focus();
+      const before = element("api-root").innerHTML;
+      instance().select(invalid);
+      invalid.addEventListener("probe", (event) => instance().select(event));
+      invalid.dispatchEvent(new Event("probe"));
+      expect(element("api-root").innerHTML).toBe(before);
+      expect(reports).toEqual([]);
+      expect(document.activeElement).toBe(element("api-outside"));
+      instance().select(element("api-b"));
+      expect(element("api-b").getAttribute("aria-selected")).toBe("true");
+      expect(reports).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+    ["click", "user"],
+  ])("retains %s Event provenance for an action bound on a target descendant", (type, reason) => {
+    const reports: Array<{ reason: string }> = [];
+    element("api-root").addEventListener("stimeo--tree-view:select", (event) => {
+      reports.push((event as CustomEvent<{ reason: string }>).detail);
+    });
+    const child = element("api-b").querySelector("span");
+    if (!(child instanceof HTMLElement)) throw new Error("Missing action descendant");
+    child.addEventListener(type, (event) => instance().select(event));
+    child.dispatchEvent(new Event(type));
+    expect(element("api-b").getAttribute("aria-selected")).toBe("true");
+    expect(reports.map((detail) => detail.reason)).toEqual([reason]);
+  });
+
+  it.each([false, true])(
+    "selects through API with conditional focus and an updated tab stop (%s)",
+    (inside) => {
+      (inside ? element("api-a") : element("api-outside")).focus();
+      instance().select(element("api-b"));
+      expect(document.activeElement).toBe(inside ? element("api-b") : element("api-outside"));
+      expect(element("api-b").tabIndex).toBe(0);
+      expect(element("api-a").tabIndex).toBe(-1);
+    },
+  );
+
+  it.each(["control", "group"])(
+    "leaves %s clicks to the nested gesture but accepts its explicit API descendant",
+    (kind) => {
+      const descendant = document.createElement(kind === "control" ? "button" : "div");
+      if (kind === "group") descendant.setAttribute("role", "group");
+      element("api-b").append(descendant);
+      const reports: Array<{ reason: string }> = [];
+      element("api-root").addEventListener("stimeo--tree-view:select", (event) => {
+        reports.push((event as CustomEvent<{ reason: string }>).detail);
+      });
+      descendant.click();
+      expect(element("api-b").getAttribute("aria-selected")).toBe("false");
+      expect(reports).toEqual([]);
+      instance().select(descendant);
+      expect(element("api-b").getAttribute("aria-selected")).toBe("true");
+      expect(reports.map((detail) => detail.reason)).toEqual(["api"]);
+    },
+  );
+
+  it.each([false, true])(
+    "toggles an owned parent descendant and preserves external focus (%s)",
+    (inside) => {
+      const group = document.createElement("div");
+      group.setAttribute("role", "group");
+      group.hidden = true;
+      element("api-b").append(group);
+      element("api-b").setAttribute("aria-expanded", "false");
+      const reports: Array<{ item: HTMLElement; expanded: boolean; reason: string }> = [];
+      element("api-root").addEventListener("stimeo--tree-view:toggle", (event) => {
+        reports.push(
+          (event as CustomEvent<{ item: HTMLElement; expanded: boolean; reason: string }>).detail,
+        );
+      });
+      (inside ? element("api-a") : element("api-outside")).focus();
+      instance().toggle(group);
+      expect(group.hidden).toBe(false);
+      expect(reports).toEqual([{ item: element("api-b"), expanded: true, reason: "api" }]);
+      expect(document.activeElement).toBe(inside ? element("api-b") : element("api-outside"));
+      expect(element("api-b").tabIndex).toBe(0);
+    },
+  );
+
+  it("rejects a nested origin even when the Event handler belongs to an owned outer target", () => {
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--tree-view");
+    const child = document.createElement("span");
+    child.setAttribute("data-stimeo--tree-view-target", "item");
+    nested.append(child);
+    element("api-b").append(nested);
+    const reports = vi.fn();
+    element("api-root").addEventListener("stimeo--tree-view:select", reports);
+    const before = element("api-root").innerHTML;
+    element("api-b").addEventListener("probe", (event) => instance().select(event));
+    child.dispatchEvent(new Event("probe", { bubbles: true }));
+    expect(element("api-root").innerHTML).toBe(before);
+    expect(reports).not.toHaveBeenCalled();
+    instance().select(element("api-b"));
+    expect(reports).toHaveBeenCalledOnce();
+  });
+  it("keeps native field publication ahead of a reentrant API report and discards the replaced outer report", async () => {
+    element("api-a").setAttribute("data-value", "a");
+    element("api-b").setAttribute("data-value", "b");
+    const seen: string[] = [];
+    const submitted = (): string =>
+      element("api-root").querySelector<HTMLInputElement>("input")?.value ?? "";
+    let reentered = false;
+    element("api-root").addEventListener("change", () => {
+      seen.push(`native:${submitted()}`);
+      if (reentered) return;
+      reentered = true;
+      instance().select(element("api-a"));
+    });
+    element("api-root").addEventListener("stimeo--tree-view:select", (event) => {
+      const detail = (event as CustomEvent<{ reason: string }>).detail;
+      seen.push(`${detail.reason}:${submitted()}`);
+    });
+    element("api-b").click();
+    await tick();
+    expect(seen).toEqual(["native:b", "native:a", "api:a"]);
+    expect(submitted()).toBe("a");
+  });
+  it.each([
+    ["api", "inside", "unchanged"],
+    ["api", "inside", "outside"],
+    ["event", "inside", "outside"],
+    ["api", "outside", "inside"],
+  ] as const)(
+    "rechecks synchronous toggle subscriber focus for %s from %s to %s",
+    (source, initial, destination) => {
+      const group = document.createElement("div");
+      group.setAttribute("role", "group");
+      group.hidden = true;
+      const parent = element("api-b");
+      parent.append(group);
+      parent.setAttribute("aria-expanded", "false");
+      const first = element("api-a");
+      const outside = element("api-outside");
+      (initial === "inside" ? first : outside).focus();
+      const reasons: string[] = [];
+      element("api-root").addEventListener("stimeo--tree-view:toggle", (event) => {
+        reasons.push((event as CustomEvent<{ reason: string }>).detail.reason);
+        if (destination === "outside") outside.focus();
+        if (destination === "inside") first.focus();
+      });
+      if (source === "api") instance().toggle(parent);
+      else {
+        parent.addEventListener("probe", (event) => instance().toggle(event));
+        parent.dispatchEvent(new Event("probe"));
+      }
+      const expected =
+        source === "event" || destination === "unchanged"
+          ? parent
+          : destination === "outside"
+            ? outside
+            : first;
+      expect(document.activeElement).toBe(expected);
+      expect(group.hidden).toBe(false);
+      expect(parent.getAttribute("aria-expanded")).toBe("true");
+      expect(parent.tabIndex).toBe(0);
+      expect(first.tabIndex).toBe(-1);
+      expect(reasons).toEqual([source === "api" ? "api" : "user"]);
+    },
+  );
+  it("ignores toggling an undeclared host before accepting an owned parent", () => {
+    const group = document.createElement("div");
+    group.setAttribute("role", "group");
+    group.hidden = true;
+    element("api-b").append(group);
+    element("api-b").setAttribute("aria-expanded", "false");
+    const reports = vi.fn();
+    element("api-root").addEventListener("stimeo--tree-view:toggle", reports);
+    expect(() => instance().toggle(element("api-root"))).not.toThrow();
+    expect(group.hidden).toBe(true);
+    expect(reports).not.toHaveBeenCalled();
+    instance().toggle(element("api-b"));
+    expect(group.hidden).toBe(false);
+    expect(reports).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an unmarked toggle inside a nested scope before accepting the owned parent", () => {
+    const group = document.createElement("div");
+    group.setAttribute("role", "group");
+    group.hidden = true;
+    element("api-b").append(group);
+    element("api-b").setAttribute("aria-expanded", "false");
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--tree-view");
+    const child = document.createElement("span");
+    nested.append(child);
+    element("api-b").append(nested);
+    const reports = vi.fn();
+    element("api-root").addEventListener("stimeo--tree-view:toggle", reports);
+    instance().toggle(child);
+    expect(group.hidden).toBe(true);
+    expect(reports).not.toHaveBeenCalled();
+    instance().toggle(element("api-b"));
+    expect(group.hidden).toBe(false);
+    expect(reports).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a text-node keyboard origin untouched while an element origin navigates", () => {
+    const owned = element("api-a");
+    const text = document.createTextNode("Text action origin");
+    owned.append(text);
+    const errors: unknown[] = [];
+    const targets: Array<EventTarget | null> = [];
+    owned.addEventListener("keydown", (event) => {
+      targets.push(event.target);
+      try {
+        instance().onKeydown(event);
+      } catch (error) {
+        errors.push(error);
+      }
+    });
+    owned.focus();
+    const rejected = new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true });
+    text.dispatchEvent(rejected);
+    expect(targets).toEqual([text]);
+    expect(errors).toEqual([]);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(owned);
+    const accepted = new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true });
+    owned.dispatchEvent(accepted);
+    expect(errors).toEqual([]);
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(element("api-b"));
   });
 });

@@ -1,5 +1,4 @@
 import { Controller } from "@hotwired/stimulus";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { FrameCoalescer } from "../utils/frame_coalescer";
 import { LayoutObserver } from "../utils/layout_observer";
 import { StylePropertyLease } from "../utils/style_property_lease";
@@ -48,16 +47,15 @@ const PROGRESS_PROPERTY = "--stimeo--reading-progress";
  * viewport, so content that settles late (images, fonts) re-measures instead of
  * leaving a stale span. Scroll and layout work is rAF-throttled; the listeners,
  * the observers, any pending frame and both leased declarations are released on
- * `disconnect()` and returned again for a `turbo:before-cache` snapshot.
+ * `disconnect()`.
  */
 export class ReadingProgressController extends Controller<HTMLElement> {
   static events = ["change", "complete"] as const;
 
   /** Owns both faces of the published property so teardown can hand them back. */
-  readonly #lease = new StylePropertyLease(PROGRESS_PROPERTY);
+  readonly #lease = new StylePropertyLease(PROGRESS_PROPERTY, this.identifier);
   /** The article's own box and the viewport: either changes the span. */
   readonly #layout = new LayoutObserver(() => this.#onScroll());
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   /** Coalesces scroll bursts, and the connect baseline, into one frame. */
   readonly #frames = new FrameCoalescer();
   /** Last published progress, so `change`/`complete` fire only on movement. */
@@ -76,7 +74,6 @@ export class ReadingProgressController extends Controller<HTMLElement> {
     window.addEventListener("scroll", this.#onScroll, { passive: true, capture: true });
     this.#layout.observe(this.element);
     this.#layout.observeViewport();
-    this.#beforeCache.activate();
     this.#measure();
     // The page's scroll position is restored *after* the controller connects,
     // so that jump arrives as a move the reader never made. Everything up to
@@ -91,22 +88,9 @@ export class ReadingProgressController extends Controller<HTMLElement> {
   override disconnect(): void {
     window.removeEventListener("scroll", this.#onScroll, { capture: true });
     this.#layout.disconnect();
-    this.#beforeCache.deactivate();
     this.#frames.cancel();
-    this.#lease.returnAll();
-  }
-
-  /**
-   * Hands both declarations back before the page is snapshotted, so a restored
-   * page starts from the authored DOM rather than from someone else's progress.
-   * The baseline goes back with them: a cancelled visit leaves this page on
-   * screen, and the next measurement has to publish afresh rather than match a
-   * value that has already been handed back.
-   */
-  #rewindForCache(): void {
-    this.#frames.cancel();
-    this.#lease.returnAll();
-    this.#progress = -1;
+    this.#lease.return(this.element);
+    this.#lease.return(document.documentElement);
   }
 
   /** Computes and publishes the progress; emits on movement only. */

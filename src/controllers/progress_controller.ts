@@ -1,7 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { toFiniteNumber } from "../utils/coerce";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { rangeFraction } from "../utils/range";
 
 /**
@@ -50,6 +52,9 @@ const OWNED_VALUE_TEXT = "owns-valuetext";
  * `data-state="indeterminate"`.
  */
 export class ProgressController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   /** The marker above, in the namespace this controller is registered under. */
   get #ownedValueText(): string {
     return `data-${this.identifier}-${OWNED_VALUE_TEXT}`;
@@ -64,6 +69,12 @@ export class ProgressController extends Controller<HTMLElement> {
     valueText: { type: String, default: "" },
     announceText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    value: NUMBER_BOUNDS.finite,
+    min: NUMBER_BOUNDS.finite,
+    max: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof ProgressController.values>;
   static actions = ["setValue"] as const;
   static events = ["change", "complete"] as const;
 
@@ -82,18 +93,18 @@ export class ProgressController extends Controller<HTMLElement> {
    * A single update usually rewrites the whole set, and each Value would otherwise
    * repaint on its own.
    */
-  readonly #repaint = new MicrotaskCoalescer(() => {
+  readonly #repaint = new MorphRenderWatcher(() => {
     this.#render();
   });
 
   override connect(): void {
-    this.#repaint.activate();
+    this.#repaint.observe(this.element);
     this.#render();
   }
 
   /** Closes the window in which a queued repaint may still run. */
   override disconnect(): void {
-    this.#repaint.cancel();
+    this.#repaint.disconnect();
   }
 
   /**
@@ -109,7 +120,7 @@ export class ProgressController extends Controller<HTMLElement> {
     this.indeterminateValue = false;
     this.#render();
     this.dispatch("change", { detail: { value, ratio: this.#ratio } });
-    if (value >= this.maxValue) {
+    if (value >= this.#safeMax) {
       this.dispatch("complete", { detail: { value } });
       // Reaching the end is the transition worth reading out; the running numbers in
       // between are state the consumer can see, not news.
@@ -146,12 +157,12 @@ export class ProgressController extends Controller<HTMLElement> {
 
   /** Clamps `raw` into the configured `[min, max]` range. */
   #clamp(raw: number): number {
-    return Math.min(this.maxValue, Math.max(this.minValue, raw));
+    return Math.min(this.#safeMax, Math.max(this.#safeMin, raw));
   }
 
   /** Current fraction of the range in `[0, 1]`; `0` when the range is empty. */
   get #ratio(): number {
-    return rangeFraction(this.valueValue, this.minValue, this.maxValue);
+    return rangeFraction(this.#safeValue, this.#safeMin, this.#safeMax);
   }
 
   /**
@@ -160,8 +171,8 @@ export class ProgressController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #render(): void {
-    this.element.setAttribute("aria-valuemin", String(this.minValue));
-    this.element.setAttribute("aria-valuemax", String(this.maxValue));
+    this.element.setAttribute("aria-valuemin", String(this.#safeMin));
+    this.element.setAttribute("aria-valuemax", String(this.#safeMax));
 
     if (this.indeterminateValue) {
       this.element.removeAttribute("aria-valuenow");
@@ -174,7 +185,7 @@ export class ProgressController extends Controller<HTMLElement> {
       return;
     }
 
-    const value = this.#clamp(this.valueValue);
+    const value = this.#clamp(this.#safeValue);
     this.element.setAttribute("aria-valuenow", String(value));
     this.element.style.setProperty("--stimeo--progress-ratio", String(this.#ratio));
     this.element.setAttribute("data-state", "determinate");
@@ -206,5 +217,37 @@ export class ProgressController extends Controller<HTMLElement> {
     if (!this.element.hasAttribute(this.#ownedValueText)) return;
     this.element.removeAttribute("aria-valuetext");
     this.element.removeAttribute(this.#ownedValueText);
+  }
+  /** Current `value` declaration resolved against its numeric contract. */
+  get #safeValue(): number {
+    return this.#numbers.read(
+      this,
+      "value",
+      this.valueValue,
+      ProgressController.values.value.default,
+      ProgressController.valueConstraints.value,
+    );
+  }
+
+  /** Current `min` declaration resolved against its numeric contract. */
+  get #safeMin(): number {
+    return this.#numbers.read(
+      this,
+      "min",
+      this.minValue,
+      ProgressController.values.min.default,
+      ProgressController.valueConstraints.min,
+    );
+  }
+
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      ProgressController.values.max.default,
+      ProgressController.valueConstraints.max,
+    );
   }
 }

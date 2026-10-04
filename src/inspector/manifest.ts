@@ -1,6 +1,7 @@
 import { cableControllers } from "../cable";
 import { stimeoControllers } from "../index";
 import { positioningControllers } from "../positioning";
+import type { NumberBounds } from "../utils/number_bounds";
 import { a11yRules } from "./a11y_rules";
 import { actionParamRules } from "./action_param_rules";
 import { cardinalityRules } from "./cardinality_rules";
@@ -21,7 +22,7 @@ import { valueRelationRules } from "./value_relation_rules";
  * `schemaVersion`. Bump on breaking schema changes; a reader compares it with
  * the shape its own engine knows how to consume.
  */
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 /**
  * Minimal structural view of a Stimulus controller class, exposing only the
@@ -29,6 +30,7 @@ export const SCHEMA_VERSION = 14;
  * instantiation and no DOM.
  */
 interface ReflectableController {
+  readonly valueConstraints?: Readonly<Record<string, NumberBounds>>;
   readonly targets?: readonly string[];
   readonly values?: Readonly<Record<string, unknown>>;
   readonly actions?: readonly string[];
@@ -85,7 +87,16 @@ export function buildManifest(packageVersion: string): Manifest {
     controllers[identifier] = {
       targets: [...(reflect.targets ?? [])],
       values: Object.keys(reflect.values ?? {}),
-      valueConstraints: [...(valueConstraintRules[identifier] ?? [])],
+      valueConstraints: [
+        ...(valueConstraintRules[identifier] ?? []),
+        ...Object.entries(reflect.valueConstraints ?? {}).map(([value, bounds]) => ({
+          ...bounds,
+          finite: !bounds.allowInfinity,
+          value,
+          type: "number" as const,
+          suggestion: `Set ${value} to ${describeNumberBounds(bounds)}.`,
+        })),
+      ],
       valueSyntaxConstraints: [...(valueSyntaxConstraintRules[identifier] ?? [])],
       valueRelations: [...(valueRelationRules[identifier] ?? [])],
       actionParams: [...(allActionParamRules[identifier] ?? [])],
@@ -113,4 +124,16 @@ export function buildManifest(packageVersion: string): Manifest {
     packageVersion,
     controllers,
   };
+}
+
+/** Words the numeric domain reflected from the controller's runtime contract. */
+function describeNumberBounds(bounds: NumberBounds): string {
+  const parts = ["a finite number"];
+  if (bounds.exclusiveMin !== undefined) parts.push(`greater than ${bounds.exclusiveMin}`);
+  if (bounds.min !== undefined) parts.push(`at least ${bounds.min}`);
+  if (bounds.max !== undefined) parts.push(`at most ${bounds.max}`);
+  if (bounds.integer) parts.push("with no fractional part");
+  if (bounds.allowedValues) parts.push(`among ${bounds.allowedValues.join(", ")}`);
+  if (bounds.allowInfinity) parts.push(`or ${bounds.allowInfinity} infinity`);
+  return parts.join(" ");
 }

@@ -1,7 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce } from "../utils/announce";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { setDefaultAttribute } from "../utils/default_attribute";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -38,7 +40,7 @@ const TRANSIENT_STATES = new Set(["copied", "error"]);
  *
  * Values: `text` (copy this instead of reading `source`), `feedbackDuration` (ms the
  * completion state is held; `0` or less arms no timer, so it stands until the next
- * copy — a reconnect and the before-cache rewind still clear it), `copiedLabel` /
+ * copy — a reconnect still clears it), `copiedLabel` /
  * `errorLabel` (what the visible slot shows), `announceCopiedText` /
  * `announceErrorText` (what assistive tech hears; empty announces nothing).
  *
@@ -53,10 +55,13 @@ const TRANSIENT_STATES = new Set(["copied", "error"]);
  * well would say everything twice.
  *
  * `copied` and `error` are transient: the timer that clears them belongs to one
- * connection, so a fresh `connect()` that finds either — a restored snapshot, an
- * in-page move — returns to `idle`, and the state is rewound before Turbo caches
- * the page (`BeforeCacheReset`). The rewind is silent: it discards nothing a
- * reconnect does not derive again.
+ * connection, so a fresh `connect()` that finds either — a page Turbo restores from its
+ * cache, an in-page move — returns to `idle`, silently. `turbo:before-cache` changes
+ * nothing: Turbo also dispatches it on pages that stay (a promoted frame navigation, a
+ * `popstate` without Turbo state, a refresh of a cached URL), where the result is still
+ * on screen and its return to idle still due. Returning to `idle` empties only a slot that
+ * still shows the wording a copy wrote there; a slot the page swapped in, rewrote, or put
+ * an element into keeps what it holds.
  *
  * A `copiedLabel` / `errorLabel` changed on the live element while its result is
  * shown rewrites the slot — only while the slot still reads the label the copy wrote
@@ -66,6 +71,9 @@ const TRANSIENT_STATES = new Set(["copied", "error"]);
  * belong to one copy, so a change to them applies from the next.
  */
 export class ClipboardController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["source", "button", "feedback"];
   static override values = {
     text: { type: String, default: "" },
@@ -75,12 +83,17 @@ export class ClipboardController extends Controller<HTMLElement> {
     announceCopiedText: { type: String, default: "" },
     announceErrorText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    feedbackDuration: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof ClipboardController.values>;
   static actions = ["copy"] as const;
   static events = ["copy"] as const;
 
   declare readonly sourceTarget: HTMLElement;
   declare readonly buttonTarget: HTMLElement;
   declare readonly feedbackTarget: HTMLElement;
+  declare readonly feedbackTargets: HTMLElement[];
   declare readonly hasSourceTarget: boolean;
   declare readonly hasButtonTarget: boolean;
   declare readonly hasFeedbackTarget: boolean;
@@ -98,9 +111,6 @@ export class ClipboardController extends Controller<HTMLElement> {
    */
   readonly #timers = new SafeTimeout();
 
-  /** Returns the completion state to idle for the snapshot Turbo takes. */
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewind());
-
   /**
    * Whether this connection is still live. `copy()` suspends on the Clipboard API,
    * and a teardown that lands while it is suspended must win: the continuation
@@ -110,16 +120,32 @@ export class ClipboardController extends Controller<HTMLElement> {
    * the markup is `connect()`'s to settle, not theirs.
    */
   #connected = false;
+  #result: boolean | null = null;
+  #feedback: { element: HTMLElement; original: string; text: string } | null = null;
+  /**
+   * Every feedback this controller wrote a result's wording into, with that wording. It
+   * outlives a connection, so an in-page move still knows what it wrote.
+   */
+  readonly #written = new Map<HTMLElement, string>();
+  readonly #morphRender = new MorphRenderWatcher(() => this.#renderResult());
 
   override connect(): void {
     this.#connected = true;
     this.#adopt();
-    this.#beforeCache.activate();
+    this.#result = null;
+    this.#feedback = this.hasFeedbackTarget
+      ? {
+          element: this.feedbackTarget,
+          original: this.feedbackTarget.textContent ?? "",
+          text: this.feedbackTarget.textContent ?? "",
+        }
+      : null;
+    this.#morphRender.observe(this.element);
   }
 
   override disconnect(): void {
     this.#connected = false;
-    this.#beforeCache.deactivate();
+    this.#morphRender.disconnect();
     this.#timers.clearAll();
   }
 
@@ -194,7 +220,11 @@ export class ClipboardController extends Controller<HTMLElement> {
    */
   #adopt(): void {
     if (this.#inTransientState()) {
+      const restored = this.#written.size === 0;
       this.#reset();
+      // A fresh instance on restored markup has no write on record: the first feedback
+      // holds the restored result's wording, which goes with the result.
+      if (restored && this.hasFeedbackTarget) this.feedbackTarget.textContent = "";
       return;
     }
     setDefaultAttribute(this.element, "data-state", "idle");
@@ -207,31 +237,44 @@ export class ClipboardController extends Controller<HTMLElement> {
   }
 
   /**
-   * Returns the completion state to idle for the snapshot Turbo is about to take,
-   * so a page reached with the Back button does not report a copy that happened
-   * before the navigation. Only a state this controller wrote is rewound — an
-   * authored one is the consumer's and has to survive into the snapshot, exactly as
-   * `connect()` leaves it alone. State only — no `copy` is dispatched, which would
-   * claim a fresh copy ran.
+   * Reflects the result, announces it, and schedules the return to idle.
    */
-  #rewind(): void {
-    if (!this.#inTransientState()) return;
-    this.#timers.clearAll();
-    this.#reset();
+  #reportResult(success: boolean): void {
+    this.#result = success;
+    this.#renderResult(true);
+    this.#announceResult(success);
+    this.#scheduleReset();
   }
 
   /**
-   * Reflects the result, announces it, and schedules the return to idle.
-   *
+   * Repairs a held result without repeating its announcement or extending its deadline.
    * @stimeoRenderRoot
    */
-  #reportResult(success: boolean): void {
-    this.element.setAttribute("data-state", success ? "copied" : "error");
-    if (this.hasFeedbackTarget) {
-      this.feedbackTarget.textContent = success ? this.copiedLabelValue : this.errorLabelValue;
+  #renderResult(force = false): void {
+    if (this.#result === null) {
+      setDefaultAttribute(this.element, "data-state", "idle");
+      return;
     }
-    this.#announceResult(success);
-    this.#scheduleReset();
+    this.element.setAttribute("data-state", this.#result ? "copied" : "error");
+    if (!this.hasFeedbackTarget) return;
+    const element = this.feedbackTarget;
+    const held = this.#feedback;
+    if (
+      !force &&
+      (!held ||
+        element !== held.element ||
+        element.firstElementChild !== null ||
+        (element.textContent !== held.text && element.textContent !== held.original))
+    )
+      return;
+    const text = this.#result ? this.copiedLabelValue : this.errorLabelValue;
+    this.#feedback = {
+      element,
+      original: held?.element === element ? held.original : (element.textContent ?? ""),
+      text,
+    };
+    element.textContent = text;
+    this.#written.set(element, text);
   }
 
   /**
@@ -254,8 +297,8 @@ export class ClipboardController extends Controller<HTMLElement> {
     // Drop any in-flight reset so consecutive copies restart the full window
     // rather than having the earlier timer clear the new result prematurely.
     this.#timers.clearAll();
-    if (this.feedbackDurationValue > 0) {
-      this.#timers.set(() => this.#reset(), this.feedbackDurationValue);
+    if (this.#safeFeedbackDuration > 0) {
+      this.#timers.set(() => this.#reset(), this.#safeFeedbackDuration);
     }
   }
 
@@ -268,13 +311,34 @@ export class ClipboardController extends Controller<HTMLElement> {
     if (this.element.getAttribute("data-state") !== state || !this.hasFeedbackTarget) return;
     if (this.feedbackTarget.textContent !== previous) return;
     this.feedbackTarget.textContent = label;
+    this.#written.set(this.feedbackTarget, label);
+    if (this.#feedback?.element === this.feedbackTarget) this.#feedback.text = label;
   }
 
-  /** Returns to the idle state and empties the completion slot. */
+  /**
+   * Returns to the idle state and empties each feedback this controller wrote into that is
+   * still a feedback target showing the wording written there and nothing else. A slot the
+   * page swapped in, rewrote, or put an element into keeps what it holds.
+   */
   #reset(): void {
+    this.#result = null;
     this.element.setAttribute("data-state", "idle");
-    if (this.hasFeedbackTarget) {
-      this.feedbackTarget.textContent = "";
+    for (const [element, text] of this.#written) {
+      if (!this.feedbackTargets.includes(element)) continue;
+      if (element.firstElementChild === null && element.textContent === text) {
+        element.textContent = "";
+      }
     }
+    this.#written.clear();
+  }
+  /** Current `feedbackDuration` declaration resolved against its numeric contract. */
+  get #safeFeedbackDuration(): number {
+    return this.#numbers.read(
+      this,
+      "feedbackDuration",
+      this.feedbackDurationValue,
+      ClipboardController.values.feedbackDuration.default,
+      ClipboardController.valueConstraints.feedbackDuration,
+    );
   }
 }

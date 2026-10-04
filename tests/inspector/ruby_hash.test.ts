@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { type DataAttribute, readDataOption } from "../../src/inspector/ruby_hash";
+import {
+  type DataAttribute,
+  type DataOption,
+  readDataOption as scanDataOption,
+} from "../../src/inspector/ruby_hash";
+import { withinTimeLimit } from "../helpers/time_limit";
+
+/**
+ * The scanner under test, run under a time limit. Every loop in it advances by
+ * an offset a helper returns, so one that stops advancing would otherwise hold
+ * the suite instead of failing the test that reached it.
+ */
+function readDataOption(source: string, base: number): DataOption {
+  return withinTimeLimit(() => scanDataOption(source, base));
+}
 
 /**
  * Tests for the Ruby `data:` hash scanner: which spellings decode into which
@@ -70,6 +84,38 @@ describe("readDataOption", () => {
       // `data :sym` passes an argument; only `data:` is a hash key.
       expect(readDataOption(`render data :controller`, 0).found).toBe(false);
     });
+
+    it("does not take a :data symbol argument for the option", () => {
+      // Only `:data =>` names the option; a field called `data` is an argument.
+      expect(readDataOption(`f.text_area :data`, 0)).toEqual({
+        attrs: [],
+        found: false,
+        opaque: false,
+      });
+    });
+
+    it("does not take a backtick string for a quoted data key", () => {
+      // A backtick runs a command, so its text never names the option.
+      expect(readDataOption('tag.div `data` => { controller: "stimeo--menu" }', 0).found).toBe(
+        false,
+      );
+    });
+
+    it("reports a key that cannot name an attribute as unreadable", () => {
+      const code = `tag.div data: { "a b": "x", controller: "stimeo--menu" }`;
+      expect(decode(code)).toEqual({ "data-controller": "stimeo--menu" });
+      expect(readDataOption(code, 0).opaque).toBe(true);
+    });
+
+    it("reports an interpolated key as unreadable", () => {
+      const code = 'tag.div data: { "stimeo--#{kind}-target": "item" }';
+      expect(readDataOption(code, 0)).toEqual({ attrs: [], found: true, opaque: true });
+    });
+
+    it("reports a symbol no => follows as unreadable", () => {
+      const code = `tag.div data: { :controller }`;
+      expect(readDataOption(code, 0)).toEqual({ attrs: [], found: true, opaque: true });
+    });
   });
 
   describe("value readings", () => {
@@ -103,6 +149,24 @@ describe("readDataOption", () => {
       expect(decode('tag.div data: { controller: "stimeo--#{kind}" }')).toEqual({
         "data-controller": null,
       });
+    });
+
+    it("reads the entries after an interpolated or escaped string value", () => {
+      expect(
+        decode('tag.div data: { controller: "stimeo--#{kind}", action: "click->x#y" }'),
+      ).toEqual({ "data-controller": null, "data-action": "click->x#y" });
+      expect(decode('tag.div data: { controller: "\\u0041", action: "click->x#y" }')).toEqual({
+        "data-controller": null,
+        "data-action": "click->x#y",
+      });
+    });
+
+    it("keeps a hash whose last value is an expression readable", () => {
+      // An expression value is an attribute with unknown content, not a gap in
+      // the hash, so it leaves the option enumerable.
+      const code = `tag.div data: { controller: kind }`;
+      expect(readDataOption(code, 0)).toMatchObject({ found: true, opaque: false });
+      expect(decode(code)).toEqual({ "data-controller": null });
     });
 
     it("marks a string that only starts an expression as unknown", () => {
@@ -182,6 +246,14 @@ describe("readDataOption", () => {
       expect(readDataOption(`tag.div data: { controller: "stimeo--menu" }`, 0).opaque).toBe(false);
     });
 
+    it("stays readable when another argument or the call's end follows the hash", () => {
+      expect(
+        readDataOption(`link_to "x", "/y", data: { controller: "stimeo--menu" }, class: "b"`, 0)
+          .opaque,
+      ).toBe(false);
+      expect(readDataOption(`tag.div(data: { controller: "stimeo--menu" })`, 0).opaque).toBe(false);
+    });
+
     it("reports a hash the expression goes on to transform as opaque", () => {
       // `{}.merge(…)` and `{…} || x` hand the helper something this scanner
       // never sees, so the braces it can read are not the whole option.
@@ -228,6 +300,7 @@ describe("readDataOption", () => {
       const [attr] = readDataOption(`tag.div data: { title: "a\\"b" }`, 0).attrs;
       expect(attr?.value).toBe('a"b');
       expect(attr?.valueStart).toBeUndefined();
+      expect(attr?.valueEnd).toBeUndefined();
     });
   });
 

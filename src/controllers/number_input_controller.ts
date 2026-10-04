@@ -1,11 +1,13 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { CompositionTracker } from "../utils/composition_tracker";
-import { commitEdit } from "../utils/field_mirror";
+import { commitField } from "../utils/field_mirror";
 import { toHalfWidth } from "../utils/half_width";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeInterval, SafeTimeout } from "../utils/safe_timeout";
 import { snapSteppedValue, stepSteppedValue } from "../utils/stepped_value";
 
@@ -48,6 +50,12 @@ const OWNED_DISABLED = "data-number-input-disabled";
  *
  * `change` dispatches `{ value: number }`; `reconcile` dispatches `{ value: number }`.
  *
+ * All published state is settled before its reports. A synchronous listener
+ * that confirms another value leaves that newer confirmation to report itself;
+ * reports still pending for the replaced value are not sent. A read-only listener
+ * or a confirmation that moves no published value leaves pending reports intact.
+ * An event already being dispatched still reaches its remaining listeners.
+ *
  * @remarks
  * Behavior only — the consumer styles the field and buttons. The input is the
  * sole Tab stop; the buttons are `tabindex="-1"` and keep focus on the input
@@ -58,8 +66,8 @@ const OWNED_DISABLED = "data-number-input-disabled";
  *   (default `step × 10`); `Home`/`End` jump to a finite `min`/`max`.
  * - Increment/decrement buttons step too, and are `disabled` at the bounds (focus
  *   is returned to the input before a focused button is disabled).
- * - **Press-and-hold auto-repeat**: holding a step button steps once, then after a
- *   short delay repeats until release, the bound is reached, or the element
+ * - **Press-and-hold auto-repeat**: holding a step button starts repeated steps
+ *   after a short delay until release, the bound is reached, or the element
  *   disconnects. The `click` binding stays the single-step path (a quick click, a
  *   synthesized/programmatic click, or assistive activation), so a normal click
  *   never double-steps — the trailing click after a hold is swallowed.
@@ -83,6 +91,12 @@ const OWNED_DISABLED = "data-number-input-disabled";
  *   while finite range endpoints remain reachable off the grid.
  */
 export class NumberInputController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
+  readonly #moves = new MoveCounter();
+  #move = 0;
+
   static override targets = ["input", "increment", "decrement"];
   static override values = {
     min: { type: Number, default: Number.NEGATIVE_INFINITY },
@@ -90,6 +104,13 @@ export class NumberInputController extends Controller<HTMLElement> {
     step: { type: Number, default: 1 },
     pageStep: { type: Number, default: 0 },
   };
+
+  static valueConstraints = {
+    min: NUMBER_BOUNDS.lowerBound,
+    max: NUMBER_BOUNDS.upperBound,
+    step: NUMBER_BOUNDS.positive,
+    pageStep: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof NumberInputController.values>;
   static actions = ["decrement", "increment", "onInput", "onKeydown"] as const;
   static events = ["change", "reconcile"] as const;
 
@@ -134,10 +155,9 @@ export class NumberInputController extends Controller<HTMLElement> {
   /** A reconciliation that arrived while the input was composing. */
   #reconcileHeld = false;
   /** Restores authored custom-spinbutton ARIA when a target leaves or the controller stops. */
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
-  readonly #ariaValueNow = new AttributeLease<HTMLInputElement>("aria-valuenow");
-  readonly #ariaValueMin = new AttributeLease<HTMLInputElement>("aria-valuemin");
-  readonly #ariaValueMax = new AttributeLease<HTMLInputElement>("aria-valuemax");
+  readonly #ariaValueNow = new AttributeLease<HTMLInputElement>("aria-valuenow", this.identifier);
+  readonly #ariaValueMin = new AttributeLease<HTMLInputElement>("aria-valuemin", this.identifier);
+  readonly #ariaValueMax = new AttributeLease<HTMLInputElement>("aria-valuemax", this.identifier);
   /**
    * The number shown last — reconciled or committed by the user — which the next
    * move is measured from; `null` while the field is blank, and before this
@@ -156,6 +176,8 @@ export class NumberInputController extends Controller<HTMLElement> {
   readonly #holdIntervals = new SafeInterval();
   /** True while a hold is armed/running, making `#stopHold` idempotent. */
   #holdActive = false;
+  /** Counts holds armed and stopped, so a step that outlived its hold arms nothing. */
+  #holdGeneration = 0;
   /** True once a hold actually produced a repeated step (vs. a quick click). */
   #repeatedDuringHold = false;
   /** True when the next `click` is the trailing one after a hold and must be ignored. */
@@ -164,12 +186,11 @@ export class NumberInputController extends Controller<HTMLElement> {
   #holdButton: HTMLButtonElement | null = null;
   #holdPointerId: number | null = null;
   /** Collapses runtime range/step changes into one input reconciliation. */
-  readonly #repaint = new MicrotaskCoalescer(() => this.#reconcile());
+  readonly #repaint = new MorphRenderWatcher(() => this.#reconcile());
 
   /** Normalizes any initial value and wires the focus/hold pointer guards. */
   override connect(): void {
-    this.#repaint.activate();
-    this.#beforeCache.activate();
+    this.#repaint.observe(this.element);
     this.#globalGuards = new AbortController();
     const { signal } = this.#globalGuards;
     for (const button of this.incrementTargets) this.#wireButton(button, 1);
@@ -192,9 +213,8 @@ export class NumberInputController extends Controller<HTMLElement> {
    */
   override disconnect(): void {
     this.#connected = false;
-    this.#repaint.cancel();
+    this.#repaint.disconnect();
     this.#composition.disconnect();
-    this.#beforeCache.deactivate();
     this.#globalGuards?.abort();
     this.#globalGuards = null;
     const buttons = new Set([
@@ -209,7 +229,6 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.#repeatedDuringHold = false;
     this.#suppressNextClick = false;
     this.#holdTimeouts.clearAll();
-    this.#holdIntervals.clearAll();
     this.#ariaValueNow.returnAll();
     this.#ariaValueMin.returnAll();
     this.#ariaValueMax.returnAll();
@@ -257,7 +276,6 @@ export class NumberInputController extends Controller<HTMLElement> {
   /** Releases only the increment target that actually disconnected. */
   incrementTargetDisconnected(button: HTMLButtonElement): void {
     this.#unwireButton(button);
-    this.#repaint.schedule();
   }
 
   /** Wires focus preservation and hold behavior on a runtime decrement target. */
@@ -269,7 +287,6 @@ export class NumberInputController extends Controller<HTMLElement> {
   /** Releases only the decrement target that actually disconnected. */
   decrementTargetDisconnected(button: HTMLButtonElement): void {
     this.#unwireButton(button);
-    this.#repaint.schedule();
   }
 
   /** Increases by one step. Bound via `data-action` (click). */
@@ -314,23 +331,23 @@ export class NumberInputController extends Controller<HTMLElement> {
         break;
       case "PageUp":
         next =
-          this.pageStepValue > 0
-            ? this.#currentValue() + this.pageStepValue
+          this.#safePageStep > 0
+            ? this.#currentValue() + this.#safePageStep
             : stepSteppedValue(this.#currentValue(), 10, this.#steppedRange);
         break;
       case "PageDown":
         next =
-          this.pageStepValue > 0
-            ? this.#currentValue() - this.pageStepValue
+          this.#safePageStep > 0
+            ? this.#currentValue() - this.#safePageStep
             : stepSteppedValue(this.#currentValue(), -10, this.#steppedRange);
         break;
       case "Home":
-        if (!Number.isFinite(this.minValue)) return;
-        next = this.minValue;
+        if (!Number.isFinite(this.#safeMin)) return;
+        next = this.#safeMin;
         break;
       case "End":
-        if (!Number.isFinite(this.maxValue)) return;
-        next = this.maxValue;
+        if (!Number.isFinite(this.#safeMax)) return;
+        next = this.#safeMax;
         break;
       default:
         return;
@@ -385,11 +402,10 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.#holdPointerId = this.#pointerId(event);
     this.#repeatedDuringHold = false;
     this.#suppressNextClick = false;
+    const generation = ++this.#holdGeneration;
     this.#holdTimeouts.set(() => {
-      if (!this.#commitStep(direction)) {
-        this.#stopHold();
-        return;
-      }
+      // A listener on the step's reports may end this hold or arm another one.
+      if (!this.#commitStep(direction) || generation !== this.#holdGeneration) return;
       this.#repeatedDuringHold = true;
       this.#holdIntervals.set(() => {
         if (!this.#commitStep(direction)) this.#stopHold();
@@ -405,6 +421,7 @@ export class NumberInputController extends Controller<HTMLElement> {
   #stopHold(suppressTrailingClick = true): void {
     if (!this.#holdActive) return;
     this.#holdActive = false;
+    this.#holdGeneration += 1;
     this.#holdButton = null;
     this.#holdPointerId = null;
     this.#holdTimeouts.clearAll();
@@ -414,8 +431,6 @@ export class NumberInputController extends Controller<HTMLElement> {
       this.#holdTimeouts.set(() => {
         this.#suppressNextClick = false;
       }, NumberInputController.#SUPPRESS_RESET_MS);
-    } else if (!suppressTrailingClick) {
-      this.#suppressNextClick = false;
     }
   }
 
@@ -466,11 +481,18 @@ export class NumberInputController extends Controller<HTMLElement> {
     // settled number does not. `change` means the user settled on a number, so it
     // follows the number.
     const shown = this.inputTarget.value;
-    this.#write(value);
-    // Settled before either report, so the `change` below — which re-enters
-    // through this widget's own markup contract — finds nothing left to commit.
     this.#lastValue = value;
-    if (report && shown !== this.inputTarget.value) commitEdit(this.inputTarget);
+    if (changed) this.#move = this.#moves.record();
+    const move = this.#move;
+    this.#write(value);
+    if (!this.#moves.isLatest(move)) return changed;
+    if (report && shown !== this.inputTarget.value) {
+      const input = this.inputTarget;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      if (!this.#moves.isLatest(move)) return changed;
+      commitField(input);
+    }
+    if (!this.#moves.isLatest(move)) return changed;
     if (changed) this.dispatch("change", { detail: { value } });
     return changed;
   }
@@ -500,8 +522,10 @@ export class NumberInputController extends Controller<HTMLElement> {
     const previous = this.#lastValue;
     if (this.inputTarget.value.trim() !== "") {
       const value = this.#normalize(this.#currentValue());
-      this.#write(value);
       this.#lastValue = value;
+      const move = this.#move;
+      this.#write(value);
+      if (!this.#moves.isLatest(move)) return;
     } else {
       this.#lastValue = null;
       this.#reflectEmpty();
@@ -524,7 +548,7 @@ export class NumberInputController extends Controller<HTMLElement> {
   /** Reflects `value` on the input (and ARIA for non-native hosts) and the buttons. */
   #write(value: number): void {
     const input = this.inputTarget;
-    input.value = String(value);
+    if (input.value !== String(value)) input.value = String(value);
     this.#syncInputAria(input, value);
     this.#updateButtons(value);
   }
@@ -542,8 +566,8 @@ export class NumberInputController extends Controller<HTMLElement> {
       return;
     }
     this.#ariaValueNow.write(input, value === null ? null : String(value));
-    this.#ariaValueMin.write(input, Number.isFinite(this.minValue) ? String(this.minValue) : null);
-    this.#ariaValueMax.write(input, Number.isFinite(this.maxValue) ? String(this.maxValue) : null);
+    this.#ariaValueMin.write(input, Number.isFinite(this.#safeMin) ? String(this.#safeMin) : null);
+    this.#ariaValueMax.write(input, Number.isFinite(this.#safeMax) ? String(this.#safeMax) : null);
   }
 
   /** Returns all custom-spinbutton ARIA leased on `input`. */
@@ -555,8 +579,15 @@ export class NumberInputController extends Controller<HTMLElement> {
 
   /** Disables a step button at its bound, returning focus to the input first. */
   #updateButtons(value: number): void {
-    for (const button of this.incrementTargets) this.#toggleButton(button, value < this.maxValue);
-    for (const button of this.decrementTargets) this.#toggleButton(button, value > this.minValue);
+    const move = this.#move;
+    for (const button of this.incrementTargets) {
+      this.#toggleButton(button, value < this.#safeMax, move);
+      if (!this.#moves.isLatest(move)) return;
+    }
+    for (const button of this.decrementTargets) {
+      this.#toggleButton(button, value > this.#safeMin, move);
+      if (!this.#moves.isLatest(move)) return;
+    }
   }
 
   /**
@@ -565,7 +596,7 @@ export class NumberInputController extends Controller<HTMLElement> {
    * (`data-number-input-disabled`, like `conditional-fields`/`submit-once`), so an
    * author-disabled button (e.g. the whole control disabled) is never re-enabled.
    */
-  #toggleButton(button: HTMLButtonElement, enabled: boolean): void {
+  #toggleButton(button: HTMLButtonElement, enabled: boolean, move: number): void {
     if (enabled) {
       if (button.hasAttribute(OWNED_DISABLED)) {
         button.disabled = false;
@@ -575,6 +606,7 @@ export class NumberInputController extends Controller<HTMLElement> {
     }
     if (button.disabled) return; // already disabled (possibly by the author) — leave it
     if (document.activeElement === button && this.hasInputTarget) this.inputTarget.focus();
+    if (!this.#moves.isLatest(move)) return;
     button.disabled = true;
     button.setAttribute(OWNED_DISABLED, "");
   }
@@ -597,7 +629,7 @@ export class NumberInputController extends Controller<HTMLElement> {
     const text = toHalfWidth(this.inputTarget.value);
     const parsed = Number(text);
     if (Number.isFinite(parsed) && text.trim() !== "") return parsed;
-    return Number.isFinite(this.minValue) ? this.minValue : 0;
+    return Number.isFinite(this.#safeMin) ? this.#safeMin : 0;
   }
 
   /** Clamps to `[min, max]` and snaps to the step grid anchored at a finite min (else 0). */
@@ -607,12 +639,49 @@ export class NumberInputController extends Controller<HTMLElement> {
 
   /** Shared range configuration; finite endpoints remain allowed off the grid. */
   get #steppedRange() {
-    return { min: this.minValue, max: this.maxValue, step: this.stepValue };
+    return { min: this.#safeMin, max: this.#safeMax, step: this.#safeStep };
   }
-  /** Returns borrowed range ARIA before Turbo snapshots the page. */
-  #rewindForCache(): void {
-    this.#ariaValueNow.returnAll();
-    this.#ariaValueMin.returnAll();
-    this.#ariaValueMax.returnAll();
+  /** Current `min` declaration resolved against its numeric contract. */
+  get #safeMin(): number {
+    return this.#numbers.read(
+      this,
+      "min",
+      this.minValue,
+      NumberInputController.values.min.default,
+      NumberInputController.valueConstraints.min,
+    );
+  }
+
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      NumberInputController.values.max.default,
+      NumberInputController.valueConstraints.max,
+    );
+  }
+
+  /** Current `step` declaration resolved against its numeric contract. */
+  get #safeStep(): number {
+    return this.#numbers.read(
+      this,
+      "step",
+      this.stepValue,
+      NumberInputController.values.step.default,
+      NumberInputController.valueConstraints.step,
+    );
+  }
+
+  /** Current `pageStep` declaration resolved against its numeric contract. */
+  get #safePageStep(): number {
+    return this.#numbers.read(
+      this,
+      "pageStep",
+      this.pageStepValue,
+      NumberInputController.values.pageStep.default,
+      NumberInputController.valueConstraints.pageStep,
+    );
   }
 }

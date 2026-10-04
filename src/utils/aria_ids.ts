@@ -1,3 +1,5 @@
+import { sharedRegistry } from "./shared_registry";
+
 /**
  * Minimal id primitives for wiring ARIA relationships.
  *
@@ -13,10 +15,10 @@
  */
 
 /**
- * Monotonic counter backing {@link uniqueId}. Module-scoped so every generated
- * id is unique across all controller instances sharing this module in a document.
+ * Monotonic counter backing {@link uniqueId}, shared by every entry copy so generated
+ * ids are distinct even before their elements enter the document.
  */
-let counter = 0;
+const ids = sharedRegistry("stimeo-ui.aria-ids.registry.v1", () => ({ counter: 0 }));
 
 /**
  * Returns a unique, DOM-id-safe string of the form `` `${prefix}-${n}` `` where
@@ -34,8 +36,8 @@ let counter = 0;
 export function uniqueId(prefix = "stimeo"): string {
   let candidate: string;
   do {
-    counter += 1;
-    candidate = `${prefix}-${counter}`;
+    ids.counter += 1;
+    candidate = `${prefix}-${ids.counter}`;
   } while (typeof document !== "undefined" && document.getElementById(candidate) !== null);
   return candidate;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkSource } from "../../src/inspector/check";
+import { checkSource, didYouMean } from "../../src/inspector/check";
 import { buildManifest } from "../../src/inspector/manifest";
 import type { Diagnostic, DiagnosticCode, Manifest } from "../../src/inspector/types";
 
@@ -75,6 +75,17 @@ describe("checkSource", () => {
         `<div data-controller="stimeo--otp" data-stimeo--otp-bogus-value="1"><input data-stimeo--otp-target="field"></div>`,
       );
       expect(codeList).toContain("unknown-value");
+    });
+
+    it("flags a value attribute whose controller is unknown", () => {
+      expect(checkSource(`<div data-stimeo--menoo-open-value="true"></div>`, manifest)).toEqual([
+        expect.objectContaining({
+          code: "unknown-controller",
+          severity: "error",
+          message:
+            'Value attribute "data-stimeo--menoo-open-value" references unknown Stimeo controller.',
+        }),
+      ]);
     });
 
     it("accepts dasherized multi-word value names", () => {
@@ -154,11 +165,87 @@ describe("checkSource", () => {
     });
 
     describe("literal Value constraints", () => {
+      it("preserves legacy greaterThan and infinity semantics", () => {
+        const slider = manifest.controllers["stimeo--slider"];
+        if (!slider) throw new Error("Missing slider manifest");
+        const legacy: Manifest = {
+          ...manifest,
+          schemaVersion: 14,
+          controllers: {
+            ...manifest.controllers,
+            "stimeo--slider": {
+              ...slider,
+              valueConstraints: [
+                {
+                  value: "step",
+                  type: "number",
+                  greaterThan: 0,
+                  suggestion: "Use a positive number.",
+                },
+              ],
+            },
+          },
+        };
+        for (const [raw, invalid] of [
+          ["0", true],
+          ["1", false],
+          ["Infinity", false],
+          ["NaN", true],
+        ] as const) {
+          expect(
+            checkSource(`<div data-stimeo--slider-step-value="${raw}"></div>`, legacy).some(
+              (diagnostic) => diagnostic.code === "invalid-value",
+            ),
+          ).toBe(invalid);
+        }
+      });
+
+      it.each([true, false])(
+        "keeps numeric infinity contracts intact through JSON with finite=%s",
+        (finite) => {
+          const slider = manifest.controllers["stimeo--slider"];
+          if (!slider) throw new Error("Missing slider manifest");
+          const current: Manifest = {
+            ...manifest,
+            controllers: {
+              ...manifest.controllers,
+              "stimeo--slider": {
+                ...slider,
+                valueConstraints: [
+                  {
+                    value: "step",
+                    type: "number",
+                    finite,
+                    allowInfinity: "positive",
+                    min: 0,
+                    suggestion: "Use a nonnegative number.",
+                  },
+                ],
+              },
+            },
+          };
+          const roundtrip: Manifest = JSON.parse(JSON.stringify(current));
+          for (const [raw, invalid] of [
+            ["Infinity", false],
+            ["-Infinity", true],
+            ["NaN", true],
+            ["1_000", false],
+            ["-1", true],
+          ] as const) {
+            expect(
+              checkSource(`<div data-stimeo--slider-step-value="${raw}"></div>`, roundtrip).some(
+                (diagnostic) => diagnostic.code === "invalid-value",
+              ),
+            ).toBe(invalid);
+          }
+        },
+      );
+
       it.each([
         ["max", "max"],
         ["warn-at", "warnAt"],
       ])("rejects invalid Character Counter %s counts", (token, value) => {
-        for (const authored of ["-1", "1.5", "Infinity", "NaN"]) {
+        for (const authored of ["-1", "Infinity", "NaN"]) {
           const diagnostic = checkSource(
             `<div data-stimeo--character-counter-${token}-value="${authored}"></div>`,
             manifest,
@@ -166,7 +253,7 @@ describe("checkSource", () => {
 
           expect(diagnostic).toMatchObject({
             severity: "error",
-            suggestion: `Set ${value} to a non-negative integer.`,
+            suggestion: `Set ${value} to a finite number at least 0.`,
           });
         }
       });
@@ -309,31 +396,71 @@ describe("checkSource", () => {
         },
       );
 
-      it.each(["0", "-1", "1.5", "Infinity", "NaN"])(
-        "rejects the invalid Time Picker step %s",
-        (step) => {
-          const diagnostic = checkSource(
-            `<div data-stimeo--time-picker-step-value="${step}"></div>`,
-            manifest,
-          ).find((candidate) => candidate.code === "invalid-value");
-
-          expect(diagnostic).toMatchObject({
-            severity: "error",
-            suggestion: "Set step to a positive integer.",
-          });
-        },
-      );
-
-      it("names the integral requirement in the Time Picker step message", () => {
-        // The suggestion tells the author what to write; the message tells them
-        // what was expected. Only the message carries the integral part.
+      it.each(["0", "-1", "Infinity", "NaN"])("rejects the invalid Time Picker step %s", (step) => {
         const diagnostic = checkSource(
-          `<div data-stimeo--time-picker-step-value="1.5"></div>`,
+          `<div data-stimeo--time-picker-step-value="${step}"></div>`,
           manifest,
         ).find((candidate) => candidate.code === "invalid-value");
 
+        expect(diagnostic).toMatchObject({
+          severity: "error",
+          suggestion: "Set step to a finite number greater than 0.",
+        });
+      });
+
+      it("names the positive requirement in the Time Picker step message", () => {
+        const diagnostic = checkSource(
+          `<div data-stimeo--time-picker-step-value="0"></div>`,
+          manifest,
+        ).find((candidate) => candidate.code === "invalid-value");
         expect(diagnostic?.message).toContain("a finite number greater than 0");
-        expect(diagnostic?.message).toContain("with no fractional part");
+      });
+
+      it.each([
+        [{ finite: false }, "a number"],
+        [{ min: 2 }, "a finite number at least 2"],
+        [{ max: 4 }, "a finite number at most 4"],
+        [{ allowedValues: [2, 4] }, "a finite number among 2, 4"],
+        [{ allowInfinity: "positive" }, "a finite number or positive infinity"],
+      ] as const)("describes the numeric Value contract as %s", (bounds, expected) => {
+        const slider = manifest.controllers["stimeo--slider"];
+        if (!slider) throw new Error("Missing slider manifest");
+        const custom: Manifest = {
+          ...manifest,
+          controllers: {
+            ...manifest.controllers,
+            "stimeo--slider": {
+              ...slider,
+              valueConstraints: [
+                {
+                  value: "step",
+                  type: "number",
+                  finite: true,
+                  ...bounds,
+                  suggestion: "Set step to an accepted number.",
+                },
+              ],
+            },
+          },
+        };
+        const diagnostic = checkSource(
+          '<div data-stimeo--slider-step-value="NaN"></div>',
+          custom,
+        ).find((candidate) => candidate.code === "invalid-value");
+
+        expect(diagnostic?.message).toBe(
+          `Invalid value "NaN" for "stimeo--slider.step". Expected ${expected}.`,
+        );
+      });
+
+      it.each([
+        ["character-counter", "max"],
+        ["character-counter", "warn-at"],
+        ["time-picker", "step"],
+      ])("accepts positive fractional declarations for %s.%s", (identifier, value) => {
+        expect(codes(`<div data-stimeo--${identifier}-${value}-value="1.5"></div>`)).not.toContain(
+          "invalid-value",
+        );
       });
 
       it.each(["-1", "Infinity", "NaN", "not-a-number"])(
@@ -534,6 +661,18 @@ describe("checkSource", () => {
         `<div data-controller="stimeo--menu"><button data-stimeo--menu-target="trigger" data-action="click->stimeo--menu#frobnicate"></button><ul data-stimeo--menu-target="menu"></ul></div>`,
       );
       expect(codeList).toContain("unknown-action-method");
+    });
+
+    it.each([
+      ["tree-view", "onClick"],
+      ["calendar", "selectByClick"],
+      ["combobox", "selectByClick"],
+      ["command-palette", "selectByClick"],
+    ])("recognizes the target-selection action for %s", (identifier, eventAction) => {
+      const markup = (method: string): string =>
+        `<div data-controller="stimeo--${identifier}" data-action="click->stimeo--${identifier}#${method}"></div>`;
+      expect(codes(markup(eventAction))).toContain("unknown-action-method");
+      expect(codes(markup("select"))).not.toContain("unknown-action-method");
     });
 
     it("accepts a declared action method", () => {
@@ -1242,6 +1381,341 @@ describe("checkSource", () => {
       // required targets must be reported once, not once per repetition.
       const codeList = codes(`<div data-controller="stimeo--menu stimeo--menu"></div>`);
       expect(codeList.filter((c) => c === "missing-required-target")).toHaveLength(2);
+    });
+  });
+
+  describe("the severity, wording and reach each diagnostic settles on", () => {
+    /** The bundled manifest with one controller's entry overridden by `patch`. */
+    const patched = (
+      identifier: string,
+      patch: Partial<Manifest["controllers"][string]>,
+    ): Manifest => {
+      const entry = manifest.controllers[identifier];
+      if (!entry) throw new Error(`Missing ${identifier} manifest`);
+      return {
+        ...manifest,
+        controllers: { ...manifest.controllers, [identifier]: { ...entry, ...patch } },
+      };
+    };
+
+    /** The single diagnostic of `code` the source produces; fails on none or several. */
+    const only = (
+      source: string,
+      code: DiagnosticCode,
+      against: Manifest = manifest,
+    ): Diagnostic | undefined => {
+      const found = checkSource(source, against).filter((d) => d.code === code);
+      expect(found).toHaveLength(1);
+      return found[0];
+    };
+
+    it("fails an orphan target outright and only warns when a generated host may own it", () => {
+      const orphan = only(`<div data-stimeo--menu-target="menu"></div>`, "orphan-target");
+      expect(orphan).toMatchObject({
+        severity: "error",
+        message: 'Target "data-stimeo--menu-target" has no enclosing controller "stimeo--menu".',
+      });
+      expect(orphan?.suggestion).toBeUndefined();
+
+      const unplaced = only(
+        `<div data-controller="<%= kind %>"><span data-stimeo--menu-target="menu"></span></div>`,
+        "orphan-target",
+      );
+      expect(unplaced).toMatchObject({
+        severity: "warning",
+        suggestion:
+          "An enclosing helper's data: option is not a literal hash, so the host controller may be declared at runtime.",
+      });
+    });
+
+    it("hints at a missing required target only when part of the scope is unreadable", () => {
+      const missing = only(
+        `<div data-controller="stimeo--form-field"></div>`,
+        "missing-required-target",
+      );
+      expect(missing).toMatchObject({
+        severity: "error",
+        message: '"stimeo--form-field" is missing required target "control".',
+      });
+      expect(missing?.suggestion).toBeUndefined();
+
+      const hidden = only(
+        `<div data-controller="stimeo--form-field">
+          <%= f.text_area :body, data: field_attrs %>
+        </div>`,
+        "missing-required-target",
+      );
+      expect(hidden).toMatchObject({
+        severity: "warning",
+        suggestion:
+          "Part of this scope is rendered by a helper or a non-literal data: hash, so the target may exist at runtime.",
+      });
+    });
+
+    it("lets a generated target name hide targets of its own controller only", () => {
+      // The generated name is declared for the inner tabs scope, so it may stand
+      // for any tabs target and for none of the outer form field's.
+      const missing = checkSource(
+        `
+          <div data-controller="stimeo--form-field">
+            <div data-controller="stimeo--tabs">
+              <div data-stimeo--tabs-target="<%= part %>"></div>
+            </div>
+          </div>`,
+        manifest,
+      ).filter((d) => d.code === "missing-required-target");
+      const severities = (identifier: string) =>
+        missing.filter((d) => d.message.startsWith(`"${identifier}"`)).map((d) => d.severity);
+
+      expect(severities("stimeo--form-field")).toEqual(["error"]);
+      expect(severities("stimeo--tabs")).toEqual(["warning", "warning", "warning"]);
+    });
+
+    it("leaves a non-finite bound to its own diagnostic rather than ordering it", () => {
+      // The scalar contract already reports the bound; comparing a value that is
+      // not a finite number against its peer would say nothing further.
+      for (const [min, max] of [
+        ["NaN", "20"],
+        ["80", "NaN"],
+        ["Infinity", "20"],
+      ]) {
+        const invalid = checkSource(
+          `<div data-stimeo--range-slider-min-value="${min}" data-stimeo--range-slider-max-value="${max}"></div>`,
+          manifest,
+        ).filter((d) => d.code === "invalid-value");
+
+        expect(invalid).toHaveLength(1);
+        expect(invalid[0]?.message).toMatch(
+          /^Invalid value "(NaN|Infinity)" for "stimeo--range-slider\.(min|max)"\. /,
+        );
+      }
+    });
+
+    it("asks for an exit only when the opener is bound to the event that opens the state", () => {
+      const form = (action: string) => `
+        <form data-controller="stimeo--submit-once" data-action="${action}">
+          <button type="submit">Send</button>
+        </form>`;
+
+      expect(codes(form("click->stimeo--submit-once#start"))).not.toContain(
+        "missing-action-completion",
+      );
+      expect(codes(form("submit->stimeo--submit-once#start"))).toContain(
+        "missing-action-completion",
+      );
+    });
+
+    it("pairs structured-label halves by their submit control, not by their parent", () => {
+      const together = `
+        <form data-controller="stimeo--submit-once">
+          <button type="submit">
+            <span class="label"><span data-stimeo--submit-once-target="idle">Send</span></span>
+            <span data-stimeo--submit-once-target="busy" hidden>Sending</span>
+          </button>
+        </form>`;
+      const split = `
+        <form data-controller="stimeo--submit-once">
+          <button type="submit">
+            <span class="label"><span data-stimeo--submit-once-target="idle">Send</span></span>
+          </button>
+          <button type="submit">
+            <span class="label"><span data-stimeo--submit-once-target="busy" hidden>Sending</span></span>
+          </button>
+        </form>`;
+
+      expect(codes(together)).not.toContain("missing-conditional-target");
+      expect(codes(split)).toContain("missing-conditional-target");
+    });
+
+    it("words an invalid host by what makes it unsupported", () => {
+      const message = (source: string) => only(source, "invalid-host")?.message;
+
+      expect(message('<button data-controller="stimeo--switch"></button>')).toBe(
+        'The scope element of "stimeo--switch" uses the unsupported implicit type="submit" host.',
+      );
+      expect(message('<button type="reset" data-controller="stimeo--switch"></button>')).toBe(
+        'The scope element of "stimeo--switch" uses the unsupported type="reset" host.',
+      );
+      expect(
+        message(`<div role="radiogroup" aria-label="Plan" data-controller="stimeo--radio-group">
+          <input type="radio" data-stimeo--radio-group-target="radio">
+        </div>`),
+      ).toBe(
+        'The "radio" target of "stimeo--radio-group" uses an unsupported interactive <input> host.',
+      );
+    });
+
+    it("rejects every button as a non-interactive host, whatever type it renders", () => {
+      // A generated type leaves a rule that admits some buttons undecided; a rule
+      // that admits no button at all is decided by the tag alone.
+      const tree = `<ul role="tree" aria-label="Files" data-controller="stimeo--tree-view">
+        <button type="<%= kind %>" role="treeitem" data-stimeo--tree-view-target="item">src</button>
+      </ul>`;
+      const group = `<div role="group" aria-label="View" data-controller="stimeo--toggle-group">
+        <button type="<%= kind %>" data-stimeo--toggle-group-target="item"></button>
+      </div>`;
+
+      expect(codes(tree)).toContain("invalid-host");
+      expect(codes(group)).not.toContain("invalid-host");
+    });
+
+    it("words a button on a non-interactive host by its tag, whatever type it renders", () => {
+      // No button type is admitted, so the type is not what makes it unsupported,
+      // and a generated one has no readable value to quote.
+      const item = (type: string) => `
+        <ul role="tree" aria-label="Files" data-controller="stimeo--tree-view">
+          <button ${type} role="treeitem" data-stimeo--tree-view-target="item">src</button>
+        </ul>`;
+
+      for (const type of ['type="button"', 'type="<%= kind %>"', ""]) {
+        const source = item(type);
+        const diagnostic = only(source, "invalid-host");
+        expect(diagnostic?.message).toBe(
+          'The "item" target of "stimeo--tree-view" uses an unsupported interactive <button> host.',
+        );
+        // Anchored on the element itself, not on its type attribute.
+        expect([diagnostic?.line, diagnostic?.column]).toEqual([
+          3,
+          (source.split("\n")[2]?.indexOf("<button") ?? -1) + 1,
+        ]);
+      }
+    });
+
+    it("words the focus floor of a roving target apart from the Tab-order floor", () => {
+      const menu = `
+        <div data-controller="stimeo--menu">
+          <button id="menu-trigger" aria-haspopup="menu" data-stimeo--menu-target="trigger">Actions</button>
+          <ul role="menu" aria-labelledby="menu-trigger" data-stimeo--menu-target="menu" hidden>
+            <li role="none"><div role="menuitem" data-stimeo--menu-target="item">Edit</div></li>
+          </ul>
+        </div>`;
+      const slider = `
+        <div data-controller="stimeo--slider">
+          <div data-stimeo--slider-target="track">
+            <div role="slider" aria-label="Volume" data-stimeo--slider-target="thumb"></div>
+          </div>
+        </div>`;
+
+      expect(only(menu, "keyboard-inaccessible")?.message).toBe(
+        'The "item" target of "stimeo--menu" is not focusable (needs a native control or tabindex).',
+      );
+      expect(only(slider, "keyboard-inaccessible")?.message).toBe(
+        'The "thumb" target of "stimeo--slider" is not in the Tab order (needs a native control or tabindex="0").',
+      );
+    });
+
+    it("leaves a helper-rendered keyboard target to the runtime", () => {
+      // The helper emits the tag and any tabindex, so neither is in the template.
+      const slider = (thumb: string) => `
+        <div data-controller="stimeo--slider">
+          <div data-stimeo--slider-target="track">${thumb}</div>
+        </div>`;
+
+      expect(
+        codes(slider(`<%= tag.div data: { "stimeo--slider-target": "thumb" } %>`)),
+      ).not.toContain("keyboard-inaccessible");
+      expect(codes(slider(`<div data-stimeo--slider-target="thumb"></div>`))).toContain(
+        "keyboard-inaccessible",
+      );
+    });
+
+    it("leaves a helper-rendered host to the runtime, even inside an editable region", () => {
+      // Whether the host is supported turns on the tag the helper emits, which the
+      // template does not hold.
+      expect(
+        codes(
+          `<div contenteditable="true"><%= tag.div data: { controller: "stimeo--switch" } %></div>`,
+        ),
+      ).not.toContain("invalid-host");
+      expect(
+        codes(`<div contenteditable="true"><div data-controller="stimeo--switch"></div></div>`),
+      ).toContain("invalid-host");
+    });
+
+    it("names the scope element or the target a managed attribute sits on", () => {
+      const combobox = `
+        <div data-controller="stimeo--combobox">
+          <input role="combobox" aria-autocomplete="list" aria-activedescendant="opt-1"
+                 data-stimeo--combobox-target="input">
+          <ul role="listbox" data-stimeo--combobox-target="list" hidden>
+            <li role="option" id="opt-1" data-stimeo--combobox-target="option">A</li>
+          </ul>
+        </div>`;
+      const onScope = patched("stimeo--switch", {
+        managedAria: [{ target: "", attrs: ["aria-checked"], suggestion: "Remove aria-checked." }],
+      });
+
+      expect(only(combobox, "managed-aria")?.message).toBe(
+        'aria-activedescendant on the "input" target of "stimeo--combobox" is managed by the controller at runtime.',
+      );
+      expect(
+        only(
+          '<div role="switch" aria-checked="false" data-controller="stimeo--switch"></div>',
+          "managed-aria",
+          onScope,
+        )?.message,
+      ).toBe(
+        'aria-checked on the scope element of "stimeo--switch" is managed by the controller at runtime.',
+      );
+    });
+
+    it("keeps the managed-attribute pass off a helper-rendered element", () => {
+      // A data: hash carries only data-* attributes, so the rule names one to
+      // reach a helper-rendered element at all.
+      const rules = patched("stimeo--switch", {
+        managedAria: [{ target: "", attrs: ["data-state"], suggestion: "Remove data-state." }],
+      });
+      const found = (source: string) => checkSource(source, rules).map((d) => d.code);
+
+      expect(
+        found(`<%= tag.div data: { controller: "stimeo--switch", state: "on" } %>`),
+      ).not.toContain("managed-aria");
+      expect(found(`<div data-controller="stimeo--switch" data-state="on"></div>`)).toContain(
+        "managed-aria",
+      );
+    });
+
+    it("names the scope element or the target a forbidden attribute sits on", () => {
+      const menubar = `
+        <div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+          <button id="t-file" role="menuitem" aria-controls="m-file" data-stimeo--menubar-target="top">File</button>
+          <ul id="m-file" role="menu" aria-labelledby="t-file" data-stimeo--menubar-target="menu" aria-busy="true" hidden>
+            <li role="none"><button role="menuitem" tabindex="-1"
+                    data-stimeo--menubar-target="item">New</button></li>
+          </ul>
+        </div>`;
+      const onScope = patched("stimeo--switch", {
+        forbiddenAria: [{ target: "", attrs: ["aria-pressed"], suggestion: "Drop aria-pressed." }],
+      });
+
+      expect(only(menubar, "forbidden-aria")?.message).toBe(
+        'aria-busy on the "menu" target of "stimeo--menubar" contradicts the markup around it.',
+      );
+      expect(
+        only(
+          '<div role="switch" aria-checked="false" aria-pressed="true" data-controller="stimeo--switch"></div>',
+          "forbidden-aria",
+          onScope,
+        )?.message,
+      ).toBe(
+        'aria-pressed on the scope element of "stimeo--switch" contradicts the markup around it.',
+      );
+    });
+
+    it("keeps the forbidden-attribute pass off a helper-rendered element", () => {
+      // A data: hash carries only data-* attributes, so the rule names one to
+      // reach a helper-rendered element at all.
+      const rules = patched("stimeo--switch", {
+        forbiddenAria: [{ target: "", attrs: ["data-state"], suggestion: "Drop data-state." }],
+      });
+      const found = (source: string) => checkSource(source, rules).map((d) => d.code);
+
+      expect(
+        found(`<%= tag.div data: { controller: "stimeo--switch", state: "on" } %>`),
+      ).not.toContain("forbidden-aria");
+      expect(found(`<div data-controller="stimeo--switch" data-state="on"></div>`)).toContain(
+        "forbidden-aria",
+      );
     });
   });
 
@@ -3725,6 +4199,28 @@ describe("checkSource", () => {
              role="region" aria-label="Items">items</div>
       </div>`;
 
+    it.each([
+      ["stimeo--stepper", "goto", "index", true],
+      ["stimeo--progress", "setValue", "amount", false],
+      ["stimeo--meter", "setValue", "amount", false],
+      ["stimeo--password-strength", "setScore", "score", false],
+    ])("checks the numeric grammar for %s#%s", (identifier, action, param, required) => {
+      const markup = (literal?: string) =>
+        `<div data-controller="${identifier}" ${literal === undefined ? "" : `data-${identifier}-${param}-param='${literal}'`} data-action="click->${identifier}#${action}"></div>`;
+      if (required) expect(codes(markup())).toContain("missing-action-param");
+      else expect(codes(markup())).not.toContain("missing-action-param");
+      for (const literal of ["2", '"2"', " 2 "]) {
+        expect(codes(markup(literal))).not.toContain("invalid-action-param");
+      }
+      for (const literal of [" ", '"  "', "true", "[2]", "null", "2_0", "NaN", "Infinity", "{}"]) {
+        expect(codes(markup(literal))).toContain("invalid-action-param");
+      }
+      expect(codes(markup(""))).toContain(
+        required ? "missing-action-param" : "invalid-action-param",
+      );
+      expect(codes(markup("<%= amount %>"))).not.toContain("invalid-action-param");
+    });
+
     it("reports a required param nothing on the element supplies", () => {
       expect(codes(scroller(""))).toContain("missing-action-param");
     });
@@ -3828,6 +4324,28 @@ describe("checkSource", () => {
         </div>`;
 
       expect(codes(source)).toContain("invalid-action-param");
+    });
+
+    it.each([
+      ["stimeo--stepper", "goto", "index", "a whole number"],
+      ["stimeo--progress", "setValue", "amount", "a finite number"],
+    ])("describes the rejected %s#%s numeric param", (identifier, action, param, expected) => {
+      const source = `<div data-controller="${identifier}" data-${identifier}-${param}-param="abc"
+                           data-action="click->${identifier}#${action}"></div>`;
+      const diagnostic = checkSource(source, manifest).find(
+        (candidate) => candidate.code === "invalid-action-param",
+      );
+
+      expect(diagnostic?.message).toContain(`It accepts ${expected}.`);
+    });
+
+    it("leaves an empty optional numeric param undecided with a generated descriptor", () => {
+      const source = `<div data-controller="stimeo--progress"
+                           data-stimeo--progress-amount-param=""
+                           data-action="<%= event %>->stimeo--progress#setValue"></div>`;
+
+      expect(codes(source)).not.toContain("invalid-action-param");
+      expect(codes(source.replace("<%= event %>", "click"))).toContain("invalid-action-param");
     });
 
     it("leaves a generated param value undecided", () => {
@@ -4064,6 +4582,546 @@ describe("checkSource", () => {
         </div>`;
 
       expect(codes(source)).toContain("confusable-action-param");
+    });
+  });
+
+  describe("wording and reach of the later stage-3 passes", () => {
+    type ControllerEntry = NonNullable<Manifest["controllers"][string]>;
+    type NumericConstraint = Extract<
+      ControllerEntry["valueConstraints"][number],
+      { type: "number" }
+    >;
+
+    /** The shipped manifest plus a `stimeo--demo` controller carrying only the given rules. */
+    function withDemo(rules: Partial<ControllerEntry>): Manifest {
+      return {
+        ...manifest,
+        controllers: {
+          ...manifest.controllers,
+          "stimeo--demo": {
+            targets: [],
+            values: [],
+            valueConstraints: [],
+            valueRelations: [],
+            actionParams: [],
+            actions: [],
+            events: [],
+            requiredTargets: [],
+            conditionalTargets: [],
+            templateRoots: [],
+            requiredActions: [],
+            actionCompletion: [],
+            a11y: [],
+            keyboard: [],
+            hosts: [],
+            managedAria: [],
+            compositions: [],
+            companions: [],
+            targetDeclarations: [],
+            cardinality: [],
+            forbiddenAria: [],
+            ...rules,
+          },
+        },
+      };
+    }
+
+    /** The shipped manifest with the slider's `step` constraint replaced. */
+    function withSliderStep(
+      bounds: Omit<NumericConstraint, "value" | "type" | "suggestion">,
+    ): Manifest {
+      const slider = manifest.controllers["stimeo--slider"];
+      if (!slider) throw new Error("Missing slider manifest");
+      return {
+        ...manifest,
+        controllers: {
+          ...manifest.controllers,
+          "stimeo--slider": {
+            ...slider,
+            valueConstraints: [
+              {
+                value: "step",
+                type: "number",
+                suggestion: "Set step to an accepted number.",
+                ...bounds,
+              },
+            ],
+          },
+        },
+      };
+    }
+
+    /** Every diagnostic of one code. */
+    function only(source: string, code: DiagnosticCode, against: Manifest = manifest) {
+      return checkSource(source, against).filter((d) => d.code === code);
+    }
+
+    describe("composition values", () => {
+      it("names the host configuration and the target it judges", () => {
+        const source = `
+          <div data-controller="stimeo--sortable">
+            <ul data-controller="stimeo--roving" data-stimeo--sortable-target="list">
+              <li data-stimeo--sortable-target="item">A</li>
+            </ul>
+          </div>`;
+        const found = only(source, "composition-mismatch");
+
+        expect(found).toHaveLength(1);
+        expect(found[0]).toMatchObject({
+          severity: "error",
+          message:
+            '"stimeo--sortable" (orientation "vertical") requires the co-located "stimeo--roving" on its "list" target to set data-stimeo--roving-orientation-value to "vertical", "both" (its default is "horizontal").',
+        });
+      });
+
+      it("falls back to the scope element only for a rule that says so", () => {
+        // The list rules fall back to the scope element when no list target is
+        // written; the item rules do not, so a scope element carrying the
+        // item's companion is not an item and is not judged as one.
+        const rovingOnScope = `
+          <ul data-controller="stimeo--sortable stimeo--roving">
+            <li data-stimeo--sortable-target="item">A</li>
+          </ul>`;
+        expect(only(rovingOnScope, "composition-mismatch").map((d) => d.message)).toEqual([
+          '"stimeo--sortable" (orientation "vertical") requires the co-located "stimeo--roving" on its scope element to set data-stimeo--roving-orientation-value to "vertical", "both" (its default is "horizontal").',
+        ]);
+
+        const dragOnScope = `
+          <ul data-controller="stimeo--sortable stimeo--pointer-drag"
+              data-stimeo--pointer-drag-axis-value="x"></ul>`;
+        expect(only(dragOnScope, "composition-mismatch")).toEqual([]);
+
+        const dragOnItem = `
+          <ul data-controller="stimeo--sortable">
+            <li data-controller="stimeo--pointer-drag" data-stimeo--pointer-drag-axis-value="x"
+                data-stimeo--sortable-target="item">A</li>
+          </ul>`;
+        expect(only(dragOnItem, "composition-mismatch")).toHaveLength(1);
+      });
+
+      it("judges the scope element itself under an unconditional rule", () => {
+        const scoped = withDemo({
+          compositions: [
+            {
+              target: "",
+              coController: "stimeo--roving",
+              require: { value: "orientation", oneOf: ["vertical"], default: "horizontal" },
+              suggestion: "Set the roving orientation to vertical.",
+            },
+          ],
+        });
+
+        expect(
+          only(
+            `<div data-controller="stimeo--demo stimeo--roving"></div>`,
+            "composition-mismatch",
+            scoped,
+          ).map((d) => d.message),
+        ).toEqual([
+          '"stimeo--demo" requires the co-located "stimeo--roving" on its scope element to set data-stimeo--roving-orientation-value to "vertical" (its default is "horizontal").',
+        ]);
+      });
+
+      it("offers the canonical value as a fix, and no fix when the rule names none", () => {
+        const source = `
+          <div data-controller="stimeo--sortable">
+            <ul data-controller="stimeo--roving" data-stimeo--roving-orientation-value="horizontal"
+                data-stimeo--sortable-target="list"></ul>
+          </div>`;
+        const [fixed] = only(source, "composition-mismatch");
+        expect(fixed?.fix).toMatchObject({
+          text: "vertical",
+          title: 'Set data-stimeo--roving-orientation-value to "vertical"',
+        });
+        expect(source.slice(fixed?.fix?.start, fixed?.fix?.end)).toBe("horizontal");
+
+        const unnamed = withDemo({
+          compositions: [
+            {
+              target: "",
+              coController: "stimeo--roving",
+              require: { value: "orientation", oneOf: [], default: "horizontal" },
+              suggestion: "Remove the roving orientation.",
+            },
+          ],
+        });
+        const found = only(
+          `<div data-controller="stimeo--demo stimeo--roving"
+                data-stimeo--roving-orientation-value="vertical"></div>`,
+          "composition-mismatch",
+          unnamed,
+        );
+        expect(found).toHaveLength(1);
+        expect(found[0]?.message).toBe(
+          'data-stimeo--roving-orientation-value="vertical" on the scope element of "stimeo--demo" must be (none).',
+        );
+        expect(found[0]?.fix).toBeUndefined();
+      });
+
+      it("stays silent on a helper whose data: hash cannot be enumerated", () => {
+        // A splatted hash may carry the companion's value itself, so its absence
+        // from the literal part proves nothing.
+        const list = (rest: string) => `
+          <div data-controller="stimeo--sortable">
+            <%= tag.ul data: { controller: "stimeo--roving", stimeo__sortable_target: "list"${rest} } %>
+          </div>`;
+
+        expect(only(list(""), "composition-mismatch")).toHaveLength(1);
+        expect(only(list(", **options"), "composition-mismatch")).toEqual([]);
+      });
+    });
+
+    describe("required companions", () => {
+      it("names the target that has to declare the companion", () => {
+        const source = `
+          <nav data-controller="stimeo--overflow-menu" aria-label="Actions">
+            <div data-stimeo--overflow-menu-target="items"><button type="button">Save</button></div>
+            <div data-stimeo--overflow-menu-target="more" hidden><button type="button">More</button></div>
+          </nav>`;
+        const found = only(source, "missing-companion");
+
+        expect(found).toHaveLength(1);
+        expect(found[0]).toMatchObject({
+          severity: "error",
+          message:
+            'The "more" target of "stimeo--overflow-menu" must also declare "stimeo--menu" in data-controller.',
+        });
+        expect(found[0]?.fix).toBeUndefined();
+      });
+
+      it("judges the scope element for a rule on the scope itself", () => {
+        const scoped = withDemo({
+          companions: [
+            { target: "", controller: "stimeo--roving", suggestion: "Add stimeo--roving." },
+          ],
+        });
+        const found = only(
+          `<div data-controller="stimeo--demo"></div>`,
+          "missing-companion",
+          scoped,
+        );
+
+        expect(found).toHaveLength(1);
+        expect(found[0]?.message).toBe(
+          'The scope element of "stimeo--demo" must also declare "stimeo--roving" in data-controller.',
+        );
+        expect(found[0]?.fix?.text).toBe("stimeo--demo stimeo--roving");
+        expect(
+          only(
+            `<div data-controller="stimeo--demo stimeo--roving"></div>`,
+            "missing-companion",
+            scoped,
+          ),
+        ).toEqual([]);
+      });
+
+      it("stays silent on a helper whose data: hash cannot be enumerated", () => {
+        const more = (rest: string) => `
+          <nav data-controller="stimeo--overflow-menu" aria-label="Actions">
+            <div data-stimeo--overflow-menu-target="items"><button type="button">Save</button></div>
+            <%= tag.div data: { stimeo__overflow_menu_target: "more"${rest} } %>
+          </nav>`;
+
+        expect(only(more(""), "missing-companion")).toHaveLength(1);
+        expect(only(more(", **menu_data"), "missing-companion")).toEqual([]);
+      });
+    });
+
+    describe("undeclared targets", () => {
+      it("skips a marker whose value is partly generated", () => {
+        // Neutralization blanks the ERB tag in place, so the remnant would read
+        // as a literal "treeitem" the rendering may never produce.
+        const tree = (role: string) => `
+          <ul data-controller="stimeo--tree-view" role="tree" aria-label="Files">
+            <li role="treeitem" data-stimeo--tree-view-target="item">A</li>
+            <li role="${role}">B</li>
+          </ul>`;
+
+        expect(only(tree("treeitem"), "undeclared-target").map((d) => d.message)).toEqual([
+          'role="treeitem" inside "stimeo--tree-view" is not declared as its "item" target, so the controller never manages it.',
+        ]);
+        expect(only(tree("<%= kind %>treeitem"), "undeclared-target")).toEqual([]);
+      });
+
+      it("reads a rule without values as any non-empty value of its own attribute", () => {
+        const declared = withDemo({
+          targets: ["item"],
+          targetDeclarations: [
+            { attr: "role", target: "item", suggestion: "Declare the item." },
+            { attr: "aria-roledescription", target: "item", suggestion: "Declare the item." },
+          ],
+        });
+        const scope = (role: string) =>
+          `<div data-controller="stimeo--demo"><span role="${role}">A</span></div>`;
+
+        expect(only(scope("row"), "undeclared-target", declared).map((d) => d.message)).toEqual([
+          'role="row" inside "stimeo--demo" is not declared as its "item" target, so the controller never manages it.',
+        ]);
+        expect(only(scope(""), "undeclared-target", declared)).toEqual([]);
+        expect(only(scope("   "), "undeclared-target", declared)).toEqual([]);
+      });
+    });
+
+    describe("cardinality wording", () => {
+      it("names an uncounted target and the controller scope", () => {
+        const source = `
+          <div data-controller="stimeo--form-field">
+            <input aria-label="Email" data-stimeo--form-field-target="control">
+            <input aria-label="Confirmation" data-stimeo--form-field-target="control">
+          </div>`;
+
+        expect(only(source, "cardinality-violation").map((d) => d.message)).toEqual([
+          '"stimeo--form-field" allows at most 1 "control" targets per controller scope, but found 2.',
+        ]);
+      });
+
+      it("names the attribute value that is counted", () => {
+        const source = `
+          <div data-controller="stimeo--tabs">
+            <div role="tablist" aria-label="Sections" data-stimeo--tabs-target="list">
+              <button role="tab" aria-selected="true" data-stimeo--tabs-target="tab">A</button>
+              <button role="tab" aria-selected="true" data-stimeo--tabs-target="tab">B</button>
+            </div>
+            <div role="tabpanel" aria-label="A" data-stimeo--tabs-target="panel">A</div>
+            <div role="tabpanel" aria-label="B" data-stimeo--tabs-target="panel" hidden>B</div>
+          </div>`;
+
+        expect(only(source, "cardinality-violation").map((d) => d.message)).toEqual([
+          '"stimeo--tabs" allows at most 1 "tab" targets with aria-selected set to "true" per controller scope, but found 2.',
+        ]);
+      });
+
+      it("names an attribute counted whatever its value", () => {
+        const counted = withDemo({
+          targets: ["item"],
+          cardinality: [
+            {
+              within: "",
+              target: "item",
+              attr: "aria-current",
+              max: 1,
+              suggestion: "Mark one item current.",
+            },
+          ],
+        });
+        const source = `
+          <div data-controller="stimeo--demo">
+            <a href="/a" aria-current="page" data-stimeo--demo-target="item">A</a>
+            <a href="/b" aria-current="step" data-stimeo--demo-target="item">B</a>
+          </div>`;
+
+        expect(only(source, "cardinality-violation", counted).map((d) => d.message)).toEqual([
+          '"stimeo--demo" allows at most 1 "item" targets with aria-current per controller scope, but found 2.',
+        ]);
+      });
+
+      describe("a short count", () => {
+        const nav = (area: string) => `
+          <nav data-controller="stimeo--navigation-menu" aria-label="Main"
+               data-stimeo--navigation-menu-open-on-hover-value="true">
+            <ul>
+              <li data-stimeo--navigation-menu-target="hoverArea">${area}</li>
+              <li>
+                <button data-stimeo--navigation-menu-target="trigger" aria-expanded="false"
+                        aria-controls="p1">P</button>
+                <div id="p1" data-stimeo--navigation-menu-target="panel" hidden>
+                  <a href="/a">A</a>
+                </div>
+              </li>
+            </ul>
+          </nav>`;
+        const message =
+          '"stimeo--navigation-menu" requires at least 1 "trigger" targets per "hoverArea" target, but found 0.';
+
+        it("is an error carrying the rule's suggestion when every element is readable", () => {
+          const rule = manifest.controllers["stimeo--navigation-menu"]?.cardinality[0];
+
+          expect(only(nav("<span>Nothing</span>"), "cardinality-violation")).toEqual([
+            expect.objectContaining({
+              severity: "error",
+              message,
+              suggestion: rule?.suggestion,
+            }),
+          ]);
+          expect(rule?.suggestion).toContain("Wrap exactly one trigger per hoverArea");
+        });
+
+        it("is a warning naming the unreadable helper when one may hold the target", () => {
+          expect(
+            only(nav("<%= render_trigger data: trigger_data %>"), "cardinality-violation"),
+          ).toEqual([
+            expect.objectContaining({
+              severity: "warning",
+              message,
+              suggestion:
+                "Part of this scope is rendered by a helper or a non-literal data: hash, so the target may exist at runtime.",
+            }),
+          ]);
+        });
+      });
+    });
+
+    describe("numeric contract wording", () => {
+      it("words an exclusive lower endpoint read from an older manifest", () => {
+        const diagnostic = only(
+          '<div data-stimeo--slider-step-value="0"></div>',
+          "invalid-value",
+          withSliderStep({ greaterThan: 0 }),
+        );
+
+        expect(diagnostic.map((d) => d.message)).toEqual([
+          'Invalid value "0" for "stimeo--slider.step". Expected a number greater than 0.',
+        ]);
+      });
+
+      it("words a whole-number contract", () => {
+        const integer = withSliderStep({ finite: true, integer: true });
+
+        expect(
+          only('<div data-stimeo--slider-step-value="1.5"></div>', "invalid-value", integer).map(
+            (d) => d.message,
+          ),
+        ).toEqual([
+          'Invalid value "1.5" for "stimeo--slider.step". Expected a finite number with no fractional part.',
+        ]);
+        expect(
+          only('<div data-stimeo--slider-step-value="2"></div>', "invalid-value", integer),
+        ).toEqual([]);
+      });
+    });
+
+    describe("ARIA requirement wording and fixes", () => {
+      const dialog = (attrs: string) => `
+        <div data-controller="stimeo--dialog">
+          <button data-stimeo--dialog-target="trigger" data-action="stimeo--dialog#open">Open</button>
+          <div data-stimeo--dialog-target="dialog" role="dialog" ${attrs} hidden></div>
+        </div>`;
+
+      it("lists every attribute that would satisfy a missing requirement", () => {
+        expect(only(dialog('aria-modal="true"'), "missing-aria").map((d) => d.message)).toEqual([
+          '"stimeo--dialog" requires aria-labelledby or aria-label on its "dialog" target.',
+        ]);
+      });
+
+      it("fixes a value only where exactly one value is allowed", () => {
+        const [single] = only(
+          dialog('aria-modal="yes" aria-label="Confirm"'),
+          "invalid-aria-value",
+        );
+        expect(single?.fix?.text).toBe("true");
+
+        const source = `
+          <div data-controller="stimeo--menu">
+            <button id="menu-trigger" aria-haspopup="listbox" data-stimeo--menu-target="trigger">Actions</button>
+            <ul role="menu" aria-labelledby="menu-trigger" data-stimeo--menu-target="menu" hidden>
+              <li role="none"><button role="menuitem" data-stimeo--menu-target="item">Edit</button></li>
+            </ul>
+          </div>`;
+        const found = only(source, "invalid-aria-value");
+        expect(found).toHaveLength(1);
+        expect(found[0]?.suggestion).toBe('Set aria-haspopup to "menu", "true".');
+        expect(found[0]?.fix).toBeUndefined();
+      });
+
+      it("offers no fix for an attribute written without a value", () => {
+        // A bare attribute has no value range to replace, so the rewrite has
+        // nowhere to go and only the suggestion is offered.
+        const found = only(dialog('aria-modal aria-label="Confirm"'), "invalid-aria-value");
+
+        expect(found).toHaveLength(1);
+        expect(found[0]?.message).toBe(
+          'aria-modal="" is not valid on the "dialog" target of "stimeo--dialog". Expected "true".',
+        );
+        expect(found[0]?.fix).toBeUndefined();
+      });
+    });
+
+    describe("keyboard reach", () => {
+      const menu = (item: string) => `
+        <div data-controller="stimeo--menu">
+          <button id="menu-trigger" aria-haspopup="menu" data-stimeo--menu-target="trigger">Actions</button>
+          <ul role="menu" aria-labelledby="menu-trigger" data-stimeo--menu-target="menu" hidden>
+            <li role="none">${item}</li>
+          </ul>
+        </div>`;
+      const slider = (thumb: string) => `
+        <div data-controller="stimeo--slider">
+          <div data-stimeo--slider-target="track">${thumb}</div>
+        </div>`;
+
+      it("counts a link as focusable only with an href", () => {
+        expect(
+          only(
+            menu('<a role="menuitem" href="/edit" data-stimeo--menu-target="item">Edit</a>'),
+            "keyboard-inaccessible",
+          ),
+        ).toEqual([]);
+        expect(
+          only(
+            menu('<a role="menuitem" data-stimeo--menu-target="item">Edit</a>'),
+            "keyboard-inaccessible",
+          ),
+        ).toHaveLength(1);
+      });
+
+      it("does not count a tabindex that is not an integer toward programmatic focus", () => {
+        expect(
+          only(
+            menu('<div role="menuitem" tabindex="-1" data-stimeo--menu-target="item">Edit</div>'),
+            "keyboard-inaccessible",
+          ),
+        ).toEqual([]);
+        expect(
+          only(
+            menu(
+              '<div role="menuitem" tabindex="first" data-stimeo--menu-target="item">Edit</div>',
+            ),
+            "keyboard-inaccessible",
+          ).map((d) => d.message),
+        ).toEqual([
+          'The "item" target of "stimeo--menu" is not focusable (needs a native control or tabindex).',
+        ]);
+      });
+
+      it("does not count a tabindex that is not an integer toward the Tab order", () => {
+        expect(
+          only(
+            slider(
+              '<div role="slider" aria-label="V" tabindex="0" data-stimeo--slider-target="thumb"></div>',
+            ),
+            "keyboard-inaccessible",
+          ),
+        ).toEqual([]);
+        expect(
+          only(
+            slider(
+              '<div role="slider" aria-label="V" tabindex="first" data-stimeo--slider-target="thumb"></div>',
+            ),
+            "keyboard-inaccessible",
+          ).map((d) => d.message),
+        ).toEqual([
+          'The "thumb" target of "stimeo--slider" is not in the Tab order (needs a native control or tabindex="0").',
+        ]);
+      });
+    });
+
+    describe("name lists and suggestions", () => {
+      it("says a controller declares no targets instead of printing an empty list", () => {
+        const empty = withDemo({});
+
+        expect(
+          only(
+            `<div data-controller="stimeo--demo"><span data-stimeo--demo-target="box"></span></div>`,
+            "unknown-target",
+            empty,
+          ).map((d) => d.message),
+        ).toEqual(['Unknown target "box" for "stimeo--demo". Known targets: (none).']);
+      });
+
+      it("suggests nothing for an empty name, even beside a one-letter candidate", () => {
+        expect(didYouMean("", ["a", "ab"])).toBeUndefined();
+        expect(didYouMean("b", ["a"])).toBe('Did you mean "a"?');
+      });
     });
   });
 });

@@ -100,6 +100,55 @@ describe("StickToBottomController", () => {
       Object.defineProperty(box(), key, { configurable: true, value });
     }
   };
+  it.each(["root", "target"])(
+    "reevaluates pinned geometry on retained morph from %s",
+    async (origin) => {
+      setup();
+      setGeom(800, 200, 600);
+      const scroll = spyOnScrollTo();
+      await start();
+      expect(box().getAttribute("data-pinned")).toBe("true");
+      const pins = vi.fn();
+      box().addEventListener("stimeo--stick-to-bottom:pin", pins);
+      setGeom(1000, 200, 600);
+      (origin === "root" ? box() : content()).dispatchEvent(
+        new CustomEvent("turbo:morph-element", { bubbles: true }),
+      );
+      await tick();
+      expect(box().hasAttribute("data-pinned")).toBe(false);
+      expect(pins).toHaveBeenCalledTimes(1);
+      expect((pins.mock.calls[0]?.[0] as CustomEvent | undefined)?.detail).toEqual({
+        pinned: false,
+      });
+      expect(scroll).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["root", "target"])(
+    "cancels retained morph work at disconnect from %s",
+    async (origin) => {
+      setup();
+      setGeom(800, 200, 600);
+      await start();
+      expect(box().getAttribute("data-pinned")).toBe("true");
+      const instance = application.getControllerForElementAndIdentifier(
+        box(),
+        "stimeo--stick-to-bottom",
+      ) as StickToBottomController;
+      const pins = vi.fn();
+      box().addEventListener("stimeo--stick-to-bottom:pin", pins);
+      const source = origin === "root" ? box() : content();
+      source.dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+      instance.disconnect();
+      setGeom(1000, 200, 600);
+      box().setAttribute("data-pinned", "consumer");
+      source.dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+      await tick();
+      expect(box().getAttribute("data-pinned")).toBe("consumer");
+      expect(pins).not.toHaveBeenCalled();
+    },
+  );
+
   const appendChild = async () => {
     content().appendChild(document.createElement("li"));
     await tick();
@@ -268,6 +317,22 @@ describe("StickToBottomController", () => {
       const scrollTo = await connectUnlaidOut();
       FakeResizeObserver.instances[0]?.trigger(); // still display:none
       expect(scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("stops waiting on layout once the held jump has run", async () => {
+      const scrollTo = await connectUnlaidOut();
+      const observer = FakeResizeObserver.instances[0];
+      setGeom(1000, 400, 0); // revealed
+      observer?.trigger();
+      expect(scrollTo).toHaveBeenCalledOnce();
+      expect(observer?.observed.size).toBe(0);
+
+      // The reader scrolls up; a later resize must not drag them back to the bottom.
+      setGeom(1000, 400, 100);
+      box().dispatchEvent(new Event("scroll"));
+      observer?.trigger();
+      expect(scrollTo).toHaveBeenCalledOnce();
+      expect(box().hasAttribute("data-pinned")).toBe(false);
     });
 
     it("releases the layout watch on disconnect", async () => {
@@ -583,6 +648,44 @@ describe("StickToBottomController", () => {
     fresh.appendChild(document.createElement("li"));
     await tick();
     expect(box().getAttribute("data-has-new")).toBe("true");
+  });
+
+  it("moves the append watch onto a content target that arrives at runtime", async () => {
+    setupWithoutContentTarget();
+    setGeom(1000, 400, 100); // unpinned
+    await start();
+    box().scrollTo = vi.fn();
+    const list = document.createElement("ul");
+    list.setAttribute("data-stimeo--stick-to-bottom-target", "content");
+    box().appendChild(list);
+    controller().contentTargetConnected();
+    await tick();
+    const news = recordNews();
+
+    // An append beside the list, on the container itself, goes unwatched…
+    box().appendChild(document.createElement("p"));
+    await tick();
+    expect(news).toEqual([]);
+
+    // …while an append to the list is followed.
+    list.appendChild(document.createElement("li"));
+    await tick();
+    expect(news).toEqual([{ count: 1 }]);
+  });
+
+  it("moves the append watch back onto the container when the content target leaves", async () => {
+    setup();
+    setGeom(1000, 400, 100); // unpinned
+    await start();
+    box().scrollTo = vi.fn();
+    content().remove();
+    controller().contentTargetDisconnected();
+    await tick();
+    const news = recordNews();
+
+    box().appendChild(document.createElement("li"));
+    await tick();
+    expect(news).toEqual([{ count: 1 }]);
   });
 
   it("keeps an arrival in flight when the watch re-syncs to the same target", async () => {

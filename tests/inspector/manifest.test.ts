@@ -17,6 +17,7 @@ import type { ContentCondition, ValueCondition } from "../../src/inspector/types
 import { valueConstraintRules } from "../../src/inspector/value_constraint_rules";
 import { valueRelationRules } from "../../src/inspector/value_relation_rules";
 import { positioningControllers } from "../../src/positioning";
+import type { NumberBounds } from "../../src/utils/number_bounds";
 
 /** Tests for the reflection-based manifest generator. */
 describe("buildManifest", () => {
@@ -29,6 +30,116 @@ describe("buildManifest", () => {
   /** A controller's declared `static values` default, read without instantiating. */
   const valueDefault = (ctor: unknown, name: string): unknown =>
     (ctor as { values?: Record<string, { default?: unknown }> }).values?.[name]?.default;
+
+  it("rejects numeric bounds corrupted by JSON infinity serialization", () => {
+    const controller = manifest.controllers["stimeo--slider"];
+    if (!controller) throw new Error("Missing slider manifest");
+    const candidate = {
+      ...manifest,
+      controllers: {
+        ...manifest.controllers,
+        "stimeo--slider": {
+          ...controller,
+          valueConstraints: [
+            { value: "step", type: "number", min: null, suggestion: "Use a valid number." },
+          ],
+        },
+      },
+    };
+    expect(isCompatibleManifest(candidate)).toBe(false);
+  });
+
+  it("exposes infinity exceptions to readers that only recognize finite", () => {
+    const constraints = manifest.controllers["stimeo--number-input"]?.valueConstraints ?? [];
+    expect(constraints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: "min",
+          type: "number",
+          finite: false,
+          allowInfinity: "negative",
+        }),
+        expect.objectContaining({
+          value: "max",
+          type: "number",
+          finite: false,
+          allowInfinity: "positive",
+        }),
+      ]),
+    );
+    const roundtrip = JSON.parse(JSON.stringify(manifest));
+    expect(isCompatibleManifest(roundtrip)).toBe(true);
+  });
+
+  it("describes each reflected numeric bound in its author-facing suggestion", () => {
+    const ctor = stimeoControllers["stimeo--slider"] as unknown as {
+      valueConstraints: Record<string, NumberBounds>;
+    };
+    const original = ctor.valueConstraints;
+    try {
+      ctor.valueConstraints = {
+        ...original,
+        step: { finite: true, exclusiveMin: 0, max: Number.MAX_SAFE_INTEGER, integer: true },
+      };
+      const step = buildManifest("1.2.3").controllers["stimeo--slider"]?.valueConstraints.find(
+        (constraint) => constraint.value === "step" && constraint.type === "number",
+      );
+      expect(step?.suggestion).toBe(
+        `Set step to a finite number greater than 0 at most ${Number.MAX_SAFE_INTEGER} with no fractional part.`,
+      );
+    } finally {
+      ctor.valueConstraints = original;
+    }
+    const lower = manifest.controllers["stimeo--number-input"]?.valueConstraints.find(
+      (constraint) => constraint.value === "min" && constraint.type === "number",
+    );
+    expect(lower?.suggestion).toBe("Set min to a finite number or negative infinity.");
+  });
+
+  it("describes discrete numeric values in a reflected suggestion", () => {
+    const ctor = stimeoControllers["stimeo--slider"] as unknown as {
+      valueConstraints: Record<string, NumberBounds>;
+    };
+    const original = ctor.valueConstraints;
+    try {
+      ctor.valueConstraints = { ...original, step: { allowedValues: [1, 2, 5] } };
+      const step = buildManifest("1.2.3").controllers["stimeo--slider"]?.valueConstraints.find(
+        (constraint) => constraint.value === "step" && constraint.type === "number",
+      );
+      expect(step?.suggestion).toBe("Set step to a finite number among 1, 2, 5.");
+    } finally {
+      ctor.valueConstraints = original;
+    }
+  });
+
+  it("rejects malformed reflected numeric domains in an external manifest", () => {
+    const controller = manifest.controllers["stimeo--slider"];
+    if (!controller) throw new Error("Missing slider manifest");
+    const withConstraint = (constraint: unknown) => ({
+      ...manifest,
+      controllers: {
+        ...manifest.controllers,
+        "stimeo--slider": { ...controller, valueConstraints: [constraint] },
+      },
+    });
+    expect(isCompatibleManifest(withConstraint({ type: "number", allowedValues: [1, 2] }))).toBe(
+      true,
+    );
+    for (const malformed of [
+      null,
+      "number",
+      { type: "number", allowedValues: "1, 2" },
+      { type: "number", allowedValues: [1, "2"] },
+      { type: "number", allowInfinity: "sideways" },
+    ]) {
+      expect(isCompatibleManifest(withConstraint(malformed))).toBe(false);
+    }
+    for (const direction of ["negative", "positive", "both"]) {
+      expect(
+        isCompatibleManifest(withConstraint({ type: "number", allowInfinity: direction })),
+      ).toBe(true);
+    }
+  });
 
   it("stamps schema and package versions", () => {
     expect(manifest.schemaVersion).toBe(SCHEMA_VERSION);
@@ -262,112 +373,28 @@ describe("buildManifest", () => {
       "change",
       "reconcile",
     ]);
-    expect(manifest.controllers["stimeo--character-counter"]?.valueConstraints).toEqual([
-      {
-        value: "max",
-        type: "number",
-        finite: true,
-        greaterThan: -1,
-        integer: true,
-        suggestion: "Set max to a non-negative integer.",
-      },
-      {
-        value: "warnAt",
-        type: "number",
-        finite: true,
-        greaterThan: -1,
-        integer: true,
-        suggestion: "Set warnAt to a non-negative integer.",
-      },
-    ]);
-    expect(manifest.controllers["stimeo--slider"]?.valueConstraints).toEqual([
-      {
-        value: "step",
-        type: "number",
-        finite: true,
-        greaterThan: 0,
-        suggestion: "Set step to a finite number greater than 0.",
-      },
-    ]);
-    expect(manifest.controllers["stimeo--range-slider"]?.valueConstraints).toEqual([
-      {
-        value: "min",
-        type: "number",
-        finite: true,
-        suggestion: "Set min to a finite number.",
-      },
-      {
-        value: "max",
-        type: "number",
-        finite: true,
-        suggestion: "Set max to a finite number.",
-      },
-      {
-        value: "step",
-        type: "number",
-        finite: true,
-        greaterThan: 0,
-        suggestion: "Set step to a finite number greater than 0.",
-      },
-      {
-        value: "start",
-        type: "number",
-        finite: true,
-        suggestion: "Set start to a finite number.",
-      },
-      {
-        value: "end",
-        type: "number",
-        finite: true,
-        suggestion: "Set end to a finite number.",
-      },
-    ]);
-    expect(manifest.controllers["stimeo--number-input"]?.valueConstraints).toEqual(
-      manifest.controllers["stimeo--slider"]?.valueConstraints,
+    for (const [identifier, ctor] of Object.entries(allControllers)) {
+      const reflected = ctor as unknown as {
+        valueConstraints?: Record<string, Record<string, unknown>>;
+      };
+      const numeric = manifest.controllers[identifier]?.valueConstraints.filter(
+        (constraint) => constraint.type === "number",
+      );
+      expect(numeric?.map((constraint) => constraint.value)).toEqual(
+        Object.keys(reflected.valueConstraints ?? {}),
+      );
+      for (const constraint of numeric ?? []) {
+        const bounds = reflected.valueConstraints?.[constraint.value] ?? {};
+        expect(constraint).toMatchObject({
+          ...bounds,
+          finite: !bounds.allowInfinity,
+        });
+      }
+    }
+    expect(manifest.schemaVersion).toBe(15);
+    expect(manifest.controllers["stimeo--slider"]?.valueConstraints).toEqual(
+      expect.arrayContaining([expect.objectContaining({ value: "step", exclusiveMin: 0 })]),
     );
-    expect(manifest.controllers["stimeo--time-picker"]?.valueConstraints).toEqual([
-      {
-        value: "step",
-        type: "number",
-        finite: true,
-        greaterThan: 0,
-        integer: true,
-        suggestion: "Set step to a positive integer.",
-      },
-    ]);
-    expect(manifest.controllers["stimeo--separator"]?.valueConstraints).toEqual([
-      {
-        value: "orientation",
-        type: "string",
-        allowedValues: ["horizontal", "vertical"],
-        suggestion: 'Set orientation to "horizontal" or "vertical".',
-      },
-      {
-        value: "min",
-        type: "number",
-        finite: true,
-        suggestion: "Set min to a finite number.",
-      },
-      {
-        value: "max",
-        type: "number",
-        finite: true,
-        suggestion: "Set max to a finite number.",
-      },
-      {
-        value: "step",
-        type: "number",
-        finite: true,
-        greaterThan: 0,
-        suggestion: "Set step to a finite number greater than 0.",
-      },
-      {
-        value: "value",
-        type: "number",
-        finite: true,
-        suggestion: "Set value to a finite number.",
-      },
-    ]);
     expect(manifest.controllers["stimeo--switch"]?.valueConstraints).toEqual([]);
 
     for (const [identifier, rules] of Object.entries(valueConstraintRules)) {
@@ -489,8 +516,7 @@ describe("buildManifest", () => {
   });
 
   it("only writes a11y rules for known controllers", () => {
-    // Cable controllers carry a11y rules too (e.g. typing-indicator's status
-    // live region), so the domain is core + opt-ins, not the core alone.
+    // Every rule names a controller in the public registry, including opt-ins.
     for (const id of Object.keys(a11yRules)) {
       expect(allControllers).toHaveProperty(id);
     }
@@ -929,6 +955,26 @@ describe("buildManifest", () => {
           `${id}: one placement per rule`,
         ).toBeUndefined();
       }
+    }
+  });
+
+  it("reflects numeric action params with only Stepper required", () => {
+    for (const [identifier, action, param, required] of [
+      ["stimeo--stepper", "goto", "index", true],
+      ["stimeo--progress", "setValue", "amount", false],
+      ["stimeo--meter", "setValue", "amount", false],
+      ["stimeo--password-strength", "setScore", "score", false],
+    ] as const) {
+      expect(manifest.controllers[identifier]?.actionParams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            action,
+            param,
+            numeric: true,
+            ...(required ? { required } : {}),
+          }),
+        ]),
+      );
     }
   });
 

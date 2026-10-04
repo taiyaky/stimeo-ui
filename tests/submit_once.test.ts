@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SubmitOnceController } from "../src/controllers/submit_once_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /** Behavioral and lifecycle coverage for the form-scoped submit-once contract. */
@@ -33,6 +33,19 @@ describe("SubmitOnceController", () => {
       <form id="form" action="#" data-controller="stimeo--submit-once" ${attributes}>
         ${contents}
       </form>`;
+    await startApplication();
+  };
+
+  /**
+   * Mounts on a wrapper around the form: happy-dom connects a second instance to a
+   * `<form>` host when one of its attributes changes, under another identity of the same
+   * element, and that instance takes the form's leased attributes for a restored copy's.
+   */
+  const mountAround = async (attributes: string, contents: string) => {
+    document.body.innerHTML = `
+      <div id="root" data-controller="stimeo--submit-once" ${attributes}>
+        <form id="form" action="#">${contents}</form>
+      </div>`;
     await startApplication();
   };
 
@@ -169,9 +182,8 @@ describe("SubmitOnceController", () => {
       '<input id="image-submit" type="image" value="commit" alt="Send">',
     );
     const image = control("#image-submit") as HTMLInputElement;
-    // Real browsers exclude image submitters from form.elements.
-    // Shadow happy-dom's broader collection so this test fixes that engine gap.
-    vi.spyOn(HTMLFormElement.prototype, "elements", "get").mockReturnValue(
+    /** Browsers omit image submitters from the collection exposed by this form. */
+    vi.spyOn(form(), "elements", "get").mockReturnValue(
       [] as unknown as HTMLFormControlsCollection,
     );
 
@@ -263,22 +275,148 @@ describe("SubmitOnceController", () => {
     expect(ends).toEqual([{ form: form(), submitter: button, reason: "timeout", success: false }]);
   });
 
+  // --- `timeout` belongs to one submission session ---------------------------------
+
+  /**
+   * Rewrites `timeout` on `host` and delivers its Value callback directly when the
+   * controller defines one, since happy-dom does not reliably run it for an attribute
+   * write.
+   */
+  const declareTimeout = (value: number, host: Element = form()) => {
+    host.setAttribute("data-stimeo--submit-once-timeout-value", String(value));
+    const owner = controller(host);
+    const callback: unknown = Reflect.get(owner, "timeoutValueChanged");
+    if (typeof callback === "function") callback.call(owner);
+  };
+
+  it.each([
+    { direction: "shrinks", next: 50 },
+    { direction: "grows", next: 5000 },
+  ])(
+    "keeps a session's watchdog deadline when timeout $direction, and arms the next submission anew",
+    async ({ next }) => {
+      await mountAround(
+        'data-stimeo--submit-once-timeout-value="1000"',
+        '<button id="send" type="submit">Send</button>',
+      );
+      const button = control("#send");
+      const reasons: string[] = [];
+      query("#root").addEventListener("stimeo--submit-once:end", (event) => {
+        reasons.push((event as CustomEvent<{ reason: string }>).detail.reason);
+      });
+      turboStart(button);
+      await vi.advanceTimersByTimeAsync(100);
+
+      declareTimeout(next, query("#root"));
+      await vi.advanceTimersByTimeAsync(899);
+      expect(button.disabled).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(button.disabled).toBe(false);
+      expect(reasons).toEqual(["timeout"]);
+
+      turboStart(button);
+      await vi.advanceTimersByTimeAsync(next - 1);
+      expect(button.disabled).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(button.disabled).toBe(false);
+      expect(reasons).toEqual(["timeout", "timeout"]);
+    },
+  );
+
+  it.each([{ ending: "a completion", end: () => turboEnd() }])(
+    "disarms the watchdog of a submission ended by $ending before the next one starts",
+    async ({ end }) => {
+      await mount(
+        'data-stimeo--submit-once-timeout-value="1000"',
+        '<button id="send" type="submit">Send</button>',
+      );
+      const button = control("#send");
+      const reasons: string[] = [];
+      form().addEventListener("stimeo--submit-once:end", (event) => {
+        reasons.push((event as CustomEvent<{ reason: string }>).detail.reason);
+      });
+      turboStart(button);
+      await vi.advanceTimersByTimeAsync(500);
+      end();
+      const before = [...reasons];
+
+      turboStart(button);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(button.disabled).toBe(true);
+      expect(reasons).toEqual(before);
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(button.disabled).toBe(false);
+      expect(reasons).toEqual([...before, "timeout"]);
+    },
+  );
+
+  it("keeps each form's session on the timeout it started with", async () => {
+    document.body.innerHTML = `
+      <div id="root" data-controller="stimeo--submit-once"
+           data-stimeo--submit-once-timeout-value="1000">
+        <form id="alpha"><button id="alpha-send" type="submit">Alpha</button></form>
+        <form id="beta"><button id="beta-send" type="submit">Beta</button></form>
+      </div>`;
+    await startApplication();
+    const root = query<HTMLElement>("#root");
+    const alphaButton = control("#alpha-send");
+    const betaButton = control("#beta-send");
+
+    turboStart(alphaButton, query<HTMLFormElement>("#alpha"));
+    await vi.advanceTimersByTimeAsync(100);
+    declareTimeout(300, root);
+    turboStart(betaButton, query<HTMLFormElement>("#beta")); // due at t=400
+
+    await vi.advanceTimersByTimeAsync(299);
+    expect([alphaButton.disabled, betaButton.disabled]).toEqual([true, true]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect([alphaButton.disabled, betaButton.disabled]).toEqual([true, false]);
+    await vi.advanceTimersByTimeAsync(599); // t=999
+    expect(alphaButton.disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(alphaButton.disabled).toBe(false);
+  });
+
+  it("ends and reports nothing from a timeout change alone", async () => {
+    await mount("", '<button id="send" type="submit">Send</button>');
+    const button = control("#send");
+    const events: string[] = [];
+    for (const type of ["start", "end", "reconcile"]) {
+      form().addEventListener(`stimeo--submit-once:${type}`, () => events.push(type));
+    }
+    declareTimeout(20);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(events).toEqual([]);
+
+    // A session started with no watchdog is not given one by a later declaration.
+    declareTimeout(0);
+    turboStart(button);
+    declareTimeout(20);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(button.disabled).toBe(true);
+    expect(form().getAttribute("aria-busy")).toBe("true");
+    expect(events).toEqual(["start"]);
+  });
+
   it("stays busy across a non-Turbo async round trip until finish", async () => {
-    await mount(
+    await mountAround(
       'data-action="submit->stimeo--submit-once#start custom:done->stimeo--submit-once#finish"',
       '<button id="send" type="submit">Send</button>',
     );
     const button = control("#send");
     const ends: unknown[] = [];
-    form().addEventListener("stimeo--submit-once:end", (event) => {
+    query("#root").addEventListener("stimeo--submit-once:end", (event) => {
       ends.push((event as CustomEvent).detail);
     });
     // Such a form has to cancel the native navigation to issue its own request,
     // which is why cancelling the default cannot mean the submission died.
-    form().addEventListener("submit", (event) => {
+    query("#root").addEventListener("submit", (event) => {
       event.preventDefault();
       window.setTimeout(() => {
-        form().dispatchEvent(new CustomEvent("custom:done", { detail: { success: true } }));
+        form().dispatchEvent(
+          new CustomEvent("custom:done", { bubbles: true, detail: { success: true } }),
+        );
       }, 50);
     });
 
@@ -368,19 +506,19 @@ describe("SubmitOnceController", () => {
   });
 
   it("keeps a submit alive when a later listener only suppresses navigation", async () => {
-    await mount(
+    await mountAround(
       'data-action="submit->stimeo--submit-once#start"',
       '<button id="send" type="submit">Send</button>',
     );
     const button = control("#send");
-    form().addEventListener("submit", (event) => event.preventDefault());
+    query("#root").addEventListener("submit", (event) => event.preventDefault());
 
     nativeSubmit(button);
     await vi.advanceTimersByTimeAsync(0);
 
     expect(button.disabled).toBe(true);
     expect(form().getAttribute("data-submitting")).toBe("true");
-    controller().finish();
+    controller(query("#root")).finish();
   });
 
   it("lets a direct cancel abandon the sole active form", async () => {
@@ -492,6 +630,22 @@ describe("SubmitOnceController", () => {
 
     expect(late.disabled).toBe(true);
     expect(late.getAttribute("aria-busy")).toBe("true");
+  });
+
+  it("returns each control's aria-busy when the submission ends", async () => {
+    await mount(
+      "",
+      `<button id="send" type="submit">Send</button>
+       <button id="other" type="submit">Other</button>`,
+    );
+    turboStart(control("#send"));
+    expect(control("#send").getAttribute("aria-busy")).toBe("true");
+    expect(control("#other").getAttribute("aria-busy")).toBe("true");
+
+    turboEnd();
+
+    expect(control("#send").hasAttribute("aria-busy")).toBe(false);
+    expect(control("#other").hasAttribute("aria-busy")).toBe(false);
   });
 
   it("never enables an authored-disabled submit control", async () => {
@@ -714,19 +868,20 @@ describe("SubmitOnceController", () => {
   });
 
   it("preserves a live session and timeout across an in-page move", async () => {
+    // The host is a wrapper: happy-dom connects a second instance to a moved `<form>` host.
     document.body.innerHTML = `
       <div id="from">
-        <form id="form" data-controller="stimeo--submit-once"
-              data-stimeo--submit-once-timeout-value="1000">
-          <button id="send" type="submit">Send</button>
-        </form>
+        <div id="root" data-controller="stimeo--submit-once"
+             data-stimeo--submit-once-timeout-value="1000">
+          <form id="form"><button id="send" type="submit">Send</button></form>
+        </div>
       </div>
       <div id="to"></div>`;
     await startApplication();
     const button = control("#send");
     turboStart(button);
 
-    query<HTMLElement>("#to").append(form());
+    query<HTMLElement>("#to").append(query("#root"));
     await vi.advanceTimersByTimeAsync(0);
     expect(button.disabled).toBe(true);
 
@@ -758,6 +913,71 @@ describe("SubmitOnceController", () => {
     expect(button.disabled).toBe(false);
   });
 
+  it("drops detached sessions so the same instance can start the same form again", async () => {
+    await mountAround("", '<button id="send" type="submit">Send</button>');
+    const root = query<HTMLElement>("#root");
+    const instance = controller(root);
+    const button = control("#send");
+    const starts = vi.fn();
+    const ends = vi.fn();
+    root.addEventListener("stimeo--submit-once:start", starts);
+    root.addEventListener("stimeo--submit-once:end", ends);
+    turboStart(button);
+    expect(button.disabled).toBe(true);
+
+    root.remove();
+    instance.disconnect();
+    expect(button.disabled).toBe(false);
+    instance.finish();
+    expect(ends).not.toHaveBeenCalled();
+
+    document.body.append(root);
+    instance.connect();
+    turboStart(button);
+
+    expect(starts).toHaveBeenCalledTimes(2);
+    expect(button.disabled).toBe(true);
+    expect(form().getAttribute("data-submitting")).toBe("true");
+    turboEnd();
+    expect(ends).toHaveBeenCalledTimes(1);
+    expect(button.disabled).toBe(false);
+  });
+
+  it("does not let a detached submission's deadline complete the next session of the same form", async () => {
+    await mountAround(
+      'data-stimeo--submit-once-timeout-value="1000"',
+      '<button id="send" type="submit">Send</button>',
+    );
+    const root = query<HTMLElement>("#root");
+    const instance = controller(root);
+    const button = control("#send");
+    const ends: unknown[] = [];
+    root.addEventListener("stimeo--submit-once:end", (event) => {
+      ends.push((event as CustomEvent).detail);
+    });
+    turboStart(button);
+    expect(button.disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(100);
+
+    root.remove();
+    instance.disconnect();
+    expect(button.disabled).toBe(false);
+    document.body.append(root);
+    instance.connect();
+    turboStart(button);
+    expect(button.disabled).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(900);
+    expect(button.disabled).toBe(true);
+    expect(form().getAttribute("aria-busy")).toBe("true");
+    expect(ends).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(button.disabled).toBe(false);
+    expect(form().hasAttribute("aria-busy")).toBe(false);
+    expect(ends).toEqual([{ form: form(), submitter: button, reason: "timeout", success: false }]);
+  });
+
   it("releases the capture submit listener on disconnect", async () => {
     // The listener runs in capture, so its release has to match that flag. The
     // release is synchronous, and the session it would read is still live on
@@ -772,50 +992,362 @@ describe("SubmitOnceController", () => {
     expect(nativeSubmit(button).defaultPrevented).toBe(false);
   });
 
-  it("reports the submission the cache rewind abandoned", async () => {
-    await mount("", '<button id="send" type="submit">Send</button>');
-    const button = control("#send");
-    const reports: unknown[] = [];
-    form().addEventListener("stimeo--submit-once:reconcile", (e) =>
-      reports.push((e as CustomEvent).detail),
-    );
-    turboStart(button);
-
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    // `end` would claim the submission resolved; the rewind only says it is gone.
-    expect(reports).toEqual([{ forms: [form()] }]);
-
-    // No session left, so a second snapshot has nothing to report.
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(reports).toEqual([{ forms: [form()] }]);
-  });
-
-  it("rewinds before Turbo cache without events, announcements, or focus", async () => {
+  it("keeps the guard through turbo:before-cache until the submission ends", async () => {
     await mount(
-      'data-stimeo--submit-once-restore-focus-value="true" data-stimeo--submit-once-announce-ready-text-value="Done"',
+      'data-stimeo--submit-once-announce-ready-text-value="Done" data-stimeo--submit-once-busy-label-value="Saving"',
       '<button id="send" type="submit">Send</button>',
     );
-    const outside = query<HTMLButtonElement>("#outside");
     const button = control("#send");
     const announcements: string[] = [];
-    let ends = 0;
+    const events: string[] = [];
     window.addEventListener("stimeo--announcer:announce", (event) => {
       announcements.push((event as CustomEvent<{ message: string }>).detail.message);
     });
-    form().addEventListener("stimeo--submit-once:end", () => {
-      ends += 1;
-    });
-    button.focus();
+    for (const name of ["end", "reconcile"]) {
+      form().addEventListener(`stimeo--submit-once:${name}`, () => events.push(name));
+    }
     turboStart(button);
-    outside.focus();
 
+    // Turbo dispatches it on pages that stay as well, where the request is still
+    // running and a second click must not submit again.
     document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe("Saving");
+    expect(form().getAttribute("data-submitting")).toBe("true");
+    expect(nativeSubmit(button).defaultPrevented).toBe(true);
+    expect(events).toEqual([]);
 
+    turboEnd();
     expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe("Send");
+    expect(events[0]).toBe("end");
+    expect(events).not.toContain("reconcile");
+    expect(announcements).toContain("Done");
+  });
+
+  it("records a label it swaps through text or value until the submission ends", async () => {
+    await mount(
+      'data-stimeo--submit-once-busy-label-value="Working"',
+      `<button id="send" type="submit">Send</button>
+       <input id="input-submit" type="submit" value="Go">`,
+    );
+    const button = control("#send");
+    const input = control("#input-submit") as HTMLInputElement;
+
+    turboStart(button);
+    expect(button.getAttribute("data-stimeo--submit-once-label")).toBe('["Send","Working"]');
+    turboEnd();
+    expect(button.hasAttribute("data-stimeo--submit-once-label")).toBe(false);
+
+    turboStart(input);
+    expect(input.getAttribute("data-stimeo--submit-once-label")).toBe('["Go","Working"]');
+    turboEnd();
+    expect(input.hasAttribute("data-stimeo--submit-once-label")).toBe(false);
+  });
+
+  /** Mounts the controller on a wrapper, so each element has one controller instance. */
+  const mountWrapped = async (attributes: string, contents: string) => {
+    document.body.innerHTML = `
+      <div id="root" data-controller="stimeo--submit-once" ${attributes}>
+        <form id="form" action="#">${contents}</form>
+      </div>`;
+    await startApplication();
+  };
+
+  /** Puts a restored copy of the page in place, as Turbo renders one from its cache. */
+  const restore = async () => {
+    application = await restoreFromCache(
+      application,
+      (restored) => restored.register("stimeo--submit-once", SubmitOnceController),
+      () => vi.advanceTimersByTimeAsync(0),
+    );
+  };
+
+  it("puts back the labels a page restored mid-submission still shows", async () => {
+    await mountWrapped(
+      'data-stimeo--submit-once-busy-label-value="Working"',
+      `<button id="send" type="submit">Send</button>
+       <input id="input-submit" type="submit" value="Go">`,
+    );
+    turboStart(control("#send"));
+
+    await restore();
+
+    expect(control("#send").textContent).toBe("Send");
+    expect(control("#send").hasAttribute("data-stimeo--submit-once-label")).toBe(false);
+  });
+
+  it("puts back an input's label on a page restored mid-submission", async () => {
+    await mountWrapped(
+      'data-stimeo--submit-once-busy-label-value="Working"',
+      '<input id="input-submit" type="submit" value="Go">',
+    );
+    turboStart(control("#input-submit"));
+    expect((control("#input-submit") as HTMLInputElement).value).toBe("Working");
+
+    await restore();
+
+    expect((control("#input-submit") as HTMLInputElement).value).toBe("Go");
+  });
+
+  it.each(["button", "input"])(
+    "puts back an external %s submitter's label on a restored page",
+    async (kind) => {
+      await mountWrapped('data-stimeo--submit-once-busy-label-value="Working"', "");
+      document.body.insertAdjacentHTML(
+        "beforeend",
+        kind === "button"
+          ? '<button id="external-send" type="submit" form="form">Send outside</button>'
+          : '<input id="external-send" type="submit" form="form" value="Send outside">',
+      );
+      const submitter = control("#external-send");
+      turboStart(submitter);
+      expect(submitter.disabled).toBe(true);
+      expect(submitter instanceof HTMLInputElement ? submitter.value : submitter.textContent).toBe(
+        "Working",
+      );
+
+      await restore();
+
+      const copied = control("#external-send");
+      expect(copied instanceof HTMLInputElement ? copied.value : copied.textContent).toBe(
+        "Send outside",
+      );
+      expect(copied.hasAttribute("data-stimeo--submit-once-label")).toBe(false);
+      expect(copied.disabled).toBe(false);
+    },
+  );
+
+  it.each(["button", "input"])(
+    "keeps a consumer's %s label on a restored page after a busy-label write",
+    async (kind) => {
+      await mountWrapped(
+        'data-stimeo--submit-once-busy-label-value="Working"',
+        kind === "button"
+          ? '<button id="send" type="submit" data-submit-once-busy-label="Sending">Send</button>'
+          : '<input id="send" type="submit" data-submit-once-busy-label="Sending" value="Send">',
+      );
+      const submitter = control("#send");
+      turboStart(submitter);
+      expect(submitter instanceof HTMLInputElement ? submitter.value : submitter.textContent).toBe(
+        "Sending",
+      );
+      if (submitter instanceof HTMLInputElement) submitter.value = "Author revised";
+      else submitter.textContent = "Author revised";
+
+      await restore();
+
+      const copied = control("#send");
+      expect(copied instanceof HTMLInputElement ? copied.value : copied.textContent).toBe(
+        "Author revised",
+      );
+      expect(copied.hasAttribute("data-stimeo--submit-once-label")).toBe(false);
+    },
+  );
+
+  it("reports the forms a page restored mid-submission still marks submitting", async () => {
+    await mountWrapped("", '<button id="send" type="submit">Send</button>');
+    turboStart(control("#send"));
+    const reports: Array<{ forms: HTMLFormElement[] }> = [];
+    document.addEventListener("stimeo--submit-once:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+
+    await restore();
+
+    // `end` would claim the submission resolved; its request died with the page.
+    expect(reports.map(({ forms }) => forms.map((f) => f.id))).toEqual([["form"]]);
+    expect(reports[0]?.forms[0]).toBe(form());
+  });
+
+  it("stays silent on a restored page with no submission in flight", async () => {
+    await mountWrapped("", '<button id="send" type="submit">Send</button>');
+    turboStart(control("#send"));
+    turboEnd();
+    const reports: unknown[] = [];
+    document.addEventListener("stimeo--submit-once:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+
+    await restore();
+
+    expect(reports).toEqual([]);
+  });
+
+  it("leaves the label record of a nested instance's form to that instance", async () => {
+    document.body.innerHTML = `
+      <div id="root" data-controller="stimeo--submit-once">
+        <div data-controller="stimeo--submit-once">
+          <form id="inner"><button id="inner-send" type="submit" data-stimeo--submit-once-label='["Kept","Busy"]'>Busy</button></form>
+        </div>
+      </div>`;
+    await startApplication();
+
+    // The inner instance owns the form and gives its own record back.
+    expect(control("#inner-send").textContent).toBe("Kept");
+  });
+
+  it("leaves a nested instance's label alone while that instance is still submitting", async () => {
+    document.body.innerHTML = `
+      <div id="root">
+        <div data-controller="stimeo--submit-once" data-stimeo--submit-once-busy-label-value="Working">
+          <form id="inner"><button id="inner-send" type="submit">Send</button></form>
+        </div>
+      </div>`;
+    await startApplication();
+    turboStart(control("#inner-send"), query<HTMLFormElement>("#inner"));
+    expect(control("#inner-send").textContent).toBe("Working");
+
+    // An outer instance connects while the inner submission is still in flight.
+    query<HTMLElement>("#root").setAttribute("data-controller", "stimeo--submit-once");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(control("#inner-send").textContent).toBe("Working");
+  });
+
+  it.each(["{", "5", '"Send"', '["Send"]', '["Send",5]', '[5,"Busy"]'])(
+    "keeps a control's label when its record is malformed: %s",
+    async (record) => {
+      await mountWrapped("", `<button id="malformed" type="submit">Busy</button>`);
+      control("#malformed").setAttribute("data-stimeo--submit-once-label", record);
+      await restore();
+      expect(control("#malformed").textContent).toBe("Busy");
+      expect(control("#malformed").hasAttribute("data-stimeo--submit-once-label")).toBe(false);
+    },
+  );
+
+  it("reports a form it is mounted on that a restored page still marks submitting", async () => {
+    await mount("", '<button id="send" type="submit">Send</button>');
+    turboStart(control("#send"));
+    const reports: Array<{ forms: HTMLFormElement[] }> = [];
+    document.addEventListener("stimeo--submit-once:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+
+    await restore();
+
+    // happy-dom binds a form host twice, so only the forms named are asserted, not the count.
+    expect(reports.length).toBeGreaterThan(0);
+    for (const { forms } of reports) expect(forms).toEqual([form()]);
+  });
+
+  it("gives a page restored mid-submission the authored disabled, aria-busy, data-submitting, aria-label and hidden back", async () => {
+    await mountWrapped(
+      'data-stimeo--submit-once-busy-label-value="Working"',
+      `<button id="send" type="submit" aria-label="Send now" aria-busy="false">
+         <span id="idle" data-stimeo--submit-once-target="idle">Send</span>
+         <span id="busy" data-stimeo--submit-once-target="busy" hidden>Sending</span>
+       </button>
+       <button id="other" type="submit">Other</button>`,
+    );
+    form().setAttribute("aria-busy", "false");
+    turboStart(control("#send"));
+    expect(control("#send").disabled).toBe(true);
+    expect(control("#send").getAttribute("aria-label")).toBe("Working");
+    expect(query("#busy").hidden).toBe(false);
+
+    await restore();
+
+    const records = [form(), control("#send"), control("#other"), query("#idle"), query("#busy")]
+      .flatMap((element) => element.getAttributeNames())
+      .filter((name) => name.endsWith("-lease"));
+    expect(control("#send").hasAttribute("disabled")).toBe(false);
+    expect(control("#other").hasAttribute("disabled")).toBe(false);
+    expect(control("#send").getAttribute("aria-busy")).toBe("false");
+    expect(control("#other").hasAttribute("aria-busy")).toBe(false);
+    expect(control("#send").getAttribute("aria-label")).toBe("Send now");
+    expect(form().getAttribute("aria-busy")).toBe("false");
     expect(form().hasAttribute("data-submitting")).toBe(false);
-    expect(document.activeElement).toBe(outside);
-    expect(ends).toBe(0);
-    expect(announcements).toEqual([]);
+    expect(query("#idle").hidden).toBe(false);
+    expect(query("#busy").hidden).toBe(true);
+    expect(records).toEqual([]);
+
+    // The next submission runs from the author's values.
+    turboStart(control("#send"));
+    expect(control("#send").disabled).toBe(true);
+    turboEnd();
+    expect(control("#send").disabled).toBe(false);
+    expect(control("#send").getAttribute("aria-label")).toBe("Send now");
+  });
+
+  /** What Turbo does before `turbo:submit-start`: disable the submitter, mark the form busy. */
+  const turboRequestStarted = (submitter: SubmitControl) => {
+    submitter.disabled = true;
+    submitter.form?.setAttribute("aria-busy", "true");
+    turboStart(submitter);
+  };
+
+  it("enables the submitter Turbo disabled on a copy taken mid-submission, and clears the busy form", async () => {
+    await mountWrapped("", '<button id="send" type="submit">Send</button>');
+    turboRequestStarted(control("#send"));
+    expect(control("#send").hasAttribute("data-stimeo--submit-once-submitter")).toBe(true);
+
+    await restore();
+
+    expect(control("#send").disabled).toBe(false);
+    expect(control("#send").hasAttribute("data-stimeo--submit-once-submitter")).toBe(false);
+    expect(form().hasAttribute("aria-busy")).toBe(false);
+    expect(form().hasAttribute("data-submitting")).toBe(false);
+  });
+
+  it("enables it on a copy taken after the controller left the document too, and reports the form", async () => {
+    await mountWrapped("", '<button id="send" type="submit">Send</button>');
+    turboRequestStarted(control("#send"));
+    const reports: Array<{ forms: HTMLFormElement[] }> = [];
+    document.addEventListener("stimeo--submit-once:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+
+    // A visit takes the page out of the document first and copies it afterwards.
+    const left = query("#root");
+    left.remove();
+    disconnectAndStopApplication(application);
+    document.body.replaceChildren(left.cloneNode(true));
+    await startApplication();
+
+    expect(control("#send").disabled).toBe(false);
+    expect(form().hasAttribute("aria-busy")).toBe(false);
+    expect(reports.map(({ forms }) => forms)).toEqual([[form()]]);
+  });
+
+  it("enables a submitter Turbo marked aria-disabled on a copy taken mid-submission", async () => {
+    await mountWrapped("", '<button id="send" type="submit">Send</button>');
+    const send = control("#send");
+    send.setAttribute("aria-disabled", "true");
+    turboStart(send);
+
+    await restore();
+
+    expect(control("#send").hasAttribute("aria-disabled")).toBe(false);
+  });
+
+  it("leaves an authored disabled control and aria-busy alone on a copy with no submission", async () => {
+    await mountWrapped(
+      "",
+      '<button id="send" type="submit">Send</button><button id="off" type="submit" disabled>Off</button>',
+    );
+    form().setAttribute("aria-busy", "true");
+
+    await restore();
+
+    expect(control("#off").disabled).toBe(true);
+    expect(form().getAttribute("aria-busy")).toBe("true");
+  });
+
+  it("reports the form it gives back once, after the attributes are back", async () => {
+    await mountWrapped("", '<button id="send" type="submit">Send</button>');
+    turboStart(control("#send"));
+    const seen: Array<{ submitting: boolean; disabled: boolean }> = [];
+    document.addEventListener("stimeo--submit-once:reconcile", () =>
+      seen.push({
+        submitting: form().hasAttribute("data-submitting"),
+        disabled: control("#send").disabled,
+      }),
+    );
+
+    await restore();
+
+    expect(seen).toEqual([{ submitting: false, disabled: false }]);
   });
 
   it("announces only configured start and successful completion transitions", async () => {

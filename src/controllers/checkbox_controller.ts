@@ -1,7 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { FormResetWatcher } from "../utils/form_reset_watcher";
-import { ListenerSet } from "../utils/listener_set";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 
 /** Aggregate selection state of a parent/child checkbox group. */
 type CheckboxState = "all" | "partial" | "none";
@@ -43,7 +42,7 @@ type CheckboxState = "all" | "partial" | "none";
  * - Parent toggle checks/unchecks every child and clears its own `indeterminate`.
  *   All child targets, including disabled ones, participate; omit the target to
  *   exclude an input. The cascade does not synthesize native child `change`
- *   events — one aggregate custom event describes the action.
+ *   events — one aggregate custom event reports a changed aggregate.
  * - A child change recomputes the parent: all → checked, none → unchecked,
  *   some → `indeterminate`.
  * - The aggregate (`all` / `partial` / `none`) is mirrored to `data-state` on the
@@ -51,7 +50,12 @@ type CheckboxState = "all" | "partial" | "none";
  *   form resets are reconciled from the children. Callers that assign the live
  *   `checked` property directly must dispatch `change`, because property writes
  *   are not observable by a `MutationObserver`.
- * - `stimeo--checkbox:change` is dispatched for the two public change actions;
+ * - `stimeo--checkbox:change` is dispatched by the two public change actions only
+ *   when the aggregate differs from the last published one. Pending page writes
+ *   are included in that confirmation; returning to the published aggregate is
+ *   silent. Browser-dispatched listeners can reconcile a page write before the
+ *   action runs, while script dispatch and consecutive Stimulus actions in one
+ *   listener include it in the action's `change`.
  *   `stimeo--checkbox:reconcile` is dispatched instead when a reconciliation —
  *   not the user — moves the aggregate. Both carry `{ checked: boolean,
  *   indeterminate: boolean, state: "all" | "partial" | "none" }` and describe
@@ -68,8 +72,7 @@ export class CheckboxController extends Controller<HTMLElement> {
   declare readonly childTargets: HTMLInputElement[];
 
   /** Collapses every lifecycle signal from one DOM update into one derived pass. */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileFromChildren());
-  readonly #listeners = new ListenerSet();
+  readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileFromChildren());
   readonly #formReset = new FormResetWatcher(
     (form) => this.#hasCheckboxOwnedBy(form),
     () => this.#reconcile.schedule(),
@@ -85,22 +88,20 @@ export class CheckboxController extends Controller<HTMLElement> {
 
   /** Reflects the initial aggregate and starts retained-DOM reconciliation. */
   override connect(): void {
-    this.#reconcile.activate();
     this.#syncFromChildren();
+    this.#reconcile.observe(this.element);
     this.#checkedObserver.observe(this.element, {
       attributes: true,
       attributeFilter: ["checked"],
       subtree: true,
     });
-    this.#listeners.add(this.element, "turbo:morph-element", this.#onMorph);
     this.#formReset.observe();
   }
 
   /** Releases the observer, global reset listener, and every pending reconciliation. */
   override disconnect(): void {
-    this.#reconcile.cancel();
+    this.#reconcile.disconnect();
     this.#checkedObserver.disconnect();
-    this.#listeners.dispose();
     this.#formReset.disconnect();
   }
 
@@ -127,18 +128,22 @@ export class CheckboxController extends Controller<HTMLElement> {
   /** Cascades the parent's state to every child. Bound via `data-action` (change). */
   onParentChange(): void {
     if (!this.hasParentTarget) return;
+    const previous = this.#committedState;
     const checked = this.parentTarget.checked;
     for (const child of this.childTargets) {
       child.checked = checked;
     }
     this.#reflect(checked ? "all" : "none", true);
+    if (this.#committedState === previous) return;
     const detail = this.#settledDetail();
     if (detail) this.dispatch("change", { detail });
   }
 
   /** Recomputes the parent from its children. Bound via `data-action` (change). */
   onChildChange(): void {
+    const previous = this.#committedState;
     this.#syncFromChildren();
+    if (this.#committedState === previous) return;
     const detail = this.#settledDetail();
     if (detail) this.dispatch("change", { detail });
   }
@@ -188,11 +193,6 @@ export class CheckboxController extends Controller<HTMLElement> {
     if (state === null) return null;
     return { checked: state === "all", indeterminate: state === "partial", state };
   }
-
-  /** Reconciles retained targets after Turbo has finished morphing their live state. */
-  readonly #onMorph = (): void => {
-    this.#reconcile.schedule();
-  };
 
   /** Whether a form owns at least one current parent or child target. */
   #hasCheckboxOwnedBy(form: HTMLFormElement): boolean {

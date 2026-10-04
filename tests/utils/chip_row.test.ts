@@ -181,6 +181,28 @@ describe("ChipRow", () => {
     expect(remove).toHaveBeenCalledTimes(1);
   });
 
+  it("moves delegation to a new container instead of adding a second one", () => {
+    chipRow.connect(root());
+    buttons()[0]?.click();
+
+    expect(remove).toHaveBeenCalledExactlyOnceWith(0);
+  });
+
+  it("consumes each key it acts on, and leaves ArrowLeft on the first chip to the browser", () => {
+    const press = (button: HTMLButtonElement | undefined, key: string): boolean => {
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      button?.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    expect(press(buttons()[0], "ArrowLeft")).toBe(false);
+    expect(press(buttons()[1], "ArrowLeft")).toBe(true);
+    expect(press(buttons()[0], "ArrowRight")).toBe(true);
+    expect(press(buttons()[1], "ArrowRight")).toBe(true);
+    expect(press(buttons()[0], "Delete")).toBe(true);
+    expect(press(buttons()[0], "Backspace")).toBe(true);
+  });
+
   it("leaves listener order unchanged when connecting the same row again", () => {
     const calls: string[] = [];
     remove.mockImplementation(() => calls.push("chip-row"));

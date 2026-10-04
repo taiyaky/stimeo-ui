@@ -486,6 +486,30 @@ describe("LocalTimeController", () => {
     }
   });
 
+  it("reports one format when it reconnects after the datetime changed while disconnected", async () => {
+    await start(
+      'data-stimeo--local-time-locale-value="en-US" ' +
+        'data-stimeo--local-time-time-zone-value="UTC"',
+    );
+    const controller = application.getControllerForElementAndIdentifier(
+      el(),
+      "stimeo--local-time",
+    ) as LocalTimeController;
+    const formatted: string[] = [];
+    el().addEventListener("stimeo--local-time:format", (event) => {
+      formatted.push((event as CustomEvent<{ formatted: string }>).detail.formatted);
+    });
+
+    controller.disconnect();
+    el().setAttribute("datetime", SWAPPED_ISO);
+    controller.connect();
+    await tick();
+
+    expect(formatted).toEqual([
+      refFor(SWAPPED_ISO, "en-US", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }),
+    ]);
+  });
+
   it("stops following render inputs once disconnected", async () => {
     await start(
       'data-stimeo--local-time-locale-value="en-US" ' +

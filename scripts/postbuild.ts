@@ -1,5 +1,5 @@
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { stimeoControllers } from "../src";
 import { buildExamplesIndex } from "../src/inspector/examples";
 import { buildManifest } from "../src/inspector/manifest";
@@ -9,6 +9,7 @@ import {
   assertCoreControllerRegistry,
 } from "./controller_entries";
 import { collectDemoSources } from "./demo_sources";
+import { finalizeJavaScriptArtifact, type RawSourceMap } from "./source_map";
 
 /**
  * Post-build step for the Inspector CLI.
@@ -24,8 +25,9 @@ import { collectDemoSources } from "./demo_sources";
  *      sidecars (`collectDemoSources` resolves their root); `buildExamplesIndex`
  *      fails the build when a demo and the manifest drift or an example stops
  *      passing the checker.
- *   4. Prepends a Node shebang to the CLI and marks it executable so the
- *      `stimeo` / `stimeo-ui` bins run directly.
+ *   4. Keeps one final source-map directive per JavaScript artifact, prepends
+ *      the Node CLI shebang with its unmapped line in the map, and marks the CLI
+ *      executable so the `stimeo` / `stimeo-ui` bins run directly.
  *
  * Run via Bun (`bun scripts/postbuild.ts`) so it can import the TypeScript
  * source directly.
@@ -48,10 +50,30 @@ const examples = buildExamplesIndex(collectDemoSources(root), manifest);
 writeFileSync(join(outDir, "examples.json"), `${JSON.stringify(examples, null, 2)}\n`);
 
 const cliPath = join(outDir, "cli_bin.js");
-const shebang = "#!/usr/bin/env node\n";
-const cli = readFileSync(cliPath, "utf8");
-if (!cli.startsWith(shebang)) writeFileSync(cliPath, shebang + cli);
+prepareJavaScript(join(root, "dist"));
 chmodSync(cliPath, 0o755);
+
+/** Finalizes emitted JavaScript without moving any mapped token except past the CLI shebang. */
+function prepareJavaScript(directory: string): void {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      prepareJavaScript(path);
+    } else if (entry.isFile() && entry.name.endsWith(".js")) {
+      const code = readFileSync(path, "utf8");
+      const mapPath = `${path}.map`;
+      const map = JSON.parse(readFileSync(mapPath, "utf8")) as RawSourceMap;
+      const finalized = finalizeJavaScriptArtifact(
+        code,
+        map,
+        `${basename(path)}.map`,
+        path === cliPath,
+      );
+      if (finalized.code !== code) writeFileSync(path, finalized.code);
+      if (finalized.map !== map) writeFileSync(mapPath, JSON.stringify(finalized.map));
+    }
+  }
+}
 
 console.log(
   `Inspector: wrote manifest.json (${Object.keys(manifest.controllers).length} controllers), ` +

@@ -2,19 +2,28 @@
  * Numeric coercion for controllers that accept a number through a Value, an action
  * param, or an event detail.
  *
- * Stimulus already coerces numeric action params to numbers, but a value can also
- * arrive as a string — via a `*:set` CustomEvent `detail`, or an action param
- * whose attribute does not look numeric. Centralizing the parse keeps `setValue`
- * tolerant of either form while rejecting anything that is not a finite number.
+ * Stimulus decodes action params as JSON when possible and leaves other text
+ * untouched. CustomEvent detail can also supply a number or numeric string.
+ * The reader accepts those two types while rejecting blank and non-finite input.
  */
 
+import { matchesNumberBounds, type NumberBounds } from "./number_bounds";
+
 /**
- * Coerces `raw` to a finite number, or returns `null` when it is absent, empty,
- * or not parseable. Empty strings are treated as "no value" rather than `0`, so a
- * stray blank param cannot silently reset the value.
+ * Reads a finite number or nonblank numeric string; other input returns `null`.
+ * Blank strings cannot silently reset a value to zero.
  */
-export function toFiniteNumber(raw: number | string | null | undefined): number | null {
-  if (raw === null || raw === undefined || raw === "") return null;
-  const value = typeof raw === "number" ? raw : Number(raw);
+export function toFiniteNumber(raw: unknown): number | null {
+  if (typeof raw !== "number" && typeof raw !== "string") return null;
+  if (typeof raw === "string" && raw.trim().length === 0) return null;
+  const value = Number(raw);
   return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Returns an accepted decoded Number Value or the caller's fallback unchanged.
+ * The caller owns the fallback contract; this reader does not parse or write a Value.
+ */
+export function readNumber(raw: number, fallback: number, bounds: NumberBounds): number {
+  return matchesNumberBounds(raw, bounds) ? raw : fallback;
 }

@@ -5,7 +5,7 @@ import { expectNoA11yViolations } from "./helpers/a11y";
 import { byId, query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { delay, tick } from "./helpers/timing";
 
 /**
@@ -83,6 +83,30 @@ describe("PasswordRevealController", () => {
     expect(input().selectionEnd).toBe(4);
   });
 
+  it("gives focus and the caret back when flipping the type takes them away", async () => {
+    await start();
+    const field = input();
+    // An engine may drop focus and reset the caret when an input's type flips;
+    // this field behaves like one that does. A write of the `type` attribute stands
+    // for the flip; in happy-dom the `type` property setter writes it that way too.
+    const setAttribute = field.setAttribute.bind(field);
+    field.setAttribute = (name: string, value: string): void => {
+      setAttribute(name, value);
+      if (name !== "type") return;
+      field.blur();
+      field.setSelectionRange(field.value.length, field.value.length);
+    };
+    field.focus();
+    field.setSelectionRange(2, 4);
+
+    toggle().click();
+
+    expect(field.type).toBe("text");
+    expect(document.activeElement).toBe(field);
+    expect(field.selectionStart).toBe(2);
+    expect(field.selectionEnd).toBe(4);
+  });
+
   it("keeps focus on the toggle button when it (not the input) was focused", async () => {
     await start();
     toggle().focus();
@@ -151,6 +175,252 @@ describe("PasswordRevealController", () => {
     // The field is still revealed, so the button must say so.
     expect(input().type).toBe("text");
     expect(toggle().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("describes the state to a button that arrives where there was none", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--password-reveal">
+        <input type="text" aria-label="Password" value="s3cret"
+               data-stimeo--password-reveal-target="input">
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--password-reveal", PasswordRevealController);
+    await tick();
+
+    // Nothing departs here, so the arrival is the only callback that can describe it.
+    const late = document.createElement("button");
+    late.type = "button";
+    late.setAttribute("aria-pressed", "false");
+    late.setAttribute("aria-label", "Show password");
+    late.setAttribute("data-stimeo--password-reveal-target", "toggle");
+    controllerEl().append(late);
+    await tick();
+
+    expect(late.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("describes the state to a button that stays after an earlier one leaves", async () => {
+    await start();
+    toggle().click();
+    const original = toggle();
+    const successor = original.cloneNode(true) as HTMLButtonElement;
+    successor.setAttribute("aria-pressed", "false");
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(toggle()).toBe(successor);
+    expect(successor.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("says nothing when it describes the state to a button left behind", async () => {
+    await start();
+    toggle().click();
+    const events = captureStateEvents("stimeo--password-reveal", ["toggle", "change", "reconcile"]);
+    const native: Event[] = [];
+    document.addEventListener("change", (event) => native.push(event));
+    const original = toggle();
+    const successor = original.cloneNode(true) as HTMLButtonElement;
+    successor.setAttribute("aria-pressed", "false");
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(successor.getAttribute("aria-pressed")).toBe("true");
+    expect(events.names()).toEqual([]);
+    expect(native).toEqual([]);
+    events.stop();
+  });
+
+  it("keeps describing the field when its only button leaves", async () => {
+    await start();
+    toggle().click();
+    const leaving = toggle();
+    leaving.remove();
+    await tick();
+    const controller = application.getControllerForElementAndIdentifier(
+      controllerEl(),
+      "stimeo--password-reveal",
+    ) as PasswordRevealController;
+
+    expect(() => controller.toggleTargetDisconnected(leaving)).not.toThrow();
+    expect(controllerEl().getAttribute("data-state")).toBe("visible");
+  });
+
+  it("writes nothing to the button from a departure delivered after disconnect", async () => {
+    await start();
+    toggle().click();
+    const controller = application.getControllerForElementAndIdentifier(
+      controllerEl(),
+      "stimeo--password-reveal",
+    ) as PasswordRevealController;
+    controller.disconnect();
+    // The page rewrites the button once the controller is gone; the departure
+    // Stimulus delivers after `disconnect()` must leave that alone.
+    toggle().setAttribute("aria-pressed", "false");
+    controllerEl().setAttribute("data-state", "hidden");
+
+    controller.toggleTargetDisconnected(toggle());
+
+    expect(toggle().getAttribute("aria-pressed")).toBe("false");
+    expect(controllerEl().getAttribute("data-state")).toBe("hidden");
+  });
+
+  it("gives the authored pressed state back to a button that stops being the toggle", async () => {
+    await start();
+    toggle().click();
+    const former = toggle();
+    // The element stays; only the attribute naming it the toggle goes.
+    former.removeAttribute("data-stimeo--password-reveal-target");
+    await tick();
+
+    expect(former.getAttribute("aria-pressed")).toBe("false");
+    expect(controllerEl().getAttribute("data-state")).toBe("visible");
+  });
+
+  it("removes a pressed state it wrote on a button that authored none, once it stops being the toggle", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--password-reveal">
+        <input type="text" aria-label="Password" value="s3cret"
+               data-stimeo--password-reveal-target="input">
+        <button type="button" aria-label="Show password"
+                data-stimeo--password-reveal-target="toggle"></button>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--password-reveal", PasswordRevealController);
+    await tick();
+    const former = toggle();
+    expect(former.getAttribute("aria-pressed")).toBe("true");
+
+    former.removeAttribute("data-stimeo--password-reveal-target");
+    await tick();
+
+    expect(former.hasAttribute("aria-pressed")).toBe(false);
+  });
+
+  it("keeps a pressed state the page wrote on a button that stops being the toggle", async () => {
+    await start();
+    toggle().click();
+    const former = toggle();
+    former.setAttribute("aria-pressed", "mixed");
+    former.removeAttribute("data-stimeo--password-reveal-target");
+    await tick();
+
+    expect(former.getAttribute("aria-pressed")).toBe("mixed");
+  });
+
+  it("gives the button back its own pressed state when the widget loses its controller", async () => {
+    await start();
+    toggle().click();
+    const departed = toggle();
+
+    controllerEl().removeAttribute("data-controller");
+    await tick();
+
+    expect(departed.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("masks a revealed field again once it stops being the input", async () => {
+    await start();
+    toggle().click();
+    const former = input();
+    expect(former.type).toBe("text");
+
+    // The element stays; only the attribute naming it the input goes.
+    former.removeAttribute("data-stimeo--password-reveal-target");
+    await tick();
+
+    expect(former.type).toBe("password");
+  });
+
+  it("masks a revealed field again when the widget loses its controller", async () => {
+    await start();
+    toggle().click();
+    const departed = input();
+
+    controllerEl().removeAttribute("data-controller");
+    await tick();
+
+    expect(departed.type).toBe("password");
+  });
+
+  it("keeps a revealed field revealed when it moves within the widget", async () => {
+    await start();
+    toggle().click();
+    const moving = input();
+
+    controllerEl().append(moving);
+    await tick();
+
+    expect(moving.type).toBe("text");
+    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("leaves a field it never revealed as served once it stops being the input", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--password-reveal">
+        <input type="text" aria-label="Password" value="s3cret"
+               data-stimeo--password-reveal-target="input">
+        <button type="button" aria-pressed="false" aria-label="Show password"
+                data-stimeo--password-reveal-target="toggle"></button>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--password-reveal", PasswordRevealController);
+    await tick();
+    const former = input();
+
+    former.removeAttribute("data-stimeo--password-reveal-target");
+    await tick();
+
+    expect(former.type).toBe("text");
+  });
+
+  it("keeps a type the page wrote on a field that stops being the input", async () => {
+    await start();
+    toggle().click();
+    const former = input();
+    former.type = "search";
+
+    former.removeAttribute("data-stimeo--password-reveal-target");
+    await tick();
+
+    expect(former.type).toBe("search");
+  });
+
+  it("keeps the revealed hooks when the whole widget leaves the page", async () => {
+    // Stimulus delivers the field's departure after `disconnect()`; the field is
+    // still revealed, so nothing may describe it as masked from there.
+    await start();
+    toggle().click();
+    const root = controllerEl();
+    const kept = toggle();
+
+    root.remove();
+    await tick();
+
+    expect(kept.getAttribute("aria-pressed")).toBe("true");
+    expect(root.getAttribute("data-state")).toBe("visible");
+  });
+
+  it("writes nothing to the hooks from a field departure delivered after disconnect", async () => {
+    await start();
+    toggle().click();
+    const controller = application.getControllerForElementAndIdentifier(
+      controllerEl(),
+      "stimeo--password-reveal",
+    ) as PasswordRevealController;
+    controller.disconnect();
+    // The page rewrites the hooks once the controller is gone; the departure
+    // Stimulus delivers after `disconnect()` must leave that alone.
+    toggle().setAttribute("aria-pressed", "mixed");
+    controllerEl().setAttribute("data-state", "page");
+
+    controller.inputTargetDisconnected(input());
+
+    expect(toggle().getAttribute("aria-pressed")).toBe("mixed");
+    expect(controllerEl().getAttribute("data-state")).toBe("page");
   });
 
   it("describes a revealed field swapped in over a masked one", async () => {
@@ -252,6 +522,34 @@ describe("PasswordRevealController", () => {
     expect(controllerEl().getAttribute("data-state")).toBe("hidden");
   });
 
+  it("re-masks a revealed field that is left behind when another leaves", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--password-reveal"
+           data-stimeo--password-reveal-auto-hide-value="20">
+        <input id="first" type="password" aria-label="Password" value="s3cret"
+               data-stimeo--password-reveal-target="input">
+        <input id="second" type="text" aria-label="Password again" value="s3cret"
+               data-stimeo--password-reveal-target="input">
+        <button type="button" aria-pressed="false" aria-label="Show password"
+                data-stimeo--password-reveal-target="toggle"
+                data-action="stimeo--password-reveal#toggle"></button>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--password-reveal", PasswordRevealController);
+    await tick();
+
+    byId("first").remove();
+    await tick();
+    const second = query<HTMLInputElement>("#second");
+    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+
+    // The field left behind is revealed, so it inherits the re-mask the
+    // declaration promises.
+    await delay(60);
+    expect(second.type).toBe("password");
+    expect(toggle().getAttribute("aria-pressed")).toBe("false");
+  });
+
   it("does nothing when there is no field to reveal", async () => {
     document.body.innerHTML = `
       <div data-controller="stimeo--password-reveal">
@@ -289,6 +587,23 @@ describe("PasswordRevealController", () => {
     expect(toggle().getAttribute("aria-pressed")).toBe("false");
   });
 
+  it("derives the state from a revealed field that follows its button in the markup", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--password-reveal">
+        <button type="button" aria-pressed="false" aria-label="Show password"
+                data-stimeo--password-reveal-target="toggle"
+                data-action="stimeo--password-reveal#toggle"></button>
+        <input type="text" aria-label="Password" value="s3cret"
+               data-stimeo--password-reveal-target="input">
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--password-reveal", PasswordRevealController);
+    await tick();
+
+    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+    expect(controllerEl().getAttribute("data-state")).toBe("visible");
+  });
+
   it("derives the state from a field that arrives revealed", async () => {
     document.body.innerHTML = `
       <div data-controller="stimeo--password-reveal">
@@ -324,6 +639,100 @@ describe("PasswordRevealController", () => {
     toggle().click();
     await delay(40);
     expect(input().type).toBe("text");
+  });
+
+  // --- `autoHide` belongs to one reveal ---------------------------------------------
+
+  /**
+   * Rewrites `autoHide` and delivers its Value callback directly when the controller
+   * defines one, since happy-dom does not reliably run it for an attribute write.
+   */
+  const declareAutoHide = (value: number) => {
+    controllerEl().setAttribute("data-stimeo--password-reveal-auto-hide-value", String(value));
+    const owner = application.getControllerForElementAndIdentifier(
+      controllerEl(),
+      "stimeo--password-reveal",
+    );
+    const callback: unknown = Reflect.get(owner ?? {}, "autoHideValueChanged");
+    if (typeof callback === "function") callback.call(owner);
+  };
+
+  it.each([
+    { direction: "shrinks", next: 20 },
+    { direction: "grows", next: 5000 },
+  ])(
+    "keeps a reveal's re-mask deadline when autoHide $direction, and times the next reveal anew",
+    async ({ next }) => {
+      await start('data-stimeo--password-reveal-auto-hide-value="200"');
+      vi.useFakeTimers();
+      try {
+        toggle().click();
+        vi.advanceTimersByTime(50);
+
+        declareAutoHide(next);
+        vi.advanceTimersByTime(149);
+        expect(input().type).toBe("text");
+        vi.advanceTimersByTime(1);
+        expect(input().type).toBe("password");
+
+        toggle().click();
+        vi.advanceTimersByTime(next - 1);
+        expect(input().type).toBe("text");
+        vi.advanceTimersByTime(1);
+        expect(input().type).toBe("password");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("times a reveal that follows a manual mask from that reveal", async () => {
+    await start('data-stimeo--password-reveal-auto-hide-value="100"');
+    const toggles: boolean[] = [];
+    controllerEl().addEventListener("stimeo--password-reveal:toggle", (event) =>
+      toggles.push((event as CustomEvent<{ visible: boolean }>).detail.visible),
+    );
+    vi.useFakeTimers();
+    try {
+      toggle().click();
+      vi.advanceTimersByTime(50);
+      toggle().click(); // masked by hand before the re-mask was due
+      toggle().click();
+
+      vi.advanceTimersByTime(99);
+      expect(input().type).toBe("text");
+      expect(toggles).toEqual([true, false, true]);
+      vi.advanceTimersByTime(1);
+      expect(input().type).toBe("password");
+      expect(toggles).toEqual([true, false, true, false]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("arms nothing and reports nothing from an autoHide change alone", async () => {
+    await start();
+    const toggles: boolean[] = [];
+    controllerEl().addEventListener("stimeo--password-reveal:toggle", (event) =>
+      toggles.push((event as CustomEvent<{ visible: boolean }>).detail.visible),
+    );
+    vi.useFakeTimers();
+    try {
+      toggle().click(); // revealed with no re-mask promised
+      declareAutoHide(20);
+      vi.advanceTimersByTime(1000);
+      expect(input().type).toBe("text");
+      expect(toggle().getAttribute("aria-pressed")).toBe("true");
+      expect(toggles).toEqual([true]);
+
+      toggle().click(); // masked: a change while masked arms nothing either
+      declareAutoHide(30);
+      vi.advanceTimersByTime(1000);
+      expect(input().type).toBe("password");
+      expect(toggles).toEqual([true, false]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // --- Delays setTimeout cannot hold ----------------------------------------------
@@ -378,6 +787,253 @@ describe("PasswordRevealController", () => {
     expect(controllerEl().getAttribute("data-state")).toBe("hidden");
   });
 
+  it("keeps what the user typed when it masks for the cache on a page that stays", async () => {
+    // Turbo also dispatches the event on a page that stays (a promoted frame
+    // navigation, a popstate without Turbo state, a refresh of a cached URL).
+    await start();
+    input().value = "typed secret";
+    toggle().click();
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(input().type).toBe("password");
+    expect(input().value).toBe("typed secret");
+  });
+
+  describe("a copy of the page Turbo restores", () => {
+    const restore = async (): Promise<void> => {
+      application = await restoreFromCache(application, (restored) =>
+        restored.register("stimeo--password-reveal", PasswordRevealController),
+      );
+    };
+
+    it("masks a field the copy carries revealed and empties it, as Turbo empties a password field", async () => {
+      await start();
+      toggle().click();
+      expect(input().type).toBe("text");
+      const seen: boolean[] = [];
+      document.addEventListener("stimeo--password-reveal:toggle", (event) => {
+        seen.push((event as CustomEvent<{ visible: boolean }>).detail.visible);
+      });
+
+      await restore();
+
+      expect(input().type).toBe("password");
+      expect(input().value).toBe("");
+      expect(toggle().getAttribute("aria-pressed")).toBe("false");
+      expect(controllerEl().getAttribute("data-state")).toBe("hidden");
+      expect(seen).toEqual([]);
+    });
+
+    it("masks and empties the revealed fields of the page Turbo is about to render, before it connects", async () => {
+      await start();
+      input().value = "hunter2";
+      toggle().click();
+      const incoming = document.body.cloneNode(true) as HTMLElement;
+      const author = document.createElement("input");
+      author.type = "text";
+      author.value = "plain";
+      incoming.append(author);
+
+      document.dispatchEvent(
+        new CustomEvent("turbo:before-render", { detail: { newBody: incoming } }),
+      );
+
+      const copied = incoming.querySelector<HTMLInputElement>(
+        "[data-stimeo--password-reveal-target='input']",
+      ) as HTMLInputElement;
+      expect(copied.type).toBe("password");
+      expect(copied.value).toBe("");
+      expect(copied.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+      expect(author.value).toBe("plain");
+      // The live page is not touched.
+      expect(input().type).toBe("text");
+      expect(input().value).toBe("hunter2");
+    });
+
+    it("masks the page Turbo renders once no instance is connected, and passes over a render without a body", async () => {
+      // A copy can come back while the page being left holds no reveal toggle: Turbo
+      // renders every visit into the same document, so the mask stays with the document.
+      await start();
+      input().value = "hunter2";
+      toggle().click();
+      const incoming = document.body.cloneNode(true) as HTMLElement;
+      application.unload("stimeo--password-reveal");
+      document.body.innerHTML = "<p>A page without a reveal toggle</p>";
+
+      expect(() =>
+        document.dispatchEvent(new CustomEvent("turbo:before-render", { detail: {} })),
+      ).not.toThrow();
+      document.dispatchEvent(
+        new CustomEvent("turbo:before-render", { detail: { newBody: incoming } }),
+      );
+
+      const copied = incoming.querySelector<HTMLInputElement>(
+        "[data-stimeo--password-reveal-target='input']",
+      ) as HTMLInputElement;
+      expect(copied.type).toBe("password");
+      expect(copied.value).toBe("");
+    });
+
+    it("masks the copies of a toggle registered under another identifier as well", async () => {
+      document.body.innerHTML = `
+        <div data-controller="other--reveal">
+          <input type="password" aria-label="Password" value="hunter2"
+                 data-other--reveal-target="input">
+          <button type="button" aria-pressed="false" aria-label="Show password"
+                  data-other--reveal-target="toggle"
+                  data-action="other--reveal#toggle"></button>
+        </div>`;
+      application = Application.start();
+      application.register("other--reveal", PasswordRevealController);
+      await tick();
+      query<HTMLButtonElement>("[data-other--reveal-target='toggle']").click();
+      const incoming = document.body.cloneNode(true) as HTMLElement;
+      application.unload("other--reveal");
+
+      document.dispatchEvent(
+        new CustomEvent("turbo:before-render", { detail: { newBody: incoming } }),
+      );
+
+      const copied = incoming.querySelector<HTMLInputElement>(
+        "[data-other--reveal-target='input']",
+      ) as HTMLInputElement;
+      expect(copied.type).toBe("password");
+      expect(copied.value).toBe("");
+    });
+
+    it("watches the pages Turbo renders into a document with one listener, however many instances connect", async () => {
+      const add = vi.spyOn(document, "addEventListener");
+      try {
+        document.body.innerHTML = `
+          ${[1, 2]
+            .map(
+              (n) => `
+          <div data-controller="stimeo--password-reveal">
+            <input type="password" aria-label="Password ${n}"
+                   data-stimeo--password-reveal-target="input">
+          </div>`,
+            )
+            .join("")}`;
+        application = Application.start();
+        application.register("stimeo--password-reveal", PasswordRevealController);
+        await tick();
+        const [first] = application.controllers as PasswordRevealController[];
+        first?.disconnect();
+        first?.connect();
+
+        const renders = add.mock.calls.filter(([type]) => type === "turbo:before-render");
+        // None when an earlier test of this file already installed it for this document.
+        expect(renders.length).toBeLessThanOrEqual(1);
+      } finally {
+        add.mockRestore();
+      }
+    });
+
+    it("shares the render mask between separate copies of the controller", async () => {
+      const identifier = "test--reveal-copies";
+      const add = vi.spyOn(document, "addEventListener");
+      try {
+        document.body.innerHTML = `
+          <div data-controller="${identifier}">
+            <input type="password" aria-label="Password"
+                   data-${identifier}-target="input">
+          </div>`;
+        application = Application.start();
+        application.register(identifier, PasswordRevealController);
+        await tick();
+        const renders = () =>
+          add.mock.calls.filter(([type]) => type === "turbo:before-render").length;
+        expect(renders()).toBe(1);
+
+        application.unload(identifier);
+        vi.resetModules();
+        const { PasswordRevealController: OtherCopy } = await import(
+          "../src/controllers/password_reveal_controller"
+        );
+        expect(OtherCopy).not.toBe(PasswordRevealController);
+        application.register(identifier, OtherCopy);
+        await tick();
+        expect(renders()).toBe(1);
+
+        const incoming = document.createElement("div");
+        incoming.innerHTML = `
+          <input type="text" value="secret"
+                 data-${identifier}-type-lease='["password","text"]'>`;
+        document.dispatchEvent(
+          new CustomEvent("turbo:before-render", { detail: { newBody: incoming } }),
+        );
+        const field = incoming.querySelector("input");
+        expect(field?.type).toBe("password");
+        expect(field?.value).toBe("");
+      } finally {
+        add.mockRestore();
+      }
+    });
+
+    it("leaves a field the author wrote as text, which the copy carries masked, as it comes", async () => {
+      document.body.innerHTML = `
+        <div data-controller="stimeo--password-reveal">
+          <input type="text" aria-label="Password" value="shown"
+                 data-stimeo--password-reveal-target="input">
+          <button type="button" aria-pressed="true" aria-label="Show password"
+                  data-stimeo--password-reveal-target="toggle"
+                  data-action="stimeo--password-reveal#toggle"></button>
+        </div>`;
+      application = Application.start();
+      application.register("stimeo--password-reveal", PasswordRevealController);
+      await tick();
+      toggle().click();
+      expect(input().type).toBe("password");
+      const incoming = document.body.cloneNode(true) as HTMLElement;
+
+      document.dispatchEvent(
+        new CustomEvent("turbo:before-render", { detail: { newBody: incoming } }),
+      );
+
+      const copied = incoming.querySelector<HTMLInputElement>(
+        "[data-stimeo--password-reveal-target='input']",
+      ) as HTMLInputElement;
+      expect(copied.type).toBe("password");
+      expect(copied.value).toBe("shown");
+    });
+
+    it("keeps a field the author wrote revealed", async () => {
+      document.body.innerHTML = `
+        <div data-controller="stimeo--password-reveal">
+          <input type="text" aria-label="Password" value="shown"
+                 data-stimeo--password-reveal-target="input">
+          <button type="button" aria-pressed="true" aria-label="Show password"
+                  data-stimeo--password-reveal-target="toggle"
+                  data-action="stimeo--password-reveal#toggle"></button>
+        </div>`;
+      application = Application.start();
+      application.register("stimeo--password-reveal", PasswordRevealController);
+      await tick();
+
+      await restore();
+
+      expect(input().type).toBe("text");
+      expect(input().value).toBe("shown");
+    });
+  });
+
+  it("keeps a revealed field revealed when its element moves within the page", async () => {
+    await start();
+    toggle().click();
+    const controller = application.getControllerForElementAndIdentifier(
+      controllerEl(),
+      "stimeo--password-reveal",
+    ) as PasswordRevealController;
+
+    controller.disconnect();
+    controller.connect();
+
+    expect(input().type).toBe("text");
+    expect(input().value).toBe("s3cret");
+    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("says nothing when it masks for the cache", async () => {
     // The page is about to be frozen; there is no consumer left to tell.
     await start();
@@ -390,6 +1046,25 @@ describe("PasswordRevealController", () => {
     document.dispatchEvent(new Event("turbo:before-cache"));
 
     expect(seen).toEqual([]);
+  });
+
+  it("leaves no re-mask behind once it has masked for the cache", async () => {
+    await start('data-stimeo--password-reveal-auto-hide-value="20"');
+    vi.useFakeTimers();
+    try {
+      toggle().click();
+      const seen: boolean[] = [];
+      controllerEl().addEventListener("stimeo--password-reveal:toggle", (event) => {
+        seen.push((event as CustomEvent<{ visible: boolean }>).detail.visible);
+      });
+
+      document.dispatchEvent(new Event("turbo:before-cache"));
+      vi.advanceTimersByTime(40);
+
+      expect(seen).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("has nothing to mask for the cache when there is no field", async () => {
@@ -465,6 +1140,94 @@ describe("PasswordRevealController", () => {
     toggle().click();
     expect(onLabel().hidden).toBe(true);
     expect(offLabel().hidden).toBe(false);
+  });
+
+  it("gives the authored label pair back to a button that stops being the toggle", async () => {
+    await startWithLabels(LABEL_PAIR);
+    toggle().click();
+    const former = toggle();
+    expect([onLabel(former).hidden, offLabel(former).hidden]).toEqual([false, true]);
+
+    former.removeAttribute("data-stimeo--password-reveal-target");
+    await tick();
+
+    expect([onLabel(former).hidden, offLabel(former).hidden]).toEqual([true, false]);
+  });
+
+  it("gives back a label pair authored against the state once its button stops being the toggle", async () => {
+    // The connection corrects the pair, so what it hands back is what the author wrote.
+    await startWithLabels(`
+      <span data-stimeo--password-reveal-target="onLabel">Hide password</span>
+      <span data-stimeo--password-reveal-target="offLabel" hidden>Show password</span>`);
+    const former = toggle();
+    expect([onLabel(former).hidden, offLabel(former).hidden]).toEqual([true, false]);
+
+    former.removeAttribute("data-stimeo--password-reveal-target");
+    await tick();
+
+    expect([onLabel(former).hidden, offLabel(former).hidden]).toEqual([false, true]);
+  });
+
+  it("keeps a label state the page wrote on a button that stops being the toggle", async () => {
+    await startWithLabels(LABEL_PAIR);
+    toggle().click();
+    const former = toggle();
+    onLabel(former).setAttribute("hidden", "until-found");
+    former.removeAttribute("data-stimeo--password-reveal-target");
+    await tick();
+
+    expect(onLabel(former).getAttribute("hidden")).toBe("until-found");
+    expect(offLabel(former).hidden).toBe(false);
+  });
+
+  it("gives the button back its own label pair when the widget loses its controller", async () => {
+    await startWithLabels(LABEL_PAIR);
+    toggle().click();
+    const departed = toggle();
+
+    controllerEl().removeAttribute("data-controller");
+    await tick();
+
+    expect(departed.getAttribute("aria-pressed")).toBe("false");
+    expect([onLabel(departed).hidden, offLabel(departed).hidden]).toEqual([true, false]);
+  });
+
+  it("gives back a label half that left the pair before its button stopped being the toggle", async () => {
+    await startWithLabels(LABEL_PAIR);
+    toggle().click();
+    const former = toggle();
+    const half = onLabel(former);
+
+    half.removeAttribute("data-stimeo--password-reveal-target");
+    former.removeAttribute("data-stimeo--password-reveal-target");
+    await tick();
+
+    expect(half.hidden).toBe(true);
+    expect(offLabel(former).hidden).toBe(false);
+  });
+
+  it("keeps what it wrote on a button that moves within the widget", async () => {
+    // A move delivers the departure and the arrival of the same element, which is
+    // still the toggle throughout, so nothing is handed back and written again.
+    await startWithLabels(LABEL_PAIR);
+    toggle().click();
+    const moving = toggle();
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((batch) => records.push(...batch));
+    observer.observe(moving, {
+      attributes: true,
+      subtree: true,
+      attributeFilter: ["aria-pressed", "hidden"],
+    });
+
+    controllerEl().prepend(moving);
+    await tick();
+    records.push(...observer.takeRecords());
+    observer.disconnect();
+
+    expect(moving.getAttribute("aria-pressed")).toBe("true");
+    expect([onLabel(moving).hidden, offLabel(moving).hidden]).toEqual([false, true]);
+    expect(records.map((record) => record.attributeName)).toEqual([]);
   });
 
   it("corrects a label pair authored against the state it mounts onto", async () => {
@@ -561,6 +1324,42 @@ describe("PasswordRevealController", () => {
 
     expect(onLabel().hidden).toBe(false);
     expect(offLabel().hidden).toBe(true);
+  });
+
+  /** A label half created the way a re-rendered button fragment would carry it. */
+  const labelHalf = (name: "onLabel" | "offLabel", text: string) => {
+    const span = document.createElement("span");
+    span.textContent = text;
+    span.setAttribute("data-stimeo--password-reveal-target", name);
+    return span;
+  };
+
+  it("completes a pair when the revealed-side half arrives after connect", async () => {
+    await startWithLabels(
+      `<span data-stimeo--password-reveal-target="offLabel">Show password</span>`,
+      "text",
+    );
+    // A lone half keeps what the author wrote.
+    expect(offLabel().hidden).toBe(false);
+
+    toggle().append(labelHalf("onLabel", "Hide password"));
+    await tick();
+
+    expect(onLabel().hidden).toBe(false);
+    expect(offLabel().hidden).toBe(true);
+  });
+
+  it("completes a pair when the masked-side half arrives after connect", async () => {
+    await startWithLabels(
+      `<span data-stimeo--password-reveal-target="onLabel">Hide password</span>`,
+    );
+    expect(onLabel().hidden).toBe(false);
+
+    toggle().append(labelHalf("offLabel", "Show password"));
+    await tick();
+
+    expect(onLabel().hidden).toBe(true);
+    expect(offLabel().hidden).toBe(false);
   });
 
   it("returns the label pair to masked before the page is cached", async () => {

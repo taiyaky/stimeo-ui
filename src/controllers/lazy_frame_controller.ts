@@ -31,6 +31,11 @@ import { IntersectionWatcher } from "../utils/intersection_watcher";
  *
  * `load` dispatches `{ url }` — always the URL the fetch actually started for.
  *
+ * `once` follows a runtime change for a frame that has loaded: turned off, the frame is
+ * observed again and the visit begins wherever the observer first finds it, exactly as on a
+ * reconnect; turned on, observing stops. Before the first load it has nothing to change,
+ * because it only decides what that load leaves behind.
+ *
  * @remarks
  * Behavior only — the load itself and the frame's content are Turbo's / the server's job,
  * and the loading UI (skeleton / `aria-busy`) belongs to `stimeo--frame-loading`. The trigger
@@ -86,6 +91,26 @@ export class LazyFrameController extends Controller<HTMLElement> {
   /** Rebuilds the observer when the early-load margin changes at runtime. */
   rootMarginValueChanged(): void {
     if (this.#connected && this.#watcher.active) this.#observe();
+  }
+
+  /**
+   * Follows `once` for a frame that has loaded, reaching the observer a reconnect
+   * would build: a loaded frame under `once` is left unobserved, and one that may
+   * re-fetch is observed with its baseline taken afresh, so the first report is
+   * where the frame is rather than a return to it.
+   *
+   * Stimulus can deliver this ahead of `connect()`, and `#loaded` may still hold
+   * the previous connection's answer then; the connected guard keeps a callback
+   * outside the connected window from building anything.
+   */
+  onceValueChanged(): void {
+    if (!this.#connected || !this.#loaded) return;
+    if (this.onceValue) {
+      this.#watcher.stop();
+    } else if (!this.#watcher.active) {
+      this.#inside = null;
+      this.#arm();
+    }
   }
 
   override connect(): void {

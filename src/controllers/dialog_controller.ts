@@ -1,5 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { FocusTrap } from "../utils/focus_trap";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { type StateReason, stateReasonFor } from "../utils/state_reason";
 
 /**
@@ -35,7 +37,10 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  * `stimeo--dialog:close` dispatch `{ reason: StateReason }`, after the dialog's
  * `hidden` attribute is written and before focus moves. Both are informational,
  * so neither is cancelable. A call that leaves the state where it already was,
- * the normalization in {@link connect}, and {@link disconnect} are all silent.
+ * the normalization in {@link connect}, the reconciliation that follows dialog
+ * churn, and {@link disconnect} are all silent. A Turbo morph that puts the
+ * server's `hidden` back on an open dialog, or takes it off a closed one, is
+ * answered by writing the open state back, silently.
  */
 export class DialogController extends Controller<HTMLElement> {
   static override targets = ["trigger", "dialog"];
@@ -44,6 +49,7 @@ export class DialogController extends Controller<HTMLElement> {
 
   declare readonly triggerTarget: HTMLElement;
   declare readonly dialogTarget: HTMLElement;
+  declare readonly dialogTargets: HTMLElement[];
   declare readonly hasTriggerTarget: boolean;
   declare readonly hasDialogTarget: boolean;
 
@@ -55,11 +61,23 @@ export class DialogController extends Controller<HTMLElement> {
 
   /** Whether state moves are reported: set once `connect()` settled the baseline. */
   #reporting = false;
+  /** Whether dialog churn is applied: set by `connect()`, cleared first thing in `disconnect()`. */
+  #connected = false;
+  /** The dialog the open state was last applied to. */
+  #dialog: HTMLElement | null = null;
+  /** Borrows `hidden` on each dialog, to give back when one stops being the target. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Writes the open state back after a Turbo morph put the server's `hidden` in its place. */
+  readonly #morphRender = new MorphRenderWatcher(() => this.#repair());
 
   /** Starts closed (idempotently reflects the closed state on the markup). */
   override connect(): void {
-    if (this.hasDialogTarget) this.dialogTarget.hidden = true;
+    this.#trap.connect();
+    this.#connected = true;
+    if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, "");
+    this.#dialog = this.hasDialogTarget ? this.dialogTarget : null;
     this.#reporting = true;
+    this.#morphRender.observe(this.element);
   }
 
   /**
@@ -69,8 +87,31 @@ export class DialogController extends Controller<HTMLElement> {
    * teardown.
    */
   override disconnect(): void {
+    this.#morphRender.disconnect();
+    this.#connected = false;
     this.#reporting = false;
-    this.#trap.deactivate({ restoreFocus: false });
+    this.#trap.disconnect(this);
+  }
+
+  /** Shows the dialog while its trap is active and hides it otherwise. */
+  #repair(): void {
+    if (this.hasDialogTarget) this.#hidden.write(this.dialogTarget, this.#trap.active ? null : "");
+  }
+
+  /** Applies the open state to a dialog that arrives after connect in front of the others. */
+  dialogTargetConnected(): void {
+    if (this.#connected) this.#adoptDialog();
+  }
+
+  /**
+   * Gives a dialog that no longer resolves as the target its own `hidden` back — after
+   * `disconnect()` too, since dropping the identifier leaves the element on the page — and,
+   * while connected, applies the open state to the dialog left.
+   */
+  dialogTargetDisconnected(dialog: HTMLElement): void {
+    if (this.dialogTargets.includes(dialog)) return;
+    this.#hidden.return(dialog);
+    if (this.#connected) this.#adoptDialog();
   }
 
   /** Opens the dialog, traps focus, and locks background scroll. */
@@ -91,7 +132,7 @@ export class DialogController extends Controller<HTMLElement> {
   /** Reveals the dialog, reports a move, then traps focus and locks scroll. */
   #open(reason: StateReason): void {
     if (!this.hasDialogTarget || this.#isOpen) return;
-    this.dialogTarget.hidden = false;
+    this.#hidden.write(this.dialogTarget, null);
     if (this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
     // A subscriber may close it again from the handler above. Everything below
     // applies to an element that is open; run it against a closed one and the
@@ -103,13 +144,35 @@ export class DialogController extends Controller<HTMLElement> {
   /** Hides the dialog, reports a move, then restores scroll and focus. */
   #close(reason: StateReason): void {
     if (!this.hasDialogTarget || !this.#isOpen) return;
-    this.dialogTarget.hidden = true;
+    this.#hidden.write(this.dialogTarget, "");
     if (this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
     // A subscriber may reopen it from the handler above, in which case the trap it
     // just activated is the live one — tearing it down here would strip the modal
     // side effects off a dialog that is on screen.
     if (this.#isOpen) return;
     this.#trap.deactivate();
+  }
+
+  /**
+   * Applies the open state to the dialog that is now first, when that dialog changed. An
+   * open dialog moves its modal trap onto it, keeping the trap's place among the page's modals
+   * and the opener focus returns to; focus moves inside unless it is already there or a modal
+   * opened over this one takes `Tab`. An open dialog left with no dialog closes. Both are silent.
+   */
+  #adoptDialog(): void {
+    const dialog = this.hasDialogTarget ? this.dialogTarget : null;
+    if (dialog === this.#dialog) return;
+    this.#dialog = dialog;
+    if (!this.#trap.active) {
+      if (dialog) this.#hidden.write(dialog, "");
+      return;
+    }
+    if (!dialog) {
+      this.#trap.deactivate();
+      return;
+    }
+    this.#hidden.write(dialog, null);
+    this.#trap.refreshContainer();
   }
 
   /** Whether the dialog is currently visible. */

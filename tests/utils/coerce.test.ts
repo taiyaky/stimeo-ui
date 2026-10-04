@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toFiniteNumber } from "../../src/utils/coerce";
+import { readNumber, toFiniteNumber } from "../../src/utils/coerce";
 
 /**
  * Unit tests for the numeric coercion shared by the value-bearing status
@@ -25,6 +25,7 @@ describe("toFiniteNumber", () => {
     expect(toFiniteNumber(null)).toBeNull();
     expect(toFiniteNumber(undefined)).toBeNull();
     expect(toFiniteNumber("")).toBeNull();
+    expect(toFiniteNumber("   ")).toBeNull();
   });
 
   it("rejects anything that is not a finite number", () => {
@@ -32,5 +33,29 @@ describe("toFiniteNumber", () => {
     expect(toFiniteNumber("12px")).toBeNull();
     expect(toFiniteNumber(Number.NaN)).toBeNull();
     expect(toFiniteNumber(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(toFiniteNumber(true as unknown as number)).toBeNull();
+    expect(toFiniteNumber([1] as unknown as number)).toBeNull();
+  });
+});
+
+/** A reader returns the supplied fallback without normalizing either value. */
+describe("readNumber", () => {
+  it("preserves accepted fractions and negative zero", () => {
+    expect(readNumber(1.25, 7, { min: 1 })).toBe(1.25);
+    expect(readNumber(-0, 7, {})).toBe(-0);
+  });
+
+  it("falls back for non-numbers and out-of-contract numbers", () => {
+    for (const value of [Number.NaN, Infinity, -Infinity, -1, 0.5]) {
+      expect(readNumber(value, 7, { min: 0, integer: true })).toBe(7);
+    }
+    expect(readNumber(13, 24, { allowedValues: [12, 24] })).toBe(24);
+  });
+
+  it("leaves the caller's fallback and explicit sentinel intact", () => {
+    expect(readNumber(Number.NaN, -Infinity, {})).toBe(-Infinity);
+    expect(readNumber(Number.NaN, Number.NaN, {})).toBeNaN();
+    expect(readNumber(Infinity, 0, { allowInfinity: "positive" })).toBe(Infinity);
+    expect(readNumber(-1, -2, { min: 0 })).toBe(-2);
   });
 });

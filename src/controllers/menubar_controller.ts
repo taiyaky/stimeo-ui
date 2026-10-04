@@ -1,11 +1,14 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { ownerOf } from "../utils/event_owner";
 import { isRtl } from "../utils/logical_scroll";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { RovingTabindex } from "../utils/roving_tabindex";
 import { SafeTimeout } from "../utils/safe_timeout";
-import { type StateReason, stateReasonFor } from "../utils/state_reason";
+import type { StateReason } from "../utils/state_reason";
+import { targetSelector } from "../utils/target_selector";
 import { findTypeaheadMatch, isTypeaheadKey, Typeahead } from "../utils/typeahead";
 
 /** Where to land focus when a menu opens. */
@@ -169,6 +172,8 @@ export class MenubarController extends Controller<HTMLElement> {
     if (next && !this.element.contains(next)) this.#focused = null;
   };
 
+  readonly #morph = new MorphRenderWatcher(() => this.#reconcile());
+
   /**
    * Establishes the closed baseline and the single tab stop: keep an existing tab
    * stop when it is still navigable (so a Turbo cache restore preserves the user's
@@ -180,6 +185,7 @@ export class MenubarController extends Controller<HTMLElement> {
    * close the menu.
    */
   override connect(): void {
+    this.#morph.observe(this.element);
     this.#closeAllMenus("api");
     this.#reconcile();
     this.element.addEventListener("click", this.#onDisabledClickCapture, true);
@@ -187,7 +193,7 @@ export class MenubarController extends Controller<HTMLElement> {
     this.element.addEventListener("focusout", this.#onFocusOut);
     document.addEventListener("click", this.#onOutsideClick, true);
     if (typeof MutationObserver !== "undefined") {
-      this.#observer = new MutationObserver(() => this.#reconcile());
+      this.#observer = new MutationObserver(() => this.#morph.schedule());
       this.#observer.observe(this.element, {
         subtree: true,
         childList: true,
@@ -201,6 +207,7 @@ export class MenubarController extends Controller<HTMLElement> {
 
   /** Removes the listeners, stack membership, and any pending timer (typeahead / Tab close). */
   override disconnect(): void {
+    this.#morph.disconnect();
     this.#connected = false;
     this.#reporting = false;
     this.#escapeLayer.deactivate();
@@ -268,14 +275,18 @@ export class MenubarController extends Controller<HTMLElement> {
     this.#reconcile();
   }
 
-  /** Toggles a top item's menu. Bound via `data-action` (click on the top item). */
-  toggle(event: Event): void {
-    const top = event.currentTarget as HTMLButtonElement;
-    const reason = stateReasonFor(event);
+  /** Toggles an owned top item's menu from an action or explicit element. */
+  toggle(source: Event | HTMLElement): void {
+    const { event, host, origin, reason } = actionSource(source);
+    const top = host?.closest<HTMLButtonElement>(targetSelector(this.identifier, "top"));
+    if (!top || !this.topTargets.includes(top)) return;
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const moveFocus = event !== null || this.element.contains(document.activeElement);
     if (this.#isExpanded(top)) {
       this.#closeMenu(top, reason);
     } else {
-      this.#openMenu(top, "first", reason);
+      this.#openMenu(top, "first", reason, moveFocus);
     }
   }
 
@@ -394,29 +405,37 @@ export class MenubarController extends Controller<HTMLElement> {
     // Enter/Space activate the item via its native button click → activate().
   }
 
-  /** Closes the owning menu after an item is activated and refocuses its top. */
-  activate(event: Event): void {
-    const item = event.currentTarget as HTMLElement;
+  /** Closes an activated item's menu, returning focus only from inside on API calls. */
+  activate(source: Event | HTMLElement): void {
+    const { event, host, origin } = actionSource(source);
+    const item = host?.closest<HTMLButtonElement>(targetSelector(this.identifier, "item"));
+    if (!item || !this.itemTargets.includes(item)) return;
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const moveFocus = event !== null || this.element.contains(document.activeElement);
     const menu = item.closest<HTMLElement>("[role='menu']");
     const top = this.#topFor(menu);
     this.#closeAllMenus("select");
-    this.#focusTop(top);
+    this.#focusTop(
+      top,
+      moveFocus && (event !== null || this.element.contains(document.activeElement)),
+    );
   }
 
-  /** Moves the roving focus to `top`, opening its menu when one was open. */
-  #gotoTop(top: HTMLButtonElement | undefined, reopen: boolean, reason: StateReason): void {
-    if (!top) return;
+  /** Moves the roving focus to `destination`, opening its menu when one was open. */
+  #gotoTop(destination: HTMLButtonElement | undefined, reopen: boolean, reason: StateReason): void {
+    if (!destination) return;
     if (reopen) {
-      this.#openMenu(top, "first", reason);
+      this.#openMenu(destination, "first", reason);
     } else {
       // The roving index is resolved against the full target list, since that is
       // what carries the tabindex bookkeeping.
-      this.#roving.setActive(this.topTargets.indexOf(top), { focus: true });
+      this.#roving.setActive(this.topTargets.indexOf(destination), { focus: true });
     }
   }
 
   /**
-   * Opens `top`'s menu (closing others) and focuses its first/last item.
+   * Opens `opener`'s menu (closing others) and focuses its first/last item.
    *
    * Three kinds of top item never open a menu:
    * - **`aria-disabled`** — focusable but never activated, and opening a popup is
@@ -438,38 +457,42 @@ export class MenubarController extends Controller<HTMLElement> {
    * destination while nothing is open.
    */
   #openMenu(
-    top: HTMLButtonElement | null | undefined,
+    opener: HTMLButtonElement | null | undefined,
     focus: OpenFocus,
     reason: StateReason,
+    moveFocus = true,
   ): void {
-    if (!top) return;
+    if (!opener) return;
     // Resolve the menu *before* touching any state, so the dangling case below
     // can bail out without having changed anything.
-    const menu = this.#menuFor(top);
-    if (!menu || this.#isActivationBlocked(top)) {
+    const menu = this.#menuFor(opener);
+    if (!menu || this.#isActivationBlocked(opener)) {
       // Broken markup (an `aria-controls` that resolves to nothing) is the one
       // case that must not act on a guess.
-      if (menu || !top.hasAttribute("aria-controls")) {
+      if (menu || !opener.hasAttribute("aria-controls")) {
         this.#closeAllMenus(reason);
-        this.#focusTop(top);
+        this.#focusTop(
+          opener,
+          moveFocus && (reason !== "api" || this.element.contains(document.activeElement)),
+        );
       }
       return;
     }
     // A reopen must discard a pending Tab close, or that stale task would slam
     // the freshly opened menu shut on the next tick.
     this.#timers.clearAll();
-    const was = this.#isExpanded(top);
+    const was = this.#isExpanded(opener);
     // The blanket close also rewrites this top's own attributes, so its move is
     // reported from here instead — a reopen of the menu that is already open
     // leaves the state where it was and says nothing.
-    this.#closeAllMenus(reason, top);
+    this.#closeAllMenus(reason, opener);
     menu.hidden = false;
-    top.setAttribute("aria-expanded", "true");
-    if (!was) this.#report("open", top, menu, reason);
+    opener.setAttribute("aria-expanded", "true");
+    if (!was) this.#report("open", opener, menu, reason);
     // A subscriber may close it again from the handler above. The layer and the
     // focus move below belong to a menu that is open; against a hidden one they
     // strand the Escape layer and put focus where nothing is visible.
-    if (!this.#isExpanded(top)) return;
+    if (!this.#isExpanded(opener)) return;
     this.#escapeLayer.activate(document, {
       onDismiss: () => this.#dismissOpenMenu(),
       claims: claimsWhileFocusWithin(this.element),
@@ -477,9 +500,11 @@ export class MenubarController extends Controller<HTMLElement> {
     // Opening always re-registers, which puts this layer back on top of the
     // stack — the menubar is the innermost thing the user just interacted with.
     this.#layerActive = true;
-    this.#roving.setActive(this.topTargets.indexOf(top));
+    this.#roving.setActive(this.topTargets.indexOf(opener));
     const items = this.#itemsIn(menu);
-    this.#focusAt(items, focus === "first" ? 0 : items.length - 1);
+    if (moveFocus && (reason !== "api" || this.element.contains(document.activeElement))) {
+      this.#focusAt(items, focus === "first" ? 0 : items.length - 1);
+    }
   }
 
   /**
@@ -553,10 +578,10 @@ export class MenubarController extends Controller<HTMLElement> {
 
   /** Opens the menu of the navigable top item `delta` steps from `menu`'s owner. */
   #moveToAdjacentMenu(menu: HTMLElement, delta: number): void {
-    const top = this.#topFor(menu);
-    if (!top) return;
+    const ownerTop = this.#topFor(menu);
+    if (!ownerTop) return;
     const tops = this.#navigableTops;
-    const current = tops.indexOf(top);
+    const current = tops.indexOf(ownerTop);
     if (current === -1) return;
     const next = (current + delta + tops.length) % tops.length;
     this.#openMenu(tops[next], "first", "user");
@@ -766,9 +791,9 @@ export class MenubarController extends Controller<HTMLElement> {
   }
 
   /** Returns roving focus to a top item (and makes it the single tab stop). */
-  #focusTop(top: HTMLButtonElement | null): void {
+  #focusTop(top: HTMLButtonElement | null, focus = true): void {
     if (!top) return;
-    this.#roving.setActive(this.topTargets.indexOf(top), { focus: true });
+    this.#roving.setActive(this.topTargets.indexOf(top), { focus });
   }
 
   /** Whether `top`'s menu is currently expanded. */

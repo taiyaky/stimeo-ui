@@ -129,6 +129,215 @@ describe("OverflowIndicatorController", () => {
     window.dispatchEvent(new Event("resize"));
   };
 
+  it("keeps retained morph safe while the viewport target is absent", async () => {
+    await start();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    expect(viewport().getAttribute("data-overflow-end")).toBe("true");
+    const retained = viewport();
+    retained.removeAttribute("data-stimeo--overflow-indicator-target");
+    await tick();
+    const changes = vi.fn();
+    root().addEventListener("stimeo--overflow-indicator:change", changes);
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await tick();
+    expect(changes).not.toHaveBeenCalled();
+    expect(retained.getAttribute("data-overflow-end")).toBe("true");
+    retained.setAttribute("data-stimeo--overflow-indicator-target", "viewport");
+    await tick();
+    layout({ scrollLeft: 700, scrollWidth: 1000, clientWidth: 300 });
+    expect(retained.getAttribute("data-overflow-end")).toBe("false");
+  });
+
+  it("ignores an invalid direction while a newly inserted viewport awaits connection", async () => {
+    document.body.innerHTML = markup.replace(
+      'data-stimeo--overflow-indicator-target="viewport"',
+      'id="pending-viewport"',
+    );
+    application = Application.start();
+    application.register("stimeo--overflow-indicator", OverflowIndicatorController);
+    await tick();
+    const pending = document.querySelector<HTMLElement>("#pending-viewport");
+    if (!pending) throw new Error("Expected the pending viewport");
+    const scroll = vi.fn();
+    pending.scrollBy = scroll;
+    pending.setAttribute("data-stimeo--overflow-indicator-target", "viewport");
+    const invalid = button("end");
+    invalid.setAttribute("data-stimeo--overflow-indicator-direction-param", "sideways");
+    invalid.click();
+    expect(scroll).not.toHaveBeenCalled();
+    await tick();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    invalid.setAttribute("data-stimeo--overflow-indicator-direction-param", "end");
+    invalid.disabled = false;
+    invalid.click();
+    expect(scroll).toHaveBeenCalledExactlyOnceWith({ left: 300, behavior: "smooth" });
+  });
+
+  it("stops viewport observation when a batch removes every candidate", async () => {
+    await start();
+    const errors: Error[] = [];
+    application.handleError = (error) => {
+      errors.push(error);
+    };
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    const first = viewport();
+    const second = document.createElement("div");
+    second.setAttribute("data-stimeo--overflow-indicator-target", "viewport");
+    root().append(second);
+    await tick();
+    expect(first.getAttribute("data-overflow-end")).toBe("true");
+    second.removeAttribute("data-stimeo--overflow-indicator-target");
+    first.removeAttribute("data-stimeo--overflow-indicator-target");
+    await tick();
+    expect(errors).toEqual([]);
+    first.setAttribute("data-stimeo--overflow-indicator-target", "viewport");
+    await tick();
+    layout({ scrollLeft: 700, scrollWidth: 1000, clientWidth: 300 });
+    expect(first.getAttribute("data-overflow-end")).toBe("false");
+    expect(errors).toEqual([]);
+  });
+
+  it("cancels the old viewport frame when the same target moves within the root", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (handle: number) => {
+      frames.delete(handle);
+    });
+    await start();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    const retained = viewport();
+    Object.defineProperty(retained, "scrollLeft", { configurable: true, value: 300 });
+    retained.dispatchEvent(new Event("scroll"));
+    expect(frames.size).toBe(1);
+    root().append(retained);
+    await tick();
+    expect(frames.size).toBe(0);
+    expect(retained.getAttribute("data-overflow-start")).toBe("true");
+  });
+
+  it("does not claim a nested owner's buttons while its viewport is absent", async () => {
+    await start();
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--overflow-indicator");
+    nested.innerHTML =
+      '<button data-stimeo--overflow-indicator-direction-param="start">Nested start</button>';
+    root().append(nested);
+    await tick();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    const nestedButton = nested.querySelector<HTMLButtonElement>("button");
+    expect(nestedButton?.disabled).toBe(false);
+    expect(nestedButton?.hasAttribute("data-overflow-indicator-disabled")).toBe(false);
+    expect(button("start").disabled).toBe(true);
+  });
+
+  it("returns stale pending ARIA before disabling an unfocused boundary button", async () => {
+    document.body.innerHTML = markup;
+    const restored = button("end");
+    restored.setAttribute("data-overflow-indicator-pending-disabled", "");
+    restored.setAttribute("data-overflow-indicator-aria-disabled", "false");
+    restored.setAttribute("aria-disabled", "true");
+    application = Application.start();
+    application.register("stimeo--overflow-indicator", OverflowIndicatorController);
+    await tick();
+    expect(restored.disabled).toBe(true);
+    expect(restored.getAttribute("aria-disabled")).toBe("false");
+    expect(restored.hasAttribute("data-overflow-indicator-pending-disabled")).toBe(false);
+    expect(restored.hasAttribute("data-overflow-indicator-aria-disabled")).toBe(false);
+  });
+
+  it("retains the authored ARIA value across repeated pending boundary measurements", async () => {
+    await start();
+    layout({ scrollLeft: 300, scrollWidth: 1000, clientWidth: 300 });
+    const pending = button("end");
+    pending.setAttribute("aria-disabled", "false");
+    pending.focus();
+    layout({ scrollLeft: 700, scrollWidth: 1000, clientWidth: 300 });
+    expect(pending.getAttribute("data-overflow-indicator-aria-disabled")).toBe("false");
+    layout({ scrollLeft: 700, scrollWidth: 1000, clientWidth: 300 });
+    expect(pending.getAttribute("data-overflow-indicator-aria-disabled")).toBe("false");
+    expect(pending.disabled).toBe(false);
+    viewport().focus();
+    expect(pending.disabled).toBe(true);
+    expect(pending.getAttribute("aria-disabled")).toBe("false");
+  });
+
+  it("keeps the observed viewport generation when an unused candidate arrives", async () => {
+    await start();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    const changes = vi.fn();
+    root().addEventListener("stimeo--overflow-indicator:change", changes);
+    const secondary = document.createElement("div");
+    secondary.setAttribute("data-stimeo--overflow-indicator-target", "viewport");
+    root().append(secondary);
+    await tick();
+    expect(changes).not.toHaveBeenCalled();
+    layout({ scrollLeft: 300, scrollWidth: 1000, clientWidth: 300 });
+    expect(changes).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores content observer callbacks from a released viewport generation", async () => {
+    const NativeObserver = globalThis.MutationObserver;
+    const observations: Array<{ callback: MutationCallback; observer: MutationObserver }> = [];
+    class RecordingObserver extends NativeObserver {
+      readonly #callback: MutationCallback;
+      constructor(callback: MutationCallback) {
+        super(callback);
+        this.#callback = callback;
+      }
+      override observe(target: Node, options?: MutationObserverInit): void {
+        if (options?.attributeFilter?.join(",") === "class,style,hidden") {
+          observations.push({ callback: this.#callback, observer: this });
+        }
+        super.observe(target, options);
+      }
+    }
+    vi.stubGlobal("MutationObserver", RecordingObserver);
+    await start();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    const stale = observations.at(-1);
+    const replacement = document.createElement("div");
+    replacement.setAttribute("data-stimeo--overflow-indicator-target", "viewport");
+    viewport().replaceWith(replacement);
+    await tick();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    const current = observations.at(-1);
+    if (!stale || !current || stale === current)
+      throw new Error("Expected two observation generations");
+    const changes = vi.fn();
+    root().addEventListener("stimeo--overflow-indicator:change", changes);
+    Object.defineProperty(replacement, "scrollLeft", { configurable: true, value: 300 });
+    stale.callback([], stale.observer);
+    expect(replacement.getAttribute("data-overflow-start")).toBe("false");
+    expect(changes).not.toHaveBeenCalled();
+    current.callback([], current.observer);
+    expect(replacement.getAttribute("data-overflow-start")).toBe("true");
+    expect(changes).toHaveBeenCalledTimes(1);
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--overflow-indicator",
+    );
+    instance?.disconnect();
+    replacement.setAttribute("data-overflow-start", "consumer");
+    current.callback([], current.observer);
+    expect(replacement.getAttribute("data-overflow-start")).toBe("consumer");
+  });
+
+  it.each(["abc", "Infinity"])(
+    "keeps scroll room measurable with a %s threshold",
+    async (threshold) => {
+      await start();
+      root().setAttribute("data-stimeo--overflow-indicator-threshold-value", threshold);
+      await tick();
+      layout({ scrollLeft: 10, scrollWidth: 1000, clientWidth: 300 });
+      expect(viewport().getAttribute("data-overflow-start")).toBe("true");
+      expect(viewport().getAttribute("data-overflow-end")).toBe("true");
+    },
+  );
+
   it("reports room toward the end when scrolled to the start", async () => {
     await start();
     layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
@@ -185,6 +394,18 @@ describe("OverflowIndicatorController", () => {
     expect(document.activeElement).toBe(viewport());
     expect(button("end").disabled).toBe(true);
     expect(button("end").hasAttribute("aria-disabled")).toBe(false);
+  });
+
+  it("marks a focused boundary button with the pending hook until it blurs", async () => {
+    await start();
+    layout({ scrollLeft: 300, scrollWidth: 1000, clientWidth: 300 });
+    button("end").focus();
+
+    layout({ scrollLeft: 700, scrollWidth: 1000, clientWidth: 300 });
+    expect(button("end").hasAttribute("data-overflow-indicator-pending-disabled")).toBe(true);
+
+    viewport().focus();
+    expect(button("end").hasAttribute("data-overflow-indicator-pending-disabled")).toBe(false);
   });
 
   it("releases temporary focus state when a pending button is removed", async () => {
@@ -265,8 +486,7 @@ describe("OverflowIndicatorController", () => {
     layout({ scrollLeft: 700, scrollWidth: 1000, clientWidth: 300 });
     expect(pending.getAttribute("aria-disabled")).toBe("true");
 
-    // The controller-owned pending state is released on disconnect, so a cached
-    // snapshot never keeps a half-disabled button.
+    // Disconnect releases the controller-owned pending state from the live DOM.
     application.unload("stimeo--overflow-indicator");
     await tick();
 
@@ -481,11 +701,12 @@ describe("OverflowIndicatorController", () => {
     expect(viewport().getAttribute("data-overflow-end")).toBe("false");
   });
 
-  it("rebinds layout and content observation when the viewport target is replaced", async () => {
+  it("rebinds layout and content observation when a new first viewport connects", async () => {
     vi.stubGlobal("ResizeObserver", FakeResizeObserver);
     await start();
     layout({ scrollLeft: 0, scrollWidth: 300, clientWidth: 300 });
     const oldViewport = viewport();
+    const oldContent = oldViewport.firstElementChild as HTMLElement;
     const replacement = document.createElement("div");
     replacement.setAttribute("data-stimeo--overflow-indicator-target", "viewport");
     replacement.innerHTML = "<span>replacement</span>";
@@ -495,15 +716,74 @@ describe("OverflowIndicatorController", () => {
       clientWidth: { configurable: true, value: 300 },
     });
 
-    oldViewport.replaceWith(replacement);
+    // Rebind while the old target remains connected, so its disconnected callback
+    // cannot release the observations on behalf of the new target's connection.
+    oldViewport.before(replacement);
     await tick();
 
     expect(viewport()).toBe(replacement);
     expect(replacement.getAttribute("data-overflow-end")).toBe("true");
     const observed = FakeResizeObserver.instances[0]?.observed;
     expect(observed?.has(oldViewport)).toBe(false);
+    expect(observed?.has(oldContent)).toBe(false);
     expect(observed?.has(replacement)).toBe(true);
     expect(observed?.has(replacement.firstElementChild as Element)).toBe(true);
+  });
+
+  it("keeps observing the content of a viewport that moves within the root", async () => {
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+    await start();
+    const retained = viewport();
+    const content = retained.firstElementChild as HTMLElement;
+
+    root().append(retained);
+    await tick();
+
+    const observed = FakeResizeObserver.instances[0]?.observed;
+    expect(observed?.has(retained)).toBe(true);
+    expect(observed?.has(content)).toBe(true);
+  });
+
+  it("follows content added to, removed from and returned to the viewport", async () => {
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+    await start();
+    const observed = FakeResizeObserver.instances[0]?.observed;
+    const content = viewport().firstElementChild as HTMLElement;
+    const added = document.createElement("span");
+
+    viewport().append(added);
+    await tick();
+    expect(observed?.has(added)).toBe(true);
+
+    content.remove();
+    await tick();
+    expect(observed?.has(content)).toBe(false);
+
+    viewport().append(content);
+    await tick();
+    expect(observed?.has(content)).toBe(true);
+  });
+
+  it("moves observation to the remaining viewport candidate when the observed one leaves", async () => {
+    await start();
+    layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
+    const first = viewport();
+    const second = document.createElement("div");
+    second.setAttribute("data-stimeo--overflow-indicator-target", "viewport");
+    Object.defineProperties(second, {
+      scrollLeft: { configurable: true, value: 700 },
+      scrollWidth: { configurable: true, value: 1000 },
+      clientWidth: { configurable: true, value: 300 },
+    });
+    root().append(second);
+    await tick();
+    expect(second.hasAttribute("data-overflow-start")).toBe(false);
+
+    first.removeAttribute("data-stimeo--overflow-indicator-target");
+    await tick();
+
+    expect(second.getAttribute("data-overflow-start")).toBe("true");
+    expect(second.getAttribute("data-overflow-end")).toBe("false");
   });
 
   it("re-evaluates runtime orientation and threshold values", async () => {
@@ -709,6 +989,74 @@ describe("OverflowIndicatorController", () => {
     await tick();
 
     expect(viewport().getAttribute("data-overflow-end")).toBe("false");
+  });
+
+  it("releases the window and load listeners when the viewport leaves with no successor", async () => {
+    document.body.innerHTML = markup;
+    const released = viewport();
+    const windowAdded = vi.spyOn(window, "addEventListener");
+    const windowRemoved = vi.spyOn(window, "removeEventListener");
+    const added = vi.spyOn(released, "addEventListener");
+    const removed = vi.spyOn(released, "removeEventListener");
+    application = Application.start();
+    application.register("stimeo--overflow-indicator", OverflowIndicatorController);
+    await tick();
+    const onResize = windowAdded.mock.calls.find(([type]) => type === "resize");
+    const onLoad = added.mock.calls.find(([type]) => type === "load");
+    if (!onResize || !onLoad) throw new Error("Expected the resize and load listeners");
+
+    released.removeAttribute("data-stimeo--overflow-indicator-target");
+    await tick();
+
+    expect(windowRemoved).toHaveBeenCalledWith(...onResize);
+    expect(removed).toHaveBeenCalledWith(...onLoad);
+  });
+
+  it("stops observing mutations under the root on disconnect", async () => {
+    const NativeObserver = globalThis.MutationObserver;
+    let observer: MutationObserver | null = null;
+    let deliveries = 0;
+    class RecordingObserver extends NativeObserver {
+      constructor(callback: MutationCallback) {
+        super((records, self) => {
+          if (self === observer) deliveries += 1;
+          callback(records, self);
+        });
+      }
+      override observe(target: Node, options?: MutationObserverInit): void {
+        if (options?.attributeFilter?.join(",") === "class,style,hidden") observer = this;
+        super.observe(target, options);
+      }
+    }
+    vi.stubGlobal("MutationObserver", RecordingObserver);
+    await start();
+    const content = viewport().firstElementChild as HTMLElement;
+    content.classList.add("wide");
+    await tick();
+    const seen = deliveries;
+    expect(seen).toBeGreaterThan(0);
+
+    application
+      .getControllerForElementAndIdentifier(root(), "stimeo--overflow-indicator")
+      ?.disconnect();
+    content.classList.remove("wide");
+    await tick();
+
+    expect(deliveries).toBe(seen);
+  });
+
+  it("releases its resize observer on disconnect", async () => {
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+    await start();
+    const resizeObserver = FakeResizeObserver.instances[0];
+    if (!resizeObserver) throw new Error("Expected a resize observer");
+    const released = vi.spyOn(resizeObserver, "disconnect");
+
+    application
+      .getControllerForElementAndIdentifier(root(), "stimeo--overflow-indicator")
+      ?.disconnect();
+
+    expect(released).toHaveBeenCalledOnce();
   });
 
   // Stimulus delivers the initial Value callbacks before `connect()` runs. Measuring

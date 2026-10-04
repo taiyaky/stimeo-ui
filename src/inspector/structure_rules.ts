@@ -23,8 +23,8 @@ const SUBMIT_CONTROL_HOSTS: readonly HostSelector[] = [
  * noisy. Dynamically-generated targets (e.g. `toast` items rendered from a
  * `<template>`) are deliberately omitted.
  *
- * `data-action` controller and method validation is handled separately from the
- * reflected `static actions`; this table owns only target requiredness.
+ * Controller and method names are validated against reflected `static actions`.
+ * This table owns target structure, required action bindings, and completion wiring.
  */
 export const structureRules: StructureRules = {
   // Each header may carry a pair of labels that swap with its own `aria-expanded`,
@@ -183,8 +183,7 @@ export const structureRules: StructureRules = {
     ],
     // The selected-file list is opt-in, and both halves are load-bearing: the
     // template supplies the item markup and the list is where it is appended.
-    // With one of them the picker still works and the files are still submitted —
-    // they just render nowhere, which reads to a user as a broken picker.
+    // Files are added to the selection only when both targets are available.
     conditionalTargets: [
       {
         whenPresent: "itemTemplate",
@@ -368,7 +367,7 @@ export const structureRules: StructureRules = {
   // No targets: the controller formats its own <time> element.
   "stimeo--relative-time": {},
   // No required targets: it scans for `data-reset-*` directives within scope.
-  "stimeo--reset-before-cache": {},
+  "stimeo--reset-on-restore": {},
   "stimeo--resizable": { requiredTargets: ["primary", "secondary", "separator"] },
   "stimeo--roving": { requiredTargets: ["item"] },
   "stimeo--scroll-area": { requiredTargets: ["viewport"] },

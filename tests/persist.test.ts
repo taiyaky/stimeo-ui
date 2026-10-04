@@ -1,6 +1,7 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DirtyFormController } from "../src/controllers/dirty_form_controller";
+import { PasswordRevealController } from "../src/controllers/password_reveal_controller";
 import { PersistController } from "../src/controllers/persist_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
@@ -180,19 +181,72 @@ describe("PersistController", () => {
     expect(values("draft")).toEqual({ title: "hello" });
   });
 
-  it("reschedules a pending save when debounce changes", async () => {
+  /**
+   * Rewrites `debounce` and delivers its Value callback directly when the controller
+   * defines one, since happy-dom does not reliably run it for an attribute write.
+   */
+  const declareDebounce = (value: number): void => {
+    root().setAttribute("data-stimeo--persist-debounce-value", String(value));
+    const owner = instance();
+    const callback: unknown = Reflect.get(owner, "debounceValueChanged");
+    if (typeof callback === "function") callback.call(owner);
+  };
+
+  // `debounce` is read as each edit schedules its save: a pending save keeps the
+  // deadline its edit gave it, and the next edit takes the new value.
+
+  it("keeps a pending save's deadline when debounce shrinks, and times the next edit anew", async () => {
+    const saves: Array<{ key: string }> = [];
+    listen("stimeo--persist:save", saves);
     await mount(
       'data-stimeo--persist-key-value="draft" data-stimeo--persist-debounce-value="100"',
       '<input name="title">',
     );
     edit("title", "hello");
     vi.advanceTimersByTime(50);
-    instance().debounceValue = 10;
-    instance().debounceValueChanged();
-    vi.advanceTimersByTime(9);
+    declareDebounce(10);
+    vi.advanceTimersByTime(49);
     expect(stored("draft")).toBeNull();
     vi.advanceTimersByTime(1);
     expect(values("draft")).toEqual({ title: "hello" });
+    expect(saves).toEqual([{ key: "draft" }]);
+
+    edit("title", "world");
+    vi.advanceTimersByTime(9);
+    expect(values("draft")).toEqual({ title: "hello" });
+    vi.advanceTimersByTime(1);
+    expect(values("draft")).toEqual({ title: "world" });
+    expect(saves).toEqual([{ key: "draft" }, { key: "draft" }]);
+  });
+
+  it("does not stretch a pending save when debounce grows", async () => {
+    await mount(
+      'data-stimeo--persist-key-value="draft" data-stimeo--persist-debounce-value="100"',
+      '<input name="title">',
+    );
+    edit("title", "hello");
+    vi.advanceTimersByTime(50);
+    declareDebounce(1000);
+    vi.advanceTimersByTime(49);
+    expect(stored("draft")).toBeNull();
+    vi.advanceTimersByTime(1);
+    expect(values("draft")).toEqual({ title: "hello" });
+  });
+
+  it("schedules and reports nothing from a debounce change alone", async () => {
+    const saves: Array<{ key: string }> = [];
+    const errors: ErrorDetail[] = [];
+    listen("stimeo--persist:save", saves);
+    listen("stimeo--persist:error", errors);
+    await mount(
+      'data-stimeo--persist-key-value="draft" data-stimeo--persist-debounce-value="100"',
+      '<input name="title">',
+    );
+    declareDebounce(10);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(stored("draft")).toBeNull();
+    expect(saves).toEqual([]);
+    expect(errors).toEqual([]);
   });
 
   it("restores typed values, marks the host, and emits no native input", async () => {
@@ -219,6 +273,19 @@ describe("PersistController", () => {
     expect(root().getAttribute("data-persist-restored")).toBe("true");
     expect(restores).toEqual([{ key: "draft" }]);
     expect(nativeEvents).toEqual([]);
+  });
+
+  it("restores a hidden field once although the restore writes its value attribute", async () => {
+    writeDraft("draft", { rating: "5" });
+    const restores: Array<{ key: string }> = [];
+    listen("stimeo--persist:restore", restores);
+    await mount(
+      'data-stimeo--persist-key-value="draft"',
+      '<input type="hidden" name="rating" value="1">',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(input("rating").value).toBe("5");
+    expect(restores).toEqual([{ key: "draft" }]);
   });
 
   it("removes a stale restored marker when no draft exists", async () => {
@@ -299,6 +366,15 @@ describe("PersistController", () => {
     expect(values("draft")).toEqual({ title: "repaired" });
   });
 
+  it("reads nothing, and reports nothing, while no namespace resolves", async () => {
+    const errors: ErrorDetail[] = [];
+    listen("stimeo--persist:error", errors);
+    installBlockedStorage();
+    await mount("", '<input name="title">');
+
+    expect(errors).toEqual([]);
+  });
+
   it("reports an unavailable read and can save after storage recovers", async () => {
     const errors: ErrorDetail[] = [];
     listen("stimeo--persist:error", errors);
@@ -355,6 +431,17 @@ describe("PersistController", () => {
     expect(clears).toEqual([{ key: "draft" }]);
   });
 
+  it("drops an edit still waiting for its debounce when the draft is cleared", async () => {
+    const saves: Array<{ key: string }> = [];
+    listen("stimeo--persist:save", saves);
+    await mount('data-stimeo--persist-key-value="draft"', '<input name="title">');
+    edit("title", "typed just before clearing");
+    instance().clear();
+    vi.advanceTimersByTime(DEBOUNCE);
+    expect(stored("draft")).toBeNull();
+    expect(saves).toEqual([]);
+  });
+
   it("keeps connect idempotent when a host invokes it twice", async () => {
     writeDraft("draft", { title: "restored" });
     const restores: Array<{ key: string }> = [];
@@ -392,10 +479,125 @@ describe("PersistController", () => {
     await mount('data-stimeo--persist-key-value="draft"', '<input name="title">');
     expect(root().getAttribute("data-persist-restored")).toBe("true");
 
-    // The marker names this connection cycle, so nothing may carry it into the
-    // snapshot a navigation takes.
+    // The marker names this connection cycle; disconnect removes it from the live element.
     instance().disconnect();
     expect(root().hasAttribute("data-persist-restored")).toBe(false);
+  });
+
+  it("ignores change events after disconnect", async () => {
+    await mount('data-stimeo--persist-key-value="draft"', '<input type="checkbox" name="agree">');
+    instance().disconnect();
+    input("agree").checked = true;
+    input("agree").dispatchEvent(new Event("change", { bubbles: true }));
+    vi.advanceTimersByTime(DEBOUNCE);
+    expect(stored("draft")).toBeNull();
+  });
+
+  it("keeps the stored draft when the clearOn event fires after disconnect", async () => {
+    writeDraft("draft", { title: "kept" });
+    const clears: Array<{ key: string }> = [];
+    listen("stimeo--persist:clear", clears);
+    await mount(
+      'data-stimeo--persist-key-value="draft" data-stimeo--persist-clear-on-value="submit"',
+      '<input name="title">',
+    );
+    instance().disconnect();
+    root().dispatchEvent(new Event("submit", { bubbles: true }));
+    expect(stored("draft")).not.toBeNull();
+    expect(clears).toEqual([]);
+  });
+
+  it("does not follow a host id replacement after disconnect", async () => {
+    writeDraft("second", { title: "restored" });
+    const restores: Array<{ key: string }> = [];
+    listen("stimeo--persist:restore", restores);
+    await mount('id="first"', '<input name="title">');
+    instance().disconnect();
+    root().id = "second";
+    await vi.advanceTimersByTimeAsync(0);
+    expect(input("title").value).toBe("");
+    expect(root().hasAttribute("data-persist-restored")).toBe(false);
+    expect(restores).toEqual([]);
+  });
+
+  it("drops a queued restore pass on disconnect, so nothing reads the fields afterwards", async () => {
+    await mount('data-stimeo--persist-key-value="draft"', '<input name="title">');
+    instance().excludeValueChanged();
+    const querySelectorAll = vi.spyOn(root(), "querySelectorAll");
+    instance().disconnect();
+    await Promise.resolve();
+    expect(querySelectorAll).not.toHaveBeenCalled();
+    querySelectorAll.mockRestore();
+  });
+
+  it("leaves no save timer behind when a save listener edits during the disconnect flush", async () => {
+    const saves: Array<{ key: string }> = [];
+    listen("stimeo--persist:save", saves);
+    await mount(
+      'data-stimeo--persist-key-value="draft"',
+      '<input name="title"><input name="stamp">',
+    );
+    let stamped = false;
+    document.addEventListener(
+      "stimeo--persist:save",
+      () => {
+        if (stamped) return;
+        stamped = true;
+        edit("stamp", "saved");
+      },
+      { signal: listenerAbort.signal },
+    );
+    edit("title", "typed");
+    instance().disconnect();
+    expect(saves).toEqual([{ key: "draft" }]);
+    vi.advanceTimersByTime(DEBOUNCE);
+    expect(saves).toEqual([{ key: "draft" }]);
+  });
+
+  it("writes nothing under the old key later when a save listener edits during the disconnect flush", async () => {
+    writeDraft("second", { title: "second value" });
+    await mount(
+      'data-stimeo--persist-key-value="first"',
+      '<input name="title"><input name="stamp">',
+    );
+    let stamped = false;
+    document.addEventListener(
+      "stimeo--persist:save",
+      () => {
+        if (stamped) return;
+        stamped = true;
+        edit("stamp", "saved");
+      },
+      { signal: listenerAbort.signal },
+    );
+    edit("title", "first value");
+    instance().disconnect();
+    expect(values("first")).toEqual({ title: "first value", stamp: "" });
+
+    root().setAttribute("data-stimeo--persist-key-value", "second");
+    instance().connect();
+    expect(input("title").value).toBe("second value");
+    instance().disconnect();
+    expect(values("first")).toEqual({ title: "first value", stamp: "" });
+  });
+
+  it("writes a flushed edit once when a save listener disconnects the controller during the flush", async () => {
+    const saves: Array<{ key: string }> = [];
+    listen("stimeo--persist:save", saves);
+    await mount('data-stimeo--persist-key-value="draft"', '<input name="title">');
+    let disconnected = false;
+    document.addEventListener(
+      "stimeo--persist:save",
+      () => {
+        if (disconnected) return;
+        disconnected = true;
+        instance().disconnect();
+      },
+      { signal: listenerAbort.signal },
+    );
+    edit("title", "typed");
+    instance().disconnect();
+    expect(saves).toEqual([{ key: "draft" }]);
   });
 
   it("rebinds clearOn and removes the exact registered listener", async () => {
@@ -461,6 +663,47 @@ describe("PersistController", () => {
     expect(restores).toEqual([{ key: "second" }]);
   });
 
+  it("writes nothing more under the old key once its flushed edit's debounce elapses", async () => {
+    writeDraft("second", { title: "second value" });
+    const saves: Array<{ key: string }> = [];
+    listen("stimeo--persist:save", saves);
+    await mount('data-stimeo--persist-key-value="first"', '<input name="title">');
+    edit("title", "first value");
+    instance().keyValue = "second";
+    instance().keyValueChanged();
+    vi.advanceTimersByTime(DEBOUNCE);
+    expect(values("first")).toEqual({ title: "first value" });
+    expect(saves).toEqual([{ key: "first" }]);
+  });
+
+  it("keeps the old namespace's values when a save listener edits during the key-switch flush", async () => {
+    writeDraft("second", { title: "second value" });
+    const saves: Array<{ key: string }> = [];
+    listen("stimeo--persist:save", saves);
+    await mount(
+      'data-stimeo--persist-key-value="first"',
+      '<input name="title"><input name="stamp">',
+    );
+    let stamped = false;
+    document.addEventListener(
+      "stimeo--persist:save",
+      () => {
+        if (stamped) return;
+        stamped = true;
+        edit("stamp", "saved");
+      },
+      { signal: listenerAbort.signal },
+    );
+    edit("title", "first value");
+    instance().keyValue = "second";
+    instance().keyValueChanged();
+    expect(input("title").value).toBe("second value");
+    expect(values("first")).toEqual({ title: "first value", stamp: "" });
+    vi.advanceTimersByTime(DEBOUNCE);
+    expect(values("first").title).toBe("first value");
+    expect(saves).toEqual([{ key: "first" }]);
+  });
+
   it("does not flush or reload when the logical key has not changed", async () => {
     const saves: Array<{ key: string }> = [];
     listen("stimeo--persist:save", saves);
@@ -480,6 +723,18 @@ describe("PersistController", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(values("first")).toEqual({ title: "saved first" });
     expect(input("title").value).toBe("restored");
+  });
+
+  it("emits one restore when an id replacement and an inserted field share a mutation batch", async () => {
+    writeDraft("second", { title: "restored", late: "late draft" });
+    const restores: Array<{ key: string }> = [];
+    listen("stimeo--persist:restore", restores);
+    await mount('id="first"', '<input name="title">');
+    root().id = "second";
+    root().insertAdjacentHTML("beforeend", '<input name="late">');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(input("late").value).toBe("late draft");
+    expect(restores).toEqual([{ key: "second" }]);
   });
 
   it("is disabled without a key or id but can be enabled at runtime", async () => {
@@ -568,6 +823,29 @@ describe("PersistController", () => {
     vi.advanceTimersByTime(DEBOUNCE);
     expect(stored("draft")).toBeNull();
     expect(saves).toEqual([]);
+  });
+
+  it("never persists a password field a reveal has turned into a text field", async () => {
+    await mount(
+      'data-stimeo--persist-key-value="draft"',
+      `<div data-controller="stimeo--password-reveal">
+         <input type="password" name="secret" aria-label="Password" data-stimeo--password-reveal-target="input">
+         <button type="button" aria-label="Show password" data-stimeo--password-reveal-target="toggle"
+                 data-action="click->stimeo--password-reveal#toggle">Show</button>
+       </div>
+       <input name="title">`,
+    );
+    application?.register("stimeo--password-reveal", PasswordRevealController);
+    await vi.advanceTimersByTimeAsync(0);
+    query<HTMLButtonElement>("button").click();
+    expect(input("secret").type).toBe("text");
+
+    edit("secret", "hunter2");
+    edit("title", "hello");
+    vi.advanceTimersByTime(DEBOUNCE);
+
+    expect(values("draft")).toEqual({ title: "hello" });
+    expect(stored("draft")).not.toContain("hunter2");
   });
 
   it("never persists passwords and excludes Rails request metadata by default", async () => {
@@ -697,6 +975,19 @@ describe("PersistController", () => {
       '<input id="current" type="radio" name="plan" value="current" checked>',
     );
     expect(query<HTMLInputElement>("#current").checked).toBe(true);
+  });
+
+  it("marks the host and emits restore when a radio group is the only restored control", async () => {
+    writeDraft("draft", { plan: "b" });
+    const restores: Array<{ key: string }> = [];
+    listen("stimeo--persist:restore", restores);
+    await mount(
+      'data-stimeo--persist-key-value="draft"',
+      '<input id="a" type="radio" name="plan" value="a" checked><input id="b" type="radio" name="plan" value="b">',
+    );
+    expect(query<HTMLInputElement>("#b").checked).toBe(true);
+    expect(root().getAttribute("data-persist-restored")).toBe("true");
+    expect(restores).toEqual([{ key: "draft" }]);
   });
 
   it("keeps radio and non-radio controls with the same name in distinct slots", async () => {
@@ -840,6 +1131,42 @@ describe("PersistController", () => {
     expect(input("late").value).toBe("restored");
   });
 
+  it("keeps an edit to an inserted field when a later insertion runs another restore pass", async () => {
+    writeDraft("draft", { late: "restored" });
+    await mount('data-stimeo--persist-key-value="draft"', "");
+    root().insertAdjacentHTML("beforeend", '<input name="late" value="server">');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(input("late").value).toBe("restored");
+    edit("late", "typed");
+    root().insertAdjacentHTML("beforeend", '<input name="other">');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(input("late").value).toBe("typed");
+  });
+
+  it.each<[string, () => void, () => void]>([
+    ["no stored draft", () => undefined, () => undefined],
+    ["an unreadable storage", installBlockedStorage, restoreAvailableStorage],
+    [
+      "an invalid stored draft",
+      () => window.localStorage.setItem(storageKey("draft"), "not json"),
+      () => undefined,
+    ],
+  ])(
+    "keeps a debounced edit when a field arrives after the first save, starting from %s",
+    async (_label, before, after) => {
+      before();
+      await mount('data-stimeo--persist-key-value="draft"', '<input name="title">');
+      after();
+      edit("title", "saved");
+      vi.advanceTimersByTime(DEBOUNCE);
+      expect(values("draft")).toEqual({ title: "saved" });
+      edit("title", "still typing");
+      root().insertAdjacentHTML("beforeend", '<input name="late">');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(input("title").value).toBe("still typing");
+    },
+  );
+
   it("restores a known field after its name starts matching a saved entry", async () => {
     writeDraft("draft", { current: "restored" });
     await mount('data-stimeo--persist-key-value="draft"', '<input name="previous" value="server">');
@@ -872,6 +1199,51 @@ describe("PersistController", () => {
     edit("title", "what the user just typed");
 
     query<HTMLElement>("#wrapper").setAttribute("name", "renamed");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(input("title").value).toBe("what the user just typed");
+  });
+
+  it.each<[string, string, (wrapper: HTMLElement) => void]>([
+    [
+      "gains an unrelated controller",
+      "",
+      (wrapper) => wrapper.setAttribute("data-controller", "other"),
+    ],
+    [
+      "loses an unrelated controller",
+      ' data-controller="other"',
+      (wrapper) => wrapper.removeAttribute("data-controller"),
+    ],
+    [
+      "takes this controller and gives it back in one batch",
+      ' data-controller="other"',
+      (wrapper) => {
+        wrapper.setAttribute("data-controller", "other stimeo--persist");
+        wrapper.setAttribute("data-controller", "other");
+      },
+    ],
+  ])("keeps a debounced edit when a wrapper %s", async (_label, wrapperAttrs, change) => {
+    writeDraft("draft", { title: "saved draft" });
+    await mount(
+      'data-stimeo--persist-key-value="draft"',
+      `<div id="wrapper"${wrapperAttrs}><input name="title"></div>`,
+    );
+    expect(input("title").value).toBe("saved draft");
+    edit("title", "what the user just typed");
+
+    change(query<HTMLElement>("#wrapper"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(input("title").value).toBe("what the user just typed");
+  });
+
+  it("keeps a debounced edit when the host takes another controller alongside this one", async () => {
+    writeDraft("draft", { title: "saved draft" });
+    await mount('data-stimeo--persist-key-value="draft"', '<input name="title">');
+    edit("title", "what the user just typed");
+
+    root().setAttribute("data-controller", "stimeo--persist other");
     await vi.advanceTimersByTimeAsync(0);
 
     expect(input("title").value).toBe("what the user just typed");
@@ -953,6 +1325,23 @@ describe("PersistController", () => {
     expect(input("late").value).toBe("server");
 
     query<HTMLElement>("#nested").removeAttribute("data-controller");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(input("late").value).toBe("restored");
+  });
+
+  it("restores a known field again when it returns from a nested Persist scope", async () => {
+    writeDraft("outer", { late: "restored" });
+    await mount(
+      'data-stimeo--persist-key-value="outer"',
+      '<div id="wrapper"><input name="late" value="server"></div>',
+    );
+    expect(input("late").value).toBe("restored");
+    const wrapper = query<HTMLElement>("#wrapper");
+    wrapper.setAttribute("data-controller", "stimeo--persist");
+    await vi.advanceTimersByTimeAsync(0);
+    input("late").value = "changed inside the nested scope";
+
+    wrapper.removeAttribute("data-controller");
     await vi.advanceTimersByTimeAsync(0);
     expect(input("late").value).toBe("restored");
   });

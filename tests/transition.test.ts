@@ -3,15 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TransitionController } from "../src/controllers/transition_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link TransitionController}: the enter/leave class staging,
  * completion through the shared TransitionCompletion (per-property terminal events,
  * transitioncancel, pseudo-element exclusion, bounded fallback, synchronous 0ms
  * settle), the timeout-Value override, the hidden sync, the state hook and events,
- * reduced-motion fast-path, interruption, toggle, and teardown.
+ * reduced-motion fast-path, interruption, toggle, teardown, and a transition across
+ * Turbo's cache.
  */
 
 let originalMatchMedia: typeof window.matchMedia;
@@ -283,8 +284,7 @@ describe("TransitionController", () => {
     application.register("stimeo--transition", TransitionController);
     await vi.advanceTimersByTimeAsync(0);
     // A class the consumer authored is theirs even when a stage Value names the
-    // same token; the rewind before the page is cached is what keeps this
-    // controller's own classes out of a snapshot.
+    // same token. Connecting a restored copy removes only recorded staged classes.
     expect(has("opacity-100")).toBe(true);
     expect(has("rounded")).toBe(true);
   });
@@ -377,6 +377,62 @@ describe("TransitionController", () => {
     expect(node.className).toBe(""); // the staged classes went with it
   });
 
+  it("releases a staging timer still queued at disconnect where frames are unavailable", async () => {
+    await mount(`${ATTRS} data-stimeo--transition-timeout-value="200"`);
+    vi.stubGlobal("requestAnimationFrame", undefined);
+    vi.stubGlobal("cancelAnimationFrame", undefined);
+    try {
+      const left: number[] = [];
+      el().addEventListener("stimeo--transition:left", () => left.push(1));
+      instance().enter();
+      vi.advanceTimersByTime(0);
+      expect(has("opacity-100")).toBe(true); // a timer stands in for the missing frame
+
+      instance().leave(); // its staging timer is queued and not yet run
+      instance().disconnect();
+      await flushMicrotasks(); // no reconnection follows: a real detach
+      vi.advanceTimersByTime(500);
+      expect(has("opacity-0")).toBe(false);
+      expect(left).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a running leave across an in-page move, so the element still hides and left fires", async () => {
+    await mount(`${ATTRS} data-stimeo--transition-timeout-value="200"`, "");
+    const left: number[] = [];
+    el().addEventListener("stimeo--transition:left", () => left.push(1));
+    instance().leave();
+    vi.advanceTimersToNextFrame();
+    expect(el().getAttribute("data-transition-state")).toBe("leaving");
+
+    instance().disconnect();
+    instance().connect();
+    await flushMicrotasks();
+    expect(el().getAttribute("data-transition-state")).toBe("leaving");
+    expect(has("opacity-0")).toBe(true);
+    vi.advanceTimersByTime(200);
+    expect(el().hidden).toBe(true);
+    expect(el().getAttribute("data-transition-state")).toBe("left");
+    expect(left).toEqual([1]);
+  });
+
+  it("leaves a class the consumer adds after a transition alone on the next one", async () => {
+    await mount();
+    stubTransition();
+    instance().enter();
+    vi.advanceTimersToNextFrame();
+    endTransition(); // entered: the stage classes are stripped
+    el().classList.add("ease-out"); // the consumer's standing class from here on
+
+    instance().leave();
+    vi.advanceTimersToNextFrame();
+    endTransition();
+    expect(state()).toBe("left");
+    expect(has("ease-out")).toBe(true);
+  });
+
   it("releases a staging frame still queued when the direction reverses", async () => {
     await mount(ATTRS, "");
     stubTransition();
@@ -404,24 +460,100 @@ describe("TransitionController", () => {
     expect(state()).toBe("leaving");
   });
 
-  it("rewinds the staged state before Turbo caches the page", async () => {
+  it("keeps a running leave through turbo:before-cache, hides the element and says left", async () => {
     await mount(ATTRS, "");
     stubTransition();
     const seen: string[] = [];
-    el().addEventListener("stimeo--transition:entered", () => seen.push("entered"));
     el().addEventListener("stimeo--transition:left", () => seen.push("left"));
 
     instance().leave();
     vi.advanceTimersToNextFrame();
     expect(has("opacity-0")).toBe(true);
 
+    // Turbo dispatches it on pages that stay as well, where the leave is still running.
     document.dispatchEvent(new Event("turbo:before-cache"));
-    // The snapshot is taken here, so the half-applied stage has to be gone by
-    // now — stripping it on the next connect only fixes the page after it is
-    // painted from the cache.
-    expect(el().className).toBe("");
-    expect(state()).toBe("entered"); // derived from the element still being visible
-    expect(seen).toEqual([]); // the frozen page has nobody to tell
+    expect(state()).toBe("leaving");
+    expect(has("opacity-0")).toBe(true);
+
+    endTransition();
+    expect(el().hidden).toBe(true);
+    expect(state()).toBe("left");
+    expect(seen).toEqual(["left"]);
+  });
+
+  it("records the stage classes in place on the element", async () => {
+    await mount(ATTRS, "");
+    stubTransition();
+
+    instance().leave();
+    expect(JSON.parse(el().getAttribute("data-stimeo--transition-staged") ?? "[]")).toEqual([
+      "ease-in",
+      "opacity-100",
+    ]);
+    vi.advanceTimersToNextFrame();
+    expect(JSON.parse(el().getAttribute("data-stimeo--transition-staged") ?? "[]")).toEqual([
+      "ease-in",
+      "opacity-0",
+    ]);
+
+    endTransition();
+    expect(el().hasAttribute("data-stimeo--transition-staged")).toBe(false);
+  });
+
+  it("strips the stage a restored page was copied with and settles it, silently", async () => {
+    await mount(ATTRS, "");
+    stubTransition();
+    el().classList.add("card");
+    instance().leave();
+    vi.advanceTimersToNextFrame();
+    const seen: string[] = [];
+    document.addEventListener("stimeo--transition:left", () => seen.push("left"));
+    document.addEventListener("stimeo--transition:entered", () => seen.push("entered"));
+
+    application = await restoreFromCache(
+      application,
+      (restored) => restored.register("stimeo--transition", TransitionController),
+      () => vi.advanceTimersByTimeAsync(0),
+    );
+
+    // The copy was still visible, so it settles as entered; the consumer's own class stays.
+    expect(el().className).toBe("card");
+    expect(el().hasAttribute("data-stimeo--transition-staged")).toBe(false);
+    expect(state()).toBe("entered");
+    expect(seen).toEqual([]);
+  });
+
+  it("keeps an authored class a stage names on a restored page", async () => {
+    await mount(`${ATTRS} class="opacity-100"`, "");
+    stubTransition();
+    instance().leave(); // opacity-100 is the consumer's: it is not staged
+    vi.advanceTimersToNextFrame();
+
+    application = await restoreFromCache(
+      application,
+      (restored) => restored.register("stimeo--transition", TransitionController),
+      () => vi.advanceTimersByTimeAsync(0),
+    );
+
+    expect(el().className).toBe("opacity-100");
+  });
+
+  it("strips nothing for a record that is not a list of classes", async () => {
+    await mount(`${ATTRS} class="a b" data-stimeo--transition-staged='"ab"'`, "");
+    expect(el().className).toBe("a b");
+    expect(el().hasAttribute("data-stimeo--transition-staged")).toBe(false);
+  });
+
+  it("strips nothing and settles for a record that is not JSON", async () => {
+    await mount(`${ATTRS} class="a" data-stimeo--transition-staged="["`, "");
+    expect(el().className).toBe("a");
+    expect(el().hasAttribute("data-stimeo--transition-staged")).toBe(false);
+    expect(state()).toBe("entered");
+  });
+
+  it("leaves a stage token the author wrote alone when no record says otherwise", async () => {
+    await mount(`${ATTRS} class="ease-in opacity-0"`, "");
+    expect(el().className).toBe("ease-in opacity-0");
   });
 
   it("removes the classes it applied even after the Values change", async () => {
@@ -437,6 +569,94 @@ describe("TransitionController", () => {
     // Stripping by the current declaration would strand the token that was on
     // the element when the transition started.
     expect(el().className).toBe("");
+  });
+
+  // --- One transition runs on the declaration it started with -----------------
+
+  it("keeps the timeout a transition started with when it changes before the staging frame", async () => {
+    await mount(`${ATTRS} data-stimeo--transition-timeout-value="200"`);
+    instance().enter();
+    el().setAttribute("data-stimeo--transition-timeout-value", "50");
+    vi.advanceTimersToNextFrame();
+
+    vi.advanceTimersByTime(50);
+    expect(state()).toBe("entering");
+    vi.advanceTimersByTime(150);
+    expect(state()).toBe("entered");
+  });
+
+  it("keeps the timeout a running transition waits on, and times the next one anew", async () => {
+    await mount(`${ATTRS} data-stimeo--transition-timeout-value="200"`);
+    instance().enter();
+    vi.advanceTimersToNextFrame();
+    el().setAttribute("data-stimeo--transition-timeout-value", "50");
+    await vi.advanceTimersByTimeAsync(0);
+
+    vi.advanceTimersByTime(199);
+    expect(state()).toBe("entering");
+    vi.advanceTimersByTime(1);
+    expect(state()).toBe("entered");
+
+    instance().leave();
+    vi.advanceTimersToNextFrame();
+    vi.advanceTimersByTime(49);
+    expect(state()).toBe("leaving");
+    vi.advanceTimersByTime(1);
+    expect(state()).toBe("left");
+  });
+
+  it.each([
+    { kind: "enter", hidden: "hidden", base: "ease-out", from: "opacity-0", to: "opacity-100" },
+    { kind: "leave", hidden: "", base: "ease-in", from: "opacity-100", to: "opacity-0" },
+  ] as const)(
+    "stages the $kind classes it started with, and the next $kind the new ones",
+    async ({ kind, hidden, base, from, to }) => {
+      await mount(ATTRS, hidden);
+      stubTransition();
+      const run = () => (kind === "enter" ? instance().enter() : instance().leave());
+      const settle = () => (kind === "enter" ? instance().leave() : instance().enter());
+
+      run();
+      el().setAttribute(`data-stimeo--transition-${kind}-value`, "next-base");
+      el().setAttribute(`data-stimeo--transition-${kind}-from-value`, "next-from");
+      el().setAttribute(`data-stimeo--transition-${kind}-to-value`, "next-to");
+      await vi.advanceTimersByTimeAsync(0);
+      expect([has(base), has(from), has("next-base"), has("next-from")]).toEqual([
+        true,
+        true,
+        false,
+        false,
+      ]);
+
+      vi.advanceTimersToNextFrame(); // the swap reads the lists the transition began with
+      expect([has(from), has(to), has("next-to")]).toEqual([false, true, false]);
+      endTransition();
+      expect(el().className).toBe("");
+
+      settle(); // the opposite direction, so the next run starts from its own side
+      vi.advanceTimersToNextFrame();
+      endTransition();
+      run();
+      expect([has("next-base"), has("next-from"), has(base)]).toEqual([true, true, false]);
+      vi.advanceTimersToNextFrame();
+      expect([has("next-from"), has("next-to")]).toEqual([false, true]);
+    },
+  );
+
+  it("stages and reports nothing from a Value change alone", async () => {
+    await mount(`${ATTRS} data-stimeo--transition-timeout-value="200"`, "");
+    const seen: string[] = [];
+    el().addEventListener("stimeo--transition:entered", () => seen.push("entered"));
+    el().addEventListener("stimeo--transition:left", () => seen.push("left"));
+
+    el().setAttribute("data-stimeo--transition-enter-value", "next-base");
+    el().setAttribute("data-stimeo--transition-leave-to-value", "next-to");
+    el().setAttribute("data-stimeo--transition-timeout-value", "50");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(el().className).toBe("");
+    expect(state()).toBe("entered");
+    expect(el().hidden).toBe(false);
+    expect(seen).toEqual([]);
   });
 
   it("cancels timers and listeners on disconnect", async () => {

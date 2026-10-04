@@ -12,10 +12,10 @@
  * CSS then keeps claiming a state no one is in.
  *
  * **`turbo:before-cache` cannot do this job**, which is why the pass belongs in
- * `connect()`: that event fires for a navigation only, so an in-page move — the
- * other half of the population — never reaches it, and a hook that arrived with
- * a moved element would survive. `connect()` covers both, because both end in a
- * connection.
+ * `connect()`: Turbo also dispatches that event on pages that stay, where the hook
+ * is still true, and an in-page move — the other half of the population — never
+ * reaches it, so a hook that arrived with a moved element would survive.
+ * `connect()` covers both, because both end in a connection.
  *
  * Scope is the **drop** only. What the fresh cycle should say instead is the
  * consumer's: a value re-read from the live DOM, a roster refilled by the
@@ -74,10 +74,6 @@ export interface TransientHooksOptions {
 /**
  * One consumer's declaration of the hooks its interaction owns, dropped from an
  * element by {@link TransientHooks.reset}.
- *
- * Every member comment inside this class body is inlined into each consumer
- * bundle (`tsup` builds with `splitting: false`), so rationale belongs in this
- * file's own block, which `dist` drops, and only the contract belongs inside.
  */
 export class TransientHooks {
   readonly #attributes: readonly string[];

@@ -86,6 +86,27 @@ describe("ProgressController", () => {
     expect(root().style.getPropertyValue("--stimeo--progress-ratio")).toBe("0.6");
   });
 
+  it("decodes bound action params and keeps an invalid param ahead of detail", async () => {
+    await start();
+    const attr = "data-stimeo--progress-amount-param";
+    const send = (value: string): void => {
+      root().setAttribute(attr, value);
+      root().dispatchEvent(new CustomEvent("progress:set", { detail: { value: 80 } }));
+    };
+    send('"25"');
+    expect(root().getAttribute("aria-valuenow")).toBe("25");
+    for (const invalid of [" ", '"  "', "true", "[1]", "Infinity", "2_0"]) {
+      send(invalid);
+      expect(root().getAttribute("aria-valuenow")).toBe("25");
+    }
+    // A JSON null is nullish and keeps the existing detail fallback.
+    send("null");
+    expect(root().getAttribute("aria-valuenow")).toBe("80");
+    root().removeAttribute(attr);
+    root().dispatchEvent(new CustomEvent("progress:set", { detail: { value: 80 } }));
+    expect(root().getAttribute("aria-valuenow")).toBe("80");
+  });
+
   it("clamps an out-of-range initial value when computing the ratio", async () => {
     await start('data-stimeo--progress-value-value="250"');
     expect(root().getAttribute("aria-valuenow")).toBe("100");
@@ -184,6 +205,15 @@ describe("ProgressController", () => {
     expect(root().getAttribute("data-state")).toBe("determinate");
   });
 
+  it("drops the ratio when the bar turns indeterminate", async () => {
+    await start('data-stimeo--progress-value-value="40"');
+    expect(root().style.getPropertyValue("--stimeo--progress-ratio")).toBe("0.4");
+
+    root().setAttribute("data-stimeo--progress-indeterminate-value", "true");
+    await tick();
+    expect(root().style.getPropertyValue("--stimeo--progress-ratio")).toBe("");
+  });
+
   it("leaving the indeterminate state via setValue restores aria-valuenow", async () => {
     await start('data-stimeo--progress-indeterminate-value="true"');
     instance().setValue({ detail: { value: 30 } } as unknown as Event);
@@ -244,7 +274,7 @@ describe("ProgressController", () => {
     await start('data-stimeo--progress-value-value="40"');
     const spoken = await captureSpeech({ container: root(), steps: 0 });
     // Freeze the whole ordered array (not a name-only `toContain`): the progressbar
-    // role, name, and value range are all the AT announces.
+    // role, name, and value range are all in the virtual reader's announcement.
     expect(spoken).toEqual(["progressbar, Upload, max value 100, min value 0, current value 40%"]);
   });
 

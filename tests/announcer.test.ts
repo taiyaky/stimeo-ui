@@ -4,14 +4,15 @@ import { AnnouncerController, visuallyHide } from "../src/controllers/announcer_
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { installRecyclingTimers, tick } from "./helpers/timing";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
+import { flushMicrotasks, installRecyclingTimers, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link AnnouncerController}: routing to the polite vs
  * assertive region, the Stimulus action and CustomEvent entry points, the
  * dedupe re-announce of identical text, auto-clear, fallback-region generation,
- * focus preservation, and listener/timer teardown on disconnect.
+ * focus preservation, listener/timer teardown on disconnect, and the messages a page
+ * restored from Turbo's cache carries.
  */
 
 describe("AnnouncerController", () => {
@@ -281,6 +282,77 @@ describe("AnnouncerController", () => {
     vi.useRealTimers();
   });
 
+  // --- `clearAfter` belongs to one written message ---------------------------------
+
+  /**
+   * Rewrites `clearAfter` and delivers its Value callback directly when the controller
+   * defines one, since happy-dom does not reliably run it for an attribute write.
+   */
+  const declareClearAfter = (value: number) => {
+    root().setAttribute("data-stimeo--announcer-clear-after-value", String(value));
+    const owner = controller();
+    const callback: unknown = Reflect.get(owner, "clearAfterValueChanged");
+    if (typeof callback === "function") callback.call(owner);
+  };
+
+  it.each([
+    { direction: "shrinks", next: 50 },
+    { direction: "grows", next: 5000 },
+  ])(
+    "keeps a written message's clear deadline when clearAfter $direction, and times the next message anew",
+    async ({ next }) => {
+      vi.useFakeTimers();
+      mount(`data-stimeo--announcer-clear-after-value="1000"`);
+      await vi.advanceTimersByTimeAsync(0);
+
+      announce({ message: "First" });
+      await vi.advanceTimersByTimeAsync(100);
+      declareClearAfter(next);
+      await vi.advanceTimersByTimeAsync(899); // t=999
+      expect(polite().textContent).toBe("First");
+      await vi.advanceTimersByTimeAsync(1); // t=1000, the deadline "First" was written with
+      expect(polite().textContent).toBe("");
+
+      announce({ message: "Second" });
+      await vi.advanceTimersByTimeAsync(next - 1);
+      expect(polite().textContent).toBe("Second");
+      await vi.advanceTimersByTimeAsync(1);
+      expect(polite().textContent).toBe("");
+      vi.useRealTimers();
+    },
+  );
+
+  it("arms and writes nothing from a clearAfter change alone", async () => {
+    vi.useFakeTimers();
+    mount(`data-stimeo--announcer-clear-after-value="0"`);
+    await vi.advanceTimersByTimeAsync(0);
+
+    announce({ message: "Standing" }); // written with no clear promised
+    await vi.advanceTimersByTimeAsync(0);
+    declareClearAfter(20);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(polite().textContent).toBe("Standing");
+    expect(assertive().textContent).toBe("");
+    vi.useRealTimers();
+  });
+
+  it("keeps a repeat written with clearAfter 0 past the earlier write's deadline", async () => {
+    vi.useFakeTimers();
+    mount(
+      `data-stimeo--announcer-clear-after-value="1000" data-stimeo--announcer-dedupe-reannounce-value="false"`,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    announce({ message: "Saved" }); // clear due at t=1000
+    await vi.advanceTimersByTimeAsync(100);
+    declareClearAfter(0);
+    announce({ message: "Saved" }); // written again, with no clear promised
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(polite().textContent).toBe("Saved");
+    vi.useRealTimers();
+  });
+
   it("clears each region on its own schedule", async () => {
     vi.useFakeTimers();
     mount(`data-stimeo--announcer-clear-after-value="1000"`);
@@ -325,7 +397,6 @@ describe("AnnouncerController", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(polite().textContent).toBe("a");
 
-      // The reconnect releases every handle this connection was holding.
       controller().disconnect();
       controller().connect();
       await vi.advanceTimersByTimeAsync(0);
@@ -431,6 +502,8 @@ describe("AnnouncerController", () => {
     expect(query("[aria-live='polite']", root()).textContent).toBe("Before");
 
     controller().disconnect();
+    // No reconnection follows within the probe window: a real detach.
+    await flushMicrotasks();
     expect(root().querySelector("[aria-live='polite']")).toBeNull();
     // The window listener is gone: a later event is ignored (no region recreated).
     announce({ message: "After" });
@@ -438,33 +511,64 @@ describe("AnnouncerController", () => {
     expect(root().querySelector("[aria-live]")).toBeNull();
   });
 
-  it("leaves no generated region in the Turbo snapshot", async () => {
-    document.body.innerHTML = `<div data-controller="stimeo--announcer"></div>`;
+  it.each([
+    { clone: "inside the event", settle: async () => {} },
+    { clone: "a task after the event", settle: tick },
+  ])(
+    "keeps one region per politeness on every snapshot restore, cloned $clone",
+    async ({ settle }) => {
+      await startWithoutTargets();
+
+      const counts: number[] = [];
+      for (let round = 0; round < 3; round += 1) {
+        counts.push(root().querySelectorAll("[aria-live]").length);
+        document.dispatchEvent(new Event("turbo:before-cache"));
+        // Turbo clones the page a task after `turbo:before-cache`. A render that
+        // waits — a paused `turbo:before-render`, a new stylesheet, a view
+        // transition — swaps the body only after that clone, so the controller is
+        // still connected when the clone is taken.
+        await settle();
+        const snapshot = document.body.innerHTML;
+        disconnectAndStopApplication(application);
+        // Back button: the cached markup returns and Stimulus connects again.
+        document.body.innerHTML = snapshot;
+        application = Application.start();
+        application.register("stimeo--announcer", AnnouncerController);
+        await tick();
+      }
+      counts.push(root().querySelectorAll("[aria-live]").length);
+      expect(counts).toEqual([2, 2, 2, 2]);
+    },
+  );
+
+  it("drops the stand-ins a host arrives with and keeps what the author wrote", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--announcer" data-stimeo--announcer-clear-after-value="0">
+        <div data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
+        <p id="note">Status</p>
+        <div data-stimeo--announcer-stand-in aria-live="polite" aria-atomic="true"></div>
+        <div data-stimeo--announcer-stand-in aria-live="assertive" aria-atomic="true"></div>
+      </div>`;
+    const inherited = [...document.querySelectorAll("[data-stimeo--announcer-stand-in]")];
     application = Application.start();
     application.register("stimeo--announcer", AnnouncerController);
     await tick();
 
-    const counts: number[] = [];
-    for (let round = 0; round < 3; round += 1) {
-      counts.push(root().querySelectorAll("[aria-live]").length);
-      // Turbo clones the snapshot at `turbo:before-cache` and only then tears the
-      // page down, so a region removed in `disconnect()` is already in the clone.
-      document.dispatchEvent(new Event("turbo:before-cache"));
-      const snapshot = document.body.innerHTML;
-      disconnectAndStopApplication(application);
-      // Back button: the cached markup returns and Stimulus connects again. A
-      // restored region carries no target attribute, so it cannot be reused —
-      // every visit would add another pair.
-      document.body.innerHTML = snapshot;
-      application = Application.start();
-      application.register("stimeo--announcer", AnnouncerController);
-      await tick();
-    }
-    counts.push(root().querySelectorAll("[aria-live]").length);
-    expect(counts).toEqual([2, 2, 2, 2]);
+    // The authored target owns polite; assertive gets a stand-in of this connection's own.
+    expect(inherited.filter((node) => node.isConnected)).toEqual([]);
+    expect(politeRegions()).toHaveLength(1);
+    expect(politeRegions()[0]).toBe(polite());
+    const assertiveRegions = document.querySelectorAll<HTMLElement>('[aria-live="assertive"]');
+    expect(assertiveRegions).toHaveLength(1);
+    expect(query("#note").isConnected).toBe(true);
+    announce({ message: "Saved" });
+    announce({ message: "Lost", assertive: true });
+    await tick();
+    expect(polite().textContent).toBe("Saved");
+    expect(assertiveRegions[0]?.textContent).toBe("Lost");
   });
 
-  it("keeps announcing on the live page after the snapshot rewind", async () => {
+  it("keeps announcing through turbo:before-cache", async () => {
     document.body.innerHTML = `<div data-controller="stimeo--announcer"
                                     data-stimeo--announcer-clear-after-value="0"></div>`;
     application = Application.start();
@@ -472,8 +576,7 @@ describe("AnnouncerController", () => {
     await tick();
 
     document.dispatchEvent(new Event("turbo:before-cache"));
-    // A cached page is not a torn-down one: a navigation that never completes
-    // must still be able to announce.
+    // Turbo dispatches it on pages that stay as well, which must still announce.
     announce({ message: "Still here" });
     await tick();
     expect(root().querySelectorAll("[aria-live='polite']")).toHaveLength(1);
@@ -487,10 +590,99 @@ describe("AnnouncerController", () => {
     expect(polite().textContent).toBe("Before");
 
     controller().disconnect();
+    await flushMicrotasks();
     // The element listener is gone too, not just the window one.
     announce({ message: "After" }, root());
     await tick();
     expect(polite().textContent).toBe("Before");
+  });
+
+  it("announces a non-bubbling event dispatched on the element", async () => {
+    await start();
+    root().dispatchEvent(
+      new CustomEvent("stimeo--announcer:announce", { detail: { message: "Direct" } }),
+    );
+    await tick();
+    expect(polite().textContent).toBe("Direct");
+  });
+
+  it("leaves no stand-in behind when Stimulus tears the controller down", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--announcer">
+        <div data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--announcer", AnnouncerController);
+    await tick();
+    expect(document.querySelectorAll('[aria-live="assertive"]')).toHaveLength(1);
+
+    // Stimulus reports each target disconnected after `disconnect()` has returned.
+    application.unload("stimeo--announcer");
+    await tick();
+    expect(document.querySelector('[aria-live="assertive"]')).toBeNull();
+  });
+
+  it("stops watching the host's children on disconnect", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe");
+    const release = vi.spyOn(MutationObserver.prototype, "disconnect");
+    try {
+      await startWithoutTargets();
+      const hostWatch = observe.mock.calls.findIndex(
+        ([target, options]) =>
+          target === root() && JSON.stringify(options) === JSON.stringify({ childList: true }),
+      );
+      expect(hostWatch).not.toBe(-1);
+      const watcher = observe.mock.contexts[hostWatch];
+
+      controller().disconnect();
+      await flushMicrotasks();
+      expect(release.mock.contexts).toContain(watcher);
+    } finally {
+      observe.mockRestore();
+      release.mockRestore();
+    }
+  });
+
+  it("leaves no stand-in once it disconnects", async () => {
+    await startWithoutTargets();
+    // Turbo's body swap can disconnect the controller before the next task starts.
+    controller().disconnect();
+    await tick();
+    expect(root().querySelector("[aria-live]")).toBeNull();
+  });
+
+  it("keeps what was queued across an in-page move and reads it before what follows", async () => {
+    vi.useFakeTimers();
+    mount(`data-stimeo--announcer-clear-after-value="0"`);
+    await vi.advanceTimersByTimeAsync(0);
+
+    announce({ message: "Kept" });
+    controller().disconnect();
+    controller().connect();
+    announce({ message: "A" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(polite().textContent).toBe("Kept");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(polite().textContent).toBe("A");
+    vi.useRealTimers();
+  });
+
+  it("drops what was queued when it is detached, and drains afresh once it connects again", async () => {
+    vi.useFakeTimers();
+    mount(`data-stimeo--announcer-clear-after-value="0"`);
+    await vi.advanceTimersByTimeAsync(0);
+
+    announce({ message: "Dropped" });
+    controller().disconnect();
+    await flushMicrotasks();
+    controller().connect();
+    announce({ message: "A" });
+    announce({ message: "B" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(polite().textContent).toBe("A");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(polite().textContent).toBe("B");
+    vi.useRealTimers();
   });
 
   // The announced text must reach the live region's accessible name.
@@ -580,25 +772,194 @@ describe("AnnouncerController", () => {
     expect(politeRegions()[0]?.isConnected).toBe(true);
   });
 
-  it("empties an authored region before the snapshot is taken", async () => {
+  it("seats a region that left unobserved one pass before writing into it", async () => {
+    await startWithoutTargets(`data-stimeo--announcer-clear-after-value="0"`);
+    const generated = query("[aria-live='polite']", root());
+    const wrap = document.createElement("div");
+    root().append(wrap);
+    wrap.append(generated);
+    await tick();
+    // Removed from below the host, the region leaves the host's own children unchanged.
+    generated.remove();
+    announce({ message: "Back" });
+    await tick();
+    expect(politeRegions()).toHaveLength(1);
+    expect(politeRegions()[0]?.textContent).toBe("");
+    await tick();
+    expect(politeRegions()[0]?.textContent).toBe("Back");
+  });
+
+  describe.each(["polite", "assertive"] as const)(
+    "the %s target nested below the host",
+    (level) => {
+      /** Every live region of this politeness in the document. */
+      const regions = () => [...document.querySelectorAll<HTMLElement>(`[aria-live="${level}"]`)];
+
+      /**
+       * Delivers the target callback directly as well, since happy-dom does not
+       * reliably run it for a nested insertion or removal.
+       */
+      const deliver = (change: "connected" | "disconnected") => {
+        const owner = controller();
+        if (level === "polite") {
+          if (change === "connected") owner.politeTargetConnected();
+          else owner.politeTargetDisconnected();
+        } else if (change === "connected") owner.assertiveTargetConnected();
+        else owner.assertiveTargetDisconnected();
+      };
+
+      it("retires the stand-in when it appears", async () => {
+        await startWithoutTargets();
+        const wrap = document.createElement("div");
+        root().append(wrap);
+        await tick();
+        const added = document.createElement("div");
+        added.setAttribute("data-stimeo--announcer-target", level);
+        added.setAttribute("aria-live", level);
+        wrap.append(added);
+        deliver("connected");
+        await tick();
+        expect(regions()).toEqual([added]);
+      });
+
+      it("materialises a stand-in before any message when it goes away", async () => {
+        document.body.innerHTML = `
+        <div data-controller="stimeo--announcer">
+          <div>
+            <div data-stimeo--announcer-target="${level}" aria-live="${level}"></div>
+          </div>
+        </div>`;
+        application = Application.start();
+        application.register("stimeo--announcer", AnnouncerController);
+        await tick();
+        query(`[data-stimeo--announcer-target="${level}"]`).remove();
+        deliver("disconnected");
+        await tick();
+        expect(regions()).toHaveLength(1);
+        expect(regions()[0]?.parentElement).toBe(root());
+      });
+    },
+  );
+
+  it("keeps one generated region per politeness when the host's other children change", async () => {
+    await startWithoutTargets();
+    root().append(document.createElement("p"));
+    await tick();
+    expect(root().querySelectorAll("[aria-live]")).toHaveLength(2);
+  });
+
+  /** Puts a restored copy of the page in place, as Turbo renders one from its cache. */
+  const restore = async () => {
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--announcer", AnnouncerController),
+    );
+  };
+
+  it("marks a region while it holds a message it wrote", async () => {
+    vi.useFakeTimers();
+    mount(`data-stimeo--announcer-clear-after-value="1000"`);
+    await vi.advanceTimersByTimeAsync(0);
+
+    announce({ message: "Saved" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(polite().hasAttribute("data-stimeo--announcer-announced")).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(polite().textContent).toBe("");
+    expect(polite().hasAttribute("data-stimeo--announcer-announced")).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("keeps the message on screen through turbo:before-cache", async () => {
+    await start(`data-stimeo--announcer-clear-after-value="5000"`);
+    announce({ message: "Current" });
+    announce({ message: "Urgent", assertive: true });
+    await tick();
+
+    // Turbo dispatches it on pages that stay as well, where the message is being read.
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(polite().textContent).toBe("Current");
+    expect(assertive().textContent).toBe("Urgent");
+  });
+
+  it("empties the authored regions a restored page carries a message in", async () => {
     await start(`data-stimeo--announcer-clear-after-value="5000"`);
     announce({ message: "Stale" });
+    announce({ message: "Urgent", assertive: true });
     await tick();
     expect(polite().textContent).toBe("Stale");
-    document.dispatchEvent(new Event("turbo:before-cache"));
+
+    await restore();
+
     // A restored page must not read out an announcement from the previous visit.
+    expect(polite().textContent).toBe("");
+    expect(assertive().textContent).toBe("");
+    expect(polite().hasAttribute("data-stimeo--announcer-announced")).toBe(false);
+  });
+
+  it("leaves text the page wrote after a message alone when that message's clear comes due", async () => {
+    vi.useFakeTimers();
+    mount(`data-stimeo--announcer-clear-after-value="1000"`);
+    await vi.advanceTimersByTimeAsync(0);
+
+    announce({ message: "Saved" });
+    await vi.advanceTimersByTimeAsync(0);
+    polite().textContent = "Mine";
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(polite().textContent).toBe("Mine");
+    vi.useRealTimers();
+  });
+
+  it("keeps an authored region's own text on connect", async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--announcer">
+        <div data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true">3 results</div>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--announcer", AnnouncerController);
+    await tick();
+
+    expect(polite().textContent).toBe("3 results");
+  });
+
+  it("keeps a message on display and its clearing timer across an in-page move", async () => {
+    vi.useFakeTimers();
+    mount(`data-stimeo--announcer-clear-after-value="5000"`);
+    await vi.advanceTimersByTimeAsync(0);
+    announce({ message: "Moved" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    controller().disconnect();
+    controller().connect();
+
+    expect(polite().textContent).toBe("Moved");
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(polite().textContent).toBe("");
+    vi.useRealTimers();
+  });
+
+  it("empties a message whose clearing timer died with a detach", async () => {
+    await start(`data-stimeo--announcer-clear-after-value="5000"`);
+    announce({ message: "Detached" });
+    await tick();
+
+    controller().disconnect();
+    await flushMicrotasks();
+    controller().connect();
+
     expect(polite().textContent).toBe("");
   });
 
-  it("re-seats the regions on a live page after the snapshot rewind", async () => {
-    await startWithoutTargets();
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(politeRegions().length).toBe(0);
-    // The visit was aborted, so this page keeps running: the regions have to come
-    // back on their own, or the next message is written into a region assistive
-    // tech has never seen.
+  it("keeps the regions seated on a live page through turbo:before-cache", async () => {
+    await startWithoutTargets(`data-stimeo--announcer-clear-after-value="5000"`);
+    const seated = politeRegions();
+    announce({ message: "Current" });
     await tick();
-    expect(politeRegions().length).toBe(1);
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    await tick();
+    expect(politeRegions()).toHaveLength(1);
+    expect(politeRegions()[0]).toBe(seated[0]);
     const regionsAdded: string[] = [];
     const observer = new MutationObserver((records) => {
       for (const record of records) {
@@ -643,23 +1004,31 @@ describe("AnnouncerController", () => {
     expect(document.querySelectorAll('[aria-live="assertive"]').length).toBe(1);
   });
 
-  it("drops a queued message when the snapshot rewind overtakes it", async () => {
+  it("speaks a message queued as turbo:before-cache arrives", async () => {
     await start();
-    announce({ message: "Never" });
-    // The rewind empties the queue while its pass is already armed; that pass has
-    // to find nothing rather than write a message into the cached page.
+    announce({ message: "Spoken" });
+    // A path that keeps the page dispatches it while the message waits for its pass.
     document.dispatchEvent(new Event("turbo:before-cache"));
     await tick();
-    expect(polite().textContent).toBe("");
+    expect(polite().textContent).toBe("Spoken");
   });
 
-  it("empties the assertive region too before the snapshot is taken", async () => {
-    await start(`data-stimeo--announcer-clear-after-value="5000"`);
-    announce({ message: "Urgent", assertive: true });
-    await tick();
-    expect(assertive().textContent).toBe("Urgent");
+  it("drains a burst queued before turbo:before-cache one message per pass", async () => {
+    vi.useFakeTimers();
+    mount(`data-stimeo--announcer-clear-after-value="0"`);
+    await vi.advanceTimersByTimeAsync(0);
+
+    announce({ message: "A" });
     document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(assertive().textContent).toBe("");
+    announce({ message: "B" });
+    announce({ message: "C" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(polite().textContent).toBe("A");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(polite().textContent).toBe("B");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(polite().textContent).toBe("C");
+    vi.useRealTimers();
   });
 
   it("has no machine-detectable a11y violations", async () => {

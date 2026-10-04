@@ -1,10 +1,15 @@
 import { Controller } from "@hotwired/stimulus";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { DetachGate } from "../utils/detach_gate";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { prefersReducedMotion } from "../utils/reduced_motion";
 import { TransitionCompletion } from "../utils/transition_completion";
 
 /** Splits a space-separated class-list value into individual, non-empty tokens. */
 const tokensOf = (value: string): string[] => value.split(/\s+/).filter(Boolean);
+
+/** Suffix of the record of the stage classes in place; see the class remarks. */
+const STAGED_RECORD = "staged";
 
 /**
  * Headless **enter/leave transition base**: stages CSS classes for showing and hiding
@@ -39,17 +44,30 @@ const tokensOf = (value: string): string[] => value.split(/\s+/).filter(Boolean)
  * settles synchronously at the staging frame. A positive `timeout` Value replaces the
  * fallback verbatim and keeps the wait armed even for a computed 0ms transition.
  * Under `prefers-reduced-motion: reduce` it switches instantly (no staging). An
- * interrupting call cancels the in-flight transition and starts the new one. State
+ * interrupting call cancels the in-flight transition and starts the new one. Each
+ * transition runs on the stage classes and `timeout` declared when it starts; a
+ * change to them applies from the next transition and on its own stages nothing. State
  * lives solely in `hidden` / `data-transition-state`, and `connect()` reconciles it to
  * the element's visibility. Only the classes this controller applied are ever removed:
  * a stage token already on the element is the consumer's standing class, so it is
  * neither claimed nor stripped — declare a token as a stage Value *or* author it, not
  * both, because a token held by the consumer cannot be staged and the property it
- * drives then resolves from their CSS alone. A half-applied stage is rewound on
- * `turbo:before-cache` so it never reaches a snapshot. The terminal-event listeners,
- * rAF, and fallback timer are released on `disconnect()` (Turbo navigation included).
+ * drives then resolves from their CSS alone. The stage classes in place are recorded on
+ * the element as `data-<identifier>-staged` (a JSON list), so a copy of the element taken
+ * mid-transition — a page Turbo restores from its cache — tells the connection that
+ * adopts it which classes were staged: it strips exactly those, silently, and settles
+ * the state from `hidden`. A running transition is never cancelled on
+ * `turbo:before-cache`, which Turbo also dispatches on pages that stay (a promoted frame
+ * navigation, a state-less `popstate`, a refresh of a cached URL), so a `leave()` still
+ * hides the element and `left` still fires. The terminal-event listeners, rAF, and
+ * fallback timer are released, and the stage classes stripped, once the element is
+ * really detached; an in-page move, and a `data-turbo-permanent` element Turbo carries
+ * to the next page, reconnect the same instance with the transition still running.
  */
 export class TransitionController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override values = {
     enter: { type: String, default: "" },
     enterFrom: { type: String, default: "" },
@@ -59,6 +77,10 @@ export class TransitionController extends Controller<HTMLElement> {
     leaveTo: { type: String, default: "" },
     timeout: { type: Number, default: 0 },
   };
+
+  static valueConstraints = {
+    timeout: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof TransitionController.values>;
   static actions = ["enter", "leave", "toggle"] as const;
   static events = ["entered", "left"] as const;
 
@@ -72,8 +94,6 @@ export class TransitionController extends Controller<HTMLElement> {
 
   /** Owns the cancellable completion wait (terminal events + bounded fallback). */
   readonly #transition = new TransitionCompletion();
-  /** Rewinds a half-applied stage before Turbo copies the page into its snapshot. */
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   #rafId: number | null = null;
   /**
    * Stage classes this controller put on the element. Removing by declaration
@@ -82,17 +102,52 @@ export class TransitionController extends Controller<HTMLElement> {
    */
   readonly #staged = new Set<string>();
 
+  /** Tells an in-page move or a permanent carry from a real detach. */
+  readonly #gate = new DetachGate();
+
   override connect(): void {
-    this.#beforeCache.activate();
-    // Settle the state hook to match the element's current visibility. Nothing is
-    // stripped here: a stage token present at connect was not staged by this
-    // instance, so it belongs to the consumer.
+    const moved = this.#gate.pending;
+    this.#gate.cancel();
+    // The reconnection that completes a move finds its transition still running.
+    if (moved) return;
+    // A connection that staged nothing itself strips only what the record names: the
+    // classes an earlier instance staged on the element this copy was taken from. Any
+    // other stage token present is the consumer's.
+    if (this.#staged.size === 0) this.#stripRecorded();
+    // Settle the state hook to match the element's current visibility.
     this.#settleState();
   }
 
+  /** Cancels the transition in flight once the element is really detached. */
   override disconnect(): void {
-    this.#beforeCache.deactivate();
-    this.#cancel();
+    this.#gate.disconnected(this, () => this.#cancel());
+  }
+
+  /** The record of the stage classes in place, in this controller's namespace. */
+  get #stagedRecord(): string {
+    return `data-${this.identifier}-${STAGED_RECORD}`;
+  }
+
+  /** Strips the stage classes the record names, and drops the record. */
+  #stripRecorded(): void {
+    const raw = this.element.getAttribute(this.#stagedRecord) ?? "null";
+    this.element.removeAttribute(this.#stagedRecord);
+    let recorded: unknown = null;
+    try {
+      recorded = JSON.parse(raw);
+    } catch {
+      // A record that is not JSON names no class.
+    }
+    if (!Array.isArray(recorded)) return;
+    for (const token of recorded) {
+      if (typeof token === "string" && token !== "") this.element.classList.remove(token);
+    }
+  }
+
+  /** Writes the record of the stage classes in place, or drops it when there are none. */
+  #record(): void {
+    if (this.#staged.size === 0) this.element.removeAttribute(this.#stagedRecord);
+    else this.element.setAttribute(this.#stagedRecord, JSON.stringify([...this.#staged]));
   }
 
   /** Shows the element with the enter transition. */
@@ -113,6 +168,10 @@ export class TransitionController extends Controller<HTMLElement> {
   }
 
   /**
+   * Runs one transition on the declaration as it stands when the transition starts:
+   * the class lists and `timeout` are read here, so a change while it runs — before
+   * or after the staging frame — applies from the next transition.
+   *
    * @stimeoRuntimeOnly The class lists and `timeout` shape this one transition; `#finish` strips
    *   the classes, so none of them stays at rest.
    */
@@ -130,6 +189,7 @@ export class TransitionController extends Controller<HTMLElement> {
     const base = isEnter ? this.enterValue : this.leaveValue;
     const from = isEnter ? this.enterFromValue : this.leaveFromValue;
     const to = isEnter ? this.enterToValue : this.leaveToValue;
+    const timeoutMs = this.#safeTimeout;
 
     this.#add(base, from);
     // Commit the "from" frame before the swap: a rAF callback runs before this
@@ -143,9 +203,7 @@ export class TransitionController extends Controller<HTMLElement> {
       this.#add(to);
       // The consumer's `timeout` Value (positive) replaces the auto-computed
       // fallback so an author-declared budget always wins over computed styles.
-      this.#transition.wait(this.element, () => this.#finish(kind), {
-        timeoutMs: this.timeoutValue,
-      });
+      this.#transition.wait(this.element, () => this.#finish(kind), { timeoutMs });
     });
   }
 
@@ -165,18 +223,6 @@ export class TransitionController extends Controller<HTMLElement> {
   /** Writes the state hook the element's visibility implies. */
   #settleState(): void {
     this.element.setAttribute("data-transition-state", this.element.hidden ? "left" : "entered");
-  }
-
-  /**
-   * Returns the element to a settled state before Turbo copies the page.
-   *
-   * The snapshot is taken while the controller is still connected, so stripping on
-   * the next `connect()` would only repair the page after it has been painted from
-   * the cache. The pass is silent: `connect()` derives the state again on restore.
-   */
-  #rewindForCache(): void {
-    this.#cancel();
-    this.#settleState();
   }
 
   /** Cancels any in-flight transition (interruption / teardown). */
@@ -205,6 +251,7 @@ export class TransitionController extends Controller<HTMLElement> {
       this.element.classList.add(token);
       this.#staged.add(token);
     }
+    this.#record();
   }
 
   /** Drops the named tokens that are this controller's to drop. */
@@ -219,6 +266,7 @@ export class TransitionController extends Controller<HTMLElement> {
   #strip(): void {
     this.element.classList.remove(...this.#staged);
     this.#staged.clear();
+    this.#record();
   }
 
   #raf(callback: () => void): number {
@@ -231,5 +279,15 @@ export class TransitionController extends Controller<HTMLElement> {
   #cancelRaf(id: number): void {
     if (typeof window.cancelAnimationFrame === "function") window.cancelAnimationFrame(id);
     else window.clearTimeout(id);
+  }
+  /** Current `timeout` declaration resolved against its numeric contract. */
+  get #safeTimeout(): number {
+    return this.#numbers.read(
+      this,
+      "timeout",
+      this.timeoutValue,
+      TransitionController.values.timeout.default,
+      TransitionController.valueConstraints.timeout,
+    );
   }
 }

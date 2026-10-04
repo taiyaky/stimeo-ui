@@ -1,7 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { DetachGate } from "../utils/detach_gate";
 import { KeyedTimers } from "../utils/keyed_timers";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /** The two politeness levels this controller keeps a region for. */
@@ -9,6 +11,12 @@ const LEVELS = ["polite", "assertive"] as const;
 
 /** One of the politeness levels in {@link LEVELS}. */
 type Level = (typeof LEVELS)[number];
+
+/** Suffix of the marker on a live region this controller generated; see the class remarks. */
+const STAND_IN = "stand-in";
+
+/** Suffix of the marker on a region holding a message this controller wrote. */
+const ANNOUNCED = "announced";
 
 /**
  * Headless, shared **live-region announcer** — a polite/assertive screen-reader
@@ -46,11 +54,27 @@ type Level = (typeof LEVELS)[number];
  * announcement because assistive tech reports changes to a region it already
  * knows about — a region created and written within one task loses that first
  * message. The controller never moves focus — announcements must not steal it
- * (WCAG 2.2 4.1.3). Listeners and clear timers are torn down on `disconnect()`
- * (Turbo included), and any generated regions are removed — from the cached
- * snapshot too, via `BeforeCacheReset`, because `connect()` cannot reuse a
- * restored region (it carries no target attribute) and would pair another one
- * with it on every visit.
+ * (WCAG 2.2 4.1.3). Listeners, the queues and the clear timers are torn down, and any
+ * generated regions removed, once the element is really detached. An in-page move,
+ * and a `data-turbo-permanent` announcer Turbo carries to the next page, reconnect
+ * the same instance with all of them in place, so what was queued is still read and a
+ * message on display is still cleared on time.
+ *
+ * **Generated regions are marked, so a restore never doubles them.** Each
+ * stand-in carries `data-<identifier>-stand-in`. The region set is kept whole until
+ * the controller is detached, so a stand-in can reach a copy of the page — a page Turbo
+ * restores from its cache is one. The teardown removes the stand-ins a connection
+ * generated, so a marked child a host arrives with came from an earlier one:
+ * `connect()` drops it before generating its own, and it never sits as a second
+ * region beside the new stand-in or an authored target.
+ *
+ * **A restored page does not read out an earlier message.** A region holding a
+ * message this controller wrote carries `data-<identifier>-announced` until the message
+ * is cleared after `clearAfter`. The teardown drops the clearing timers, so a connection
+ * that is not the other half of a move empties every marked authored region it finds;
+ * an authored region's own initial text carries no mark and stays. Nothing is dropped or emptied on `turbo:before-cache`, which Turbo
+ * also dispatches on pages that stay (a promoted frame navigation, a state-less
+ * `popstate`, a refresh of a cached URL): the messages queued there are still read.
  *
  * **Messages are queued, one write per task.** Assistive tech announces what it
  * observes changing, so two messages written into one region within a single task
@@ -65,15 +89,24 @@ type Level = (typeof LEVELS)[number];
  * without waiting for the next message.
  */
 export class AnnouncerController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["polite", "assertive"];
   static override values = {
     clearAfter: { type: Number, default: 1000 },
     dedupeReannounce: { type: Boolean, default: true },
   };
+
+  static valueConstraints = {
+    clearAfter: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof AnnouncerController.values>;
   static actions = ["announce"] as const;
 
   declare readonly politeTarget: HTMLElement;
   declare readonly assertiveTarget: HTMLElement;
+  declare readonly politeTargets: HTMLElement[];
+  declare readonly assertiveTargets: HTMLElement[];
   declare readonly hasPoliteTarget: boolean;
   declare readonly hasAssertiveTarget: boolean;
 
@@ -83,15 +116,24 @@ export class AnnouncerController extends Controller<HTMLElement> {
   /** Drain timers, which belong to a politeness level rather than to a region. */
   readonly #timers = new SafeTimeout();
 
-  /**
-   * The one timer a region may have outstanding — its dedupe re-set, then its
-   * auto-clear. A region carries at most one, and the registry releases the
-   * previous one whenever a newer message takes the region over.
-   */
+  /** Tells an in-page move or a permanent carry from a real detach. */
+  readonly #gate = new DetachGate();
+
+  /** The auto-clear each region may have outstanding; a newer message releases it. */
   readonly #regionTimers = new KeyedTimers<HTMLElement>();
 
-  /** Live regions generated to stand in for absent targets, for teardown. */
+  /** The stand-in last generated per absent target, which may have left the document since. */
   readonly #generated = new Map<Level, HTMLElement>();
+
+  /** The stand-in marker, in the namespace this controller is registered under. */
+  get #standIn(): string {
+    return `data-${this.identifier}-${STAND_IN}`;
+  }
+
+  /** The written-message marker, in the namespace this controller is registered under. */
+  get #announced(): string {
+    return `data-${this.identifier}-${ANNOUNCED}`;
+  }
 
   /** Messages waiting to be written, oldest first, one queue per politeness. */
   readonly #queues = new Map<Level, string[]>();
@@ -112,9 +154,6 @@ export class AnnouncerController extends Controller<HTMLElement> {
     this.#reconcile.schedule();
   });
 
-  /** Rewinds to an announceable initial state for the snapshot; see the remarks. */
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
-
   /**
    * Guards against handling the same CustomEvent twice. An event dispatched on
    * the controller element with `bubbles: true` reaches both the element and the
@@ -132,9 +171,17 @@ export class AnnouncerController extends Controller<HTMLElement> {
     this.#announce(message, this.#assertiveFromDetail(detail));
   };
 
+  /**
+   * Seats the regions and starts listening. The reconnection that completes an in-page
+   * move or a permanent carry finds all of it in place, the queues and timers included.
+   */
   override connect(): void {
+    const moved = this.#gate.pending;
+    this.#gate.cancel();
+    if (moved) return;
     this.#reconcile.activate();
-    this.#beforeCache.activate();
+    this.#dropInheritedStandIns();
+    this.#emptyInheritedMessages();
     // Materialise any missing region now, so it is in the accessibility tree
     // before the first message rather than appearing with it.
     this.#reconcileRegions();
@@ -143,10 +190,15 @@ export class AnnouncerController extends Controller<HTMLElement> {
     window.addEventListener("stimeo--announcer:announce", this.#onAnnounceEvent);
   }
 
+  /** Tears everything down once the element is really detached. */
   override disconnect(): void {
+    this.#gate.disconnected(this, () => this.#teardown());
+  }
+
+  /** Releases the listeners, the queues, the timers and the stand-ins. */
+  #teardown(): void {
     this.#reconcile.cancel();
     this.#hostWatch.disconnect();
-    this.#beforeCache.deactivate();
     this.element.removeEventListener("stimeo--announcer:announce", this.#onAnnounceEvent);
     window.removeEventListener("stimeo--announcer:announce", this.#onAnnounceEvent);
     this.#timers.clearAll();
@@ -190,11 +242,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
       if (this.#hasTargetFor(level)) {
         // The consumer owns this politeness now; a stand-in would be a second
         // region for it, and an empty one nothing ever writes to.
-        const generated = this.#generated.get(level);
-        if (generated) {
-          generated.remove();
-          this.#generated.delete(level);
-        }
+        this.#generated.get(level)?.remove();
         continue;
       }
       const existing = this.#generated.get(level);
@@ -210,27 +258,39 @@ export class AnnouncerController extends Controller<HTMLElement> {
     return level === "assertive" ? this.hasAssertiveTarget : this.hasPoliteTarget;
   }
 
-  /** Builds a visually hidden live region for `level` and attaches it. */
+  /** Builds a visually hidden, marked live region for `level` and attaches it. */
   #createRegion(level: Level): HTMLElement {
     const region = document.createElement("div");
     region.setAttribute("aria-live", level);
     region.setAttribute("aria-atomic", "true");
+    region.setAttribute(this.#standIn, "");
     visuallyHide(region);
     this.element.appendChild(region);
     return region;
   }
 
-  /**
-   * Removes and forgets every region this controller generated. Authored targets
-   * belong to the consumer and are left untouched. Forgetting them is what keeps
-   * the live page working after a snapshot rewind: the next announcement finds an
-   * empty map and materialises a fresh region.
-   */
-  #removeGenerated(): void {
-    for (const region of this.#generated.values()) {
-      region.remove();
+  /** Removes the stand-ins the host arrived with; see the class remarks. */
+  #dropInheritedStandIns(): void {
+    for (const child of Array.from(this.element.children)) {
+      if (child.hasAttribute(this.#standIn)) child.remove();
     }
-    this.#generated.clear();
+  }
+
+  /**
+   * Empties the authored regions that hold a message this controller wrote, which no
+   * clearing timer of this connection is left to clear; see the class remarks.
+   */
+  #emptyInheritedMessages(): void {
+    for (const region of [...this.politeTargets, ...this.assertiveTargets]) {
+      if (!region.hasAttribute(this.#announced)) continue;
+      region.replaceChildren();
+      region.removeAttribute(this.#announced);
+    }
+  }
+
+  /** Removes the stand-ins this connection generated; authored targets stay. */
+  #removeGenerated(): void {
+    for (const region of this.#generated.values()) region.remove();
   }
 
   /**
@@ -299,14 +359,16 @@ export class AnnouncerController extends Controller<HTMLElement> {
     const message = queue?.[0];
     if (queue === undefined || message === undefined) return;
 
-    if (this.#reconcileRegions()) {
+    const created = this.#reconcileRegions();
+    const region = this.#regionFor(level);
+    // With nothing created every politeness has a seated region; the second check
+    // narrows the type.
+    if (created || region === undefined) {
       this.#scheduleDrain(level);
       return;
     }
 
-    const region = this.#regionFor(level);
     if (this.dedupeReannounceValue && region.textContent === message) {
-      this.#regionTimers.clear(region);
       region.textContent = "";
       this.#scheduleDrain(level);
       return;
@@ -317,6 +379,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
     // timer is released here rather than by the arming that replaces it.
     this.#regionTimers.clear(region);
     region.textContent = message;
+    region.setAttribute(this.#announced, "");
     this.#scheduleClear(region, message);
     if (queue.length > 0) this.#scheduleDrain(level);
   }
@@ -327,53 +390,27 @@ export class AnnouncerController extends Controller<HTMLElement> {
    * @stimeoRuntimeOnly `clearAfter` is the delay of the one clearing timer this call arms.
    */
   #scheduleClear(region: HTMLElement, message: string): void {
-    if (this.clearAfterValue <= 0) return;
+    if (this.#safeClearAfter <= 0) return;
     this.#regionTimers.set(
       region,
       () => {
-        if (region.textContent === message) region.textContent = "";
+        if (region.textContent !== message) return;
+        region.textContent = "";
+        region.removeAttribute(this.#announced);
       },
-      this.clearAfterValue,
+      this.#safeClearAfter,
     );
   }
 
   /**
-   * Resolves the live region for a politeness level.
-   *
-   * The remembered stand-in is used only while it is still in the document: a morph
-   * can drop it, and writing into the detached node would announce nothing at all.
+   * The region a politeness writes into: its target, else its last stand-in. A
+   * morph can drop the stand-in, and only a reconcile pass that created nothing
+   * guarantees it is seated; a detached node announces nothing.
    */
-  #regionFor(level: Level): HTMLElement {
+  #regionFor(level: Level): HTMLElement | undefined {
     if (level === "assertive" && this.hasAssertiveTarget) return this.assertiveTarget;
     if (level === "polite" && this.hasPoliteTarget) return this.politeTarget;
-
-    const existing = this.#generated.get(level);
-    if (existing?.isConnected) return existing;
-
-    const region = this.#createRegion(level);
-    this.#generated.set(level, region);
-    return region;
-  }
-
-  /**
-   * Restores the announceable initial state for the snapshot Turbo is about to
-   * take: queued and displayed messages go, generated regions go, and the live
-   * page — which keeps running when a visit is aborted — gets its regions back on
-   * the next task, after the clone.
-   */
-  #rewindForCache(): void {
-    this.#queues.clear();
-    this.#draining.clear();
-    this.#timers.clearAll();
-    this.#regionTimers.clearAll();
-    for (const level of LEVELS) {
-      if (this.#hasTargetFor(level)) {
-        const target = level === "assertive" ? this.assertiveTarget : this.politeTarget;
-        target.textContent = "";
-      }
-    }
-    this.#removeGenerated();
-    this.#timers.set(() => this.#reconcileRegions(), 0);
+    return this.#generated.get(level);
   }
 
   /** Extracts a non-empty string `message` from a CustomEvent detail, else null. */
@@ -391,6 +428,16 @@ export class AnnouncerController extends Controller<HTMLElement> {
       !!detail &&
       typeof detail === "object" &&
       (detail as Record<string, unknown>).assertive === true
+    );
+  }
+  /** Current `clearAfter` declaration resolved against its numeric contract. */
+  get #safeClearAfter(): number {
+    return this.#numbers.read(
+      this,
+      "clearAfter",
+      this.clearAfterValue,
+      AnnouncerController.values.clearAfter.default,
+      AnnouncerController.valueConstraints.clearAfter,
     );
   }
 }

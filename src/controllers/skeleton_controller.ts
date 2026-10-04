@@ -1,7 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
+import { AttributeLease } from "../utils/attribute_lease";
 import { DetachGate } from "../utils/detach_gate";
 import { MinDurationFloor } from "../utils/min_duration_floor";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -30,16 +33,25 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * kept across an in-page move and dropped on a real detach via `DetachGate`.
  */
 export class SkeletonController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["placeholder", "content"];
   static override values = {
     announceReadyText: { type: String, default: "" },
     minDuration: { type: Number, default: 0 },
   };
+
+  static valueConstraints = {
+    minDuration: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof SkeletonController.values>;
   static actions = ["ready", "reset"] as const;
   static events = ["ready"] as const;
 
   declare readonly placeholderTarget: HTMLElement;
+  declare readonly placeholderTargets: HTMLElement[];
   declare readonly contentTarget: HTMLElement;
+  declare readonly contentTargets: HTMLElement[];
   declare readonly hasPlaceholderTarget: boolean;
   declare readonly hasContentTarget: boolean;
 
@@ -49,8 +61,13 @@ export class SkeletonController extends Controller<HTMLElement> {
   readonly #timers = new SafeTimeout();
   readonly #floor = new MinDurationFloor(this.#timers);
   readonly #gate = new DetachGate();
+  /** Owns the `hidden` written on each placeholder and content, so a departed one gets it back. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Whether `connect()` has run and `disconnect()` has not since. */
+  #connected = false;
 
   override connect(): void {
+    this.#connected = true;
     // A probe still queued means this is the reconnect half of an in-page move.
     // The placeholder never left the screen, so the loading hooks already hold
     // the values `#enterLoading()` would write and the floor is still measuring
@@ -64,7 +81,36 @@ export class SkeletonController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
+    this.#connected = false;
     this.#gate.disconnected(this, () => this.#teardown());
+  }
+
+  /** Shows or hides a placeholder that arrives at runtime as the phase calls for. */
+  placeholderTargetConnected(): void {
+    if (this.#connected) this.#reflect(this.#state === "ready");
+  }
+
+  /**
+   * Gives a placeholder that no longer resolves its own `hidden` back, even after
+   * `disconnect()`, and while connected repaints the placeholder that stays.
+   */
+  placeholderTargetDisconnected(placeholder: HTMLElement): void {
+    if (!this.placeholderTargets.includes(placeholder)) this.#hidden.return(placeholder);
+    if (this.#connected) this.#reflect(this.#state === "ready");
+  }
+
+  /** Shows or hides content that arrives at runtime as the phase calls for. */
+  contentTargetConnected(): void {
+    if (this.#connected) this.#reflect(this.#state === "ready");
+  }
+
+  /**
+   * Gives content that no longer resolves its own `hidden` back, even after
+   * `disconnect()`, and while connected repaints the content that stays.
+   */
+  contentTargetDisconnected(content: HTMLElement): void {
+    if (!this.contentTargets.includes(content)) this.#hidden.return(content);
+    if (this.#connected) this.#reflect(this.#state === "ready");
   }
 
   /** Swaps to the real content. Honors `minDuration` to prevent a flash. */
@@ -72,7 +118,7 @@ export class SkeletonController extends Controller<HTMLElement> {
     // The first signal wins: a repeat while the floor still holds the reveal back
     // must not restart the wait, or a stream of ready events keeps postponing it.
     if (this.#state === "ready" || this.#floor.pending) return;
-    this.#floor.schedule(this.minDurationValue, () => this.#reveal());
+    this.#floor.schedule(this.#safeMinDuration, () => this.#reveal());
   }
 
   /** Returns to the loading state (e.g. a Turbo Stream re-fetch). */
@@ -84,8 +130,7 @@ export class SkeletonController extends Controller<HTMLElement> {
   /** Shows the placeholder, hides content, and marks the region busy. */
   #enterLoading(): void {
     this.#floor.begin();
-    if (this.hasPlaceholderTarget) this.placeholderTarget.hidden = false;
-    if (this.hasContentTarget) this.contentTarget.hidden = true;
+    this.#reflect(false);
     this.element.setAttribute("aria-busy", "true");
     this.element.setAttribute("data-state", "loading");
   }
@@ -97,8 +142,7 @@ export class SkeletonController extends Controller<HTMLElement> {
    *   makes.
    */
   #reveal(): void {
-    if (this.hasPlaceholderTarget) this.placeholderTarget.hidden = true;
-    if (this.hasContentTarget) this.contentTarget.hidden = false;
+    this.#reflect(true);
     this.element.setAttribute("aria-busy", "false");
     this.element.setAttribute("data-state", "ready");
     this.dispatch("ready", { detail: {} });
@@ -106,20 +150,35 @@ export class SkeletonController extends Controller<HTMLElement> {
     announce(fillTemplate(this.announceReadyTextValue, {}));
   }
 
+  /** Shows the placeholder or the content for the phase, on the first of each. */
+  #reflect(ready: boolean): void {
+    if (this.hasPlaceholderTarget) this.#hidden.write(this.placeholderTarget, ready ? "" : null);
+    if (this.hasContentTarget) this.#hidden.write(this.contentTarget, ready ? null : "");
+  }
+
   /**
-   * Drops the held reveal on a real detach. The markup keeps whatever it last
-   * held: an element on its way out of the document has no reader left, and one
-   * whose `data-controller` dropped the identifier no longer resolves its own
-   * targets, so the rollback could only ever be partial.
+   * Drops the held reveal on a real detach. The host's `aria-busy` and `data-state`
+   * stay as last written, and so does the `hidden` of a placeholder or content that
+   * leaves the document with it. A placeholder or content that stops resolving while
+   * it stays on the page (its mark removed, or the identifier dropped from
+   * `data-controller`) gets its own `hidden` back from its target callback.
    */
   #teardown(): void {
-    this.#gate.cancel();
-    this.#timers.clearAll();
     this.#floor.cancel();
   }
 
   /** Current lifecycle phase as reflected on `data-state`. */
   get #state(): string {
     return this.element.getAttribute("data-state") ?? "loading";
+  }
+  /** Current `minDuration` declaration resolved against its numeric contract. */
+  get #safeMinDuration(): number {
+    return this.#numbers.read(
+      this,
+      "minDuration",
+      this.minDurationValue,
+      SkeletonController.values.minDuration.default,
+      SkeletonController.valueConstraints.minDuration,
+    );
   }
 }

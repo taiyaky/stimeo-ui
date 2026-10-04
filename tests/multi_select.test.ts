@@ -4,8 +4,8 @@ import { MultiSelectController } from "../src/controllers/multi_select_controlle
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link MultiSelectController}: substring filtering with
@@ -141,10 +141,365 @@ describe("MultiSelectController", () => {
   const active = () => input().getAttribute("aria-activedescendant");
   const key = (k: string) =>
     input().dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+  /** Dispatches a cancelable keydown on the input and returns it. */
+  const press = (k: string) => {
+    const event = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true });
+    input().dispatchEvent(event);
+    return event;
+  };
   const filterTo = (value: string) => {
     input().value = value;
     input().dispatchEvent(new Event("input", { bubbles: true }));
   };
+  /** Runs `act`, lets Stimulus deliver the callbacks, and returns the writes to `attributes`. */
+  const attributeWrites = async (element: Element, attributes: string[], act: () => void) => {
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((batch) => records.push(...batch));
+    observer.observe(element, {
+      attributes: true,
+      attributeOldValue: true,
+      attributeFilter: attributes,
+    });
+    act();
+    await tick();
+    records.push(...observer.takeRecords());
+    observer.disconnect();
+    return records;
+  };
+
+  it("rejects nested-origin action events while accepting owned descendants", async () => {
+    await mount();
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--multi-select']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--multi-select",
+    ) as MultiSelectController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--multi-select-target='option']",
+    )[1];
+    if (!target) throw new Error("Missing target");
+
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--multi-select");
+    const inner = target.cloneNode(true) as HTMLElement;
+    inner.removeAttribute("data-action");
+    nested.append(inner);
+    target.append(nested);
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--multi-select:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener("pointerup", (event) => instance.toggleOption(event));
+    inner.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(0);
+    nested.remove();
+    const owned = document.createElement("span");
+    target.append(owned);
+    owned.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe("user");
+  });
+
+  it("preserves input focus after a blocked event activation", async () => {
+    await mount('data-stimeo--multi-select-max-value="1"');
+    options()[0]?.click();
+    const inside = document.createElement("button");
+    root().append(inside);
+    inside.focus();
+    options()[1]?.click();
+    expect(document.activeElement).toBe(input());
+    expect(options()[1]?.getAttribute("aria-selected")).toBe("false");
+  });
+
+  it.each([false, true])(
+    "element API focus respects an inside caller and a subscriber's handoff (handoff=%s)",
+    async (handoff) => {
+      await mount();
+      const element = document.querySelector<HTMLElement>(
+        "[data-controller='stimeo--multi-select']",
+      );
+      if (!element) throw new Error("Missing controller root");
+      const instance = application.getControllerForElementAndIdentifier(
+        element,
+        "stimeo--multi-select",
+      ) as MultiSelectController;
+      instance.open();
+      const inside = document.createElement("button");
+      element.append(inside);
+      inside.focus();
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      if (handoff)
+        element.addEventListener("stimeo--multi-select:change", () => outside.focus(), {
+          once: true,
+        });
+      const target = instance.optionTargets[1];
+      if (!target) throw new Error("Missing option");
+      instance.toggleOption(target);
+      expect(document.activeElement).toBe(handoff ? outside : input());
+    },
+  );
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+  ])("preserves action event modality %s", async (type, reason) => {
+    await mount();
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--multi-select']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--multi-select",
+    ) as MultiSelectController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--multi-select-target='option']",
+    )[1];
+    if (!target) throw new Error("Missing action target");
+
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--multi-select:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener(type, (event) => instance.toggleOption(event), { once: true });
+    target.dispatchEvent(new Event(type));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe(reason);
+  });
+
+  it.each([false, true])(
+    "accepts an owned element API source (descendant=%s) without stealing outside focus",
+    async (descendant) => {
+      await mount();
+      const element = document.querySelector<HTMLElement>(
+        "[data-controller='stimeo--multi-select']",
+      );
+      if (!element) throw new Error("Missing controller root");
+      const instance = application.getControllerForElementAndIdentifier(
+        element,
+        "stimeo--multi-select",
+      ) as MultiSelectController;
+      const target = element.querySelectorAll<HTMLElement>(
+        "[data-stimeo--multi-select-target='option']",
+      )[1];
+      if (!target) throw new Error("Missing action target");
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      outside.focus();
+      const reports: CustomEvent[] = [];
+      element.addEventListener("stimeo--multi-select:change", (event) =>
+        reports.push(event as CustomEvent),
+      );
+
+      const child = document.createElement("span");
+      target.append(child);
+      const foreign = target.cloneNode(true) as HTMLElement;
+      foreign.removeAttribute("data-action");
+      const nested = document.createElement("div");
+      nested.setAttribute("data-controller", "stimeo--multi-select");
+      const nestedTarget = foreign.cloneNode(true) as HTMLElement;
+      nested.append(nestedTarget);
+      element.append(nested);
+      const before = element.innerHTML;
+      instance.toggleOption(foreign);
+      document.body.append(foreign);
+      instance.toggleOption(foreign);
+      instance.toggleOption(nestedTarget);
+      expect(element.innerHTML).toBe(before);
+      expect(reports).toHaveLength(0);
+      instance.toggleOption(descendant ? child : target);
+      expect(target.getAttribute("aria-selected")).toBe("true");
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.detail.reason).toBe("api");
+      expect(document.activeElement).toBe(outside);
+    },
+  );
+
+  it.each([false, true])(
+    "keeps the outer selection report when a field listener only reads or attempts a capped add (%s)",
+    async (repeat) => {
+      await mountFields(
+        'data-stimeo--multi-select-name-value="fruit[]" data-stimeo--multi-select-max-value="1"',
+      );
+      const host = document.querySelector(
+        '[data-controller="stimeo--multi-select"]',
+      ) as HTMLElement;
+      const seen: string[][] = [];
+      host.addEventListener("stimeo--multi-select:change", (event) =>
+        seen.push((event as CustomEvent).detail.values),
+      );
+      host.querySelector('[data-stimeo--multi-select-target="fields"]')?.addEventListener(
+        "change",
+        () => {
+          expect(fields().map((field) => field.value)).toEqual(["apple"]);
+          if (repeat) document.getElementById("ms2-banana")?.click();
+        },
+        { once: true },
+      );
+      document.getElementById("ms2-apple")?.click();
+      expect(seen).toEqual([["apple"]]);
+    },
+  );
+
+  it.each([1, 2])(
+    "stops an older reconciliation after its first removed announcement is replaced (%s entries)",
+    async (count) => {
+      await mount(
+        'data-stimeo--multi-select-announce-text-value="{label} added" data-stimeo--multi-select-announce-removed-text-value="{label} removed"',
+      );
+      options()[0]?.click();
+      options()[1]?.click();
+      announcements.length = 0;
+      const reports: string[][] = [];
+      root().addEventListener("stimeo--multi-select:reconcile", (event) =>
+        reports.push((event as CustomEvent).detail.values),
+      );
+      let replaced = false;
+      const replace = () => {
+        if (replaced) return;
+        replaced = true;
+        options()[2]?.click();
+      };
+      window.addEventListener("stimeo--announcer:announce", replace);
+      try {
+        options()[0]?.setAttribute("aria-selected", "false");
+        if (count === 2) options()[1]?.setAttribute("aria-selected", "false");
+        controller().optionTargetConnected();
+        await tick();
+        expect(reports).toEqual([]);
+        expect(announcements.map((item) => item.message)).toEqual([
+          "Apple removed",
+          "Cherry added",
+        ]);
+        expect(tags().some((tag) => tag.dataset.value === "cherry")).toBe(true);
+      } finally {
+        window.removeEventListener("stimeo--announcer:announce", replace);
+      }
+    },
+  );
+
+  it.each([1, 2])(
+    "stops an older reconciliation after its first added announcement is replaced (%s entries)",
+    async (count) => {
+      await mount(
+        'data-stimeo--multi-select-announce-text-value="{label} added" data-stimeo--multi-select-announce-removed-text-value="{label} removed"',
+      );
+
+      const reports: string[][] = [];
+      root().addEventListener("stimeo--multi-select:reconcile", (event) =>
+        reports.push((event as CustomEvent).detail.values),
+      );
+      let replaced = false;
+      const replace = () => {
+        if (replaced) return;
+        replaced = true;
+        options()[2]?.click();
+      };
+      window.addEventListener("stimeo--announcer:announce", replace);
+      try {
+        options()[0]?.setAttribute("aria-selected", "true");
+        if (count === 2) options()[1]?.setAttribute("aria-selected", "true");
+        controller().optionTargetConnected();
+        await tick();
+        expect(reports).toEqual([]);
+        expect(announcements.map((item) => item.message)).toEqual(["Apple added", "Cherry added"]);
+        expect(tags().some((tag) => tag.dataset.value === "cherry")).toBe(true);
+      } finally {
+        window.removeEventListener("stimeo--announcer:announce", replace);
+      }
+    },
+  );
+
+  it("stops pending reports after a replacement from a field listener", async () => {
+    await mountFields('data-stimeo--multi-select-announce-text-value="{label} added"');
+    const seen: string[][] = [];
+    root().addEventListener("stimeo--multi-select:change", (event) =>
+      seen.push((event as CustomEvent).detail.values),
+    );
+    let replaced = false;
+    const replace = () => {
+      if (replaced) return;
+      replaced = true;
+      options()[1]?.click();
+    };
+    root()
+      .querySelector(`[data-stimeo--multi-select-target="fields"]`)
+      ?.addEventListener("change", replace);
+    try {
+      options()[0]?.click();
+      expect(seen).toEqual([["apple", "banana"]]);
+      expect(announcements.map((item) => item.message)).toEqual(["Banana added"]);
+    } finally {
+      root()
+        .querySelector(`[data-stimeo--multi-select-target="fields"]`)
+        ?.removeEventListener("change", replace);
+    }
+  });
+
+  it("stops pending reports after a replacement from a announcement listener", async () => {
+    await mountFields('data-stimeo--multi-select-announce-text-value="{label} added"');
+    const seen: string[][] = [];
+    root().addEventListener("stimeo--multi-select:change", (event) =>
+      seen.push((event as CustomEvent).detail.values),
+    );
+    let replaced = false;
+    const replace = () => {
+      if (replaced) return;
+      replaced = true;
+      options()[1]?.click();
+    };
+    window?.addEventListener("stimeo--announcer:announce", replace);
+    try {
+      options()[0]?.click();
+      expect(seen).toEqual([["apple", "banana"]]);
+      expect(announcements.map((item) => item.message)).toEqual(["Apple added", "Banana added"]);
+    } finally {
+      window?.removeEventListener("stimeo--announcer:announce", replace);
+    }
+  });
+
+  it("omits reports superseded by a field listener", async () => {
+    await mountFields('data-stimeo--multi-select-name-value="fruit[]"');
+    const host = document.querySelector('[data-controller="stimeo--multi-select"]') as HTMLElement;
+    const seen: string[][] = [];
+    let replaced = false;
+    host.addEventListener("stimeo--multi-select:change", (event) =>
+      seen.push((event as CustomEvent).detail.values),
+    );
+    host.querySelector('[data-stimeo--multi-select-target="fields"]')?.addEventListener(
+      "change",
+      () => {
+        if (replaced) return;
+        replaced = true;
+        document.getElementById("ms2-banana")?.click();
+      },
+      { once: true },
+    );
+    document.getElementById("ms2-apple")?.click();
+    expect(seen).toEqual([["apple", "banana"]]);
+  });
+
+  it("includes an unreconciled page selection in a user's selection", async () => {
+    await mountFields();
+    const host = document.querySelector('[data-controller="stimeo--multi-select"]') as HTMLElement;
+    const seen: string[][] = [];
+    host.addEventListener("stimeo--multi-select:change", (event) =>
+      seen.push((event as CustomEvent).detail.values),
+    );
+    document.getElementById("ms2-apple")?.setAttribute("aria-selected", "true");
+    document.getElementById("ms2-banana")?.click();
+    expect(seen).toEqual([["apple", "banana"]]);
+  });
+
+  it("does not report deselection that returns to the published selection", async () => {
+    await mountFields();
+    const host = document.querySelector('[data-controller="stimeo--multi-select"]') as HTMLElement;
+    const seen: Event[] = [];
+    host.addEventListener("stimeo--multi-select:change", (event) => seen.push(event));
+    document.getElementById("ms2-apple")?.setAttribute("aria-selected", "true");
+    document.getElementById("ms2-apple")?.click();
+    expect(seen).toEqual([]);
+  });
 
   it("reverses the horizontal arrows under RTL, in the input and across the chips", async () => {
     // Logical direction: the chips are an ordered row, so which one is "next"
@@ -269,6 +624,35 @@ describe("MultiSelectController", () => {
     expect(active()).toBe("ms-apple");
     key("End");
     expect(active()).toBe("ms-cherry");
+  });
+
+  it("opens a closed list on ArrowUp and consumes the press", async () => {
+    await mount();
+
+    expect(press("ArrowUp").defaultPrevented).toBe(true);
+
+    expect(list().hidden).toBe(false);
+    expect(input().getAttribute("aria-expanded")).toBe("true");
+    expect(active()).toBe("ms-apple");
+  });
+
+  // An unconsumed arrow, Home or End would also move the caret, an unconsumed
+  // Enter would submit an enclosing form, and an unconsumed Escape would also
+  // reach the shared Escape resolver and close an enclosing dialog.
+  it("consumes the ArrowDown, Home, End, Enter and Escape it acts on", async () => {
+    await mount();
+
+    expect(press("ArrowDown").defaultPrevented).toBe(true); // opens
+    expect(press("ArrowDown").defaultPrevented).toBe(true); // moves
+    expect(active()).toBe("ms-banana");
+    expect(press("End").defaultPrevented).toBe(true);
+    expect(active()).toBe("ms-cherry");
+    expect(press("Home").defaultPrevented).toBe(true);
+    expect(active()).toBe("ms-apple");
+    expect(press("Enter").defaultPrevented).toBe(true);
+    expect(selected()).toEqual(["true", "false", "false"]);
+    expect(press("Escape").defaultPrevented).toBe(true);
+    expect(list().hidden).toBe(true);
   });
 
   it("chooses the directional edge when an open list has no active option", async () => {
@@ -432,6 +816,21 @@ describe("MultiSelectController", () => {
     expect(active()).toBe("ms-apple");
     key("Enter");
     expect(selected()).toEqual(["true", "false", "false"]);
+  });
+
+  it("forgets a composition left open on an input that was replaced", async () => {
+    await mount();
+    const original = input();
+    original.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    const replacement = original.cloneNode() as HTMLInputElement;
+    original.replaceWith(replacement);
+    controller().inputTargetDisconnected(original);
+    controller().inputTargetConnected(replacement);
+
+    controller().onKeydown(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+
+    expect(list().hidden).toBe(false);
+    expect(replacement.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("selects options by click", async () => {
@@ -600,6 +999,16 @@ describe("MultiSelectController", () => {
     expect(fields()[0]?.hasAttribute("form")).toBe(false);
   });
 
+  it("renames the submitted fields when the name Value alone changes", async () => {
+    await mountFields("", "apple");
+
+    root().setAttribute("data-stimeo--multi-select-name-value", "fruits[]");
+    controller().nameValueChanged();
+    await flushMicrotasks();
+
+    expect(fields().map((field) => [field.name, field.value])).toEqual([["fruits[]", "apple"]]);
+  });
+
   it("seeds a fields target inserted after connect", async () => {
     await mount();
     options()[0]?.click();
@@ -610,6 +1019,71 @@ describe("MultiSelectController", () => {
     await tick();
 
     expect(fields().map((field) => field.value)).toEqual(["apple"]);
+  });
+
+  describe("a fields target that stays after an earlier one leaves", () => {
+    const fieldsTarget = () =>
+      document.querySelector<HTMLElement>(
+        "[data-stimeo--multi-select-target='fields']",
+      ) as HTMLElement;
+    /** Inserts an empty container after the live one, then removes the live one a task later. */
+    const leaveBehindSuccessor = async () => {
+      const original = fieldsTarget();
+      const successor = original.cloneNode(false) as HTMLElement;
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+      return successor;
+    };
+
+    it("seeds the fields target that stays from the current selection", async () => {
+      await mountFields("", "apple banana");
+      const successor = await leaveBehindSuccessor();
+
+      expect(fieldsTarget()).toBe(successor);
+      expect(fields().map((field) => field.value)).toEqual(["apple", "banana"]);
+    });
+
+    it("says nothing when it seeds the fields target that stays", async () => {
+      await mountFields("", "apple");
+      const reports: string[] = [];
+      const listening = new AbortController();
+      for (const type of ["stimeo--multi-select:change", "stimeo--multi-select:reconcile"]) {
+        root().addEventListener(type, () => reports.push(type), { signal: listening.signal });
+      }
+      const commits = captureFieldCommits();
+      await leaveBehindSuccessor();
+      listening.abort();
+      commits.stop();
+
+      expect(fields().map((field) => field.value)).toEqual(["apple"]);
+      expect(reports).toEqual([]);
+      expect(commits.seen).toEqual([]);
+      expect(announcements).toEqual([]);
+    });
+
+    it("keeps the selection when its only fields target leaves", async () => {
+      await mountFields("", "apple");
+      fieldsTarget().remove();
+      await tick();
+
+      expect(() => controller().fieldsTargetDisconnected()).not.toThrow();
+      await tick();
+      expect(selected()).toEqual(["true", "false"]);
+    });
+
+    it("seeds nothing from a departure delivered after disconnect", async () => {
+      await mountFields("", "apple");
+      const instance = controller();
+      instance.disconnect();
+      fieldsTarget().replaceChildren();
+
+      instance.fieldsTargetDisconnected();
+      await tick();
+
+      expect(fields()).toEqual([]);
+    });
   });
 
   it("enforces the max selection cap", async () => {
@@ -759,6 +1233,77 @@ describe("MultiSelectController", () => {
     expect(tags()).toEqual([]);
   });
 
+  it("renders the chips into a tags row that becomes the target after connect", async () => {
+    document.body.innerHTML = markup()
+      .replace(
+        '<ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>',
+        '<ul aria-label="Selected"></ul>',
+      )
+      .replace(
+        'id="ms-apple" role="option" aria-selected="false"',
+        'id="ms-apple" role="option" aria-selected="true"',
+      );
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+    const row = root().querySelector<HTMLElement>("ul[aria-label='Selected']") as HTMLElement;
+    expect(row.children).toHaveLength(0);
+
+    row.setAttribute("data-stimeo--multi-select-target", "tags");
+    controller().tagsTargetConnected(row);
+    await flushMicrotasks();
+
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
+    expect(tags()[0]?.parentElement).toBe(row);
+  });
+
+  it("rebuilds the chips in the remaining tags row when the row holding them leaves", async () => {
+    await mount();
+    options()[0]?.click();
+    const first = root().querySelector<HTMLElement>(
+      "[data-stimeo--multi-select-target='tags']",
+    ) as HTMLElement;
+    const second = document.createElement("ul");
+    second.setAttribute("aria-label", "Selected");
+    second.setAttribute("data-stimeo--multi-select-target", "tags");
+    first.after(second);
+    controller().tagsTargetConnected(second);
+    await tick();
+    expect(second.children).toHaveLength(0);
+
+    first.remove();
+    controller().tagsTargetDisconnected(first);
+    await flushMicrotasks();
+
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
+    expect(tags()[0]?.parentElement).toBe(second);
+  });
+
+  it("releases chip interaction on disconnect", async () => {
+    await mount();
+    options()[0]?.click();
+    const remove = buttons()[0] as HTMLButtonElement;
+
+    controller().disconnect();
+    remove.click();
+    remove.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+
+    expect(options()[0]?.getAttribute("aria-selected")).toBe("true");
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
+  });
+
+  it("rebinds chip interaction when it reconnects", async () => {
+    await mount();
+    options()[0]?.click();
+
+    controller().disconnect();
+    controller().connect();
+    buttons()[0]?.click();
+
+    expect(options()[0]?.getAttribute("aria-selected")).toBe("false");
+    expect(tags()).toEqual([]);
+  });
+
   it("stops delegating safely when the tags target token is removed", async () => {
     await mount();
     options()[0]?.click();
@@ -815,6 +1360,48 @@ describe("MultiSelectController", () => {
     expect(document.activeElement).toBe(input());
   });
 
+  it("consumes the empty-input Backspace and ArrowLeft that reach into the chips", async () => {
+    await mount();
+    options()[0]?.click();
+    options()[1]?.click();
+    input().value = "";
+
+    expect(press("Backspace").defaultPrevented).toBe(true);
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
+    expect(press("ArrowLeft").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(buttons()[0]);
+  });
+
+  it("hands the chip tab stop on when Backspace removes the chip that held it", async () => {
+    await mount();
+    options()[0]?.click();
+    options()[1]?.click();
+    input().value = "";
+    key("ArrowLeft"); // the last chip takes the tab stop
+    buttons()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(document.activeElement).toBe(input());
+    expect(buttons().map((button) => button.tabIndex)).toEqual([-1, 0]);
+
+    key("Backspace");
+
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
+    expect(buttons().map((button) => button.tabIndex)).toEqual([0]);
+  });
+
+  it("ends an empty-input Backspace removal in the input after its change listeners", async () => {
+    await mount();
+    options()[0]?.click();
+    options()[1]?.click();
+    root().addEventListener("stimeo--multi-select:change", () => input().blur());
+    input().value = "";
+    input().focus();
+
+    key("Backspace");
+
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
+    expect(document.activeElement).toBe(input());
+  });
+
   it("removes a chip by its button, deselecting the option and re-homing focus", async () => {
     await mount(
       'data-stimeo--multi-select-announce-removed-text-value="Removed {label} ({value}); {count} total"',
@@ -830,6 +1417,18 @@ describe("MultiSelectController", () => {
       message: "Removed Apple (apple); 1 total",
       assertive: false,
     });
+  });
+
+  it("re-homes focus to the input when the last chip is removed from the chip", async () => {
+    await mount();
+    options()[0]?.click();
+    const button = buttons()[0] as HTMLButtonElement;
+    button.focus();
+
+    button.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+
+    expect(tags()).toEqual([]);
+    expect(document.activeElement).toBe(input());
   });
 
   it("falls back to the chip value when its backing option disappears before removal", async () => {
@@ -905,6 +1504,48 @@ describe("MultiSelectController", () => {
     expect(tags()).toEqual([]);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]?.[0]).toContain('non-empty aria-label on its "remove" target');
+    warn.mockRestore();
+  });
+
+  it("names an unusable chip template once per connection", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    document.body.innerHTML = markup().replace('aria-label="Remove {label}"', 'aria-label="  "');
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+    options()[0]?.click();
+    options()[1]?.click();
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    controller().disconnect();
+    controller().connect();
+    options()[0]?.click();
+
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(selected()).toEqual(["false", "false", "false"]);
+    warn.mockRestore();
+  });
+
+  it("keeps selection unchanged and warns when the chip template has no tags container", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    document.body.innerHTML = markup().replace(
+      '<ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>',
+      '<ul aria-label="Selected"></ul>',
+    );
+    application = Application.start();
+    application.register("stimeo--multi-select", MultiSelectController);
+    await tick();
+    const changes: string[][] = [];
+    root().addEventListener("stimeo--multi-select:change", (event) => {
+      changes.push((event as CustomEvent).detail.values);
+    });
+
+    options()[0]?.click();
+
+    expect(selected()).toEqual(["false", "false", "false"]);
+    expect(changes).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain('lacks a "tags" target to append the chip to');
     warn.mockRestore();
   });
 
@@ -1423,6 +2064,25 @@ describe("MultiSelectController", () => {
       expect(root().hasAttribute("tabindex")).toBe(false);
     });
 
+    it("gives back the borrowed tab stop a page restored from the cache carries", async () => {
+      await mountLate();
+      const button = buttons()[0];
+      button?.focus();
+      button?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+      expect(root().getAttribute("tabindex")).toBe("-1");
+
+      application = await restoreFromCache(application, (restored) =>
+        restored.register("stimeo--multi-select", MultiSelectController),
+      );
+
+      expect(root().hasAttribute("tabindex")).toBe(false);
+      expect(
+        root()
+          .getAttributeNames()
+          .filter((name) => name.endsWith("-loan")),
+      ).toEqual([]);
+    });
+
     it("hands the borrowed tab stop back on disconnect", async () => {
       await mountLate();
       const button = buttons()[0];
@@ -1435,7 +2095,7 @@ describe("MultiSelectController", () => {
       expect(root().hasAttribute("tabindex")).toBe(false);
     });
 
-    it("returns a borrowed tab stop before Turbo snapshots the page", async () => {
+    it("keeps a borrowed tab stop through turbo:before-cache, which also fires on a page that stays", async () => {
       await mountLate();
       const button = buttons()[0];
       button?.focus();
@@ -1444,7 +2104,8 @@ describe("MultiSelectController", () => {
 
       document.dispatchEvent(new Event("turbo:before-cache"));
 
-      expect(root().hasAttribute("tabindex")).toBe(false);
+      expect(root().getAttribute("tabindex")).toBe("-1");
+      expect(document.activeElement).toBe(root());
     });
 
     it("keeps a consumer-authored tabindex of -1 on the root", async () => {
@@ -1689,6 +2350,576 @@ describe("MultiSelectController", () => {
 
     expect(replacement.getAttribute("aria-expanded")).toBe("false");
     expect(replacement.hasAttribute("aria-activedescendant")).toBe(false);
+  });
+
+  it("describes the open widget to an input that arrives after the last one left", async () => {
+    await mount();
+    controller().open();
+    const activeId = input().getAttribute("aria-activedescendant");
+    const original = input();
+    const fresh = original.cloneNode() as HTMLInputElement;
+    fresh.setAttribute("aria-expanded", "false");
+    fresh.removeAttribute("aria-activedescendant");
+    original.remove();
+    await tick();
+    // Nothing departs in this batch, so the arrival is the only callback that can describe it.
+    list().before(fresh);
+    await tick();
+
+    expect(fresh.getAttribute("aria-expanded")).toBe("true");
+    expect(fresh.getAttribute("aria-activedescendant")).toBe(activeId);
+  });
+
+  it("re-describes an input that stays after an earlier one leaves, once the list opened meanwhile", async () => {
+    await mount();
+    const original = input();
+    const successor = original.cloneNode() as HTMLInputElement;
+    original.after(successor);
+    await tick();
+    controller().open();
+    const activeId = original.getAttribute("aria-activedescendant");
+    expect(activeId).toBeTruthy();
+    original.remove();
+    await tick();
+
+    expect(input()).toBe(successor);
+    expect(successor.getAttribute("aria-expanded")).toBe("true");
+    expect(successor.getAttribute("aria-activedescendant")).toBe(activeId);
+  });
+
+  it("says nothing when it re-describes an input left behind", async () => {
+    await mount();
+    const original = input();
+    const successor = original.cloneNode() as HTMLInputElement;
+    original.after(successor);
+    await tick();
+    controller().open();
+    const reports: string[] = [];
+    const listening = new AbortController();
+    for (const type of [
+      "stimeo--multi-select:change",
+      "stimeo--multi-select:reconcile",
+      "stimeo--multi-select:filter",
+    ]) {
+      root().addEventListener(type, () => reports.push(type), { signal: listening.signal });
+    }
+    const commits = captureFieldCommits();
+    original.remove();
+    await tick();
+    listening.abort();
+    commits.stop();
+
+    expect(successor.getAttribute("aria-expanded")).toBe("true");
+    expect(reports).toEqual([]);
+    expect(commits.seen).toEqual([]);
+    expect(announcements).toEqual([]);
+  });
+
+  it("keeps the list when its only input leaves", async () => {
+    await mount();
+    controller().open();
+    const leaving = input();
+    leaving.remove();
+    await tick();
+
+    expect(() => controller().inputTargetDisconnected(leaving)).not.toThrow();
+    expect(list().hidden).toBe(false);
+  });
+
+  it("describes nothing from an input departure delivered after disconnect", async () => {
+    await mount();
+    controller().open();
+    const instance = controller();
+    instance.disconnect();
+    // The page rewrites the input once the controller is gone; the departure
+    // Stimulus delivers after `disconnect()` must leave that alone.
+    input().setAttribute("aria-expanded", "false");
+
+    instance.inputTargetDisconnected(input());
+
+    expect(input().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("gives the authored ARIA back to an input that stops being the input", async () => {
+    await mount();
+    controller().open();
+    const former = input();
+    expect(former.getAttribute("aria-expanded")).toBe("true");
+    expect(former.getAttribute("aria-activedescendant")).toBe("ms-apple");
+
+    // The element stays; only the attribute naming it the input goes.
+    former.removeAttribute("data-stimeo--multi-select-target");
+    await tick();
+
+    expect(former.getAttribute("aria-expanded")).toBe("false");
+    expect(former.hasAttribute("aria-activedescendant")).toBe(false);
+  });
+
+  it("keeps an active descendant the page wrote on an input that stops being the input", async () => {
+    await mount();
+    controller().open();
+    const former = input();
+    former.setAttribute("aria-activedescendant", "ms-cherry");
+
+    former.removeAttribute("data-stimeo--multi-select-target");
+    await tick();
+
+    expect(former.getAttribute("aria-activedescendant")).toBe("ms-cherry");
+    expect(former.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("gives the input back its own ARIA when the widget loses its controller", async () => {
+    await mount();
+    controller().open();
+    const departed = input();
+
+    root().removeAttribute("data-controller");
+    await tick();
+
+    expect(departed.getAttribute("aria-expanded")).toBe("false");
+    expect(departed.hasAttribute("aria-activedescendant")).toBe(false);
+  });
+
+  it("keeps what it wrote on an input that moves within the widget", async () => {
+    await mount();
+    controller().open();
+    const moving = input();
+
+    const writes = await attributeWrites(moving, ["aria-expanded", "aria-activedescendant"], () =>
+      root().append(moving),
+    );
+
+    expect(moving.getAttribute("aria-expanded")).toBe("true");
+    expect(moving.getAttribute("aria-activedescendant")).toBe("ms-apple");
+    // A write that replaced a value other than the final one means the input was
+    // handed back on the way; a rewrite of the same value does not.
+    const transient = writes.filter(
+      (write) => write.oldValue !== moving.getAttribute(write.attributeName ?? ""),
+    );
+    expect(transient.map((write) => write.attributeName)).toEqual([]);
+  });
+
+  it("keeps what it wrote on the input and list when the whole widget leaves the page", async () => {
+    await mount();
+    controller().open();
+    const keptInput = input();
+    const keptList = list();
+
+    root().remove();
+    await tick();
+
+    expect(keptInput.getAttribute("aria-expanded")).toBe("true");
+    expect(keptInput.getAttribute("aria-activedescendant")).toBe("ms-apple");
+    expect(keptList.hidden).toBe(false);
+  });
+
+  describe("a list target that is replaced or stays after an earlier one leaves", () => {
+    it("keeps a list swapped in while open open, with its active option", async () => {
+      await mount();
+      input().focus();
+      key("ArrowDown");
+      const activeId = active();
+      expect(activeId).toBeTruthy();
+      const successor = list().cloneNode(true) as HTMLElement;
+      successor.hidden = true;
+      list().replaceWith(successor);
+      await tick();
+
+      expect(list()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+      expect(input().getAttribute("aria-expanded")).toBe("true");
+      expect(active()).toBe(activeId);
+    });
+
+    it("opens the list that stays after an earlier one leaves, once the widget opened meanwhile", async () => {
+      await mount();
+      const original = list();
+      const successor = original.cloneNode(false) as HTMLElement;
+      successor.id = "ms-list-next";
+      original.after(successor);
+      await tick();
+      controller().open();
+      original.remove();
+      await tick();
+
+      expect(list()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+      expect(input().getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("keeps the list that stays closed while the widget is closed", async () => {
+      await mount();
+      const original = list();
+      const successor = original.cloneNode(false) as HTMLElement;
+      successor.id = "ms-list-next";
+      successor.hidden = false;
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(list()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+    });
+
+    it("hides a list that arrives while there is no input to open it", async () => {
+      await mount();
+      input().remove();
+      await tick();
+      const late = list().cloneNode(false) as HTMLElement;
+      late.id = "ms-list-next";
+      late.hidden = false;
+      list().replaceWith(late);
+      await tick();
+
+      expect(late.hidden).toBe(true);
+    });
+
+    it("says nothing when it brings a swapped-in list in line", async () => {
+      await mount();
+      options()[0]?.click();
+      controller().open();
+      announcements = [];
+      const reports: string[] = [];
+      const listening = new AbortController();
+      for (const type of [
+        "stimeo--multi-select:change",
+        "stimeo--multi-select:reconcile",
+        "stimeo--multi-select:filter",
+      ]) {
+        root().addEventListener(type, () => reports.push(type), { signal: listening.signal });
+      }
+      const commits = captureFieldCommits();
+      const successor = list().cloneNode(true) as HTMLElement;
+      successor.hidden = true;
+      list().replaceWith(successor);
+      await tick();
+      listening.abort();
+      commits.stop();
+
+      expect(successor.hidden).toBe(false);
+      expect(selected()).toEqual(["true", "false", "false"]);
+      expect(reports).toEqual([]);
+      expect(commits.seen).toEqual([]);
+      expect(announcements).toEqual([]);
+    });
+
+    it("gives the authored hidden back to a list that stops being the list", async () => {
+      await mount();
+      controller().open();
+      const former = list();
+      expect(former.hidden).toBe(false);
+      // The element stays; only the attribute naming it the list goes.
+      former.removeAttribute("data-stimeo--multi-select-target");
+      await tick();
+
+      expect(former.hidden).toBe(true);
+    });
+
+    it("keeps the widget when its only list leaves", async () => {
+      await mount();
+      controller().open();
+      const leaving = list();
+      leaving.remove();
+      await tick();
+
+      expect(() => controller().listTargetDisconnected(leaving)).not.toThrow();
+      expect(input().getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("writes nothing to lists from callbacks delivered after disconnect", async () => {
+      await mount();
+      controller().open();
+      const instance = controller();
+      instance.disconnect();
+      // The page hides the list once the controller is gone; the callbacks Stimulus
+      // delivers after `disconnect()` must leave that alone.
+      list().hidden = true;
+      const late = list().cloneNode(false) as HTMLElement;
+      late.hidden = true;
+
+      instance.listTargetDisconnected(list());
+      instance.listTargetConnected(late);
+
+      expect(list().hidden).toBe(true);
+      expect(late.hidden).toBe(true);
+    });
+
+    it("closes over a list that loses its mark and reopens it with an active option when the mark returns", async () => {
+      await mount();
+      controller().open();
+      const element = list();
+      expect(active()).toBeTruthy();
+
+      element.removeAttribute("data-stimeo--multi-select-target");
+      await tick();
+      // No list is left, so the reconcile pass drops the active option.
+      expect(active()).toBeNull();
+      expect(options().some((option) => option.hasAttribute("data-active"))).toBe(false);
+
+      element.setAttribute("data-stimeo--multi-select-target", "list");
+      await tick();
+      // The input still says the widget is open, and the pass seeds an active option.
+      expect(element.hidden).toBe(false);
+      expect(active()).toBe("ms-apple");
+    });
+
+    it("gives the list back its own hidden when the widget loses its controller", async () => {
+      await mount();
+      controller().open();
+      const departed = list();
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("keeps what it wrote on a list that moves within the widget", async () => {
+      await mount();
+      controller().open();
+      const moving = list();
+
+      const writes = await attributeWrites(moving, ["hidden"], () => root().append(moving));
+
+      expect(moving.hidden).toBe(false);
+      // `hidden` is written only when it changes, so any write means the list was
+      // handed back on the way.
+      expect(writes.map((write) => write.attributeName)).toEqual([]);
+    });
+
+    it("keeps the widget closed on the list that stays once the page hid the list it opened", async () => {
+      await mount();
+      controller().open();
+      const original = list();
+      // The page closes the list itself, behind the widget's back.
+      original.hidden = true;
+      const successor = original.cloneNode(false) as HTMLElement;
+      successor.id = "ms-list-next";
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(list()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps the widget closed on the list that stays when the page hid the open list after it arrived", async () => {
+      await mount();
+      controller().open();
+      const original = list();
+      const successor = original.cloneNode(false) as HTMLElement;
+      successor.id = "ms-list-next";
+      original.after(successor);
+      await tick();
+      original.hidden = true;
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(list()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps the widget closed on a list that replaces, in a later task, the open list the page hid", async () => {
+      await mount();
+      controller().open();
+      const original = list();
+      original.hidden = true;
+      await tick();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.id = "ms-list-next";
+      successor.hidden = false;
+      original.replaceWith(successor);
+      await tick();
+
+      expect(list()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps the widget closed on a list added, as the hidden open list leaves, in one later task", async () => {
+      await mount();
+      controller().open();
+      const original = list();
+      original.hidden = true;
+      await tick();
+      const successor = original.cloneNode(false) as HTMLElement;
+      successor.id = "ms-list-next";
+      successor.hidden = false;
+      // The arrival is reported before the departure.
+      original.after(successor);
+      original.remove();
+      await tick();
+
+      expect(list()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps the widget closed on a list that arrives in front of the open list the page hid", async () => {
+      await mount();
+      controller().open();
+      const original = list();
+      original.hidden = true;
+      await tick();
+      const successor = original.cloneNode(false) as HTMLElement;
+      successor.id = "ms-list-next";
+      successor.hidden = false;
+      original.before(successor);
+      await tick();
+
+      expect(list()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps the widget closed on a list that arrives after its only list, hidden by the page, left", async () => {
+      await mount();
+      controller().open();
+      const original = list();
+      const late = original.cloneNode(false) as HTMLElement;
+      late.id = "ms-list-next";
+      late.hidden = false;
+      original.hidden = true;
+      await tick();
+      original.remove();
+      await tick();
+      input().after(late);
+      await tick();
+
+      expect(list()).toBe(late);
+      expect(late.hidden).toBe(true);
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("writes nothing to a list that arrives in front after disconnect", async () => {
+      await mount();
+      controller().open();
+      const instance = controller();
+      instance.disconnect();
+      const late = list().cloneNode(false) as HTMLElement;
+      late.id = "ms-list-late";
+      late.hidden = true;
+      list().before(late);
+
+      instance.listTargetConnected(late);
+
+      expect(late.hidden).toBe(true);
+    });
+
+    it("writes nothing to the list that stays from a departure delivered after disconnect", async () => {
+      await mount();
+      const original = list();
+      const successor = original.cloneNode(false) as HTMLElement;
+      successor.id = "ms-list-next";
+      original.after(successor);
+      await tick();
+      controller().open();
+      const instance = controller();
+      instance.disconnect();
+      original.remove();
+
+      instance.listTargetDisconnected(original);
+
+      expect(successor.hidden).toBe(true);
+    });
+  });
+
+  describe("an input and a list swapped together", () => {
+    /** A fresh input in the server's resting markup. */
+    const freshInput = () => {
+      const fresh = input().cloneNode() as HTMLInputElement;
+      fresh.setAttribute("aria-expanded", "false");
+      fresh.removeAttribute("aria-activedescendant");
+      return fresh;
+    };
+    /** A fresh list in the server's resting markup. */
+    const freshList = () => {
+      const fresh = list().cloneNode(true) as HTMLElement;
+      fresh.hidden = true;
+      return fresh;
+    };
+
+    it("keeps an open widget open when the input is swapped before the list", async () => {
+      await mount();
+      controller().open();
+      const activeId = active();
+      const nextInput = freshInput();
+      const nextList = freshList();
+
+      input().replaceWith(nextInput);
+      list().replaceWith(nextList);
+      await tick();
+
+      expect(nextList.hidden).toBe(false);
+      expect(nextInput.getAttribute("aria-expanded")).toBe("true");
+      expect(nextInput.getAttribute("aria-activedescendant")).toBe(activeId);
+    });
+
+    it("keeps an open widget open when the list is swapped before the input", async () => {
+      await mount();
+      controller().open();
+      const activeId = active();
+      const nextInput = freshInput();
+      const nextList = freshList();
+
+      list().replaceWith(nextList);
+      input().replaceWith(nextInput);
+      await tick();
+
+      expect(nextList.hidden).toBe(false);
+      expect(nextInput.getAttribute("aria-expanded")).toBe("true");
+      expect(nextInput.getAttribute("aria-activedescendant")).toBe(activeId);
+    });
+
+    it("keeps a closed widget closed when both are swapped", async () => {
+      await mount();
+      const nextInput = freshInput();
+      nextInput.setAttribute("aria-expanded", "true");
+      const nextList = freshList();
+      nextList.hidden = false;
+
+      input().replaceWith(nextInput);
+      list().replaceWith(nextList);
+      await tick();
+
+      expect(nextList.hidden).toBe(true);
+      expect(nextInput.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("says nothing when it keeps the widget open across the swap", async () => {
+      await mount();
+      options()[0]?.click();
+      controller().open();
+      announcements = [];
+      const reports: string[] = [];
+      const listening = new AbortController();
+      for (const type of [
+        "stimeo--multi-select:change",
+        "stimeo--multi-select:reconcile",
+        "stimeo--multi-select:filter",
+      ]) {
+        root().addEventListener(type, () => reports.push(type), { signal: listening.signal });
+      }
+      const commits = captureFieldCommits();
+      const nextInput = freshInput();
+      const nextList = freshList();
+
+      input().replaceWith(nextInput);
+      list().replaceWith(nextList);
+      await tick();
+      listening.abort();
+      commits.stop();
+
+      expect(nextList.hidden).toBe(false);
+      expect(reports).toEqual([]);
+      expect(commits.seen).toEqual([]);
+      expect(announcements).toEqual([]);
+    });
   });
 
   describe("runtime option removal", () => {
@@ -2318,6 +3549,20 @@ describe("MultiSelectController", () => {
 
       expect(emptyRegion()).toBe(replacement);
       expect(replacement.hidden).toBe(false);
+    });
+
+    it("takes the region down when an open attempt finds the list target gone", async () => {
+      // Without a list the widget cannot be open, so the empty result it was
+      // showing no longer holds; the open attempt settles that side at once.
+      await mountEmpty();
+      filterTo("zzz");
+      expect(emptyRegion().hidden).toBe(false);
+
+      list().removeAttribute("data-stimeo--multi-select-target");
+      input().dispatchEvent(new FocusEvent("focus"));
+
+      expect(emptyRegion().hidden).toBe(true);
+      expect(root().hasAttribute("data-stimeo--multi-select-empty")).toBe(false);
     });
 
     it("connects a resting region without writing `hidden` at all", async () => {

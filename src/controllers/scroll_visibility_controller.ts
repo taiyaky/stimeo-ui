@@ -1,9 +1,13 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { BlurDeferral } from "../utils/blur_deferral";
 import { validSelector } from "../utils/declared_value";
 import { FrameCoalescer } from "../utils/frame_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { prefersReducedMotion } from "../utils/reduced_motion";
-import { resolveScrollSource, scrollOffset } from "../utils/scroll_source";
+import { resolveScrollSource, type ScrollSource, scrollOffset } from "../utils/scroll_source";
 import { TabindexLoan } from "../utils/tabindex_loan";
 
 /** Default scroll threshold in px, and what a non-finite declaration falls back to. */
@@ -45,10 +49,14 @@ const DEFAULT_OFFSET = 400;
  * @remarks
  * Behavior only — the look and any transition are the consumer's CSS. The scroll
  * listener is `passive`, coalesced through `requestAnimationFrame`, and removed on
- * `disconnect()` (Turbo navigation included). `offset` / `mode` are re-read at
- * runtime, so a Turbo morph that swaps either attribute is followed without
- * waiting for the next scroll; a selector (`root`, `focusSelector`) or a
- * threshold that cannot be parsed reads as its default, keeping the rest of the
+ * `disconnect()` (Turbo navigation included). `offset`, `mode` and `root` follow a
+ * runtime change — a Turbo morph, a Stream, an author script — without waiting for
+ * the next scroll: the Values a batch changes are applied in one pass after it. A
+ * `root` that names another container, or a morph that reaches this element after
+ * replacing the container its selector names, moves the listener to the container
+ * resolved now; the position found there is a baseline rather than a movement, and
+ * the visibility is decided again from it. A selector (`root`, `focusSelector`) or
+ * a threshold that cannot be parsed reads as its default, keeping the rest of the
  * element alive. **A scroll never hides the control while it owns focus**: that
  * hide waits for it to blur and is decided again from the scroll position at that
  * moment. `toTop` honors `prefers-reduced-motion` by forcing an
@@ -61,6 +69,9 @@ const DEFAULT_OFFSET = 400;
  * was cloned before disconnect.
  */
 export class ScrollVisibilityController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["element"];
   static override values = {
     offset: { type: Number, default: DEFAULT_OFFSET },
@@ -68,10 +79,15 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
     focusSelector: { type: String, default: "" },
     root: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    offset: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof ScrollVisibilityController.values>;
   static actions = ["toTop"] as const;
   static events = ["change"] as const;
 
   declare readonly elementTarget: HTMLElement;
+  declare readonly elementTargets: HTMLElement[];
   declare readonly hasElementTarget: boolean;
 
   declare offsetValue: number;
@@ -86,10 +102,11 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
   /** Current visibility, tracked to dispatch `change` only on real transitions. */
   #visible: boolean | null = null;
   /**
-   * The observed scroll source: a container element when `root` resolves, else
-   * the window. Captured on connect so teardown detaches from the same source.
+   * The scroll source the listener is on: a container element when `root`
+   * resolves, else the window. Teardown and a move to another source detach from
+   * this same node.
    */
-  #scrollSource: HTMLElement | Window = window;
+  #scrollSource: ScrollSource = window;
   /**
    * Gates the declaration callbacks to the connected window.
    *
@@ -105,7 +122,9 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
   /** Validated `focusSelector`; an unparsable declaration reads as absent. */
   #focusSelector = "";
   /** Focus targets this instance lent a `tabindex` to. */
-  readonly #tabindex = new TabindexLoan();
+  readonly #tabindex = new TabindexLoan("-1", this.identifier);
+  /** Owns the `hidden` written on each control, so one that departs gets its own back. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
   /**
    * The hide held back while the control itself owns focus.
    *
@@ -119,15 +138,25 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
 
   readonly #onScroll = (): void => this.#frames.schedule(() => this.#evaluate());
 
+  /**
+   * One pass for a retained-element morph and for the Values a batch changes:
+   * follow the scroll source the declaration names now, then decide again.
+   */
+  readonly #morphRender = new MorphRenderWatcher(() => {
+    this.#followSource();
+    this.#evaluate();
+  });
+
   override connect(): void {
-    this.#scrollSource = resolveScrollSource(this.#rootSelector);
-    this.#lastScrollY = scrollOffset(this.#scrollSource);
-    this.#scrollSource.addEventListener("scroll", this.#onScroll, { passive: true });
+    this.#tabindex.reclaimWithin(document);
+    this.#morphRender.observe(this.element);
+    this.#listenTo(resolveScrollSource(this.#rootSelector));
     this.#evaluate(false);
     this.#connected = true;
   }
 
   override disconnect(): void {
+    this.#morphRender.disconnect();
     this.#connected = false;
     this.#scrollSource.removeEventListener("scroll", this.#onScroll);
     this.#frames.cancel();
@@ -138,39 +167,50 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
 
   /** Writes the current visibility onto a control that arrives after connect. */
   elementTargetConnected(element: HTMLElement): void {
-    if (this.#visible !== null) element.hidden = !this.#visible;
+    if (this.#visible !== null) this.#show(element, this.#visible);
   }
 
-  /** Drops a held-back hide together with the control it was waiting on. */
-  elementTargetDisconnected(): void {
+  /**
+   * Drops a held-back hide with its control, gives a control that no longer resolves its
+   * own `hidden` back, even after `disconnect()`, and writes the visibility onto the one
+   * that stays.
+   */
+  elementTargetDisconnected(element: HTMLElement): void {
     // At most one hide is ever held back, and it rides an element inside the
     // target — the focus owner, which may be a descendant rather than the
     // target itself. Losing the target ends that wait either way.
     this.#pendingHide.releaseAll();
+    if (!this.elementTargets.includes(element)) this.#hidden.return(element);
+    if (this.#visible !== null && this.hasElementTarget) {
+      this.#show(this.elementTarget, this.#visible);
+    }
   }
 
   /**
-   * Validates `offset` once, then re-renders.
+   * Validates `offset` once, then asks for a pass.
    *
-   * Re-renders when application code (or a Turbo morph) changes `offset` at
-   * runtime. A declaration that is not a finite number reads as the default, so
-   * the comparison path never sees `NaN` — which would answer `false` to every
+   * A declaration that is not a finite number reads as the default, so the
+   * comparison path never sees `NaN` — which would answer `false` to every
    * comparison and strand the element (in `direction` mode, even the guarantee
    * that the very top always reveals).
    */
   offsetValueChanged(): void {
-    this.#offset = Number.isFinite(this.offsetValue) ? this.offsetValue : DEFAULT_OFFSET;
-    if (this.#connected) this.#evaluate();
+    this.#offset = this.#safeOffset;
+    this.#morphRender.schedule();
   }
 
-  /** Re-renders when application code (or a Turbo morph) changes `mode` at runtime. */
+  /** Asks for a pass when application code (or a Turbo morph) changes `mode`. */
   modeValueChanged(): void {
-    if (this.#connected) this.#evaluate();
+    this.#morphRender.schedule();
   }
 
-  /** Validates `root` once so connect never parses a selector that throws. */
+  /**
+   * Validates `root` once, so no resolve parses a selector that throws, then asks
+   * for a pass that follows the source it names.
+   */
   rootValueChanged(): void {
     this.#rootSelector = validSelector(this.element, this.rootValue, "");
+    this.#morphRender.schedule();
   }
 
   /** Validates `focusSelector` once so `toTop` never parses a selector that throws. */
@@ -194,6 +234,29 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
   }
 
   /**
+   * Moves the listener to the scroll source the declaration resolves to now, when
+   * that is another node: released from the old one first, then added once to the
+   * new one. A pass that resolves to the source already held keeps it, and with it
+   * the position a pending scroll is measured from.
+   */
+  #followSource(): void {
+    const source = resolveScrollSource(this.#rootSelector);
+    if (source === this.#scrollSource) return;
+    this.#scrollSource.removeEventListener("scroll", this.#onScroll);
+    this.#listenTo(source);
+  }
+
+  /**
+   * Listens to `source`, taking its current position as the baseline: a position
+   * on a source not listened to before is where it is, not a movement.
+   */
+  #listenTo(source: ScrollSource): void {
+    this.#scrollSource = source;
+    this.#lastScrollY = scrollOffset(source);
+    source.addEventListener("scroll", this.#onScroll, { passive: true });
+  }
+
+  /**
    * Decides the next visibility from the current scroll state and applies it.
    *
    * @param notify - whether a transition announces itself. The reflection
@@ -211,6 +274,7 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
         nextVisible = true;
       } else if (y === this.#lastScrollY) {
         // No vertical movement carries no direction, so it decides nothing.
+        this.#setVisible(this.#visible ?? true, notify);
         return;
       } else {
         nextVisible = y < this.#lastScrollY; // scrolling up reveals, down hides
@@ -224,7 +288,7 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
 
   /** Applies visibility to the target, syncing `hidden`, `data-state`, `change`. */
   #setVisible(next: boolean, notify: boolean): void {
-    if (next === this.#visible) return;
+    const changed = next !== this.#visible;
     const focused = !next && this.hasElementTarget ? this.#focusedWithin() : null;
     if (focused) {
       // Hiding the element that holds focus drops it to the document body,
@@ -234,9 +298,14 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
       return;
     }
     this.#visible = next;
-    if (this.hasElementTarget) this.elementTarget.hidden = !next;
+    if (this.hasElementTarget) this.#show(this.elementTarget, next);
     this.element.setAttribute("data-state", next ? "visible" : "hidden");
-    if (notify) this.dispatch("change", { detail: { visible: next } });
+    if (notify && changed) this.dispatch("change", { detail: { visible: next } });
+  }
+
+  /** Shows or hides one control through the lease. */
+  #show(control: HTMLElement, visible: boolean): void {
+    this.#hidden.write(control, visible ? null : "");
   }
 
   /**
@@ -250,5 +319,15 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
     const focused = document.activeElement;
     if (focused instanceof HTMLElement && this.elementTarget.contains(focused)) return focused;
     return null;
+  }
+  /** Current `offset` declaration resolved against its numeric contract. */
+  get #safeOffset(): number {
+    return this.#numbers.read(
+      this,
+      "offset",
+      this.offsetValue,
+      ScrollVisibilityController.values.offset.default,
+      ScrollVisibilityController.valueConstraints.offset,
+    );
   }
 }

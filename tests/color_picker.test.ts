@@ -120,6 +120,132 @@ describe("ColorPickerController", () => {
     await tick();
   };
 
+  it.each(["#123456", "#12345678", "#abcdef01"])(
+    "preserves every declared hex byte through a boundary key: %s",
+    async (value) => {
+      await start(
+        'data-stimeo--color-picker-value-value="' +
+          value +
+          '" data-stimeo--color-picker-alpha-value="true"',
+        { alpha: true },
+      );
+      const expected = value.length === 7 ? value + "ff" : value;
+      expect(hex().value).toBe(expected);
+      const current = slider("hue").getAttribute("aria-valuenow") as string;
+      slider("hue").setAttribute("aria-valuemax", current);
+      const seen: unknown[] = [];
+      root().addEventListener("stimeo--color-picker:change", (event) =>
+        seen.push((event as CustomEvent).detail),
+      );
+      press(slider("hue"), "ArrowUp");
+      expect(hex().value).toBe(expected);
+      expect(declaredValue()).toBe(value);
+      expect(seen).toEqual([]);
+    },
+  );
+
+  it.each(["a", "b"])(
+    "incorporates a pending color declaration into the user confirmation: %s",
+    async (mode) => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const seen: string[] = [];
+      root().addEventListener("stimeo--color-picker:change", (event) =>
+        seen.push((event as CustomEvent).detail.value),
+      );
+      root().setAttribute(
+        "data-stimeo--color-picker-value-value",
+        mode === "a" ? "#00ff00" : "#ff0400",
+      );
+      press(slider("hue"), mode === "a" ? "ArrowUp" : "ArrowDown");
+      expect(field().value).toBe(mode === "a" ? "#00ff04" : "#ff0000");
+      expect(seen).toEqual(mode === "a" ? ["#00ff04"] : []);
+    },
+  );
+
+  it.each(["replace", "read", "repeat"])(
+    "writes every color surface before reporting and suppresses replaced reports: %s",
+    async (mode) => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const second = field().cloneNode() as HTMLInputElement;
+      root().append(second);
+      await tick();
+      const seen: string[] = [];
+      root().addEventListener("stimeo--color-picker:change", (event) =>
+        seen.push((event as CustomEvent).detail.value),
+      );
+      const snapshots: string[][] = [];
+      let handled = false;
+      field().addEventListener(
+        "change",
+        () => {
+          if (handled) return;
+          handled = true;
+          snapshots.push([second.value, color(preview()), color()]);
+          if (mode === "replace") press(slider("lightness"), "Home");
+          if (mode === "repeat") press(slider("lightness"), "End");
+        },
+        { once: true },
+      );
+      press(slider("lightness"), "End");
+      expect(snapshots).toEqual([["#ffffff", "#ffffff", "#ffffff"]]);
+      const expected = mode === "replace" ? "#000000" : "#ffffff";
+      expect(seen).toEqual([expected]);
+      expect(second.value).toBe(expected);
+      expect(color()).toBe(expected);
+    },
+  );
+
+  it("does not repeat a second field report after nested colors return to its value", async () => {
+    await start('data-stimeo--color-picker-value-value="#ff0000"');
+    const second = field().cloneNode() as HTMLInputElement;
+    root().append(second);
+    await tick();
+    const native: string[] = [];
+    second.addEventListener("change", () => native.push(second.value));
+    let handled = false;
+    field().addEventListener("change", () => {
+      if (handled) return;
+      handled = true;
+      press(slider("lightness"), "Home");
+      press(slider("lightness"), "End");
+    });
+    press(slider("lightness"), "End");
+    expect(native).toEqual(["#000000", "#ffffff"]);
+  });
+
+  it("incorporates a pending declaration before a pointer changes a channel", async () => {
+    await start('data-stimeo--color-picker-value-value="#ff0000"');
+    const seen: string[] = [];
+    root().addEventListener("stimeo--color-picker:change", (event) =>
+      seen.push((event as CustomEvent<{ value: string }>).detail.value),
+    );
+    root().setAttribute("data-stimeo--color-picker-value-value", "#00ff00");
+    pointerDown(track("lightness", 100), { clientX: 50, pointerId: 1 });
+    pointerUp({ pointerId: 1 });
+    expect(field().value).toBe("#00ff00");
+    expect(seen).toEqual(["#00ff00"]);
+    await tick();
+    expect(seen).toEqual(["#00ff00"]);
+  });
+
+  it("reports exact typed bytes in both hex and RGBA including alpha", async () => {
+    await start('data-stimeo--color-picker-alpha-value="true"', { alpha: true });
+    const seen: unknown[] = [];
+    root().addEventListener("stimeo--color-picker:change", (event) =>
+      seen.push((event as CustomEvent).detail),
+    );
+    hex().value = "#12345678";
+    hex().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(seen).toEqual([{ value: "#12345678", rgba: { r: 18, g: 52, b: 86, a: 120 / 255 } }]);
+    slider("alpha").setAttribute(
+      "aria-valuemin",
+      slider("alpha").getAttribute("aria-valuenow") as string,
+    );
+    press(slider("alpha"), "ArrowDown");
+    expect(field().value).toBe("#12345678");
+    expect(seen).toHaveLength(1);
+  });
+
   it("seeds every channel and surface from the initial hex value", async () => {
     await start('data-stimeo--color-picker-value-value="#ff0000"');
     expect(slider("hue").getAttribute("aria-valuenow")).toBe("0");
@@ -155,6 +281,19 @@ describe("ColorPickerController", () => {
     expect(slider("hue").getAttribute("aria-valuenow")).toBe("1");
     // Hue 1°, full saturation/half lightness is still essentially red.
     expect(hex().value).toBe("#ff0400");
+  });
+
+  it("keeps the page from scrolling on a key that steps a channel", async () => {
+    await start('data-stimeo--color-picker-value-value="#ff0000"');
+    const event = new KeyboardEvent("keydown", {
+      key: "PageDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    slider("lightness").dispatchEvent(event);
+
+    expect(slider("lightness").getAttribute("aria-valuenow")).toBe("40");
+    expect(event.defaultPrevented).toBe(true);
   });
 
   it("leaves a modified arrow to the browser", async () => {
@@ -340,6 +479,26 @@ describe("ColorPickerController", () => {
     expect(hex().value).toBe("#ff000000");
   });
 
+  it("reflects an opaque alpha slider for a translucent declaration while alpha is disabled", async () => {
+    await start('data-stimeo--color-picker-value-value="#12345678"', { alpha: true });
+    expect(slider("alpha").getAttribute("aria-valuenow")).toBe("100");
+    hex().value = "#abcdef01";
+    hex().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(slider("alpha").getAttribute("aria-valuenow")).toBe("100");
+  });
+
+  it("drops retained model alpha when an invalid declaration and alpha disable arrive together", async () => {
+    await start(
+      'data-stimeo--color-picker-value-value="#12345678" data-stimeo--color-picker-alpha-value="true"',
+      { alpha: true },
+    );
+    root().setAttribute("data-stimeo--color-picker-value-value", "invalid");
+    root().setAttribute("data-stimeo--color-picker-alpha-value", "false");
+    await tick();
+    expect(slider("alpha").getAttribute("aria-valuenow")).toBe("100");
+    expect(field().value).toBe("#123456");
+  });
+
   it("drops the alpha of an #RRGGBBAA initial value when alpha is disabled", async () => {
     // alpha defaults to false: a translucent initial value must be normalized to
     // opaque so the hex and the change event's rgba.a do not disagree.
@@ -384,6 +543,79 @@ describe("ColorPickerController", () => {
     expect(detail.at(-1)?.rgba.a).toBe(1);
   });
 
+  it("reads alpha at each press on the alpha slider", async () => {
+    await start('data-stimeo--color-picker-value-value="#ff0000"', { alpha: true });
+    const alpha = track("alpha", 100);
+    const refused = pointerDown(alpha, { clientX: 40, pointerId: 31 });
+    pointerUp({ pointerId: 31 });
+    expect(refused.defaultPrevented).toBe(false);
+    expect(slider("alpha").getAttribute("aria-valuenow")).toBe("100");
+
+    // The next press reads the channel switched on since the last one.
+    root().setAttribute("data-stimeo--color-picker-alpha-value", "true");
+    await tick();
+    const taken = pointerDown(alpha, { clientX: 40, pointerId: 32 });
+    pointerUp({ pointerId: 32 });
+    expect(taken.defaultPrevented).toBe(true);
+    expect(slider("alpha").getAttribute("aria-valuenow")).toBe("40");
+    expect(hex().value).toBe("#ff000066");
+  });
+
+  it("ends a drag on the alpha slider when alpha is switched off, leaving the slider opaque", async () => {
+    await start(
+      'data-stimeo--color-picker-value-value="#ff0000" data-stimeo--color-picker-alpha-value="true"',
+      { alpha: true },
+    );
+    const alpha = track("alpha", 100);
+    const changes: string[] = [];
+    const repairs: string[] = [];
+    root().addEventListener("stimeo--color-picker:change", (event) => {
+      changes.push((event as CustomEvent<{ value: string }>).detail.value);
+    });
+    root().addEventListener("stimeo--color-picker:reconcile", (event) => {
+      repairs.push((event as CustomEvent<{ value: string }>).detail.value);
+    });
+    pointerDown(alpha, { clientX: 80, pointerId: 41 });
+    // The drag reaches the model under this harness before the switch.
+    pointerMove({ clientX: 60, pointerId: 41 });
+    expect(slider("alpha").getAttribute("aria-valuenow")).toBe("60");
+    expect(hex().value).toBe("#ff000099");
+
+    root().setAttribute("data-stimeo--color-picker-alpha-value", "false");
+    await tick();
+    expect(hex().value).toBe("#ff0000");
+    expect(slider("alpha").getAttribute("aria-valuenow")).toBe("100");
+
+    // The slider edits nothing now, so the drag on it has ended.
+    pointerMove({ clientX: 20, pointerId: 41 });
+    pointerUp({ pointerId: 41 });
+    expect(slider("alpha").getAttribute("aria-valuenow")).toBe("100");
+    expect(hex().value).toBe("#ff0000");
+    expect(declaredValue()).toBe("#ff000099");
+    expect(changes).toEqual(["#ff0000cc", "#ff000099"]);
+    expect(repairs).toEqual(["#ff0000"]);
+
+    // The picker is free for the next press, on a channel it still edits.
+    pointerDown(track("hue"), { clientX: 180, pointerId: 42 });
+    pointerUp({ pointerId: 42 });
+    expect(slider("hue").getAttribute("aria-valuenow")).toBe("180");
+  });
+
+  it("keeps a drag on another channel when alpha is switched off", async () => {
+    await start(
+      'data-stimeo--color-picker-value-value="#ff0000" data-stimeo--color-picker-alpha-value="true"',
+      { alpha: true },
+    );
+    pointerDown(track("hue"), { clientX: 90, pointerId: 43 });
+    expect(slider("hue").getAttribute("aria-valuenow")).toBe("90");
+
+    root().setAttribute("data-stimeo--color-picker-alpha-value", "false");
+    await tick();
+    pointerMove({ clientX: 180, pointerId: 43 });
+    expect(slider("hue").getAttribute("aria-valuenow")).toBe("180");
+    pointerUp({ pointerId: 43 });
+  });
+
   it("drops the alpha the model carried when the channel is disabled at runtime", async () => {
     await start(
       'data-stimeo--color-picker-value-value="#ff0000" data-stimeo--color-picker-alpha-value="true"',
@@ -410,6 +642,17 @@ describe("ColorPickerController", () => {
     hue.getBoundingClientRect = () => new DOMRect(0, 0, 360, 10);
     hue.dispatchEvent(new PointerEvent("pointerdown", { clientX: 180, bubbles: true }));
     expect(slider("hue").getAttribute("aria-valuenow")).toBe("180");
+  });
+
+  it("moves focus to the slider a primary press starts a drag on", async () => {
+    await start('data-stimeo--color-picker-value-value="#ff0000"');
+    const hue = track("hue");
+
+    const event = pointerDown(hue, { clientX: 180, pointerId: 20 });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(hue);
+    pointerUp({ pointerId: 20 });
   });
 
   it("owns the initiating pointer through movement and termination", async () => {
@@ -505,6 +748,20 @@ describe("ColorPickerController", () => {
 
     const saturation = track("saturation");
     pointerDown(saturation, { clientX: 90, pointerId: 19 });
+
+    expect(saturation.getAttribute("aria-valuenow")).toBe("25");
+  });
+
+  it("ends the drag at a move that finds its slider detached before the removal is observed", async () => {
+    await start('data-stimeo--color-picker-value-value="#ff0000"');
+    const hue = track("hue");
+    pointerDown(hue, { clientX: 180, pointerId: 21 });
+    // Stimulus observes the removal a microtask later; this move reaches the drag first.
+    hue.remove();
+    pointerMove({ clientX: 0, pointerId: 21 });
+
+    const saturation = track("saturation");
+    pointerDown(saturation, { clientX: 90, pointerId: 22 });
 
     expect(saturation.getAttribute("aria-valuenow")).toBe("25");
   });
@@ -639,6 +896,23 @@ describe("ColorPickerController", () => {
 
       pressHue(180);
       expect(slider("hue").getAttribute("aria-valuenow")).toBe("180");
+
+      pressHue(0);
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("360");
+    });
+
+    it("keeps the direction a drag started with when logicalTrack changes, and reads it anew at the next press", async () => {
+      await start('data-stimeo--color-picker-value-value="#000000"');
+      root().style.direction = "rtl";
+      pointerDown(track("hue"), { clientX: 90, pointerId: 2 });
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("90");
+
+      root().setAttribute("data-stimeo--color-picker-logical-track-value", "true");
+      await tick();
+      // The live drag keeps the physical mapping it resolved at its press.
+      pointerMove({ clientX: 0, pointerId: 2 });
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("0");
+      pointerUp({ pointerId: 2 });
 
       pressHue(0);
       expect(slider("hue").getAttribute("aria-valuenow")).toBe("360");
@@ -1027,6 +1301,178 @@ describe("ColorPickerController", () => {
       expect(submitted.value).toBe("#ff0000");
       expect(color(swatch)).toBe("#ff0000");
     });
+
+    it("fills a form field and preview added at runtime beside the hex input in use", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const submitted = document.createElement("input");
+      submitted.type = "hidden";
+      submitted.setAttribute("data-stimeo--color-picker-target", "field");
+      const swatch = document.createElement("div");
+      swatch.setAttribute("data-stimeo--color-picker-target", "preview");
+
+      root().append(submitted, swatch);
+      await tick();
+
+      expect(submitted.value).toBe("#ff0000");
+      expect(color(swatch)).toBe("#ff0000");
+    });
+
+    /** Inserts an empty copy of the hex input after it and lets Stimulus connect the copy. */
+    const addHexSuccessor = async () => {
+      const original = hex();
+      const successor = original.cloneNode() as HTMLInputElement;
+      successor.value = "";
+      original.after(successor);
+      await tick();
+      return { original, successor };
+    };
+
+    it("fills a hex input that stays after an earlier one leaves with the color moved meanwhile", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const { original, successor } = await addHexSuccessor();
+      expect(successor.value).toBe("#ff0000");
+      press(slider("hue"), "ArrowRight");
+      expect(original.value).toBe("#ff0400");
+      original.remove();
+      await tick();
+
+      expect(hex()).toBe(successor);
+      expect(successor.value).toBe("#ff0400");
+    });
+
+    it("fills a hex input that stays after an earlier one leaves with a color the page moved to", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const { original, successor } = await addHexSuccessor();
+      root().setAttribute("data-stimeo--color-picker-value-value", "#00ff00");
+      await tick();
+      expect(original.value).toBe("#00ff00");
+      original.remove();
+      await tick();
+
+      expect(hex()).toBe(successor);
+      expect(successor.value).toBe("#00ff00");
+    });
+
+    it("fills the staying hex input without a report or a native change", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const { original, successor } = await addHexSuccessor();
+      press(slider("hue"), "ArrowRight");
+      await tick();
+      const events: string[] = [];
+      for (const type of ["change", "reconcile"]) {
+        root().addEventListener(`stimeo--color-picker:${type}`, () => events.push(type));
+      }
+      const commits = captureFieldCommits();
+
+      original.remove();
+      await tick();
+      commits.stop();
+
+      expect(successor.value).toBe("#ff0400");
+      expect(events).toEqual([]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("keeps working when its only hex input leaves", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const errors = captureErrors();
+      hex().remove();
+      await tick();
+      press(slider("hue"), "ArrowRight");
+
+      expect(errors).toEqual([]);
+      expect(field().value).toBe("#ff0400");
+    });
+
+    /**
+     * Commits `text` in `input` the way its bound `change` does. Stimulus binds the
+     * action of an appended input unreliably under happy-dom, so the call it would
+     * make with that event is made here directly as well.
+     */
+    const commitIn = (input: HTMLInputElement, text: string) => {
+      const picker = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--color-picker",
+      ) as ColorPickerController;
+      input.value = text;
+      const event = new Event("change", { bubbles: true });
+      input.dispatchEvent(event);
+      picker.onHexInput(event);
+    };
+
+    it("reads a color committed in a hex input that waits behind the one in use", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const { original, successor } = await addHexSuccessor();
+      const changes: string[] = [];
+      root().addEventListener("stimeo--color-picker:change", (event) => {
+        changes.push((event as CustomEvent<{ value: string }>).detail.value);
+      });
+
+      commitIn(successor, "#0F0");
+
+      expect(changes).toEqual(["#00ff00"]);
+      expect(field().value).toBe("#00ff00");
+      expect(declaredValue()).toBe("#00ff00");
+      expect(successor.value).toBe("#00ff00");
+      expect(original.value).toBe("#00ff00");
+    });
+
+    it("restores the last valid color into the hex input an invalid entry was committed in", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const { original, successor } = await addHexSuccessor();
+
+      commitIn(successor, "not a color");
+
+      expect(successor.value).toBe("#ff0000");
+      expect(original.value).toBe("#ff0000");
+      expect(field().value).toBe("#ff0000");
+    });
+
+    it("commits nothing for a change that no hex input dispatched", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const picker = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--color-picker",
+      ) as ColorPickerController;
+      const changes: string[] = [];
+      root().addEventListener("stimeo--color-picker:change", () => changes.push("change"));
+      hex().value = "#00ff00";
+      const event = new Event("change", { bubbles: true });
+      field().dispatchEvent(event);
+
+      picker.onHexInput(event);
+
+      expect(changes).toEqual([]);
+      expect(field().value).toBe("#ff0000");
+      expect(hex().value).toBe("#00ff00");
+    });
+
+    it("does nothing when the action is called without an event and there is no hex input", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const picker = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--color-picker",
+      ) as ColorPickerController;
+      hex().remove();
+      await tick();
+
+      expect(() => picker.onHexInput()).not.toThrow();
+      expect(field().value).toBe("#ff0000");
+    });
+
+    it("reads the hex input in use when the action is called without an event", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const picker = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--color-picker",
+      ) as ColorPickerController;
+      hex().value = "#00ff00";
+
+      picker.onHexInput();
+
+      expect(field().value).toBe("#00ff00");
+      expect(hex().value).toBe("#00ff00");
+    });
   });
 
   /**
@@ -1115,6 +1561,65 @@ describe("ColorPickerController", () => {
       expect(input.value).toBe("#12");
       expect(document.activeElement).toBe(input);
       expect(seen).toEqual(["change #ff0400"]);
+    });
+
+    /** Appends a lightness slider and runs the repaint its arrival schedules. */
+    const addSliderAndRepaint = async () => {
+      const picker = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--color-picker",
+      ) as ColorPickerController;
+      const added = document.createElement("div");
+      added.setAttribute("role", "slider");
+      added.setAttribute("aria-label", "Lightness");
+      added.setAttribute("data-channel", "lightness");
+      added.setAttribute("data-stimeo--color-picker-target", "slider");
+      root().append(added);
+      // Target callbacks are delivered unreliably under happy-dom, so the one
+      // Stimulus makes for the inserted slider is made here directly as well.
+      picker.sliderTargetConnected();
+      await tick();
+      return added;
+    };
+
+    it("stays in the first hex input while a later one waits beside it, when a slider arrives", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const seen = reports();
+      const first = hex();
+      const later = first.cloneNode() as HTMLInputElement;
+      later.value = "";
+      first.after(later);
+      await tick();
+      expect(later.value).toBe("#ff0000");
+      typeUncommitted("#12");
+
+      const added = await addSliderAndRepaint();
+
+      expect(added.getAttribute("aria-valuenow")).toBe("50");
+      expect(first.value).toBe("#12");
+      expect(document.activeElement).toBe(first);
+      expect(seen).toEqual([]);
+    });
+
+    it("stays in a hex input that took over from an earlier one, when a slider arrives", async () => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      const earlier = hex();
+      const later = earlier.cloneNode() as HTMLInputElement;
+      later.value = "";
+      earlier.after(later);
+      await tick();
+      press(slider("hue"), "ArrowRight");
+      earlier.remove();
+      await tick();
+      expect(later.value).toBe("#ff0400");
+      const seen = reports();
+      typeUncommitted("#12");
+
+      const added = await addSliderAndRepaint();
+
+      expect(added.getAttribute("aria-valuenow")).toBe("50");
+      expect(later.value).toBe("#12");
+      expect(seen).toEqual([]);
     });
 
     it("stays when alpha is declared again in the state it already has", async () => {

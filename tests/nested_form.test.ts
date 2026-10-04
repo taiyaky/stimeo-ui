@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { NestedFormController } from "../src/controllers/nested_form_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
+import { withinTimeLimit } from "./helpers/time_limit";
 import { tick } from "./helpers/timing";
 
 /**
@@ -56,6 +57,16 @@ describe("NestedFormController", () => {
   const root = () => query("[data-controller='stimeo--nested-form']");
   const list = () => query("[data-stimeo--nested-form-target='list']");
   const addButton = () => query<HTMLButtonElement>("[data-stimeo--nested-form-target='add']");
+
+  /**
+   * Clicks Add under a time limit. A template that yields anything but one element is
+   * rolled back by removing the inserted nodes one at a time, so a rollback that stopped
+   * removing them would never end; the limit turns that into a failure within seconds.
+   */
+  const clickAddWithinLimit = (): void => {
+    withinTimeLimit(() => addButton().click());
+  };
+
   const rows = () => Array.from(list().children) as HTMLElement[];
   const visibleRows = () => rows().filter((r) => !r.hidden);
   const controller = () =>
@@ -316,6 +327,13 @@ describe("NestedFormController", () => {
     expect(rows()).toHaveLength(2);
   });
 
+  it("drops the at-max hook once a removal leaves room again", async () => {
+    await start(MARKUP(`data-stimeo--nested-form-max-value="2"`, `${ROW}${ROW}`));
+    expect(root().getAttribute("data-nested-at-max")).toBe("true");
+    query<HTMLButtonElement>("[data-stimeo--nested-form-target='remove']", list()).click();
+    expect(root().hasAttribute("data-nested-at-max")).toBe(false);
+  });
+
   it("dispatches add and remove events", async () => {
     await start(MARKUP());
     const events: string[] = [];
@@ -502,6 +520,20 @@ describe("NestedFormController", () => {
     expect(messages).toHaveLength(0);
   });
 
+  it("bridges the count to the announcer after a removal", async () => {
+    await start(
+      MARKUP(`data-stimeo--nested-form-count-message-value="{count} rows"`, `${ROW}${ROW}`),
+    );
+    const messages: string[] = [];
+    const onAnnounce = (event: Event) => {
+      messages.push((event as CustomEvent<{ message: string }>).detail.message);
+    };
+    window.addEventListener("stimeo--announcer:announce", onAnnounce);
+    query<HTMLButtonElement>("[data-stimeo--nested-form-target='remove']", list()).click();
+    window.removeEventListener("stimeo--announcer:announce", onAnnounce);
+    expect(messages).toEqual(["1 rows"]);
+  });
+
   it("recomputes the count idempotently from existing rows on connect", async () => {
     const existing = `
       <fieldset class="row"><input name="order[items_attributes][0][name]"></fieldset>
@@ -605,6 +637,50 @@ describe("NestedFormController", () => {
     expect(addButton().disabled).toBe(true);
   });
 
+  it("re-enables the add button when the max is lifted at runtime", async () => {
+    await start(MARKUP(`data-stimeo--nested-form-max-value="1"`, ROW));
+    expect(addButton().disabled).toBe(true);
+    root().setAttribute("data-stimeo--nested-form-max-value", "0");
+    controller().maxValueChanged();
+    await tick();
+    expect(addButton().disabled).toBe(false);
+  });
+
+  it("disables an add button that arrives while the list is at the max", async () => {
+    document.body.innerHTML = MARKUP(`data-stimeo--nested-form-max-value="1"`, ROW);
+    const late = addButton();
+    late.remove();
+    application = Application.start();
+    application.register("stimeo--nested-form", NestedFormController);
+    await tick();
+
+    root().append(late);
+    controller().addTargetConnected();
+    await tick();
+    expect(late.disabled).toBe(true);
+  });
+
+  it("hands the managed disabled over when the primary add button leaves", async () => {
+    await start(`
+      <div data-controller="stimeo--nested-form" data-stimeo--nested-form-max-value="1">
+        <button type="button" id="top-add" data-stimeo--nested-form-target="add">Add</button>
+        <div data-stimeo--nested-form-target="list">${ROW}</div>
+        <template data-stimeo--nested-form-target="template"><fieldset></fieldset></template>
+        <button type="button" id="bottom-add" data-stimeo--nested-form-target="add">Add</button>
+      </div>`);
+    const top = query<HTMLButtonElement>("#top-add");
+    const bottom = query<HTMLButtonElement>("#bottom-add");
+    expect(top.disabled).toBe(true);
+    expect(bottom.disabled).toBe(false);
+
+    top.removeAttribute("data-stimeo--nested-form-target");
+    controller().addTargetDisconnected(top);
+    await tick();
+    // The departing button gets its authored state back; the remaining one takes over.
+    expect(top.disabled).toBe(false);
+    expect(bottom.disabled).toBe(true);
+  });
+
   it("adds nothing and warns once when the template produces no element", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await start(`
@@ -616,8 +692,8 @@ describe("NestedFormController", () => {
       </div>`);
     const events: unknown[] = [];
     root().addEventListener("stimeo--nested-form:add", (event) => events.push(event));
-    addButton().click();
-    addButton().click();
+    clickAddWithinLimit();
+    clickAddWithinLimit();
     expect(rows()).toHaveLength(0);
     expect(events).toHaveLength(0);
     expect(warn).toHaveBeenCalledTimes(1);
@@ -711,8 +787,8 @@ describe("NestedFormController", () => {
         <button type="button" data-stimeo--nested-form-target="add"
                 data-action="click->stimeo--nested-form#add">Add</button>
       </div>`);
-    addButton().click();
-    addButton().click();
+    clickAddWithinLimit();
+    clickAddWithinLimit();
     // The escaped markup parses to text; nothing may accumulate in the list.
     expect(list().childNodes).toHaveLength(0);
     expect(warn).toHaveBeenCalledTimes(1);
@@ -730,7 +806,7 @@ describe("NestedFormController", () => {
         <button type="button" data-stimeo--nested-form-target="add"
                 data-action="click->stimeo--nested-form#add">Add</button>
       </div>`);
-    addButton().click();
+    clickAddWithinLimit();
     // Inserting both roots would blow past max=2; the insertion is rolled back.
     expect(rows()).toHaveLength(1);
     expect(root().getAttribute("data-nested-count")).toBe("1");
@@ -738,18 +814,40 @@ describe("NestedFormController", () => {
     expect(warn.mock.calls[0]?.[0]).toContain("exactly one root element");
   });
 
-  it("returns the authored disabled to the snapshot on turbo:before-cache", async () => {
-    document.body.innerHTML = MARKUP(`data-stimeo--nested-form-max-value="3"`).replace(
-      'data-action="click->stimeo--nested-form#add">',
-      'data-action="click->stimeo--nested-form#add" disabled>',
+  it("keeps the add button it enabled through turbo:before-cache, which also fires on a page that stays", async () => {
+    await start(
+      MARKUP(`data-stimeo--nested-form-max-value="3"`).replace(
+        'data-action="click->stimeo--nested-form#add">',
+        'data-action="click->stimeo--nested-form#add" disabled>',
+      ),
     );
-    application = Application.start();
-    application.register("stimeo--nested-form", NestedFormController);
-    await tick();
-    expect(addButton().disabled).toBe(false); // under the max the controller owns it
+    expect(addButton().disabled).toBe(false);
+
     document.dispatchEvent(new Event("turbo:before-cache"));
-    // The snapshot must carry the authored value, not the controller's write.
+
+    expect(addButton().disabled).toBe(false);
+  });
+
+  it("gives the author's disabled back on a page restored from the cache", async () => {
+    await start(
+      MARKUP(`data-stimeo--nested-form-max-value="3"`).replace(
+        'data-action="click->stimeo--nested-form#add">',
+        'data-action="click->stimeo--nested-form#add" disabled>',
+      ),
+    );
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--nested-form", NestedFormController),
+    );
+    expect(addButton().disabled).toBe(false);
+
+    controller().disconnect();
+
     expect(addButton().disabled).toBe(true);
+    expect(
+      addButton()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-lease")),
+    ).toEqual([]);
   });
 
   it("follows a staggered list swap where the successor arrives first", async () => {
@@ -805,6 +903,86 @@ describe("NestedFormController", () => {
     expect(root().getAttribute("data-nested-count")).toBe(before);
   });
 
+  /** The MutationObservers the spied `observe` saw watching `target`, in call order. */
+  const observersOf = (
+    observe: { mock: { calls: unknown[][]; contexts: unknown[] } },
+    target: Node,
+  ): MutationObserver[] =>
+    observe.mock.calls.flatMap(([observed], index) =>
+      observed === target ? [observe.mock.contexts[index] as MutationObserver] : [],
+    );
+
+  it("releases its list observer on disconnect", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe");
+    await start(MARKUP());
+    const observers = observersOf(observe, list());
+    expect(observers).toHaveLength(1);
+
+    controller().disconnect();
+    list().insertAdjacentHTML("beforeend", ROW);
+
+    expect(observers.flatMap((observer) => observer.takeRecords())).toEqual([]);
+  });
+
+  it("stops observing a list once another list becomes the primary one", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe");
+    await start(MARKUP());
+    const old = list();
+    expect(observersOf(observe, old)).toHaveLength(1);
+
+    const replacement = document.createElement("div");
+    replacement.setAttribute("data-stimeo--nested-form-target", "list");
+    old.before(replacement);
+    controller().listTargetConnected();
+    old.insertAdjacentHTML("beforeend", ROW);
+
+    expect(observersOf(observe, replacement)).toHaveLength(1);
+    expect(observersOf(observe, old).flatMap((observer) => observer.takeRecords())).toEqual([]);
+  });
+
+  it("gives back the borrowed tabindex a page restored from the cache carries", async () => {
+    await start(`
+      <div data-controller="stimeo--nested-form">
+        <div data-stimeo--nested-form-target="list">
+          <fieldset class="row">
+            <button type="button" data-stimeo--nested-form-target="remove">Remove</button>
+          </fieldset>
+        </div>
+        <template data-stimeo--nested-form-target="template"><fieldset></fieldset></template>
+      </div>`);
+    query<HTMLButtonElement>("[data-stimeo--nested-form-target='remove']").click();
+    expect(root().getAttribute("tabindex")).toBe("-1");
+
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--nested-form", NestedFormController),
+    );
+
+    expect(root().hasAttribute("tabindex")).toBe(false);
+    expect(
+      root()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-loan")),
+    ).toEqual([]);
+  });
+
+  it("returns a borrowed tabindex on disconnect", async () => {
+    await start(`
+      <div data-controller="stimeo--nested-form">
+        <div data-stimeo--nested-form-target="list">
+          <fieldset class="row">
+            <button type="button" data-stimeo--nested-form-target="remove">Remove</button>
+          </fieldset>
+        </div>
+        <template data-stimeo--nested-form-target="template"><fieldset></fieldset></template>
+      </div>`);
+    query<HTMLButtonElement>("[data-stimeo--nested-form-target='remove']").click();
+    expect(root().getAttribute("tabindex")).toBe("-1");
+
+    controller().disconnect();
+
+    expect(root().hasAttribute("tabindex")).toBe(false);
+  });
+
   it("has no machine-detectable a11y violations", async () => {
     await start(`
       <main>
@@ -824,5 +1002,43 @@ describe("NestedFormController", () => {
       </main>`);
     addButton().click();
     await expectNoA11yViolations(document.body);
+  });
+
+  it("reports the added row after a pending page insertion without a duplicate reconciliation", async () => {
+    await start(MARKUP());
+    const added: HTMLElement[] = [];
+    const repairs: unknown[] = [];
+    root().addEventListener("stimeo--nested-form:add", (event) =>
+      added.push((event as CustomEvent<{ element: HTMLElement }>).detail.element),
+    );
+    root().addEventListener("stimeo--nested-form:reconcile", (event) =>
+      repairs.push((event as CustomEvent).detail),
+    );
+    list().insertAdjacentHTML("beforeend", ROW);
+    addButton().click();
+    await tick();
+    expect(rows()).toHaveLength(2);
+    expect(added).toEqual([rows()[1]]);
+    expect(repairs).toEqual([]);
+  });
+
+  it("reports removal of a pending page row even when the aggregate returns to its published count", async () => {
+    await start(MARKUP());
+    const removed: HTMLElement[] = [];
+    const repairs: unknown[] = [];
+    root().addEventListener("stimeo--nested-form:remove", (event) =>
+      removed.push((event as CustomEvent<{ element: HTMLElement }>).detail.element),
+    );
+    root().addEventListener("stimeo--nested-form:reconcile", (event) =>
+      repairs.push((event as CustomEvent).detail),
+    );
+    list().insertAdjacentHTML("beforeend", ROW);
+    const row = rows()[0];
+    if (!row) throw new Error("Missing inserted row");
+    query<HTMLButtonElement>('[data-stimeo--nested-form-target="remove"]', row).click();
+    await tick();
+    expect(rows()).toHaveLength(0);
+    expect(removed).toEqual([row]);
+    expect(repairs).toEqual([]);
   });
 });

@@ -1,9 +1,20 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce } from "../utils/announce";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { AttributeLease } from "../utils/attribute_lease";
 import { CompositionTracker } from "../utils/composition_tracker";
+import { DetachGate } from "../utils/detach_gate";
 import { ListenerSet } from "../utils/listener_set";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
+import { TransientHooks } from "../utils/transient_hooks";
+
+/**
+ * The debounce-window hook. It lives as long as the debounce timer of the instance
+ * that wrote it, and unbinding a form drops both, so a connection that finds it on its
+ * form found it on a copy of the page.
+ */
+const PENDING = new TransientHooks({ attributes: ["data-auto-submit-pending"] });
 
 /**
  * Headless **debounced auto-submit** for forms (no dedicated APG pattern). Submits
@@ -24,8 +35,10 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *   </div>
  *
  * `submit` dispatches `{ trigger }`; `done` dispatches `{ message? }`.
- * `reconcile` dispatches `{}` when the Turbo cache rewind drops a submission
- * that was pending or in flight — `done` would claim a response arrived.
+ * `reconcile` dispatches `{}` when a connection drops the pending hook, or gives back
+ * the in-flight `aria-busy`, it finds on its form — a page restored from the Turbo cache
+ * inside the debounce window or while a submit was in flight, whose submit will never
+ * fire or answer. `done` would claim a response arrived.
  *
  * @remarks
  * Behavior only — it owns *triggering* the submit (debounce + `requestSubmit`),
@@ -35,18 +48,27 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * setting `announce` bridges the completion to the shared `stimeo--announcer`
  * as a safety net; apps can also listen for `stimeo--auto-submit:done`
  * and announce richer text themselves. `aria-busy` marks the in-flight window and
- * `data-auto-submit-pending` the debounce window, for consumer CSS; both hooks are
- * rewound just before Turbo caches the page so they never burn into a snapshot.
+ * `data-auto-submit-pending` the debounce window, for consumer CSS. `aria-busy` is
+ * leased, so the end of a submit gives the form back the value its author wrote, and
+ * that value is recorded on the form for a copy of it to find. Neither hook, and
+ * neither the pending submit, is undone on `turbo:before-cache`, which Turbo also
+ * dispatches on pages that stay (a promoted frame navigation, a state-less `popstate`,
+ * a refresh of a cached URL): the query the user typed there still submits.
  * The `turbo:submit-end`/composition subscriptions follow the `form` target as it
  * is added, replaced, or removed at runtime; unbinding a form drops its pending
  * debounced submit, since that submit described a form that is going away. With
  * no resolvable form (no target and a non-`<form>` root) the controller is inert.
  * During IME composition it holds the submit until `compositionend` (the confirmed
  * conversion) so it does not fire on each intermediate keystroke. The debounce
- * timer and the `turbo:submit-end`/composition listeners are torn down on
- * `disconnect()`.
+ * timer and the `turbo:submit-end`/composition listeners are torn down once the
+ * element is really detached; an in-page move, and a `data-turbo-permanent` form Turbo
+ * carries to the next page, reconnect the same instance with the pending submit still
+ * due.
  */
 export class AutoSubmitController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["form"];
   static override values = {
     debounce: { type: Number, default: 300 },
@@ -54,6 +76,10 @@ export class AutoSubmitController extends Controller<HTMLElement> {
     announce: { type: Boolean, default: false },
     message: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    debounce: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof AutoSubmitController.values>;
   static actions = ["submit"] as const;
   static events = ["submit", "done", "reconcile"] as const;
 
@@ -65,7 +91,7 @@ export class AutoSubmitController extends Controller<HTMLElement> {
   declare announceValue: boolean;
   declare messageValue: string;
 
-  /** Debounce timer registry; one `clearAll()` in disconnect tears it down. */
+  /** Debounce timer registry; releasing the bound form cancels its pending timer. */
   readonly #timers = new SafeTimeout();
   /** Id of the pending debounce timer, so a new keystroke can reset it. */
   #pendingId = 0;
@@ -73,8 +99,10 @@ export class AutoSubmitController extends Controller<HTMLElement> {
   readonly #formListeners = new ListenerSet();
   /** The form the listeners are attached to; target callbacks rebind it. */
   #boundForm: HTMLFormElement | null = null;
-  /** Rewinds the transient state hooks just before Turbo snapshots the page. */
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+  /** Owns the in-flight `aria-busy` on the form. */
+  readonly #busy = new AttributeLease<HTMLFormElement>("aria-busy", this.identifier);
+  /** Tells an in-page move or a permanent carry from a real detach. */
+  readonly #gate = new DetachGate();
 
   /**
    * Clears `aria-busy` and emits completion once Turbo finishes the submit.
@@ -83,7 +111,7 @@ export class AutoSubmitController extends Controller<HTMLElement> {
    *   finished submit; the busy flag it clears does not depend on them.
    */
   readonly #onSubmitEnd = (): void => {
-    this.#boundForm?.removeAttribute("aria-busy");
+    if (this.#boundForm) this.#busy.return(this.#boundForm);
     const message = this.messageValue;
     this.dispatch("done", { detail: { message: message || undefined } });
     // Bridge the silent result swap to the shared Announcer so SR users hear it.
@@ -97,17 +125,36 @@ export class AutoSubmitController extends Controller<HTMLElement> {
     },
   });
 
+  /**
+   * Binds the form. The reconnection that completes an in-page move or a permanent carry
+   * keeps the form it had bound, with its pending submit, and follows its compositions
+   * afresh.
+   */
   override connect(): void {
-    this.#beforeCache.activate();
-    this.#bindForm(this.#resolveForm());
+    const moved = this.#gate.pending;
+    this.#gate.cancel();
+    const form = this.#resolveForm();
+    if (moved && form && form === this.#boundForm) {
+      this.#composition.observe(form);
+      return;
+    }
+    const stale = form?.hasAttribute("data-auto-submit-pending") === true;
+    if (form) PENDING.reset(form);
+    const busy = form !== null && this.#busy.return(form);
+    this.#bindForm(form);
+    if (stale || busy) this.dispatch("reconcile", { detail: {} });
   }
 
+  /**
+   * Forgets any composition in progress, since a move takes the field out of it, and
+   * unbinds the form, dropping its pending submit, once the element is really detached.
+   */
   override disconnect(): void {
-    this.#beforeCache.deactivate();
-    this.#bindForm(null);
     this.#composition.disconnect();
-    this.#timers.clearAll();
-    this.#pendingId = 0;
+    this.#gate.disconnected(this, () => {
+      this.#bindForm(null);
+      this.#pendingId = 0;
+    });
   }
 
   /** Follows a `form` target added (or swapped in) at runtime. */
@@ -156,10 +203,10 @@ export class AutoSubmitController extends Controller<HTMLElement> {
       // the form busy when the submit will really proceed; still call
       // `requestSubmit()` either way so the validation surfaces to the user.
       if (form.checkValidity()) {
-        form.setAttribute("aria-busy", "true");
+        this.#busy.write(form, "true");
       }
       form.requestSubmit();
-    }, this.debounceValue);
+    }, this.#safeDebounce);
   }
 
   /** Cancels the pending debounced submit, if any (`clear` no-ops on unknown ids). */
@@ -172,8 +219,8 @@ export class AutoSubmitController extends Controller<HTMLElement> {
    * Replaces the subscribed form symmetrically. The outgoing form loses the
    * `turbo:submit-end`/composition listeners, its pending hook, and any pending
    * debounced submit (which described the outgoing form). An in-flight `aria-busy`
-   * is left for `turbo:submit-end` or the pre-cache rewind — removing it here
-   * would wipe a legitimately in-progress submission.
+   * is left on it — removing it here would wipe a legitimately in-progress
+   * submission.
    */
   #bindForm(form: HTMLFormElement | null): void {
     if (form === this.#boundForm) return;
@@ -196,17 +243,18 @@ export class AutoSubmitController extends Controller<HTMLElement> {
     return this.element instanceof HTMLFormElement ? this.element : null;
   }
 
-  /** Returns the transient state hooks to their initial (absent) state. */
-  #rewindForCache(): void {
-    const inProgress = this.#pendingId !== 0 || this.#boundForm?.hasAttribute("aria-busy") === true;
-    this.#cancelPending();
-    this.#boundForm?.removeAttribute("data-auto-submit-pending");
-    this.#boundForm?.removeAttribute("aria-busy");
-    if (inProgress) this.dispatch("reconcile", { detail: {} });
-  }
-
   /** Whether `type` is one of the whitespace-separated event types in `on`. */
   #triggers(type: string): boolean {
     return this.onValue.split(/\s+/).filter(Boolean).includes(type);
+  }
+  /** Current `debounce` declaration resolved against its numeric contract. */
+  get #safeDebounce(): number {
+    return this.#numbers.read(
+      this,
+      "debounce",
+      this.debounceValue,
+      AutoSubmitController.values.debounce.default,
+      AutoSubmitController.valueConstraints.debounce,
+    );
   }
 }

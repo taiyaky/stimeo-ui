@@ -226,6 +226,33 @@ describe("BulkSelectController", () => {
     expect(count().textContent).toBe("2");
   });
 
+  it("exits all-pages mode when the select-all box is unchecked", async () => {
+    await start(MARKUP(`data-stimeo--bulk-select-total-count-value="128"`));
+    setChecked(itemAt(0), true);
+    query<HTMLButtonElement>("[data-action*='selectAllPages']").click();
+    expect(root().getAttribute("data-all-pages")).toBe("true");
+
+    setChecked(all(), false);
+
+    expect(root().getAttribute("data-all-pages")).toBe(null);
+    expect(count().textContent).toBe("0");
+    expect(bar().hidden).toBe(true);
+  });
+
+  it("exits all-pages mode when the selection is cleared", async () => {
+    await start(MARKUP(`data-stimeo--bulk-select-total-count-value="128"`));
+    setChecked(itemAt(0), true);
+    query<HTMLButtonElement>("[data-action*='selectAllPages']").click();
+    const log = recordEvents("change");
+
+    query<HTMLButtonElement>("[data-action*='clear']").click();
+
+    expect(root().getAttribute("data-all-pages")).toBe(null);
+    expect(count().textContent).toBe("0");
+    expect(bar().hidden).toBe(true);
+    expect(log).toEqual([{ count: 0, allPages: false }]);
+  });
+
   it("defaults totalCount to 0, so all-pages without a total shows nothing selected", async () => {
     await start(MARKUP());
     setChecked(itemAt(0), true);
@@ -348,6 +375,61 @@ describe("BulkSelectController", () => {
     await tick();
     expect(count().textContent).toBe("64");
     expect(log).toEqual([{ count: 64, allPages: true }]);
+  });
+
+  it("reflects the selection onto a select-all box added at runtime", async () => {
+    await start(`
+      <div data-controller="stimeo--bulk-select">
+        <input type="checkbox" data-stimeo--bulk-select-target="item">
+        <input type="checkbox" data-stimeo--bulk-select-target="item">
+      </div>`);
+    setChecked(itemAt(0), true);
+    setChecked(itemAt(1), true);
+
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.setAttribute("data-stimeo--bulk-select-target", "all");
+    root().prepend(box);
+    await tick();
+
+    expect(box.checked).toBe(true);
+    expect(box.indeterminate).toBe(false);
+  });
+
+  it("hands the selection to the next select-all box when the first one leaves", async () => {
+    // A table can repeat the box in its header and footer; the one left behind
+    // reflects the selection once the other leaves.
+    await start(`
+      <div data-controller="stimeo--bulk-select">
+        <input id="head" type="checkbox" data-stimeo--bulk-select-target="all">
+        <input type="checkbox" data-stimeo--bulk-select-target="item">
+        <input type="checkbox" data-stimeo--bulk-select-target="item">
+        <input id="foot" type="checkbox" data-stimeo--bulk-select-target="all">
+      </div>`);
+    setChecked(itemAt(0), true);
+    const foot = query<HTMLInputElement>("#foot");
+
+    query("#head").remove();
+    await tick();
+
+    expect(foot.indeterminate).toBe(true);
+    expect(foot.checked).toBe(false);
+  });
+
+  it("repairs the figures when the announcement wording changes at runtime", async () => {
+    // A row written without a change event is picked up by the repair the new
+    // wording schedules, and announced in that wording.
+    await start(MARKUP(`data-stimeo--bulk-select-announce-text-value="{count} selected"`));
+    const log = recordEvents("reconcile");
+    const messages = await collectAnnouncements(async () => {
+      itemAt(0).checked = true;
+      root().setAttribute("data-stimeo--bulk-select-announce-text-value", "{count} chosen");
+      await tick();
+    });
+
+    expect(count().textContent).toBe("1");
+    expect(log).toEqual([{ count: 1, allPages: false }]);
+    expect(messages).toEqual(["1 chosen"]);
   });
 
   it("does not count rows owned by a nested bulk-select", async () => {
@@ -534,5 +616,332 @@ describe("BulkSelectController", () => {
       "toolbar, orientated horizontally",
       "2",
     ]);
+  });
+
+  it("includes an unreported row write in the user's published selection count", async () => {
+    await start(MARKUP());
+    const changes = recordEvents("change");
+    const repairs = recordEvents("reconcile");
+    itemAt(0).checked = true;
+    setChecked(itemAt(1), true);
+    await tick();
+    expect(changes).toEqual([{ count: 2, allPages: false }]);
+    expect(repairs).toEqual([]);
+  });
+
+  it("does not report a clear that returns pending row writes to the last published count", async () => {
+    await start(MARKUP());
+    const changes = recordEvents("change");
+    const repairs = recordEvents("reconcile");
+    itemAt(0).checked = true;
+    query<HTMLButtonElement>('[data-action="click->stimeo--bulk-select#clear"]').click();
+    await tick();
+    expect(count().textContent).toBe("0");
+    expect(changes).toEqual([]);
+    expect(repairs).toEqual([]);
+  });
+
+  describe("bar and count that arrive or stay", () => {
+    /** A bar like the current one, still reading as hidden with a stale count. */
+    const staleBar = () => {
+      const fresh = bar().cloneNode(true) as HTMLElement;
+      fresh.hidden = true;
+      const figure = fresh.querySelector<HTMLElement>("[data-stimeo--bulk-select-target='count']");
+      if (figure) figure.textContent = "0";
+      return fresh;
+    };
+    /** A count like the current one, showing a stale figure. */
+    const staleCount = (figure = "9") => {
+      const fresh = count().cloneNode(true) as HTMLElement;
+      fresh.textContent = figure;
+      return fresh;
+    };
+
+    it("reveals a bar that replaces the current one while rows are selected", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      setChecked(itemAt(1), true);
+      const successor = staleBar();
+
+      bar().replaceWith(successor);
+      await tick();
+
+      expect(bar()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+      expect(count().textContent).toBe("2");
+    });
+
+    it("reveals a bar that stays after an earlier one leaves once a row is selected", async () => {
+      await start(MARKUP());
+      const original = bar();
+      const successor = staleBar();
+      original.after(successor);
+      await tick();
+      setChecked(itemAt(0), true);
+      original.remove();
+      await tick();
+
+      expect(bar()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("hides a bar that stays after an earlier one leaves once the selection clears", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      const original = bar();
+      const successor = original.cloneNode(true) as HTMLElement;
+      original.after(successor);
+      await tick();
+      setChecked(itemAt(0), false);
+      original.remove();
+      await tick();
+
+      expect(bar()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+    });
+
+    it("writes the selected count into a count that replaces the current one", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      setChecked(itemAt(2), true);
+      const successor = staleCount();
+
+      count().replaceWith(successor);
+      await tick();
+
+      expect(count()).toBe(successor);
+      expect(successor.textContent).toBe("2");
+    });
+
+    it("writes the selected count into a count that stays after an earlier one leaves", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      const original = count();
+      const successor = staleCount("1");
+      original.after(successor);
+      await tick();
+      setChecked(itemAt(1), true);
+      original.remove();
+      await tick();
+
+      expect(count()).toBe(successor);
+      expect(successor.textContent).toBe("2");
+    });
+
+    it("brings a bar and its count up to date without an event or an announcement", async () => {
+      await start(MARKUP('data-stimeo--bulk-select-announce-text-value="{count} selected"'));
+      setChecked(itemAt(0), true);
+      const changes = recordEvents("change");
+      const repairs = recordEvents("reconcile");
+      const native: Event[] = [];
+      root().addEventListener("change", (event) => native.push(event));
+      const successor = staleBar();
+
+      const spoken = await collectAnnouncements(async () => {
+        bar().replaceWith(successor);
+        await tick();
+      });
+
+      expect(successor.hidden).toBe(false);
+      expect(count().textContent).toBe("1");
+      expect(changes).toEqual([]);
+      expect(repairs).toEqual([]);
+      expect(native).toEqual([]);
+      expect(spoken).toEqual([]);
+    });
+
+    it("keeps working when its only bar leaves", async () => {
+      await start(MARKUP());
+      const errors: unknown[] = [];
+      application.handleError = (error) => {
+        errors.push(error);
+      };
+      bar().remove();
+      await tick();
+      setChecked(itemAt(0), true);
+      await tick();
+
+      expect(errors).toEqual([]);
+      expect(root().getAttribute("data-selected-count")).toBe("1");
+    });
+
+    it("keeps working when its only count leaves", async () => {
+      await start(MARKUP());
+      const errors: unknown[] = [];
+      application.handleError = (error) => {
+        errors.push(error);
+      };
+      count().remove();
+      await tick();
+      setChecked(itemAt(0), true);
+      await tick();
+
+      expect(errors).toEqual([]);
+      expect(bar().hidden).toBe(false);
+    });
+
+    it("reveals a bar that arrives after the only one left", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      const template = staleBar();
+      bar().remove();
+      await tick();
+
+      root().append(template);
+      await tick();
+
+      expect(template.hidden).toBe(false);
+      expect(count().textContent).toBe("1");
+    });
+
+    describe("with the count outside the bar", () => {
+      /** The bar holds no count, so only the bar's own callbacks answer its moves. */
+      const SPLIT = `
+        <div data-controller="stimeo--bulk-select">
+          <input type="checkbox" data-stimeo--bulk-select-target="item">
+          <input type="checkbox" data-stimeo--bulk-select-target="item">
+          <span data-stimeo--bulk-select-target="count"></span>
+          <div data-stimeo--bulk-select-target="bar" hidden role="toolbar" aria-label="Bulk actions">
+            <button type="button">Delete</button>
+          </div>
+        </div>`;
+
+      it("reveals a bar that stays after an earlier one leaves", async () => {
+        await start(SPLIT);
+        const original = bar();
+        const successor = original.cloneNode(true) as HTMLElement;
+        original.after(successor);
+        await tick();
+        setChecked(itemAt(0), true);
+        expect(original.hidden).toBe(false);
+        original.remove();
+        await tick();
+
+        expect(bar()).toBe(successor);
+        expect(successor.hidden).toBe(false);
+      });
+
+      it("reveals a bar that arrives after the only one left", async () => {
+        await start(SPLIT);
+        setChecked(itemAt(0), true);
+        const template = bar().cloneNode(true) as HTMLElement;
+        template.hidden = true;
+        bar().remove();
+        await tick();
+
+        root().append(template);
+        await tick();
+
+        expect(template.hidden).toBe(false);
+      });
+    });
+
+    it("writes the count into a count that arrives after the only one left", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      setChecked(itemAt(1), true);
+      const template = staleCount();
+      count().remove();
+      await tick();
+
+      bar().prepend(template);
+      await tick();
+
+      expect(template.textContent).toBe("2");
+    });
+
+    it("gives a bar that stops being one back the hidden it was authored with", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      const departed = bar();
+      expect(departed.hidden).toBe(false);
+
+      departed.removeAttribute("data-stimeo--bulk-select-target");
+      await tick();
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("removes the hidden it wrote on a departed bar that was authored without one", async () => {
+      await start(MARKUP().replace('target="bar" hidden', 'target="bar"'));
+      const departed = bar();
+      expect(departed.hidden).toBe(true);
+
+      departed.removeAttribute("data-stimeo--bulk-select-target");
+      await tick();
+
+      expect(departed.hasAttribute("hidden")).toBe(false);
+    });
+
+    it("keeps a hidden the page wrote on the bar after the last write", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      const departed = bar();
+      departed.hidden = true;
+
+      departed.removeAttribute("data-stimeo--bulk-select-target");
+      await tick();
+
+      expect(departed.hidden).toBe(true);
+      departed.hidden = false;
+      setChecked(itemAt(1), true);
+      await tick();
+      expect(departed.hidden).toBe(false);
+    });
+
+    it("gives the bar back its own hidden when the widget loses its controller", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      const departed = bar();
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("keeps a bar that moves within the widget shown without touching it", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      const moving = bar();
+      const writes: string[] = [];
+      new MutationObserver((records) => {
+        for (const record of records) {
+          if (record.attributeName === "hidden") writes.push(String(record.oldValue));
+        }
+      }).observe(moving, { attributes: true, attributeOldValue: true });
+
+      root().prepend(moving);
+      await tick();
+
+      expect(bar()).toBe(moving);
+      expect(moving.hidden).toBe(false);
+      expect(writes).toEqual([]);
+    });
+
+    it("keeps what it wrote on the bar when the whole widget leaves the page", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      const kept = bar();
+
+      root().remove();
+      await tick();
+
+      expect(kept.hidden).toBe(false);
+    });
+
+    it("writes nothing onto the bar or the count while Stimulus tears the controller down", async () => {
+      await start(MARKUP());
+      setChecked(itemAt(0), true);
+      // Values the page wrote after the last write stay where they were left.
+      bar().hidden = true;
+      count().textContent = "7";
+
+      application.unload("stimeo--bulk-select");
+      await tick();
+
+      expect(bar().hidden).toBe(true);
+      expect(count().textContent).toBe("7");
+    });
   });
 });

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConditionalFieldsController } from "../src/controllers/conditional_fields_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
@@ -87,6 +87,29 @@ describe("ConditionalFieldsController", () => {
     expect(region().getAttribute("aria-hidden")).toBe("true");
     expect(query<HTMLInputElement>("[name='street']").disabled).toBe(true);
     expect(region().hasAttribute("data-visible")).toBe(false);
+  });
+
+  it("repairs an owned disabled marker while preserving authored disabled controls", async () => {
+    await mount(`${CHECKBOX}
+      <fieldset data-stimeo--conditional-fields-target="region" data-when-checked>
+        <input id="owned"><input id="authored" disabled>
+      </fieldset>`);
+    const owned = query<HTMLInputElement>("#owned");
+    const authored = query<HTMLInputElement>("#authored");
+    expect(owned.disabled).toBe(true);
+    expect(owned.getAttribute("data-conditional-disabled")).toBe("true");
+    expect(authored.hasAttribute("data-conditional-disabled")).toBe(false);
+    owned.setAttribute("data-conditional-disabled", "false");
+    region().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+    expect(owned.disabled).toBe(true);
+    expect(owned.getAttribute("data-conditional-disabled")).toBe("true");
+    expect(authored.disabled).toBe(true);
+    expect(authored.hasAttribute("data-conditional-disabled")).toBe(false);
+    setChecked(true);
+    expect(owned.disabled).toBe(false);
+    expect(owned.hasAttribute("data-conditional-disabled")).toBe(false);
+    expect(authored.disabled).toBe(true);
   });
 
   it("shows the region and enables inputs when the condition becomes true", async () => {
@@ -340,6 +363,31 @@ describe("ConditionalFieldsController", () => {
     expect(root().hasAttribute("tabindex")).toBe(false);
   });
 
+  it("gives back the landmark tab stop a page restored from the cache carries", async () => {
+    await mount(
+      `<input type="checkbox" disabled checked
+              data-stimeo--conditional-fields-target="trigger">
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked>
+         <input name="street">
+       </fieldset>`,
+    );
+    query<HTMLInputElement>("[name='street']").focus();
+    trigger().checked = false;
+    trigger().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(root().getAttribute("tabindex")).toBe("-1");
+
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--conditional-fields", ConditionalFieldsController),
+    );
+
+    expect(root().hasAttribute("tabindex")).toBe(false);
+    expect(
+      root()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-loan")),
+    ).toEqual([]);
+  });
+
   it("does not retreat into a trigger whose region is also being hidden", async () => {
     await mount(
       `<fieldset data-stimeo--conditional-fields-target="region" data-when-checked>
@@ -401,6 +449,9 @@ describe("ConditionalFieldsController", () => {
     root().addEventListener("stimeo--conditional-fields:change", (event) => {
       changes.push((event as CustomEvent).detail);
     });
+    root().addEventListener("stimeo--conditional-fields:reconcile", (event) => {
+      changes.push((event as CustomEvent).detail);
+    });
     const field = query<HTMLInputElement>("[name='street']");
     region().hidden = true;
     region().setAttribute("aria-hidden", "true");
@@ -430,6 +481,9 @@ describe("ConditionalFieldsController", () => {
     root().addEventListener("stimeo--conditional-fields:change", (event) => {
       changes.push((event as CustomEvent).detail);
     });
+    root().addEventListener("stimeo--conditional-fields:reconcile", (event) => {
+      changes.push((event as CustomEvent).detail);
+    });
     const field = query<HTMLInputElement>("[name='street']");
     region().hidden = false;
     region().removeAttribute("aria-hidden");
@@ -446,6 +500,26 @@ describe("ConditionalFieldsController", () => {
     expect(field.disabled).toBe(true);
     expect(field.getAttribute("data-conditional-disabled")).toBe("true");
     expect(changes).toEqual([]);
+  });
+
+  it("coalesces own, descendant, and Value requests without reporting an unchanged region", async () => {
+    await mount(
+      `<input type="checkbox" checked data-stimeo--conditional-fields-target="trigger">
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked></fieldset>`,
+    );
+    const events = vi.fn();
+    root().addEventListener("stimeo--conditional-fields:change", events);
+    root().addEventListener("stimeo--conditional-fields:reconcile", events);
+    region().removeAttribute("data-visible");
+    const writes = vi.spyOn(region(), "setAttribute");
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    region().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    controller().matchValueChanged();
+    await flushMicrotasks();
+    expect(region().hidden).toBe(false);
+    expect(region().getAttribute("data-visible")).toBe("true");
+    expect(writes.mock.calls.filter(([name]) => name === "data-visible")).toHaveLength(1);
+    expect(events).not.toHaveBeenCalled();
   });
 
   it("does not produce redundant attribute mutations during an idempotent evaluation", async () => {
@@ -754,6 +828,320 @@ describe("ConditionalFieldsController", () => {
 
     expect(region().hidden).toBe(false);
     expect(region().getAttribute("data-sentinel")).toBe("preserved");
+  });
+
+  it("re-evaluates on a trigger's input event alone", async () => {
+    await mount(
+      `<input type="text" data-stimeo--conditional-fields-target="trigger">
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-value="other"></fieldset>`,
+    );
+    const changes: Array<{ region: HTMLElement; visible: boolean }> = [];
+    root().addEventListener("stimeo--conditional-fields:change", (event) => {
+      changes.push((event as CustomEvent<{ region: HTMLElement; visible: boolean }>).detail);
+    });
+    const text = query<HTMLInputElement>("input[type='text']");
+
+    text.value = "other";
+    text.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(region().hidden).toBe(false);
+    expect(changes).toEqual([{ region: region(), visible: true }]);
+  });
+
+  it("stops handling trigger events once disconnected", async () => {
+    await mount(
+      `<input type="checkbox" checked data-stimeo--conditional-fields-target="trigger">
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked></fieldset>`,
+    );
+    const changes = vi.fn();
+    root().addEventListener("stimeo--conditional-fields:change", changes);
+
+    controller().disconnect();
+    setChecked(false);
+
+    expect(region().hidden).toBe(false);
+    expect(changes).not.toHaveBeenCalled();
+  });
+
+  it("stops observing its subtree on disconnect", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe");
+    await mount(
+      `${CHECKBOX}
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked></fieldset>`,
+    );
+    const index = observe.mock.calls.findIndex(
+      ([target, options]) =>
+        target === root() && options?.attributeFilter?.includes("data-when-checked") === true,
+    );
+    const observer = observe.mock.contexts[index];
+    observe.mockRestore();
+    if (!(observer instanceof MutationObserver)) throw new Error("expected the condition observer");
+
+    controller().disconnect();
+    region().setAttribute("data-when-unchecked", "");
+
+    expect(observer.takeRecords()).toEqual([]);
+  });
+
+  it("unsubscribes from document reset on disconnect", async () => {
+    const added = vi.spyOn(document, "addEventListener");
+    await mount(
+      `${CHECKBOX}
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked></fieldset>`,
+    );
+    const subscription = added.mock.calls.find(([type]) => type === "reset");
+    added.mockRestore();
+    const removed = vi.spyOn(document, "removeEventListener");
+
+    controller().disconnect();
+    const released = removed.mock.calls.some(
+      ([type, listener, options]) =>
+        type === "reset" && listener === subscription?.[1] && options === true,
+    );
+    removed.mockRestore();
+
+    expect(subscription).toBeDefined();
+    expect(released).toBe(true);
+  });
+
+  it("gives back what it wrote on a nested region that stops being a target", async () => {
+    await mount(
+      `<input type="checkbox" checked data-stimeo--conditional-fields-target="trigger">
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked>
+         <fieldset id="inner" data-stimeo--conditional-fields-target="region" data-when-unchecked>
+           <input name="nested">
+           <input name="authored" disabled>
+         </fieldset>
+       </fieldset>`,
+    );
+    const inner = query<HTMLElement>("#inner");
+    const nested = query<HTMLInputElement>("[name='nested']");
+    expect(inner.hidden).toBe(true);
+    expect(nested.disabled).toBe(true);
+
+    inner.removeAttribute("data-stimeo--conditional-fields-target");
+    controller().regionTargetDisconnected(inner);
+    await flushMicrotasks();
+
+    // The visible outer region re-enables the owned control, so the hidden this
+    // controller put on the former region has to go with it: a hidden control
+    // that is enabled would be submitted.
+    expect(inner.hidden).toBe(false);
+    expect(inner.hasAttribute("aria-hidden")).toBe(false);
+    expect(nested.disabled).toBe(false);
+    expect(nested.hasAttribute("data-conditional-disabled")).toBe(false);
+    expect(query<HTMLInputElement>("[name='authored']").disabled).toBe(true);
+  });
+
+  it("gives back hidden, aria-hidden and owned disabled state when a region stops being a target", async () => {
+    await mount(
+      `${CHECKBOX}
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked>
+         <input name="street">
+       </fieldset>`,
+    );
+    const former = region();
+    const street = query<HTMLInputElement>("[name='street']");
+    expect(former.hidden).toBe(true);
+    expect(street.disabled).toBe(true);
+
+    former.removeAttribute("data-stimeo--conditional-fields-target");
+    controller().regionTargetDisconnected(former);
+    await flushMicrotasks();
+
+    expect(former.hidden).toBe(false);
+    expect(former.hasAttribute("aria-hidden")).toBe(false);
+    expect(street.disabled).toBe(false);
+    expect(street.hasAttribute("data-conditional-disabled")).toBe(false);
+
+    former.setAttribute("aria-hidden", "true");
+    controller().evaluate();
+    expect(former.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("keeps the authored hidden of a conditionless region that stops being a target", async () => {
+    await mount(
+      `${CHECKBOX}
+       <fieldset data-stimeo--conditional-fields-target="region" hidden>
+         <input name="street">
+       </fieldset>`,
+    );
+    const former = region();
+    const street = query<HTMLInputElement>("[name='street']");
+    expect(former.getAttribute("aria-hidden")).toBe("true");
+    expect(street.disabled).toBe(true);
+
+    former.removeAttribute("data-stimeo--conditional-fields-target");
+    controller().regionTargetDisconnected(former);
+    await flushMicrotasks();
+
+    expect(former.hidden).toBe(true);
+    expect(former.hasAttribute("aria-hidden")).toBe(false);
+    expect(street.disabled).toBe(false);
+    expect(street.hasAttribute("data-conditional-disabled")).toBe(false);
+  });
+
+  it("leaves a released control disabled while a hidden region still covers it", async () => {
+    await mount(
+      `${CHECKBOX}
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked>
+         <fieldset id="inner" data-stimeo--conditional-fields-target="region" data-when-unchecked>
+           <input name="nested">
+         </fieldset>
+       </fieldset>`,
+    );
+    const inner = query<HTMLElement>("#inner");
+    const nested = query<HTMLInputElement>("[name='nested']");
+    expect(inner.getAttribute("data-visible")).toBe("true");
+    expect(nested.disabled).toBe(true);
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((batch) => records.push(...batch));
+    observer.observe(nested, { attributes: true });
+
+    inner.removeAttribute("data-stimeo--conditional-fields-target");
+    controller().regionTargetDisconnected(inner);
+    await flushMicrotasks();
+    observer.disconnect();
+
+    expect(inner.hasAttribute("data-visible")).toBe(false);
+    expect(nested.disabled).toBe(true);
+    expect(nested.getAttribute("data-conditional-disabled")).toBe("true");
+    expect(records).toEqual([]);
+  });
+
+  it("keeps a hidden the author sets on a shown region as it stops being a target", async () => {
+    await mount(
+      `${CHECKBOX}
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked></fieldset>`,
+    );
+    const former = region();
+    setChecked(true);
+    expect(former.hidden).toBe(false);
+
+    former.hidden = true;
+    former.removeAttribute("data-stimeo--conditional-fields-target");
+    controller().regionTargetDisconnected(former);
+    await flushMicrotasks();
+
+    expect(former.hidden).toBe(true);
+  });
+
+  it("keeps the state of a reported departure that is still a region", async () => {
+    await mount(
+      `${CHECKBOX}
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked>
+         <input name="street">
+       </fieldset>`,
+    );
+    const reconciliations = vi.fn();
+    root().addEventListener("stimeo--conditional-fields:reconcile", reconciliations);
+
+    controller().regionTargetDisconnected(region());
+    await flushMicrotasks();
+
+    expect(region().hidden).toBe(true);
+    expect(region().getAttribute("aria-hidden")).toBe("true");
+    expect(query<HTMLInputElement>("[name='street']").disabled).toBe(true);
+    expect(reconciliations).not.toHaveBeenCalled();
+  });
+
+  it("gives back a departure queued before a disconnect once it reconnects", async () => {
+    await mount(
+      `${CHECKBOX}
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked></fieldset>`,
+    );
+    const former = region();
+    former.removeAttribute("data-stimeo--conditional-fields-target");
+    controller().regionTargetDisconnected(former);
+    controller().disconnect();
+    expect(former.hidden).toBe(true);
+
+    controller().connect();
+
+    expect(former.hidden).toBe(false);
+  });
+
+  it("reports a former region that becomes a region again", async () => {
+    await mount(
+      `${CHECKBOX}
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked></fieldset>`,
+    );
+    const former = region();
+    former.removeAttribute("data-stimeo--conditional-fields-target");
+    controller().regionTargetDisconnected(former);
+    await flushMicrotasks();
+    expect(former.hidden).toBe(false);
+    const reconciliations: Array<{ region: HTMLElement; visible: boolean }> = [];
+    root().addEventListener("stimeo--conditional-fields:reconcile", (event) => {
+      reconciliations.push(
+        (event as CustomEvent<{ region: HTMLElement; visible: boolean }>).detail,
+      );
+    });
+
+    former.setAttribute("data-stimeo--conditional-fields-target", "region");
+    controller().regionTargetConnected();
+    await flushMicrotasks();
+
+    expect(former.hidden).toBe(true);
+    expect(reconciliations).toEqual([{ region: former, visible: false }]);
+  });
+
+  it("returns the landmark tabindex when a later retreat reaches a trigger", async () => {
+    await mount(
+      `<input type="checkbox" disabled checked
+              data-stimeo--conditional-fields-target="trigger">
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked>
+         <input name="street">
+       </fieldset>`,
+    );
+    const street = query<HTMLInputElement>("[name='street']");
+    street.focus();
+    setChecked(false);
+    expect(document.activeElement).toBe(root());
+    expect(root().getAttribute("tabindex")).toBe("-1");
+
+    trigger().disabled = false;
+    setChecked(true);
+    street.focus();
+    setChecked(false);
+
+    expect(document.activeElement).toBe(trigger());
+    expect(root().hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("reconciles each authored hidden toggle of a region that lost its condition", async () => {
+    await mount(
+      `${CHECKBOX}
+       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked>
+         <input name="street">
+       </fieldset>`,
+    );
+    setChecked(true);
+    setChecked(false);
+    await tick();
+    region().removeAttribute("data-when-checked");
+    await tick();
+    const reconciliations: Array<{ region: HTMLElement; visible: boolean }> = [];
+    root().addEventListener("stimeo--conditional-fields:reconcile", (event) => {
+      reconciliations.push(
+        (event as CustomEvent<{ region: HTMLElement; visible: boolean }>).detail,
+      );
+    });
+
+    region().hidden = false;
+    await tick();
+    expect(region().getAttribute("data-visible")).toBe("true");
+
+    region().hidden = true;
+    await tick();
+
+    expect(region().getAttribute("aria-hidden")).toBe("true");
+    expect(region().hasAttribute("data-visible")).toBe(false);
+    expect(query<HTMLInputElement>("[name='street']").disabled).toBe(true);
+    expect(reconciliations).toEqual([
+      { region: region(), visible: true },
+      { region: region(), visible: false },
+    ]);
   });
 
   it("has no a11y violations", async () => {

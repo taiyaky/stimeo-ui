@@ -5,7 +5,7 @@ import { OverflowMenuController } from "../src/controllers/overflow_menu_control
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -170,6 +170,150 @@ describe("OverflowMenuController", () => {
   /** Attribute names this controller writes on an item for its own bookkeeping. */
   const bookkeeping = (el: Element) =>
     el.getAttributeNames().filter((name) => name.startsWith("data-stimeo--overflow-menu-"));
+
+  it("preserves the fully banked boundary across an unchanged update", async () => {
+    setup(MARKUP());
+    setGeom(40, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(ids(items())).toEqual([]);
+    expect(ids(menu())).toEqual(["a", "b", "c"]);
+    const boundary = items().querySelector("template");
+    expect(boundary).not.toBeNull();
+    instance().update();
+    expect(items().querySelector("template")).toBe(boundary);
+    expect(items().querySelectorAll("template")).toHaveLength(1);
+    expect(ids(menu())).toEqual(["a", "b", "c"]);
+  });
+
+  it("treats a nonfinite saved bar index as unassigned during adoption", async () => {
+    setup(MARKUP());
+    query("#a").setAttribute("data-stimeo--overflow-menu-index", "not-a-number");
+    const banked = query("#c");
+    banked.setAttribute("data-stimeo--overflow-menu-banked", "true");
+    banked.setAttribute("data-stimeo--overflow-menu-index", "0");
+    menu().append(banked);
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(ids(items())).toEqual(["c", "a", "b"]);
+    expect(ids(menu())).toEqual([]);
+  });
+
+  it("leaves unexpanded More semantics unclaimed when every item fits", async () => {
+    setup(MARKUP());
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(trigger().hasAttribute("aria-expanded")).toBe(false);
+    expect(menu().hidden).toBe(false);
+    trigger().setAttribute("aria-expanded", "true");
+    instance().update();
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(menu().hidden).toBe(true);
+  });
+
+  it("falls back to insertion when moveBefore refuses a managed item", async () => {
+    setup(MARKUP());
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    const move = vi.fn(() => {
+      throw new DOMException("Cannot move this node", "HierarchyRequestError");
+    });
+    Object.defineProperty(menu(), "moveBefore", { configurable: true, value: move });
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    expect(() => instance().update()).not.toThrow();
+    expect(move).toHaveBeenCalled();
+    expect(ids(items())).toEqual(["a", "b"]);
+    expect(ids(menu())).toEqual(["c"]);
+  });
+
+  it("banks an earlier nonnumeric priority before later finite priorities", async () => {
+    setup(MARKUP());
+    query("#a").setAttribute("data-priority", "high");
+    query("#b").setAttribute("data-priority", "2");
+    query("#c").setAttribute("data-priority", "1");
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(ids(items())).toEqual(["b", "c"]);
+    expect(ids(menu())).toEqual(["a"]);
+  });
+
+  it("rescues a retreating HTML focus owner without claiming non-HTML focus", async () => {
+    setup(MARKUP());
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    query("#c").append(svg);
+    const active = vi.spyOn(document, "activeElement", "get");
+    const focus = vi.spyOn(trigger(), "focus");
+    try {
+      active.mockReturnValue(svg);
+      setGeom(250, { a: 100, b: 100, c: 100 });
+      instance().update();
+      expect(ids(menu())).toEqual(["c"]);
+      expect(focus).not.toHaveBeenCalled();
+      setGeom(1000, { a: 100, b: 100, c: 100 });
+      instance().update();
+      active.mockReturnValue(query("#c"));
+      setGeom(250, { a: 100, b: 100, c: 100 });
+      instance().update();
+      expect(focus).toHaveBeenCalledTimes(1);
+    } finally {
+      active.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it.each(["items", "more"])(
+    "acquires no resize lifetime while the %s target is missing",
+    async (missing) => {
+      setup(MARKUP());
+      setGeom(1000, { a: 100, b: 100, c: 100 });
+      const absent = missing === "items" ? items() : more();
+      absent.remove();
+      const subscriptions = vi.spyOn(window, "addEventListener");
+      try {
+        await start();
+        expect(subscriptions.mock.calls.filter(([name]) => name === "resize")).toHaveLength(0);
+        window.dispatchEvent(new Event("resize"));
+        expect(vi.getTimerCount()).toBe(0);
+        root().append(absent);
+        instance().disconnect();
+        instance().connect();
+        expect(subscriptions.mock.calls.filter(([name]) => name === "resize")).toHaveLength(1);
+        expect(root().getAttribute("data-overflow-count")).toBe("0");
+      } finally {
+        subscriptions.mockRestore();
+      }
+    },
+  );
+
+  it("removes an obsolete boundary before reordering a retained bar item", async () => {
+    setup(MARKUP());
+    setGeom(40, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(ids(menu())).toEqual(["a", "b", "c"]);
+    const boundary = items().querySelector("template");
+    if (!boundary) throw new Error("Expected the fully banked boundary");
+    const retained = document.createElement("a");
+    retained.id = "d";
+    retained.href = "#";
+    retained.setAttribute("data-priority", "0");
+    retained.textContent = "D";
+    boundary.before(retained);
+    stub(retained, "offsetWidth", 100);
+    stub(root(), "clientWidth", 150);
+    retained.focus();
+    const insert = vi.spyOn(items(), "insertBefore");
+    try {
+      instance().update();
+      expect(ids(items())).toEqual(["d"]);
+      expect(ids(menu())).toEqual(["a", "b", "c"]);
+      expect(items().querySelector("template")).toBeNull();
+      expect(insert).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(retained);
+    } finally {
+      insert.mockRestore();
+    }
+  });
 
   it("keeps every item in the bar and hides More when they all fit", async () => {
     setup(MARKUP());
@@ -428,6 +572,20 @@ describe("OverflowMenuController", () => {
     expect(more().hidden).toBe(true);
   });
 
+  it("drops the overflow marker and every item's bookkeeping once everything fits again", async () => {
+    setup(MARKUP());
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(root().getAttribute("data-overflowing")).toBe("true");
+    expect(bookkeeping(query("#a"))).toEqual(["data-stimeo--overflow-menu-index"]);
+
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    instance().update();
+
+    expect(root().hasAttribute("data-overflowing")).toBe(false);
+    for (const id of ["a", "b", "c"]) expect(bookkeeping(query(`#${id}`)), id).toEqual([]);
+  });
+
   it("preserves an item's authored role and tabindex across a round trip", async () => {
     setup(MARKUP());
     const c = query("#c");
@@ -477,6 +635,22 @@ describe("OverflowMenuController", () => {
     expect(c.hasAttribute("role")).toBe(false);
     expect(c.hasAttribute("tabindex")).toBe(false);
     expect(bookkeeping(c)).toEqual([]);
+  });
+
+  it("strips the canonical index from a bar item re-homed outside the controller", async () => {
+    setup(MARKUP());
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    await start();
+    const a = query("#a");
+    expect(bookkeeping(a)).toEqual(["data-stimeo--overflow-menu-index"]);
+
+    const elsewhere = document.createElement("div");
+    document.body.appendChild(elsewhere);
+    elsewhere.appendChild(a); // an item that was never banked, carrying its index
+    setGeom(1000, { b: 100, c: 100 });
+    instance().update();
+
+    expect(bookkeeping(a)).toEqual([]);
   });
 
   it("emits change only when the overflow count transitions", async () => {
@@ -593,6 +767,97 @@ describe("OverflowMenuController", () => {
     expect(root().getAttribute("data-overflow-count")).toBe("1");
   });
 
+  it("restarts the debounce on every resize of a burst", async () => {
+    setup(MARKUP());
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    window.dispatchEvent(new Event("resize"));
+    vi.advanceTimersByTime(60);
+    window.dispatchEvent(new Event("resize"));
+    vi.advanceTimersByTime(60);
+    expect(root().getAttribute("data-overflow-count")).toBe("0"); // 60 ms after the last one
+    vi.advanceTimersByTime(40);
+    expect(root().getAttribute("data-overflow-count")).toBe("1");
+  });
+
+  it("re-measures on a debounced resize of its own box", async () => {
+    const observed: Array<{ target: Element; notify: () => void }> = [];
+    class RecordingResizeObserver implements ResizeObserver {
+      readonly #callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback;
+      }
+      observe(target: Element): void {
+        observed.push({ target, notify: () => this.#callback([], this) });
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal("ResizeObserver", RecordingResizeObserver);
+    try {
+      setup(MARKUP());
+      setGeom(1000, { a: 100, b: 100, c: 100 });
+      await start();
+
+      setGeom(250, { a: 100, b: 100, c: 100 });
+      for (const entry of observed) if (entry.target === root()) entry.notify();
+      vi.advanceTimersByTime(99);
+      expect(root().getAttribute("data-overflow-count")).toBe("0");
+      vi.advanceTimersByTime(1);
+      expect(root().getAttribute("data-overflow-count")).toBe("1");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a scheduled re-measure's deadline and reads a changed debounce at the next resize", async () => {
+    setup(MARKUP());
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    const changes: number[] = [];
+    root().addEventListener("stimeo--overflow-menu:change", (event) => {
+      changes.push((event as CustomEvent<{ overflowCount: number }>).detail.overflowCount);
+    });
+
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    window.dispatchEvent(new Event("resize"));
+    root().setAttribute("data-stimeo--overflow-menu-debounce-value", "500");
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(99);
+    expect(root().getAttribute("data-overflow-count")).toBe("0");
+    vi.advanceTimersByTime(1);
+    expect(root().getAttribute("data-overflow-count")).toBe("1");
+
+    // The next resize reads the declaration as it is now.
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    window.dispatchEvent(new Event("resize"));
+    vi.advanceTimersByTime(499);
+    expect(root().getAttribute("data-overflow-count")).toBe("1");
+    vi.advanceTimersByTime(1);
+    expect(root().getAttribute("data-overflow-count")).toBe("0");
+    expect(changes).toEqual([1, 0]);
+  });
+
+  it("measures and schedules nothing when only the debounce changes", async () => {
+    setup(MARKUP());
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    const changes: number[] = [];
+    root().addEventListener("stimeo--overflow-menu:change", (event) => {
+      changes.push((event as CustomEvent<{ overflowCount: number }>).detail.overflowCount);
+    });
+
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    root().setAttribute("data-stimeo--overflow-menu-debounce-value", "10");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(root().getAttribute("data-overflow-count")).toBe("0");
+    expect(changes).toEqual([]);
+  });
+
   it("fills an empty More trigger with the moreLabel value", async () => {
     setup(MARKUP("")); // empty trigger text
     setGeom(1000, { a: 100, b: 100, c: 100 });
@@ -666,6 +931,226 @@ describe("OverflowMenuController", () => {
     instance().update();
     // The focus holder is inside the item that retreats, so it goes down with it.
     expect(document.activeElement).toBe(trigger());
+  });
+
+  it("keeps the canonical order when a focus handler re-measures during a retreat", async () => {
+    // y sits between x and z and drops first. It holds focus, so the pass moves focus
+    // to the trigger, and a consumer that re-measures on focusin re-enters the pass
+    // after y was banked but before the pass finished.
+    setup(`
+      <div id="om" data-controller="stimeo--overflow-menu" role="toolbar" aria-label="Actions">
+        <div data-stimeo--overflow-menu-target="items">
+          <a id="x" href="#" data-priority="1">X</a>
+          <a id="y" href="#">Y</a>
+          <a id="z" href="#" data-priority="2">Z</a>
+        </div>
+        <div data-stimeo--overflow-menu-target="more" hidden>
+          <button id="more-trigger" data-stimeo--menu-target="trigger">More</button>
+          <div role="menu" aria-labelledby="more-trigger" data-stimeo--menu-target="menu"></div>
+        </div>
+      </div>`);
+    setGeom(1000, { x: 100, y: 100, z: 100 });
+    await start();
+    query("#y").focus();
+    let reentered = false;
+    root().addEventListener("focusin", () => {
+      if (reentered) return;
+      reentered = true;
+      instance().update();
+    });
+
+    setGeom(250, { x: 100, y: 100, z: 100 });
+    instance().update();
+    expect(reentered).toBe(true);
+    expect(ids(menu())).toEqual(["y"]);
+
+    setGeom(1000, { x: 100, y: 100, z: 100 });
+    instance().update();
+    expect(ids(items())).toEqual(["x", "y", "z"]);
+  });
+
+  it("publishes the pass a focus handler starts during a retreat", async () => {
+    // y drops first and holds focus, so the pass moves focus to the trigger before it
+    // publishes. The focusin handler narrows the bar and re-measures: that pass banks
+    // every item and publishes, and the interrupted pass has nothing left to write.
+    setup(`
+      <div id="om" data-controller="stimeo--overflow-menu" role="toolbar" aria-label="Actions">
+        <div data-stimeo--overflow-menu-target="items">
+          <a id="x" href="#" data-priority="1">X</a>
+          <a id="y" href="#">Y</a>
+          <a id="z" href="#" data-priority="2">Z</a>
+        </div>
+        <div data-stimeo--overflow-menu-target="more" hidden>
+          <button id="more-trigger" data-stimeo--menu-target="trigger">More</button>
+          <div role="menu" aria-labelledby="more-trigger" data-stimeo--menu-target="menu"></div>
+        </div>
+      </div>`);
+    setGeom(1000, { x: 100, y: 100, z: 100 });
+    await start();
+    query("#y").focus();
+    const events: Array<{ overflowCount: number; total: number }> = [];
+    root().addEventListener("stimeo--overflow-menu:change", (e) =>
+      events.push((e as CustomEvent).detail),
+    );
+    let reentered = false;
+    root().addEventListener("focusin", () => {
+      if (reentered) return;
+      reentered = true;
+      setGeom(40, { x: 100, y: 100, z: 100 });
+      instance().update();
+    });
+
+    setGeom(250, { x: 100, y: 100, z: 100 });
+    instance().update();
+
+    expect(reentered).toBe(true);
+    expect(ids(items())).toEqual([]);
+    expect(ids(menu())).toEqual(["x", "y", "z"]);
+    expect(root().getAttribute("data-overflow-count")).toBe("3");
+    expect(events).toEqual([{ overflowCount: 3, total: 3 }]);
+    expect(items().querySelectorAll("template")).toHaveLength(1);
+  });
+
+  it("keeps More revealed when a focus handler re-banks an item during the rescue", async () => {
+    // The last banked item returns while focus is on the trigger, so the pass hands
+    // focus to the last item before it hides More. The focusin handler narrows the
+    // bar and re-measures: that pass banks c again, and More has to stay reachable.
+    setup(MARKUP());
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    await start();
+    trigger().focus();
+    const events: Array<{ overflowCount: number; total: number }> = [];
+    root().addEventListener("stimeo--overflow-menu:change", (e) =>
+      events.push((e as CustomEvent).detail),
+    );
+    let reentered = false;
+    query("#c").addEventListener("focusin", () => {
+      if (reentered) return;
+      reentered = true;
+      setGeom(250, { a: 100, b: 100, c: 100 });
+      instance().update();
+    });
+
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    instance().update();
+
+    expect(reentered).toBe(true);
+    expect(ids(menu())).toEqual(["c"]);
+    expect(more().hidden).toBe(false);
+    expect(document.activeElement).toBe(trigger());
+    expect(root().getAttribute("data-overflow-count")).toBe("1");
+    expect(events).toEqual([]);
+  });
+
+  it("leaves focus and More alone when a Menu close handler re-banks an item", async () => {
+    // Every item fits again, so the pass closes the expanded Menu before it rescues
+    // focus from the trigger and hides More. A close handler narrows the bar and
+    // re-measures: that pass banks c again, so the trigger keeps focus and More stays.
+    setup(COMPOSED_MARKUP);
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    await start(["stimeo--menu", MenuController]);
+    trigger().focus();
+    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    trigger().focus();
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    const events: Array<{ overflowCount: number; total: number }> = [];
+    root().addEventListener("stimeo--overflow-menu:change", (e) =>
+      events.push((e as CustomEvent).detail),
+    );
+    let reentered = false;
+    more().addEventListener("stimeo--menu:close", () => {
+      if (reentered) return;
+      reentered = true;
+      setGeom(250, { a: 100, b: 100, c: 100 });
+      instance().update();
+    });
+
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    instance().update();
+
+    expect(reentered).toBe(true);
+    expect(ids(menu())).toEqual(["c"]);
+    expect(more().hidden).toBe(false);
+    expect(document.activeElement).toBe(trigger());
+    expect(root().getAttribute("data-overflow-count")).toBe("1");
+    expect(events).toEqual([]);
+  });
+
+  it("returns every item to the bar when a Menu close handler re-measures during disconnect", async () => {
+    setup(COMPOSED_MARKUP);
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    await start(["stimeo--menu", MenuController]);
+    trigger().focus();
+    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    trigger().focus();
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    const controller = instance();
+    let reentered = false;
+    more().addEventListener("stimeo--menu:close", () => {
+      if (reentered) return;
+      reentered = true;
+      controller.update();
+    });
+
+    controller.disconnect();
+
+    expect(reentered).toBe(true);
+    expect(ids(items())).toEqual(["a", "b", "c"]);
+    expect(ids(menu())).toEqual([]);
+    expect(more().hidden).toBe(true);
+  });
+
+  it("runs no pass until the outer restore ends when a close handler restores again", async () => {
+    setup(COMPOSED_MARKUP);
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    await start(["stimeo--menu", MenuController]);
+    trigger().focus();
+    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    const controller = instance();
+    let closes = 0;
+    more().addEventListener("stimeo--menu:close", () => {
+      closes += 1;
+      if (closes > 1) return;
+      controller.disconnect();
+      controller.update();
+    });
+
+    controller.disconnect();
+
+    expect(closes).toBe(1);
+    expect(ids(items())).toEqual(["a", "b", "c"]);
+    expect(ids(menu())).toEqual([]);
+    expect(more().hidden).toBe(true);
+  });
+
+  it("writes nothing more when a focus handler disconnects it during a retreat", async () => {
+    setup(MARKUP());
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+    const controller = instance();
+    query("#c").focus();
+    const events: Array<{ overflowCount: number; total: number }> = [];
+    root().addEventListener("stimeo--overflow-menu:change", (e) =>
+      events.push((e as CustomEvent).detail),
+    );
+    let reentered = false;
+    root().addEventListener("focusin", () => {
+      if (reentered) return;
+      reentered = true;
+      controller.disconnect();
+    });
+
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    controller.update();
+
+    expect(reentered).toBe(true);
+    expect(ids(items())).toEqual(["a", "b", "c"]);
+    for (const id of ["a", "b", "c"]) expect(bookkeeping(query(`#${id}`))).toEqual([]);
+    expect(more().hidden).toBe(true);
+    expect(root().hasAttribute("data-overflowing")).toBe(false);
+    expect(root().hasAttribute("data-overflow-count")).toBe(false);
+    expect(events).toEqual([]);
   });
 
   it("moves no node when a re-measure changes nothing", async () => {
@@ -776,6 +1261,49 @@ describe("OverflowMenuController", () => {
     expect(more().hidden).toBe(true);
   });
 
+  it("restores the canonical order when adopted banked items are listed out of order", async () => {
+    setup(MARKUP());
+    setGeom(150, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(ids(menu())).toEqual(["b", "c"]);
+
+    const snapshot = root().outerHTML;
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = snapshot;
+    menu().append(query("#b")); // markup that lists the banked items as C, B
+    expect(ids(menu())).toEqual(["c", "b"]);
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+
+    expect(ids(items())).toEqual(["a", "b", "c"]);
+  });
+
+  it("measures adopted banked items without the menu semantics they carry", async () => {
+    // Consumer styling can size a menu row unlike a bar item, so a banked item is
+    // measured only once it is back in the bar as the item it was authored as.
+    setup(MARKUP());
+    setGeom(150, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(ids(menu())).toEqual(["b", "c"]);
+
+    const snapshot = root().outerHTML;
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = snapshot;
+    stub(root(), "clientWidth", 250);
+    for (const id of ["a", "b", "c"]) {
+      const el = query(`#${id}`);
+      Object.defineProperty(el, "offsetWidth", {
+        configurable: true,
+        get: () => (el.getAttribute("role") === "menuitem" ? 300 : 100),
+      });
+    }
+    stub(trigger(), "offsetWidth", 50);
+    await start();
+
+    expect(ids(items())).toEqual(["a", "b"]);
+    expect(ids(menu())).toEqual(["c"]);
+  });
+
   it("measures adopted banked items in the bar, not inside the closed menu", async () => {
     // The constant width stub the other cases use is location-independent, which
     // is exactly what a real engine is not: a banked item sits in the closed menu
@@ -852,6 +1380,29 @@ describe("OverflowMenuController", () => {
     expect(ids(items())).toEqual(["z", "a", "b", "c"]);
   });
 
+  it("moves no bar item already in place when a fresh controller adopts a fully banked bar", async () => {
+    setup(MARKUP());
+    setGeom(50, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(ids(menu())).toEqual(["a", "b", "c"]);
+
+    const snapshot = root().outerHTML;
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = snapshot;
+    const z = insertLink("z", "head");
+    setGeom(1000, { a: 100, b: 100, c: 100, z: 100 });
+    const insert = vi.spyOn(items(), "insertBefore");
+    try {
+      await start();
+
+      expect(ids(items())).toEqual(["z", "a", "b", "c"]);
+      // Z already leads the bar; re-inserting it would blur it in a real browser.
+      expect(insert.mock.calls.filter(([node]) => node === z)).toEqual([]);
+    } finally {
+      insert.mockRestore();
+    }
+  });
+
   it("keeps a trailing append last when a fresh controller adopts a fully banked bar", async () => {
     setup(MARKUP());
     setGeom(50, { a: 100, b: 100, c: 100 });
@@ -894,19 +1445,51 @@ describe("OverflowMenuController", () => {
     expect(bookkeeping(query("#c"))).toEqual([]);
   });
 
-  it("hands back a pristine DOM before Turbo caches the page", async () => {
+  it("strips the canonical index from the items that stayed in the bar on disconnect", async () => {
     setup(MARKUP());
-    setGeom(50, { a: 100, b: 100, c: 100 });
+    setGeom(250, { a: 100, b: 100, c: 100 });
     await start();
-    expect(ids(menu())).toEqual(["a", "b", "c"]);
-    expect(items().querySelector("[data-stimeo--overflow-menu-boundary]")).not.toBeNull();
+    expect(bookkeeping(query("#a"))).toEqual(["data-stimeo--overflow-menu-index"]);
+
+    instance().disconnect();
+
+    for (const id of ["a", "b", "c"]) expect(bookkeeping(query(`#${id}`)), id).toEqual([]);
+  });
+
+  it("leaves a banked item the consumer moved elsewhere in place on disconnect", async () => {
+    setup(MARKUP());
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    await start();
+    const c = query("#c");
+    expect(c.parentElement).toBe(menu());
+
+    const elsewhere = document.createElement("div");
+    document.body.appendChild(elsewhere);
+    elsewhere.appendChild(c);
+    instance().disconnect();
+
+    expect(c.parentElement).toBe(elsewhere);
+    expect(ids(items())).toEqual(["a", "b"]);
+    expect(c.hasAttribute("role")).toBe(false);
+    expect(bookkeeping(c)).toEqual([]);
+  });
+
+  it("keeps the bar balanced through turbo:before-cache, which Turbo also dispatches on pages that stay", async () => {
+    setup(MARKUP());
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    await start();
+    expect(ids(menu())).toEqual(["c"]);
+    const observer = new MutationObserver(() => {});
+    observer.observe(root(), { attributes: true, childList: true, subtree: true });
 
     document.dispatchEvent(new Event("turbo:before-cache"));
+    const records = observer.takeRecords();
+    observer.disconnect();
 
-    expect(ids(items())).toEqual(["a", "b", "c"]);
-    expect(more().hidden).toBe(true);
-    expect(root().querySelector("[data-stimeo--overflow-menu-boundary]")).toBeNull();
-    expect(bookkeeping(query("#b"))).toEqual([]);
+    expect(records).toEqual([]);
+    expect(ids(menu())).toEqual(["c"]);
+    expect(more().hidden).toBe(false);
+    expect(root().getAttribute("data-overflow-count")).toBe("1");
   });
 
   it("stops re-measuring after disconnect", async () => {
@@ -927,6 +1510,20 @@ describe("OverflowMenuController", () => {
     expect(update).not.toHaveBeenCalled();
     expect(root().getAttribute("data-overflow-count")).toBe(settled);
     expect(ids(menu())).toEqual([]);
+  });
+
+  it("cancels a pending re-measure on disconnect", async () => {
+    setup(MARKUP());
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    await start();
+
+    setGeom(150, { a: 100, b: 100, c: 100 }); // a geometry that *would* bank two items
+    window.dispatchEvent(new Event("resize")); // schedules the debounced pass
+    instance().disconnect();
+    vi.advanceTimersByTime(500);
+
+    expect(ids(menu())).toEqual([]);
+    expect(root().hasAttribute("data-overflow-count")).toBe(false);
   });
 
   it("lets the keyboard reach banked items through the composed Menu", async () => {
@@ -1176,6 +1773,30 @@ describe("OverflowMenuController", () => {
     expect(root().hasAttribute("tabindex")).toBe(false);
   });
 
+  it("gives back the tab stop a page restored from the cache carries", async () => {
+    setup(BUTTON_MARKUP);
+    setGeom(250, { a: 100, b: 100, c: 100 });
+    await start();
+    for (const id of ["a", "b", "c"]) (query(`#${id}`) as HTMLButtonElement).disabled = true;
+    trigger().focus();
+    setGeom(1000, { a: 100, b: 100, c: 100 });
+    instance().update();
+    expect(root().getAttribute("tabindex")).toBe("-1");
+
+    application = await restoreFromCache(
+      application,
+      (restored) => restored.register("stimeo--overflow-menu", OverflowMenuController),
+      () => vi.advanceTimersByTimeAsync(0),
+    );
+
+    expect(root().hasAttribute("tabindex")).toBe(false);
+    expect(
+      root()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-loan")),
+    ).toEqual([]);
+  });
+
   it("keeps a root tabindex the consumer changed after the loan", async () => {
     // The other half of the ownership rule: the borrow flag alone must not
     // authorize the removal. A consumer that made the bar its own Tab stop after
@@ -1212,7 +1833,7 @@ describe("OverflowMenuController", () => {
 
   // ---- The restore path owns the composed menu's state too ----
 
-  it("collapses an expanded menu before Turbo caches the page", async () => {
+  it("keeps an expanded menu open through turbo:before-cache", async () => {
     setup(COMPOSED_MARKUP);
     setGeom(150, { a: 100, b: 100, c: 100 });
     await start(["stimeo--menu", MenuController]);
@@ -1222,10 +1843,10 @@ describe("OverflowMenuController", () => {
 
     document.dispatchEvent(new Event("turbo:before-cache"));
 
-    expect(trigger().getAttribute("aria-expanded")).toBe("false");
-    expect(menu().hidden).toBe(true);
-    expect(ids(items())).toEqual(["a", "b", "c"]);
-    expect(more().hidden).toBe(true);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(menu().hidden).toBe(false);
+    expect(ids(menu())).toEqual(["b", "c"]);
+    expect(more().hidden).toBe(false);
   });
 
   it("collapses an expanded menu when only this controller disconnects", async () => {
@@ -1476,16 +2097,6 @@ describe("OverflowMenuController", () => {
     expect(records).toEqual([]);
   });
 
-  it("hands a trigger it labelled back bare before Turbo caches the page", async () => {
-    setup(MARKUP(""));
-    setGeom(50, { a: 100, b: 100, c: 100 });
-    await start();
-    expect(trigger().textContent).toBe("More");
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(trigger().textContent).toBe("");
-    expect(bookkeeping(trigger())).toEqual([]);
-  });
-
   it("hands a trigger it labelled back bare on disconnect", async () => {
     setup(MARKUP(""));
     setGeom(1000, { a: 100, b: 100, c: 100 });
@@ -1495,11 +2106,11 @@ describe("OverflowMenuController", () => {
     expect(bookkeeping(trigger())).toEqual([]);
   });
 
-  it("keeps an authored More label through the rewind", async () => {
+  it("keeps an authored More label on disconnect", async () => {
     setup(MARKUP());
     setGeom(50, { a: 100, b: 100, c: 100 });
     await start();
-    document.dispatchEvent(new Event("turbo:before-cache"));
+    instance().disconnect();
     expect(trigger().textContent).toBe("More");
   });
 
@@ -1625,17 +2236,6 @@ describe("OverflowMenuController", () => {
   );
 
   it.each(ADDITIONS)(
-    "leaves a trigger it labelled alone before Turbo caches the page once the consumer adds %s",
-    async (_, add) => {
-      const authored = await labelThenAdd(add);
-      document.dispatchEvent(new Event("turbo:before-cache"));
-      // The marker stays where it is: taking it off would write to a trigger that
-      // belongs to the consumer.
-      expect(trigger().outerHTML).toBe(authored);
-    },
-  );
-
-  it.each(ADDITIONS)(
     "leaves a trigger it labelled alone on disconnect once the consumer adds %s",
     async (_, add) => {
       const authored = await labelThenAdd(add);
@@ -1659,13 +2259,13 @@ describe("OverflowMenuController", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(trigger().textContent).toBe("Mehr");
       // With the addition gone the trigger holds the label alone again, so the label
-      // and the rewind reach it.
+      // and the hand-back on disconnect reach it.
       takeOut(trigger());
       root().setAttribute(MORE_LABEL, "Encore");
       await vi.advanceTimersByTimeAsync(0);
       expect(trigger().textContent).toBe("Encore");
       expect(trigger().getAttribute(OWNS_LABEL)).toBe("Encore");
-      document.dispatchEvent(new Event("turbo:before-cache"));
+      instance().disconnect();
       expect(trigger().textContent).toBe("");
       expect(bookkeeping(trigger())).toEqual([]);
     },
@@ -1692,5 +2292,485 @@ describe("OverflowMenuController", () => {
 
     (query("#c") as HTMLButtonElement).click();
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  // ---- An items row or a More wrapper that takes over ----
+
+  /**
+   * The overflow lives in where the items sit: the ones that fit in the items row, the
+   * rest banked in the More wrapper's menu, with the wrapper shown. A row or a wrapper
+   * that takes over — in one task, or after an earlier one leaves in a later task — is
+   * balanced the same way, silently, and the items banked from a row that leaves go back
+   * to it.
+   */
+  describe("an items row or a More wrapper that takes over", () => {
+    /** Lets Stimulus deliver the target callbacks, and the pass they schedule, under the mocked clock. */
+    const settle = () => vi.advanceTimersByTimeAsync(0);
+    const menuOf = (wrapper: HTMLElement) => query("[data-stimeo--menu-target='menu']", wrapper);
+    /** A server-rendered More wrapper: hidden, with an empty menu. */
+    const freshMore = (): HTMLElement => {
+      const wrapper = document.createElement("div");
+      wrapper.setAttribute("data-stimeo--overflow-menu-target", "more");
+      wrapper.hidden = true;
+      wrapper.innerHTML = `
+        <button id="fresh-trigger" data-stimeo--menu-target="trigger">More</button>
+        <div role="menu" aria-labelledby="fresh-trigger" data-stimeo--menu-target="menu"></div>`;
+      stub(query("[data-stimeo--menu-target='trigger']", wrapper), "offsetWidth", 50);
+      return wrapper;
+    };
+    /** A server-rendered items row holding fresh copies of the three items. */
+    const freshItems = (): HTMLElement => {
+      const row = document.createElement("div");
+      row.setAttribute("data-stimeo--overflow-menu-target", "items");
+      row.innerHTML = `
+        <a id="na" href="#" data-priority="1">A</a>
+        <a id="nb" href="#" data-priority="2">B</a>
+        <a id="nc" href="#">C</a>`;
+      for (const item of Array.from(row.children)) stub(item, "offsetWidth", 100);
+      return row;
+    };
+    /** Mounts the bar with C banked: 250px holds A and B beside the More button. */
+    const mountOverflowing = async (html = MARKUP()) => {
+      setup(html);
+      setGeom(250, { a: 100, b: 100, c: 100 });
+      await start();
+      expect(ids(items())).toEqual(["a", "b"]);
+      expect(ids(menu())).toEqual(["c"]);
+    };
+
+    it("banks the overflow into a More wrapper replaced in one task", async () => {
+      await mountOverflowing();
+      const successor = freshMore();
+      more().replaceWith(successor);
+      await settle();
+
+      expect(more()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+      expect(ids(menuOf(successor))).toEqual(["c"]);
+      expect(ids(items())).toEqual(["a", "b"]);
+      expect(root().getAttribute("data-overflow-count")).toBe("1");
+    });
+
+    it("banks the overflow into the More wrapper that stays after an earlier one leaves", async () => {
+      await mountOverflowing();
+      const original = more();
+      const successor = freshMore();
+      original.after(successor);
+      await settle();
+      original.remove();
+      await settle();
+
+      expect(more()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+      expect(ids(menuOf(successor))).toEqual(["c"]);
+      expect(ids(items())).toEqual(["a", "b"]);
+      expect(root().getAttribute("data-overflow-count")).toBe("1");
+    });
+
+    it("balances an items row replaced in one task, and the old row takes its banked item along", async () => {
+      await mountOverflowing();
+      const banked = query("#c");
+      const successor = freshItems();
+      items().replaceWith(successor);
+      await settle();
+
+      expect(items()).toBe(successor);
+      expect(ids(successor)).toEqual(["na", "nb"]);
+      expect(ids(menu())).toEqual(["nc"]);
+      expect(banked.isConnected).toBe(false);
+      expect(root().getAttribute("data-overflow-count")).toBe("1");
+    });
+
+    it("balances the items row that stays after an earlier one leaves", async () => {
+      await mountOverflowing();
+      const original = items();
+      const banked = query("#c");
+      const successor = freshItems();
+      original.after(successor);
+      await settle();
+      original.remove();
+      await settle();
+
+      expect(items()).toBe(successor);
+      expect(ids(successor)).toEqual(["na", "nb"]);
+      expect(ids(menu())).toEqual(["nc"]);
+      expect(banked.isConnected).toBe(false);
+      expect(root().getAttribute("data-overflow-count")).toBe("1");
+    });
+
+    it("banks the overflow into a More wrapper inserted in front, and keeps it once the old one leaves", async () => {
+      await mountOverflowing();
+      const original = more();
+      const successor = freshMore();
+      original.before(successor);
+      await settle();
+
+      expect(more()).toBe(successor);
+      expect(ids(menuOf(successor))).toEqual(["c"]);
+      expect(ids(menuOf(original))).toEqual([]);
+      expect(original.hidden).toBe(true);
+
+      original.remove();
+      await settle();
+
+      expect(successor.hidden).toBe(false);
+      expect(ids(menuOf(successor))).toEqual(["c"]);
+      expect(ids(items())).toEqual(["a", "b"]);
+      expect(root().getAttribute("data-overflow-count")).toBe("1");
+    });
+
+    it("balances an items row inserted in front, and the old row takes its banked item along once it leaves", async () => {
+      await mountOverflowing();
+      const original = items();
+      const banked = query("#c");
+      const successor = freshItems();
+      original.before(successor);
+      await settle();
+
+      expect(items()).toBe(successor);
+      expect(ids(successor)).toEqual(["na", "nb"]);
+      expect(ids(menu())).toEqual(["nc"]);
+      expect(ids(original)).toEqual(["a", "b", "c"]);
+      expect(bookkeeping(banked)).toEqual([]);
+
+      original.remove();
+      await settle();
+
+      expect(ids(successor)).toEqual(["na", "nb"]);
+      expect(ids(menu())).toEqual(["nc"]);
+      expect(banked.isConnected).toBe(false);
+      expect(root().getAttribute("data-overflow-count")).toBe("1");
+    });
+
+    /** Records every event the bar reports while `act` runs and its callbacks settle. */
+    const reported = async (act: () => void | Promise<void>): Promise<string[]> => {
+      const seen: string[] = [];
+      const names = ["stimeo--overflow-menu:change", "stimeo--overflow-menu:reconcile", "change"];
+      const listener = (event: Event): void => {
+        seen.push(`${event.type} ${JSON.stringify((event as CustomEvent).detail ?? null)}`);
+      };
+      for (const name of names) document.addEventListener(name, listener);
+      await act();
+      await settle();
+      for (const name of names) document.removeEventListener(name, listener);
+      return seen;
+    };
+
+    /** The records `act` leaves on the bar's subtree, besides the node it adds or removes. */
+    const writesBesides = async (node: Node, act: () => void): Promise<MutationRecord[]> => {
+      const records: MutationRecord[] = [];
+      const observer = new MutationObserver((batch) => records.push(...batch));
+      observer.observe(root(), { attributes: true, childList: true, subtree: true });
+      act();
+      await settle();
+      records.push(...observer.takeRecords());
+      observer.disconnect();
+      return records.filter(
+        (record) =>
+          !Array.from(record.addedNodes).includes(node) &&
+          !Array.from(record.removedNodes).includes(node),
+      );
+    };
+
+    it("reports nothing while it balances a wrapper or a row that takes over at the same count", async () => {
+      await mountOverflowing();
+      const seen = await reported(async () => {
+        const original = more();
+        original.after(freshMore());
+        await settle();
+        original.remove();
+        await settle();
+        items().replaceWith(freshItems());
+      });
+
+      expect(seen).toEqual([]);
+      expect(root().getAttribute("data-overflow-count")).toBe("1");
+    });
+
+    it("reports nothing while it balances a wrapper or a row inserted in front at the same count", async () => {
+      await mountOverflowing();
+      const seen = await reported(async () => {
+        const wrapper = more();
+        wrapper.before(freshMore());
+        await settle();
+        wrapper.remove();
+        await settle();
+        const row = items();
+        row.before(freshItems());
+        await settle();
+        row.remove();
+      });
+
+      expect(seen).toEqual([]);
+      expect(root().getAttribute("data-overflow-count")).toBe("1");
+    });
+
+    it("reports a count that moved with a row that takes over as reconcile", async () => {
+      await mountOverflowing();
+      const successor = freshItems();
+      const extra = document.createElement("a");
+      extra.id = "nd";
+      extra.href = "#";
+      extra.textContent = "D";
+      stub(extra, "offsetWidth", 100);
+      successor.append(extra);
+
+      const seen = await reported(() => items().replaceWith(successor));
+
+      expect(ids(menu())).toEqual(["nc", "nd"]);
+      expect(seen).toEqual(['stimeo--overflow-menu:reconcile {"overflowCount":2,"total":4}']);
+    });
+
+    it("balances a More wrapper that arrives after the only one left", async () => {
+      await mountOverflowing();
+      more().remove();
+      await settle();
+      // With no wrapper left, the banked item is handed back to the row.
+      expect(ids(items())).toEqual(["a", "b", "c"]);
+      expect(bookkeeping(query("#c"))).toEqual([]);
+      expect(root().hasAttribute("data-overflow-count")).toBe(false);
+
+      const late = freshMore();
+      const seen = await reported(() => root().append(late));
+
+      expect(late.hidden).toBe(false);
+      expect(ids(menuOf(late))).toEqual(["c"]);
+      expect(root().getAttribute("data-overflow-count")).toBe("1");
+      expect(seen).toEqual([]);
+    });
+
+    it("balances an items row that arrives after the only one left", async () => {
+      await mountOverflowing();
+      const banked = query("#c");
+      items().remove();
+      await settle();
+      expect(banked.isConnected).toBe(false);
+
+      const late = freshItems();
+      more().before(late);
+      await settle();
+
+      expect(ids(late)).toEqual(["na", "nb"]);
+      expect(ids(menu())).toEqual(["nc"]);
+      expect(root().getAttribute("data-overflow-count")).toBe("1");
+    });
+
+    it("writes nothing when a wrapper or a row arrives behind the current one", async () => {
+      await mountOverflowing();
+      const behindMore = freshMore();
+      expect(await writesBesides(behindMore, () => more().after(behindMore))).toEqual([]);
+      const behindRow = freshItems();
+      expect(await writesBesides(behindRow, () => items().after(behindRow))).toEqual([]);
+
+      expect(ids(menu())).toEqual(["c"]);
+      expect(behindMore.hidden).toBe(true);
+    });
+
+    it("writes nothing when a wrapper or a row behind the current one leaves", async () => {
+      await mountOverflowing();
+      const behindMore = freshMore();
+      const behindRow = freshItems();
+      more().after(behindMore);
+      items().after(behindRow);
+      await settle();
+
+      expect(await writesBesides(behindMore, () => behindMore.remove())).toEqual([]);
+      expect(await writesBesides(behindRow, () => behindRow.remove())).toEqual([]);
+      expect(ids(menu())).toEqual(["c"]);
+    });
+
+    it("tolerates the removal of the only row and the only wrapper", async () => {
+      await mountOverflowing();
+      const onlyRow = items();
+      const onlyMore = more();
+      onlyRow.remove();
+      onlyMore.remove();
+
+      // Drive the callbacks directly: happy-dom delivers target callbacks unreliably.
+      expect(() => instance().itemsTargetDisconnected(onlyRow)).not.toThrow();
+      expect(() => instance().moreTargetDisconnected(onlyMore)).not.toThrow();
+      await settle();
+    });
+
+    it("balances nothing into the wrapper that stays once it has disconnected", async () => {
+      await mountOverflowing();
+      const original = more();
+      const successor = freshMore();
+      original.after(successor);
+      await settle();
+      const controller = instance();
+      controller.disconnect();
+      original.remove();
+      controller.moreTargetDisconnected(original);
+      controller.moreTargetConnected();
+      controller.itemsTargetConnected();
+      await settle();
+
+      // `disconnect()` handed the bar back, and nothing banks it again afterwards.
+      expect(successor.hidden).toBe(true);
+      expect(ids(menuOf(successor))).toEqual([]);
+      expect(ids(items())).toEqual(["a", "b", "c"]);
+      expect(root().hasAttribute("data-overflow-count")).toBe(false);
+    });
+
+    it("stays inert when a required target missing since connect arrives later", async () => {
+      setup(`
+        <div id="om" data-controller="stimeo--overflow-menu" role="toolbar" aria-label="Actions">
+          <div data-stimeo--overflow-menu-target="items">
+            <a id="a" href="#" data-priority="1">A</a>
+            <a id="b" href="#" data-priority="2">B</a>
+            <a id="c" href="#">C</a>
+          </div>
+        </div>`);
+      stub(root(), "clientWidth", 250);
+      for (const id of ["a", "b", "c"]) stub(query(`#${id}`), "offsetWidth", 100);
+      await start();
+
+      const late = freshMore();
+      root().append(late);
+      await settle();
+
+      expect(root().hasAttribute("data-overflow-count")).toBe(false);
+      expect(late.hidden).toBe(true);
+      expect(ids(items())).toEqual(["a", "b", "c"]);
+    });
+
+    it("balances nothing when a target callback arrives during a restore", async () => {
+      setup(COMPOSED_MARKUP);
+      setGeom(250, { a: 100, b: 100, c: 100 });
+      await start(["stimeo--menu", MenuController]);
+      expect(ids(menu())).toEqual(["c"]);
+      trigger().focus();
+      trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      const controller = instance();
+      more().addEventListener(
+        "stimeo--menu:close",
+        () => {
+          controller.moreTargetConnected();
+          controller.itemsTargetDisconnected(items());
+        },
+        { once: true },
+      );
+
+      controller.disconnect();
+      await settle();
+
+      expect(ids(items())).toEqual(["a", "b", "c"]);
+      expect(ids(menu())).toEqual([]);
+      expect(more().hidden).toBe(true);
+    });
+
+    it("hands a wrapper that stops being the wrapper its banked items back, and hides it", async () => {
+      await mountOverflowing();
+      const former = more();
+      const successor = freshMore();
+      former.after(successor);
+      await settle();
+
+      // The element stays; only the attribute naming it the wrapper goes.
+      former.removeAttribute("data-stimeo--overflow-menu-target");
+      await settle();
+
+      expect(former.isConnected).toBe(true);
+      expect(former.hidden).toBe(true);
+      expect(ids(menuOf(former))).toEqual([]);
+      expect(successor.hidden).toBe(false);
+      expect(ids(menuOf(successor))).toEqual(["c"]);
+    });
+
+    it("takes the label it wrote back from a wrapper that stops being the wrapper", async () => {
+      setup(MARKUP(""));
+      setGeom(250, { a: 100, b: 100, c: 100 });
+      await start();
+      const former = more();
+      expect(trigger().textContent).toBe("More");
+      const successor = freshMore();
+      former.after(successor);
+      await settle();
+
+      former.removeAttribute("data-stimeo--overflow-menu-target");
+      await settle();
+
+      const formerTrigger = query("[data-stimeo--menu-target='trigger']", former);
+      expect(formerTrigger.textContent).toBe("");
+      expect(bookkeeping(formerTrigger)).toEqual([]);
+    });
+
+    it("hands a row that stops being the row its banked items back", async () => {
+      await mountOverflowing();
+      const former = items();
+      const successor = freshItems();
+      former.after(successor);
+      await settle();
+
+      former.removeAttribute("data-stimeo--overflow-menu-target");
+      await settle();
+
+      expect(ids(former)).toEqual(["a", "b", "c"]);
+      for (const id of ["a", "b", "c"]) expect(bookkeeping(query(`#${id}`)), id).toEqual([]);
+      expect(query("#c").hasAttribute("role")).toBe(false);
+      expect(ids(successor)).toEqual(["na", "nb"]);
+      expect(ids(menu())).toEqual(["nc"]);
+    });
+
+    it("hands a row that stops being the row its banked items back once it has disconnected", async () => {
+      await mountOverflowing();
+      const former = items();
+      const controller = instance();
+      former.removeAttribute("data-stimeo--overflow-menu-target");
+      controller.disconnect();
+      // The wrapper still resolves, so only the row's own callback hands the bar back.
+      controller.itemsTargetDisconnected(former);
+      await settle();
+
+      expect(ids(former)).toEqual(["a", "b", "c"]);
+      for (const id of ["a", "b", "c"]) expect(bookkeeping(query(`#${id}`)), id).toEqual([]);
+      expect(ids(menu())).toEqual([]);
+      expect(more().hidden).toBe(true);
+    });
+
+    it("hands a wrapper that stops being the wrapper its banked items back once it has disconnected", async () => {
+      await mountOverflowing();
+      const former = more();
+      const controller = instance();
+      former.removeAttribute("data-stimeo--overflow-menu-target");
+      controller.disconnect();
+      // The row still resolves, so only the wrapper's own callback hands the bar back.
+      controller.moreTargetDisconnected(former);
+      await settle();
+
+      expect(ids(items())).toEqual(["a", "b", "c"]);
+      expect(bookkeeping(query("#c"))).toEqual([]);
+      expect(ids(menuOf(former))).toEqual([]);
+      expect(former.hidden).toBe(true);
+    });
+
+    it("hands back a pristine bar when the root loses its controller", async () => {
+      await mountOverflowing();
+
+      root().removeAttribute("data-controller");
+      await settle();
+
+      expect(ids(items())).toEqual(["a", "b", "c"]);
+      expect(ids(menu())).toEqual([]);
+      expect(more().hidden).toBe(true);
+      expect(root().hasAttribute("data-overflowing")).toBe(false);
+      expect(root().hasAttribute("data-overflow-count")).toBe(false);
+      for (const id of ["a", "b", "c"]) expect(bookkeeping(query(`#${id}`)), id).toEqual([]);
+      expect(query("#c").hasAttribute("role")).toBe(false);
+    });
+
+    it("keeps the balance on a wrapper and a row that move within the bar", async () => {
+      await mountOverflowing();
+      const moving = more();
+      expect(await writesBesides(moving, () => items().before(moving))).toEqual([]);
+      const row = items();
+      expect(await writesBesides(row, () => root().append(row))).toEqual([]);
+
+      expect(moving.hidden).toBe(false);
+      expect(ids(menu())).toEqual(["c"]);
+      expect(ids(items())).toEqual(["a", "b"]);
+    });
   });
 });

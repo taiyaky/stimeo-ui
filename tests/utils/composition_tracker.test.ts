@@ -173,6 +173,34 @@ describe("CompositionTracker", () => {
     expect(tracker.consumesConfirmedInput(sendInput(first))).toBe(true);
   });
 
+  it("stops tracking compositions on a field it released", () => {
+    const input = document.createElement("input");
+    tracker = new CompositionTracker();
+    tracker.observe(input);
+    tracker.unobserve(input);
+    input.dispatchEvent(new CompositionEvent("compositionstart"));
+    expect(tracker.isComposing()).toBe(false);
+
+    tracker.observe(input);
+    tracker.disconnect();
+    input.dispatchEvent(new CompositionEvent("compositionstart"));
+    expect(tracker.isComposing()).toBe(false);
+  });
+
+  it("stops listening for keys on every field once disconnected", () => {
+    const first = document.createElement("input");
+    const second = document.createElement("input");
+    tracker = new CompositionTracker();
+    tracker.observe(first);
+    tracker.disconnect();
+    tracker.observe(second);
+
+    second.dispatchEvent(new CompositionEvent("compositionend"));
+    first.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+
+    expect(tracker.consumesConfirmedInput(sendInput(second))).toBe(true);
+  });
+
   it("marks the field that confirmed, not the ancestor being observed", () => {
     document.body.innerHTML = `<form><input id="one"><input id="two"></form>`;
     const form = document.querySelector("form") as HTMLFormElement;

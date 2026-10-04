@@ -99,22 +99,3 @@ export function writeFields(
 export function commitField(target: HTMLElement): void {
   target.dispatchEvent(new Event("change", { bubbles: true }));
 }
-
-/**
- * Reports an edit a widget made on the user's behalf, the way the browser
- * reports its own: one bubbling `input`, then one bubbling `change`.
- *
- * This is for a widget that owns the stepping or picking its *own* native
- * control would otherwise do — writing `control.value` from script fires
- * nothing, so a form listening for either event never hears the edit. Use
- * {@link commitField} instead where the element is a mirror of state held
- * elsewhere: a hidden field has no native edit to imitate, so it reports the
- * commit alone.
- *
- * Call it only for a move the user made, and only where the widget really did
- * the writing — an edit the browser already reported would be doubled.
- */
-export function commitEdit(control: HTMLElement): void {
-  control.dispatchEvent(new Event("input", { bubbles: true }));
-  control.dispatchEvent(new Event("change", { bubbles: true }));
-}

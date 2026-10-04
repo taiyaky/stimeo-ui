@@ -1,4 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { attachPositioning, type Placement, type PositioningOptions, type PositionResult } from ".";
 
 /**
@@ -67,6 +70,9 @@ const PLACEMENTS: ReadonlySet<string> = new Set([
  * instead of writing.
  */
 export class AnchoredController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["anchor", "floating"];
   static override values = {
     placement: { type: String, default: "bottom" },
@@ -77,6 +83,11 @@ export class AnchoredController extends Controller<HTMLElement> {
     strategy: { type: String, default: "absolute" },
     active: { type: Boolean, default: true },
   };
+
+  static valueConstraints = {
+    offset: NUMBER_BOUNDS.finite,
+    padding: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof AnchoredController.values>;
   static events = ["position"] as const;
 
   declare readonly anchorTarget: HTMLElement;
@@ -98,6 +109,8 @@ export class AnchoredController extends Controller<HTMLElement> {
   #attachId: symbol | null = null;
   /** True between connect and disconnect (Stimulus may fire value callbacks before connect). */
   #connected = false;
+  #position: PositionResult | null = null;
+  readonly #morphRender = new MorphRenderWatcher(() => this.#sync());
   /**
    * Serialized options as of the last reconcile, empty only before the first one —
    * a value no serialization produces, so it can never match a real key.
@@ -108,11 +121,13 @@ export class AnchoredController extends Controller<HTMLElement> {
   #appliedFloating: HTMLElement | null = null;
 
   override connect(): void {
+    this.#morphRender.observe(this.element);
     this.#connected = true;
     this.#sync();
   }
 
   override disconnect(): void {
+    this.#morphRender.disconnect();
     this.#connected = false;
     this.#sync();
   }
@@ -164,10 +179,10 @@ export class AnchoredController extends Controller<HTMLElement> {
       placement: PLACEMENTS.has(this.placementValue)
         ? (this.placementValue as Placement)
         : "bottom",
-      offset: Number.isFinite(this.offsetValue) ? this.offsetValue : 0,
+      offset: this.#safeOffset,
       flip: this.flipValue,
       shift: this.shiftValue,
-      padding: Number.isFinite(this.paddingValue) ? this.paddingValue : 0,
+      padding: this.#safePadding,
       strategy: this.strategyValue === "fixed" ? "fixed" : "absolute",
     };
   }
@@ -199,6 +214,7 @@ export class AnchoredController extends Controller<HTMLElement> {
       anchor === this.#appliedAnchor &&
       floating === this.#appliedFloating
     ) {
+      if (floating && this.#position) this.#reflectPosition(floating, this.#position);
       return;
     }
     this.#detach();
@@ -220,6 +236,7 @@ export class AnchoredController extends Controller<HTMLElement> {
     this.#stop?.();
     this.#stop = null;
     this.#attachId = null;
+    this.#position = null;
   }
 
   /**
@@ -234,9 +251,38 @@ export class AnchoredController extends Controller<HTMLElement> {
    */
   #onComputed(id: symbol, floating: HTMLElement, result: PositionResult): void {
     if (id !== this.#attachId) return;
-    floating.setAttribute("data-anchored-placement", result.placement);
+    this.#position = result;
+    this.#reflectPosition(floating, result);
     this.dispatch("position", {
       detail: { placement: result.placement, x: result.x, y: result.y },
     });
+  }
+  /** Restores the last completed placement without restarting the attached engine. */
+  #reflectPosition(floating: HTMLElement, result: PositionResult): void {
+    floating.setAttribute("data-anchored-placement", result.placement);
+    floating.style.position = this.#options.strategy ?? "absolute";
+    floating.style.left = `${result.x}px`;
+    floating.style.top = `${result.y}px`;
+  }
+  /** Current `offset` declaration resolved against its numeric contract. */
+  get #safeOffset(): number {
+    return this.#numbers.read(
+      this,
+      "offset",
+      this.offsetValue,
+      AnchoredController.values.offset.default,
+      AnchoredController.valueConstraints.offset,
+    );
+  }
+
+  /** Current `padding` declaration resolved against its numeric contract. */
+  get #safePadding(): number {
+    return this.#numbers.read(
+      this,
+      "padding",
+      this.paddingValue,
+      AnchoredController.values.padding.default,
+      AnchoredController.valueConstraints.padding,
+    );
   }
 }

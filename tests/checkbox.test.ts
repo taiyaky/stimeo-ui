@@ -205,6 +205,63 @@ describe("CheckboxController", () => {
   it("has no machine-detectable a11y violations", async () => {
     await expectNoA11yViolations(root());
   });
+  it("includes pending child writes in one user aggregate change", async () => {
+    const changes: unknown[] = [];
+    const repairs: unknown[] = [];
+    root().addEventListener("stimeo--checkbox:change", (event) =>
+      changes.push((event as CustomEvent).detail),
+    );
+    root().addEventListener("stimeo--checkbox:reconcile", (event) =>
+      repairs.push((event as CustomEvent).detail),
+    );
+    const child = children()[0];
+    if (!child) throw new Error("Missing first child");
+    child.checked = true;
+    child.dispatchEvent(new Event("change", { bubbles: true }));
+    await tick();
+    expect(changes).toEqual([{ checked: false, indeterminate: true, state: "partial" }]);
+    expect(repairs).toEqual([]);
+  });
+
+  it.each(["parent", "child"])(
+    "does not report a %s action returning to the last published aggregate",
+    async (source) => {
+      const changes: unknown[] = [];
+      const repairs: unknown[] = [];
+      root().addEventListener("stimeo--checkbox:change", (event) =>
+        changes.push((event as CustomEvent).detail),
+      );
+      root().addEventListener("stimeo--checkbox:reconcile", (event) =>
+        repairs.push((event as CustomEvent).detail),
+      );
+      for (const child of children()) child.checked = true;
+      parent().checked = true;
+      if (source === "parent") changeParent(false);
+      else {
+        for (const child of children()) child.checked = false;
+        changeChild(0, false);
+      }
+      await tick();
+      expect(root().getAttribute("data-state")).toBe("none");
+      expect(changes).toEqual([]);
+      expect(repairs).toEqual([]);
+    },
+  );
+
+  it("does not report another child edit while the published aggregate remains partial", () => {
+    root().insertAdjacentHTML(
+      "beforeend",
+      '<input type="checkbox" data-stimeo--checkbox-target="child">',
+    );
+    changeChild(0, true);
+    const changes: unknown[] = [];
+    root().addEventListener("stimeo--checkbox:change", (event) =>
+      changes.push((event as CustomEvent).detail),
+    );
+    changeChild(1, true);
+    expect(root().getAttribute("data-state")).toBe("partial");
+    expect(changes).toEqual([]);
+  });
 });
 
 /**
@@ -510,6 +567,25 @@ describe("CheckboxController runtime reconciliation", () => {
     expect(parent().indeterminate).toBe(true);
   });
 
+  it("settles a lone parent's aggregate to none when that parent leaves", async () => {
+    await start(`
+      <span data-controller="stimeo--checkbox">
+        <input type="checkbox" checked data-stimeo--checkbox-target="parent">
+      </span>`);
+    expect(root().getAttribute("data-state")).toBe("all");
+    const repairs: unknown[] = [];
+    root().addEventListener("stimeo--checkbox:reconcile", (event) => {
+      repairs.push((event as CustomEvent).detail);
+    });
+
+    parent().remove();
+    controller().parentTargetDisconnected();
+    await flushMicrotasks();
+
+    expect(root().getAttribute("data-state")).toBe("none");
+    expect(repairs).toEqual([{ checked: false, indeterminate: false, state: "none" }]);
+  });
+
   it("coalesces repeated target callbacks into one reflection pass", async () => {
     await start(group(childMarkup(), parentMarkup()));
     const setAttribute = vi.spyOn(root(), "setAttribute");
@@ -602,6 +678,24 @@ describe("CheckboxController runtime reconciliation", () => {
     expect(changes).toEqual([]);
   });
 
+  it("repairs unchanged output once for a combined own, descendant, and target burst", async () => {
+    await start(group(`${childMarkup("checked")}${childMarkup()}`, parentMarkup()));
+    const notifications = vi.fn();
+    root().addEventListener("stimeo--checkbox:change", notifications);
+    root().addEventListener("stimeo--checkbox:reconcile", notifications);
+    root().removeAttribute("data-state");
+    parent().indeterminate = false;
+    const write = vi.spyOn(root(), "setAttribute");
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    child(0).dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    controller().childTargetConnected();
+    await flushMicrotasks();
+    expect(root().getAttribute("data-state")).toBe("partial");
+    expect(parent().indeterminate).toBe(true);
+    expect(write.mock.calls.filter(([name]) => name === "data-state")).toHaveLength(1);
+    expect(notifications).not.toHaveBeenCalled();
+  });
+
   it("ignores checked changes on checkboxes outside its target set", async () => {
     await start(group(`${childMarkup()}<input type="checkbox" id="unmanaged">`, parentMarkup()));
     const setAttribute = vi.spyOn(root(), "setAttribute");
@@ -626,6 +720,26 @@ describe("CheckboxController runtime reconciliation", () => {
     expect(root().getAttribute("data-state")).toBe("sentinel");
     expect(parent().checked).toBe(false);
     expect(parent().indeterminate).toBe(false);
+  });
+
+  it("disconnects the checked-attribute observer it started", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe");
+    const release = vi.spyOn(MutationObserver.prototype, "disconnect");
+    try {
+      await start(group(`${childMarkup()}${childMarkup()}`, parentMarkup()));
+      const index = observe.mock.calls.findIndex(
+        ([target, options]) => target === root() && options?.attributeFilter?.includes("checked"),
+      );
+      const checkedObserver = observe.mock.contexts[index];
+      expect(checkedObserver).toBeInstanceOf(MutationObserver);
+
+      controller().disconnect();
+
+      expect(release.mock.contexts).toContain(checkedObserver);
+    } finally {
+      observe.mockRestore();
+      release.mockRestore();
+    }
   });
 });
 
@@ -763,5 +877,26 @@ describe("CheckboxController form reset reconciliation", () => {
     expect(children().map((child) => child.checked)).toEqual([true, false]);
     expect(root().getAttribute("data-state")).toBe("sentinel");
     expect(parent().indeterminate).toBe(false);
+  });
+
+  it("removes the same capture-phase reset listener it added", async () => {
+    const added = vi.spyOn(document, "addEventListener");
+    const removed = vi.spyOn(document, "removeEventListener");
+    try {
+      await start();
+      const listener = added.mock.calls.find(([type]) => type === "reset")?.[1];
+      expect(listener).toBeInstanceOf(Function);
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--checkbox",
+      ) as CheckboxController;
+
+      controller.disconnect();
+
+      expect(removed).toHaveBeenCalledWith("reset", listener, true);
+    } finally {
+      added.mockRestore();
+      removed.mockRestore();
+    }
   });
 });

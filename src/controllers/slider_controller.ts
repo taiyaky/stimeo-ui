@@ -2,7 +2,10 @@ import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { commitField, writeField } from "../utils/field_mirror";
 import { isRtl } from "../utils/logical_scroll";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { OwnedPointerSession } from "../utils/owned_pointer_session";
 import { rangeFraction } from "../utils/range";
 import { snapSteppedValue, stepSteppedValue } from "../utils/stepped_value";
@@ -66,6 +69,12 @@ const FRACTION_PROPERTY = "--stimeo--slider-fraction";
  * refreshed silently on connect, on a replacement field, and whenever a morph
  * or application code writes a Value.
  *
+ * All published state is settled before its reports. A synchronous listener
+ * that confirms another value leaves that newer confirmation to report itself;
+ * reports still pending for the replaced value are not sent. A read-only listener
+ * or a confirmation that moves no published value leaves pending reports intact.
+ * An event already being dispatched still reaches its remaining listeners.
+ *
  * @remarks
  * Behavior only. The consumer owns all layout (e.g. positioning the thumb from
  * the fraction). Only the horizontal orientation is handled.
@@ -83,6 +92,12 @@ const FRACTION_PROPERTY = "--stimeo--slider-fraction";
  * writing direction. Left unset, nothing here reads `direction`.
  */
 export class SliderController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
+  readonly #moves = new MoveCounter();
+  #move = 0;
+
   static override targets = ["track", "thumb", "field"];
   static override values = {
     min: { type: Number, default: 0 },
@@ -91,6 +106,13 @@ export class SliderController extends Controller<HTMLElement> {
     value: { type: Number, default: 0 },
     logicalTrack: { type: Boolean, default: false },
   };
+
+  static valueConstraints = {
+    min: NUMBER_BOUNDS.finite,
+    max: NUMBER_BOUNDS.finite,
+    step: NUMBER_BOUNDS.positive,
+    value: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof SliderController.values>;
   static actions = ["onKeydown", "onPointerDown"] as const;
   static events = ["change", "reconcile"] as const;
 
@@ -116,7 +138,7 @@ export class SliderController extends Controller<HTMLElement> {
   #settled = 0;
 
   /** Collapses a morph that swaps several render Values into one repaint. */
-  readonly #repaint = new MicrotaskCoalescer(() => this.#render());
+  readonly #repaint = new MorphRenderWatcher(() => this.#render());
 
   /** Whether the consumer declared a mirroring track and the direction mirrors it. */
   get #mirrored(): boolean {
@@ -128,14 +150,14 @@ export class SliderController extends Controller<HTMLElement> {
    * back, and takes it as the baseline, so connecting reports nothing.
    */
   override connect(): void {
-    this.#repaint.activate();
+    this.#repaint.observe(this.element);
     this.#settled = this.#currentValue();
     this.#render();
   }
 
   /** Cancels any active pointer drag so document listeners never leak. */
   override disconnect(): void {
-    this.#repaint.cancel();
+    this.#repaint.disconnect();
     this.#endDrag();
   }
 
@@ -163,7 +185,6 @@ export class SliderController extends Controller<HTMLElement> {
   thumbTargetConnected(thumb: HTMLElement): void {
     const value = this.#currentValue();
     this.#renderThumb(thumb, value);
-    this.#renderFraction(value);
     if (this.#drag && this.#drag.thumb === null) {
       this.#drag.thumb = thumb;
       thumb.focus();
@@ -176,9 +197,18 @@ export class SliderController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
-  /** Drops the stale focus owner while allowing a live track gesture to continue. */
+  /** Brings the field that stays to the current value when an earlier one leaves. */
+  fieldTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /**
+   * Drops the stale focus owner while allowing a live track gesture to continue,
+   * and brings the thumb that stays to the current value.
+   */
   thumbTargetDisconnected(thumb: HTMLElement): void {
     if (this.#drag?.thumb === thumb) this.#drag.thumb = null;
+    this.#repaint.schedule();
   }
 
   /** Ends a gesture whose geometry target disappeared or ceased being a target. */
@@ -191,7 +221,7 @@ export class SliderController extends Controller<HTMLElement> {
     if (isReservedArrowChord(event)) return;
     let next: number | null = null;
     // Stepping snaps the declaration onto the value it publishes before moving.
-    const declared = this.valueValue;
+    const declared = this.#safeValue;
     const range = this.#steppedRange;
     // On a mirrored track the greater value sits at the visual left, so the
     // horizontal pair trades places; the vertical pair passes through.
@@ -211,10 +241,10 @@ export class SliderController extends Controller<HTMLElement> {
         next = stepSteppedValue(declared, -10, range);
         break;
       case "Home":
-        next = this.minValue;
+        next = this.#safeMin;
         break;
       case "End":
-        next = this.maxValue;
+        next = this.#safeMax;
         break;
       default:
         return;
@@ -261,7 +291,7 @@ export class SliderController extends Controller<HTMLElement> {
     if (rect.width === 0) return null;
     const offset = (clientX - rect.left) / rect.width;
     const fraction = mirrored ? 1 - offset : offset;
-    return this.minValue + fraction * (this.maxValue - this.minValue);
+    return this.#safeMin + fraction * (this.#safeMax - this.#safeMin);
   }
 
   /**
@@ -279,9 +309,12 @@ export class SliderController extends Controller<HTMLElement> {
     const value = snapSteppedValue(raw, this.#steppedRange);
     const reported = this.#settled;
     this.#settled = value;
+    if (value !== reported) this.#move = this.#moves.record();
+    const move = this.#move;
     if (!Object.is(this.valueValue, value)) this.valueValue = value;
     this.#renderValue(value);
     this.#mirrorField(value, true);
+    if (!this.#moves.isLatest(move)) return;
     if (value !== reported) this.dispatch("change", { detail: { value } });
   }
 
@@ -304,6 +337,7 @@ export class SliderController extends Controller<HTMLElement> {
     this.#mirrorField(value, false);
     if (value === this.#settled) return;
     this.#settled = value;
+    this.#move = this.#moves.record();
     this.dispatch("reconcile", { detail: { value } });
   }
 
@@ -318,8 +352,8 @@ export class SliderController extends Controller<HTMLElement> {
   /** Writes only ARIA values that differ, including on a replacement target. */
   #renderThumb(thumb: HTMLElement, value: number): void {
     const attributes = {
-      "aria-valuemin": String(this.minValue),
-      "aria-valuemax": String(this.maxValue),
+      "aria-valuemin": String(this.#safeMin),
+      "aria-valuemax": String(this.#safeMax),
       "aria-valuenow": String(value),
     };
     for (const [name, next] of Object.entries(attributes)) {
@@ -329,7 +363,7 @@ export class SliderController extends Controller<HTMLElement> {
 
   /** Writes the behavior-only positioning hook only when its value changed. */
   #renderFraction(value: number): void {
-    const fraction = rangeFraction(value, this.minValue, this.maxValue);
+    const fraction = rangeFraction(value, this.#safeMin, this.#safeMax);
     const next = String(fraction);
     if (this.element.style.getPropertyValue(FRACTION_PROPERTY) !== next) {
       this.element.style.setProperty(FRACTION_PROPERTY, next);
@@ -338,12 +372,12 @@ export class SliderController extends Controller<HTMLElement> {
 
   /** Current normalized value derived from the live declarative inputs. */
   #currentValue(): number {
-    return snapSteppedValue(this.valueValue, this.#steppedRange);
+    return snapSteppedValue(this.#safeValue, this.#steppedRange);
   }
 
   /** Shared range configuration; finite endpoints remain allowed off the grid. */
   get #steppedRange() {
-    return { min: this.minValue, max: this.maxValue, step: this.stepValue };
+    return { min: this.#safeMin, max: this.#safeMax, step: this.#safeStep };
   }
 
   /** Ends the current pointer session without dispatching another change. */
@@ -351,6 +385,49 @@ export class SliderController extends Controller<HTMLElement> {
     const drag = this.#drag;
     this.#drag = null;
     drag?.pointer?.end();
+  }
+  /** Current `min` declaration resolved against its numeric contract. */
+  get #safeMin(): number {
+    return this.#numbers.read(
+      this,
+      "min",
+      this.minValue,
+      SliderController.values.min.default,
+      SliderController.valueConstraints.min,
+    );
+  }
+
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      SliderController.values.max.default,
+      SliderController.valueConstraints.max,
+    );
+  }
+
+  /** Current `step` declaration resolved against its numeric contract. */
+  get #safeStep(): number {
+    return this.#numbers.read(
+      this,
+      "step",
+      this.stepValue,
+      SliderController.values.step.default,
+      SliderController.valueConstraints.step,
+    );
+  }
+
+  /** Current `value` declaration resolved against its numeric contract. */
+  get #safeValue(): number {
+    return this.#numbers.read(
+      this,
+      "value",
+      this.valueValue,
+      this.#safeMin,
+      SliderController.valueConstraints.value,
+    );
   }
 }
 

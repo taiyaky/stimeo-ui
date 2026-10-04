@@ -99,6 +99,44 @@ describe("PointerDragController", () => {
   };
 
   describe("pointer lifecycle", () => {
+    it.each(["-1", "NaN", "Infinity"])(
+      "uses the default pointer threshold for invalid declaration %s",
+      async (raw) => {
+        const events = await mount(
+          defaultFixture.replace(
+            'data-controller="stimeo--pointer-drag"',
+            `data-controller="stimeo--pointer-drag" data-stimeo--pointer-drag-threshold-value="${raw}"`,
+          ),
+        );
+        pointerDown(100, 100);
+        pointerMove(102, 100);
+        expect(events.start).toEqual([]);
+        expect(root().hasAttribute("data-dragging")).toBe(false);
+
+        pointerMove(103, 100);
+        expect(events.start).toEqual([{ x: 103, y: 100, pointerType: "mouse" }]);
+        pointerUp();
+        expect(events.end).toEqual([{ dx: 3, dy: 0, pointerType: "mouse" }]);
+        expect(root().hasAttribute("data-dragging")).toBe(false);
+      },
+    );
+
+    it("preserves a valid fractional pointer threshold", async () => {
+      const events = await mount(
+        defaultFixture.replace(
+          'data-controller="stimeo--pointer-drag"',
+          'data-controller="stimeo--pointer-drag" data-stimeo--pointer-drag-threshold-value="0.5"',
+        ),
+      );
+      pointerDown(100, 100);
+      pointerMove(100.25, 100);
+      expect(events.start).toEqual([]);
+      pointerMove(100.5, 100);
+      expect(events.start).toEqual([{ x: 100.5, y: 100, pointerType: "mouse" }]);
+      pointerUp();
+      expect(events.end).toEqual([{ dx: 0.5, dy: 0, pointerType: "mouse" }]);
+    });
+
     it("does not start until the movement passes the threshold", async () => {
       const events = await mount(defaultFixture);
       pointerDown(100, 100);
@@ -462,6 +500,30 @@ describe("PointerDragController", () => {
       expect(events.move).toHaveLength(1);
     });
 
+    it.each([
+      ["-2", 10],
+      ["0", 10],
+      ["NaN", 10],
+      ["Infinity", 10],
+      ["0.5", 0.5],
+    ])("uses a valid keyboard distance for keyboardStep %s", async (raw, expected) => {
+      const events = await mount(
+        defaultFixture.replace(
+          'data-controller="stimeo--pointer-drag"',
+          `data-controller="stimeo--pointer-drag" data-stimeo--pointer-drag-keyboard-step-value="${raw}"`,
+        ),
+      );
+      key(" ");
+      key("ArrowRight");
+      expect(events.move).toEqual([
+        { dx: expected, dy: 0, x: expected, y: 0, pointerType: "keyboard" },
+      ]);
+      key(" ");
+      expect(events.end).toEqual([{ dx: expected, dy: 0, pointerType: "keyboard" }]);
+      expect(root().hasAttribute("data-grabbed")).toBe(false);
+      expect(document.activeElement).toBe(handle());
+    });
+
     it("scales synthetic moves by keyboardStep", async () => {
       const events = await mount(`
         <ul>
@@ -623,6 +685,17 @@ describe("PointerDragController", () => {
       expect(events.move).toHaveLength(1); // teardown is silent and final
       expect(events.start).toHaveLength(1);
       expect(events.cancel).toHaveLength(0);
+    });
+
+    it("arms no drag from a pointerdown once disconnected", async () => {
+      const events = await mount(defaultFixture);
+      controller()?.disconnect();
+
+      expect(pointerDown(100, 100)).toBe(true);
+      pointerMove(120, 100);
+
+      expect(events.start).toHaveLength(0);
+      expect(root().hasAttribute("data-dragging")).toBe(false);
     });
 
     it("keeps a keyboard grab alive across an in-page move (disconnect/reconnect)", async () => {
@@ -877,6 +950,21 @@ describe("PointerDragController", () => {
       expect(translate()).toBe("10px 10px");
     });
 
+    it("writes the committed offset on drop over a translate changed mid-gesture", async () => {
+      await mount(followFixture);
+      pointerDown(100, 100);
+      pointerMove(120, 110);
+      root().style.removeProperty("translate");
+      pointerUp();
+      expect(translate()).toBe("20px 10px");
+
+      key(" ");
+      key("ArrowRight");
+      root().style.removeProperty("translate");
+      key(" ");
+      expect(translate()).toBe("30px 10px");
+    });
+
     it("returns to the origin when reset() runs, and drags accumulate from there", async () => {
       await mount(followFixture);
       pointerDown(100, 100);
@@ -1005,6 +1093,112 @@ describe("PointerDragController", () => {
       pointerMove(110, 105);
       pointerUp();
       expect(root().getAttribute("style")).toBeNull();
+    });
+
+    /**
+     * `follow` belongs to one gesture: it is read when the gesture starts, together with
+     * the committed offset the inline `translate` shows at that moment, and holds until
+     * the gesture ends. There is no changed callback, so each case writes the attribute
+     * and the next read sees it.
+     */
+    describe("read when a gesture starts", () => {
+      const declareFollow = (on: boolean) =>
+        root().setAttribute("data-stimeo--pointer-drag-follow-value", String(on));
+
+      it("continues from the element's translate when follow is switched on after connect", async () => {
+        await mount(`
+          <ul>
+            <li data-controller="stimeo--pointer-drag" style="translate: 30px 0px">
+              <button type="button" data-stimeo--pointer-drag-target="handle"
+                      aria-label="Reorder">⠿</button>
+            </li>
+          </ul>`);
+        declareFollow(true);
+        pointerDown(100, 100);
+        pointerMove(110, 100);
+        expect(translate()).toBe("40px 0px");
+        pointerUp();
+        expect(translate()).toBe("40px 0px");
+      });
+
+      it("takes the base from the inline translate the element shows when a gesture starts", async () => {
+        await mount(followFixture);
+        pointerDown(0, 0);
+        pointerMove(20, 10);
+        pointerUp();
+        root().style.setProperty("translate", "50px 0px"); // the consumer's own position
+
+        pointerDown(0, 0);
+        pointerMove(5, 0);
+        expect(translate()).toBe("55px 0px");
+        key("Escape");
+        expect(translate()).toBe("50px 0px");
+      });
+
+      it("keeps following a pointer drag whose follow is switched off mid-gesture", async () => {
+        await mount(followFixture);
+        pointerDown(100, 100);
+        pointerMove(130, 100);
+        declareFollow(false);
+        pointerMove(140, 100);
+        expect(translate()).toBe("40px 0px");
+        pointerUp();
+        expect(translate()).toBe("40px 0px");
+
+        // The next gesture reads the new declaration and leaves the translate alone.
+        pointerDown(0, 0);
+        pointerMove(10, 0);
+        pointerUp();
+        expect(translate()).toBe("40px 0px");
+      });
+
+      it("snaps a drag back on cancel although its follow was switched off mid-gesture", async () => {
+        await mount(followFixture);
+        pointerDown(100, 100);
+        pointerMove(130, 100);
+        declareFollow(false);
+        key("Escape");
+        expect(translate()).toBe("");
+      });
+
+      it("does not start following mid-gesture when follow is switched on", async () => {
+        await mount(defaultFixture);
+        pointerDown(100, 100);
+        pointerMove(130, 100);
+        declareFollow(true);
+        pointerMove(140, 100);
+        expect(translate()).toBe("");
+        pointerUp();
+        expect(translate()).toBe("");
+
+        pointerDown(0, 0);
+        pointerMove(5, 0);
+        expect(translate()).toBe("5px 0px");
+      });
+
+      it("keeps a keyboard grab's follow from the moment it grabbed", async () => {
+        await mount(followFixture);
+        key(" ");
+        key("ArrowRight");
+        declareFollow(false);
+        key("ArrowRight");
+        expect(translate()).toBe("20px 0px");
+        key(" ");
+        expect(translate()).toBe("20px 0px");
+      });
+
+      it("leaves the translate alone when an idle element goes away", async () => {
+        await mount(followFixture);
+        pointerDown(0, 0);
+        pointerMove(20, 0);
+        pointerUp();
+        const li = root();
+        li.style.setProperty("translate", "7px 7px");
+
+        li.remove();
+        await delay(20);
+        expect(li.style.getPropertyValue("translate")).toBe("7px 7px");
+      });
     });
   });
 
@@ -1432,5 +1626,198 @@ describe("PointerDragController", () => {
     await tick();
     const after = await captureSpeech({ container, steps: 3 });
     expect(after).toEqual(before);
+  });
+  describe("retained morph session rendering", () => {
+    const followMarkup = defaultFixture.replace(
+      'data-controller="stimeo--pointer-drag"',
+      'data-controller="stimeo--pointer-drag" data-stimeo--pointer-drag-follow-value="true"',
+    );
+    const morph = async (origin: "own" | "descendant") => {
+      (origin === "own" ? root() : handle()).dispatchEvent(
+        new Event("turbo:morph-element", { bubbles: true }),
+      );
+      await flushMicrotasks();
+    };
+
+    for (const origin of ["own", "descendant"] as const) {
+      it(`clears ${origin} stale drag hooks while idle without starting a session`, async () => {
+        const events = await mount(followMarkup);
+        key(" ");
+        key("ArrowRight");
+        key(" ");
+        const before = structuredClone(events);
+        root().setAttribute("data-dragging", "true");
+        root().setAttribute("data-grabbed", "true");
+        handle().setAttribute("data-grabbed", "true");
+        await morph(origin);
+        expect(root().hasAttribute("data-dragging")).toBe(false);
+        expect(root().hasAttribute("data-grabbed")).toBe(false);
+        expect(handle().hasAttribute("data-grabbed")).toBe(false);
+        expect(root().style.translate).toBe("10px 0px");
+        expect(events).toEqual(before);
+        key(" ");
+        expect(root().dataset.grabbed).toBe("true");
+        expect(handle().dataset.grabbed).toBe("true");
+        key("Escape");
+      });
+
+      it(`repairs ${origin} keyboard grab output without replaying or committing the session`, async () => {
+        const events = await mount(followMarkup);
+        key(" ");
+        key("ArrowRight");
+        expect(root().dataset.grabbed).toBe("true");
+        expect(handle().dataset.grabbed).toBe("true");
+        expect(root().style.translate).toBe("10px 0px");
+        root().removeAttribute("data-grabbed");
+        handle().removeAttribute("data-grabbed");
+        root().style.removeProperty("translate");
+        await morph(origin);
+        expect(root().dataset.grabbed).toBe("true");
+        expect(handle().dataset.grabbed).toBe("true");
+        expect(root().style.translate).toBe("10px 0px");
+        expect(events.start).toHaveLength(1);
+        expect(events.move).toHaveLength(1);
+        expect(events.end).toHaveLength(0);
+        expect(events.cancel).toHaveLength(0);
+        key("ArrowRight");
+        key(" ");
+        expect(root().style.translate).toBe("20px 0px");
+        expect(events.end).toEqual([{ dx: 20, dy: 0, pointerType: "keyboard" }]);
+        expect(root().hasAttribute("data-grabbed")).toBe(false);
+        expect(handle().hasAttribute("data-grabbed")).toBe(false);
+      });
+
+      it(`repairs ${origin} pointer output while keeping the original capture and deltas`, async () => {
+        const events = await mount(followMarkup);
+        const capture = vi.spyOn(handle(), "setPointerCapture");
+        pointerDown(100, 100, 71);
+        pointerMove(112, 108, 71);
+        expect(root().dataset.dragging).toBe("true");
+        expect(root().style.translate).toBe("12px 8px");
+        const captures = capture.mock.calls.length;
+        root().removeAttribute("data-dragging");
+        root().style.removeProperty("translate");
+        await morph(origin);
+        expect(root().dataset.dragging).toBe("true");
+        expect(root().style.translate).toBe("12px 8px");
+        expect(capture).toHaveBeenCalledTimes(captures);
+        expect(events.start).toHaveLength(1);
+        expect(events.move).toHaveLength(1);
+        expect(events.end).toHaveLength(0);
+        expect(events.cancel).toHaveLength(0);
+        pointerMove(120, 112, 71);
+        pointerUp(71);
+        expect(root().style.translate).toBe("20px 12px");
+        expect(events.end).toEqual([{ dx: 20, dy: 12, pointerType: "mouse" }]);
+        expect(root().hasAttribute("data-dragging")).toBe(false);
+        capture.mockRestore();
+      });
+
+      it(`repairs ${origin} committed follow output without committing its offset twice`, async () => {
+        const events = await mount(followMarkup);
+        pointerDown(0, 0);
+        pointerMove(20, 10);
+        pointerUp();
+        expect(root().style.translate).toBe("20px 10px");
+        root().style.removeProperty("translate");
+        await morph(origin);
+        expect(root().style.translate).toBe("20px 10px");
+        expect(root().hasAttribute("data-dragging")).toBe(false);
+        expect(events.start).toHaveLength(1);
+        expect(events.end).toHaveLength(1);
+        pointerDown(0, 0);
+        pointerMove(5, 0);
+        pointerUp();
+        expect(root().style.translate).toBe("25px 10px");
+        expect(events.end).toHaveLength(2);
+      });
+    }
+
+    it("adopts a reconnected idle element's translate before later morphs", async () => {
+      const events = await mount(followMarkup);
+      pointerDown(0, 0);
+      pointerMove(20, 10);
+      pointerUp();
+      root().style.removeProperty("translate");
+      await morph("own");
+      expect(root().style.translate).toBe("20px 10px");
+      const element = root();
+      const parent = element.parentElement;
+      const instance = controller();
+      element.remove();
+      await tick();
+      element.style.translate = "60px 30px";
+      parent?.append(element);
+      await tick();
+      expect(controller()).toBe(instance);
+      const before = structuredClone(events);
+      await morph("descendant");
+      expect(element.style.translate).toBe("60px 30px");
+      expect(events).toEqual(before);
+      pointerDown(0, 0);
+      pointerMove(5, 0);
+      pointerUp();
+      expect(element.style.translate).toBe("65px 30px");
+    });
+
+    it("keeps authored translate before a follow move and below the pointer threshold", async () => {
+      const events = await mount(followMarkup);
+      root().style.translate = "25% 0px";
+      pointerDown(0, 0);
+      pointerMove(1, 0);
+      await morph("own");
+      expect(root().style.translate).toBe("25% 0px");
+      expect(root().hasAttribute("data-dragging")).toBe(false);
+      expect(events.start).toHaveLength(0);
+      pointerUp();
+      expect(events.end).toHaveLength(0);
+    });
+
+    it("keeps authored translate when follow is disabled during a grab", async () => {
+      await mount(defaultFixture);
+      key(" ");
+      root().style.translate = "7px 9px";
+      root().removeAttribute("data-grabbed");
+      await morph("own");
+      expect(root().dataset.grabbed).toBe("true");
+      expect(root().style.translate).toBe("7px 9px");
+      key("Escape");
+    });
+
+    it("repairs a drag's output by the follow its gesture started with", async () => {
+      await mount(followMarkup);
+      pointerDown(100, 100);
+      pointerMove(112, 108);
+      root().setAttribute("data-stimeo--pointer-drag-follow-value", "false");
+      root().style.removeProperty("translate");
+      await morph("own");
+      expect(root().style.translate).toBe("12px 8px");
+      key("Escape");
+    });
+
+    it("repairs nothing for a gesture that started without follow", async () => {
+      await mount(followMarkup);
+      pointerDown(0, 0);
+      pointerMove(20, 0);
+      pointerUp();
+      root().setAttribute("data-stimeo--pointer-drag-follow-value", "false");
+      key(" ");
+      root().setAttribute("data-stimeo--pointer-drag-follow-value", "true");
+      root().style.translate = "7px 9px";
+      await morph("own");
+      expect(root().style.translate).toBe("7px 9px");
+      key("Escape");
+    });
+
+    it("repairs an idle element's output by the current follow declaration", async () => {
+      await mount(followMarkup);
+      pointerDown(0, 0);
+      pointerMove(20, 0);
+      pointerUp();
+      root().setAttribute("data-stimeo--pointer-drag-follow-value", "false");
+      root().style.translate = "7px 9px";
+      await morph("own");
+      expect(root().style.translate).toBe("7px 9px");
+    });
   });
 });

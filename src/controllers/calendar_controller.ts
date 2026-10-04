@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import {
   monthLabelFormatter,
@@ -10,6 +11,10 @@ import {
 import { commitField, writeField } from "../utils/field_mirror";
 import { resolveLocale } from "../utils/locale";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import type { NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
+import { type StateReason, stateReasonFor } from "../utils/state_reason";
 import { targetSelector } from "../utils/target_selector";
 
 /**
@@ -42,7 +47,7 @@ const OWNED_DISABLED = "owns-disabled";
  *     <table role="grid">
  *       <tbody data-stimeo--calendar-target="grid"
  *              data-action="keydown->stimeo--calendar#onKeydown
- *                           click->stimeo--calendar#selectByClick">
+ *                           click->stimeo--calendar#select">
  *         <!-- Markup must contain exactly 42 day targets (7 days x 6 rows) -->
  *         <tr role="row">
  *           <td role="gridcell" data-stimeo--calendar-target="day" tabindex="-1"></td>
@@ -91,6 +96,10 @@ const OWNED_DISABLED = "owns-disabled";
  * or connecting again, reports neither `monthchange` nor `reconcile`, whichever
  * month the grid opens on.
  *
+ * A pick is measured from the selection last published. Selecting it again
+ * reports nothing; a page request still awaiting its paint is included in the
+ * user's pick. Listen to cell clicks separately to observe repeated activation.
+ *
  * Two optional fields carry the grid's state into a form, so a server can serve
  * the days it is showing: `field` mirrors the published selection (`YYYY-MM-DD`,
  * empty when nothing is selected) and `monthField` the month being painted
@@ -115,6 +124,11 @@ const OWNED_DISABLED = "owns-disabled";
  * `tabindex`, …) and text content on the 42 pre-allocated `day` targets.
  */
 export class CalendarController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
+  readonly #fieldWrites = new WeakMap<HTMLInputElement, number>();
+
   /** The marker above, in the namespace this controller is registered under. */
   get #ownedDisabled(): string {
     return `data-${this.identifier}-${OWNED_DISABLED}`;
@@ -129,7 +143,11 @@ export class CalendarController extends Controller<HTMLElement> {
     weekStart: { type: Number, default: 0 }, // 0 = Sunday, 1 = Monday, etc.
     locale: { type: String, default: "" },
   };
-  static actions = ["next", "onKeydown", "prev", "selectByClick"] as const;
+
+  static valueConstraints = {
+    weekStart: { finite: true, integer: true, min: 0, max: 6 },
+  } satisfies NumberValueConstraints<typeof CalendarController.values>;
+  static actions = ["next", "onKeydown", "prev", "select"] as const;
   static events = ["monthchange", "reconcile", "select"] as const;
 
   declare readonly labelTarget: HTMLElement;
@@ -183,6 +201,10 @@ export class CalendarController extends Controller<HTMLElement> {
    * month the grid opens on.
    */
   #paintedMonth = "";
+  #monthMoves = 0;
+
+  /** Last rendered date per cell, used only to recover focus when its date output is absent. */
+  readonly #paintedDates = new WeakMap<HTMLElement, string>();
 
   /**
    * Whether this instance has connected before. Only its first connection picks
@@ -207,7 +229,7 @@ export class CalendarController extends Controller<HTMLElement> {
    * connect. None of these Values decides the month on screen; `min` and `max`
    * decide whether the requested day is published.
    */
-  readonly #repaint = new MicrotaskCoalescer(() => {
+  readonly #repaint = new MorphRenderWatcher(() => {
     this.#repaintKeepingFocus();
   });
 
@@ -229,7 +251,7 @@ export class CalendarController extends Controller<HTMLElement> {
   });
 
   override connect(): void {
-    this.#repaint.activate();
+    this.#repaint.observe(this.element);
     this.#settleFocus.activate();
     // A record a paint left outside the connection has no pass coming.
     this.#focusOrigin = null;
@@ -251,7 +273,7 @@ export class CalendarController extends Controller<HTMLElement> {
    */
   override disconnect(): void {
     this.#connected = false;
-    this.#repaint.cancel();
+    this.#repaint.disconnect();
     this.#settleFocus.cancel();
   }
 
@@ -321,14 +343,14 @@ export class CalendarController extends Controller<HTMLElement> {
     this.#shiftMonth(1);
   }
 
-  /** Handles day selection when a gridcell is clicked. */
-  selectByClick(event: MouseEvent): void {
-    const dayElement = (event.target as HTMLElement | null)?.closest<HTMLElement>(
-      targetSelector(this.identifier, "day"),
-    );
-    if (!dayElement) return;
-
-    this.selectDayElement(dayElement);
+  /** Selects an owned day or a descendant, preserving focus outside the grid. */
+  select(source: Event | HTMLElement): void {
+    const { origin, reason } = actionSource(source);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const day = origin?.closest<HTMLElement>(targetSelector(this.identifier, "day"));
+    if (!day || !this.dayTargets.includes(day)) return;
+    this.#selectDay(day, reason);
   }
 
   /** Handles grid cell keyboard navigation and triggers selection. */
@@ -401,7 +423,7 @@ export class CalendarController extends Controller<HTMLElement> {
       case "Enter":
       case " ":
         event.preventDefault();
-        this.selectDayElement(dayElement);
+        this.#selectDay(dayElement, stateReasonFor(event));
         return;
       default:
         handled = false;
@@ -500,6 +522,7 @@ export class CalendarController extends Controller<HTMLElement> {
         const kept = consumerDisabled.get(dateStr);
         if (kept !== undefined) el.setAttribute("aria-disabled", kept);
       }
+      this.#paintedDates.set(el, dateStr);
       el.setAttribute("data-date", dateStr);
       el.textContent = String(date.getDate());
 
@@ -548,18 +571,20 @@ export class CalendarController extends Controller<HTMLElement> {
     // the published selection and both fields — before any report goes out. A
     // listener of one may replace the selection before the next goes out; the
     // newer selection then reports itself, so a field only reports while it
-    // holds the value this paint wrote to it.
+    // holds the value this paint wrote to it and no later paint rewrote it.
     const painted = toISOMonthString(monthStart);
     const previous = this.#paintedMonth;
     this.#paintedMonth = painted;
+    if (previous !== painted) this.#monthMoves += 1;
+    const monthMove = this.#monthMoves;
     const reconciled = this.#settleSelection(selection);
     const move = this.#selectionMoves;
-    for (const [field, value] of this.#mirrorFields(painted, selection, reconciled)) {
-      if (field.value === value) commitField(field);
+    for (const [field, value, write] of this.#mirrorFields(painted, selection, reconciled)) {
+      if (field.value === value && this.#fieldWrites.get(field) === write) commitField(field);
     }
     // A listener that picked a day in another month has painted and reported
     // that month already.
-    if (this.#connected && previous !== painted && this.#paintedMonth === painted) {
+    if (this.#connected && previous !== painted && monthMove === this.#monthMoves) {
       this.dispatch("monthchange", { detail: { month: painted } });
     }
     // A listener of an earlier report that moved the selection on — a
@@ -596,7 +621,7 @@ export class CalendarController extends Controller<HTMLElement> {
       if (cell) {
         this.#focusOrigin = {
           cell,
-          date: cell.getAttribute("data-date"),
+          date: cell.getAttribute("data-date") ?? this.#paintedDates.get(cell) ?? null,
           month: this.#paintedMonth,
         };
         this.#settleFocus.schedule();
@@ -631,14 +656,41 @@ export class CalendarController extends Controller<HTMLElement> {
     destination?.focus();
   }
 
+  /** Repaints so a month label inserted or replaced at runtime names the month on screen. */
+  labelTargetConnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints so the label that stays when an earlier one leaves names the month on screen. */
+  labelTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
   /** Fills a selected-day field inserted or replaced at runtime with the published selection. */
   fieldTargetConnected(field: HTMLInputElement): void {
-    writeField(field, this.#selection);
+    this.#writeField(field, this.#selection);
+  }
+
+  /** Repaints so the day field that stays when an earlier one leaves holds the selection. */
+  fieldTargetDisconnected(): void {
+    this.#repaint.schedule();
   }
 
   /** Fills a painted-month field inserted or replaced at runtime. */
   monthFieldTargetConnected(field: HTMLInputElement): void {
-    writeField(field, toISOMonthString(this.#paintedMonthStart()));
+    this.#writeField(field, toISOMonthString(this.#paintedMonthStart()));
+  }
+
+  /** Repaints so the painted-month field that stays when an earlier one leaves holds the month. */
+  monthFieldTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Records each field write so a later write back to the same value supersedes it. */
+  #writeField(field: HTMLInputElement, value: string): boolean {
+    if (!writeField(field, value)) return false;
+    this.#fieldWrites.set(field, (this.#fieldWrites.get(field) ?? 0) + 1);
+    return true;
   }
 
   /**
@@ -654,20 +706,25 @@ export class CalendarController extends Controller<HTMLElement> {
     painted: string,
     selection: string,
     reconciled: boolean,
-  ): [HTMLInputElement, string][] {
+  ): [HTMLInputElement, string, number][] {
     const byUser = this.#movedByUser;
     this.#movedByUser = false;
-    const moved: [HTMLInputElement, string][] = [];
-    if (this.hasFieldTarget && writeField(this.fieldTarget, selection) && !reconciled) {
-      moved.push([this.fieldTarget, selection]);
+    const moved: [HTMLInputElement, string, number][] = [];
+    if (this.hasFieldTarget && this.#writeField(this.fieldTarget, selection) && !reconciled) {
+      moved.push([this.fieldTarget, selection, this.#fieldWrites.get(this.fieldTarget) ?? 0]);
     }
-    if (this.hasMonthFieldTarget && writeField(this.monthFieldTarget, painted)) {
-      moved.push([this.monthFieldTarget, painted]);
+    if (this.hasMonthFieldTarget && this.#writeField(this.monthFieldTarget, painted)) {
+      moved.push([
+        this.monthFieldTarget,
+        painted,
+        this.#fieldWrites.get(this.monthFieldTarget) ?? 0,
+      ]);
     }
     return byUser ? moved : [];
   }
 
-  selectDayElement(dayElement: HTMLElement): void {
+  /** Commits one selectable day after recording its publication baseline. */
+  #selectDay(dayElement: HTMLElement, reason: StateReason): void {
     if (dayElement.getAttribute("aria-disabled") === "true") return;
 
     // A day the bounds exclude is refused even before a paint marks its cell,
@@ -684,7 +741,8 @@ export class CalendarController extends Controller<HTMLElement> {
     const selected = parseISODateString(dateStr);
     if (selected) this.focusedDate = selected;
     this.#movedByUser = true;
-    this.#selectionMoves += 1;
+    const changed = dateStr !== this.#published;
+    if (changed) this.#selectionMoves += 1;
     const move = this.#selectionMoves;
     // The pick is the user's move: recorded as published before the paint, so
     // the paint reports it through the field and `select`, never as `reconcile`.
@@ -692,8 +750,8 @@ export class CalendarController extends Controller<HTMLElement> {
     this.#repaintKeepingFocus();
     // A listener of the paint's reports that picked another day, or made a
     // paint that withheld this one, has had the newer selection reported.
-    if (move !== this.#selectionMoves) return;
-    this.dispatch("select", { detail: { date: dateStr } });
+    if (!changed || move !== this.#selectionMoves) return;
+    this.dispatch("select", { detail: { date: dateStr, reason } });
   }
 
   #focusAndNavigateToDate(date: Date): void {
@@ -702,13 +760,13 @@ export class CalendarController extends Controller<HTMLElement> {
 
     this.#movedByUser = true;
     if (targetMonthStr !== this.#monthRequest) {
-      // Another month: writing the Value runs `monthValueChanged`, which paints
-      // that month once and keeps `focusedDate`, since it lies in that month.
-      // The date is therefore the tab stop of the new month, and focus, still
-      // on the cell the key was pressed on, goes there once that paint has
-      // landed. Painting here as well would paint the month twice.
+      /**
+       * A new month paints from the Value callback. A return to the painted
+       * month can cancel a pending declaration before that callback observes it,
+       * so the current paint and focus move complete synchronously below.
+       */
       this.monthValue = targetMonthStr;
-      return;
+      if (targetMonthStr !== this.#paintedMonth) return;
     }
 
     this.#render();
@@ -744,6 +802,10 @@ export class CalendarController extends Controller<HTMLElement> {
     this.#movedByUser = true;
     const nextMonthDate = new Date(monthInfo.year, monthInfo.month - 1 + delta, 1);
     this.monthValue = `${nextMonthDate.getFullYear()}-${String(nextMonthDate.getMonth() + 1).padStart(2, "0")}`;
+    if (this.monthValue === this.#paintedMonth) {
+      this.#syncFocusedDateWithMonth();
+      this.#repaintKeepingFocus();
+    }
   }
 
   #calculateShiftedMonthDate(baseDate: Date, delta: number): Date {
@@ -772,7 +834,7 @@ export class CalendarController extends Controller<HTMLElement> {
 
   #getStartOfWeekDate(date: Date): Date {
     const currentDay = date.getDay();
-    const shift = (currentDay - this.weekStartValue + 7) % 7;
+    const shift = (currentDay - this.#safeWeekStart + 7) % 7;
     const target = new Date(date);
     target.setDate(date.getDate() - shift);
     return target;
@@ -836,7 +898,7 @@ export class CalendarController extends Controller<HTMLElement> {
     const dayOfWeek = firstDay.getDay();
 
     // calculate offset days based on weekStartValue
-    const offset = (dayOfWeek - this.weekStartValue + 7) % 7;
+    const offset = (dayOfWeek - this.#safeWeekStart + 7) % 7;
 
     const days: Date[] = [];
     const current = new Date(firstDay);
@@ -848,5 +910,15 @@ export class CalendarController extends Controller<HTMLElement> {
     }
 
     return days;
+  }
+  /** Current `weekStart` declaration resolved against its numeric contract. */
+  get #safeWeekStart(): number {
+    return this.#numbers.read(
+      this,
+      "weekStart",
+      this.weekStartValue,
+      CalendarController.values.weekStart.default,
+      CalendarController.valueConstraints.weekStart,
+    );
   }
 }

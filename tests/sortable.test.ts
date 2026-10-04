@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PointerDragController } from "../src/controllers/pointer_drag_controller";
 import { RovingController } from "../src/controllers/roving_controller";
 import { SortableController } from "../src/controllers/sortable_controller";
+import { MicrotaskCoalescer } from "../src/utils/microtask_coalescer";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { press } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
@@ -158,6 +159,8 @@ describe("SortableController", () => {
       key("i1", " ");
       key("i1", "ArrowUp");
       expect(order()).toEqual(["i1", "i2", "i3"]);
+      // A clamped arrow moves nothing, so nothing is announced as a move.
+      expect(announcements).toEqual(["Grabbed Card A, position 1 of 3"]);
     });
 
     it("dispatches reorder with zero-based from/to on drop", async () => {
@@ -306,6 +309,22 @@ describe("SortableController", () => {
       expect(reorders).toEqual([{ item: document.querySelector("#i1"), from: 0, to: 1 }]);
     });
 
+    it("reads orientation at each move of a live drag", async () => {
+      await mount(horizontalFixture);
+      stubRects({ i1: 0, i2: 100, i3: 200 }, "x", 100);
+      const pointer = (id: string, type: string, x: number) => pointerAt(id, type, "x", x);
+      pointer("i1", "pointerdown", 10);
+      root().setAttribute("data-stimeo--sortable-orientation-value", "vertical");
+      // Read along y, the row's items share one midpoint the pointer has not passed.
+      pointer("i1", "pointermove", 160);
+      expect(order()).toEqual(["i1", "i2", "i3"]);
+
+      root().setAttribute("data-stimeo--sortable-orientation-value", "horizontal");
+      pointer("i1", "pointermove", 170); // past B's midpoint (150) along x
+      expect(order()).toEqual(["i2", "i1", "i3"]);
+      pointer("i1", "pointerup", 170);
+    });
+
     /**
      * RTL rows. `pointer-drag` reports physical coordinates and leaves RTL to its
      * consumer, and this is that consumer: DOM order runs right-to-left here, so
@@ -441,6 +460,53 @@ describe("SortableController", () => {
       expect(reorders).toHaveLength(0);
     });
 
+    it("releases each drag listener it added when it disconnects", async () => {
+      await mount();
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--sortable",
+      ) as SortableController;
+      controller.disconnect();
+      const added = vi.spyOn(root(), "addEventListener");
+      controller.connect();
+      const listeners = added.mock.calls
+        .filter(([type]) => type.startsWith("stimeo--pointer-drag:"))
+        .map(([type, listener]) => [type, listener]);
+      added.mockRestore();
+
+      const removed = vi.spyOn(root(), "removeEventListener");
+      controller.disconnect();
+      const released = removed.mock.calls.map(([type, listener]) => [type, listener]);
+      removed.mockRestore();
+
+      expect(listeners.map(([type]) => type)).toEqual([
+        "stimeo--pointer-drag:start",
+        "stimeo--pointer-drag:move",
+        "stimeo--pointer-drag:end",
+        "stimeo--pointer-drag:cancel",
+      ]);
+      expect(released).toEqual(expect.arrayContaining(listeners));
+    });
+
+    it("drops the pending lost-item check and the root hook when it disconnects mid-grab", async () => {
+      await mount();
+      press(handle("i2"), " ");
+      expect(root().getAttribute("data-sortable-dragging")).toBe("true");
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--sortable",
+      ) as SortableController;
+      controller.itemTargetDisconnected(document.querySelector("#i2") as HTMLElement);
+      const cancel = vi.spyOn(MicrotaskCoalescer.prototype, "cancel");
+
+      controller.disconnect();
+      const cancelled = cancel.mock.calls.length;
+      cancel.mockRestore();
+
+      expect(cancelled).toBe(1);
+      expect(root().hasAttribute("data-sortable-dragging")).toBe(false);
+    });
+
     it("recovers the session when an item's pointer-drag is morphed away mid-grab", async () => {
       // A Turbo morph can strip the ITEM's data-controller while sortable (on
       // the ancestor) stays connected. pointer-drag's teardown then ends the
@@ -529,6 +595,42 @@ describe("SortableController", () => {
       announcements = [];
       press(handle("i1"), " ");
       expect(announced()).toBe("Grabbed Card A, position 1 of 2");
+    });
+
+    it("runs the deferred lost-item check cleanly after the session already ended", async () => {
+      await mount();
+      press(handle("i2"), " ");
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--sortable",
+      );
+      if (!(controller instanceof SortableController)) throw new Error("sortable not found");
+      // Collects what the deferred check throws; an error thrown from a microtask
+      // would otherwise reach no assertion.
+      const thrown: unknown[] = [];
+      const native = globalThis.queueMicrotask;
+      const queue = vi.spyOn(globalThis, "queueMicrotask").mockImplementation((callback) => {
+        native(() => {
+          try {
+            callback();
+          } catch (error) {
+            thrown.push(error);
+          }
+        });
+      });
+      try {
+        // The check waits for the mutation batch to settle; the drop ends the
+        // session before it runs.
+        controller.itemTargetDisconnected(document.querySelector("#i2") as HTMLElement);
+        press(handle("i2"), " ");
+        await flushMicrotasks();
+      } finally {
+        queue.mockRestore();
+      }
+
+      expect(thrown).toEqual([]);
+      expect(root().hasAttribute("data-sortable-dragging")).toBe(false);
+      expect(order()).toEqual(["i1", "i2", "i3"]);
     });
 
     it("keeps the session across the in-page move its own reorder performs", async () => {

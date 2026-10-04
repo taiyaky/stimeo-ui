@@ -173,6 +173,19 @@ describe("AnchoredController", () => {
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
+  it("releases the observer in disconnect() itself", async () => {
+    await mount();
+    const instance = application.getControllerForElementAndIdentifier(
+      query("#root"),
+      "stimeo--anchored",
+    );
+    if (!instance) throw new Error("Missing controller");
+
+    instance.disconnect();
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
   it("re-attaches to a floating target swapped in at runtime", async () => {
     await mount();
     await runUpdate();
@@ -204,6 +217,49 @@ describe("AnchoredController", () => {
 
     expect(autoUpdate).toHaveBeenCalledTimes(2);
     expect((autoUpdate.mock.calls.at(-1) as [Element, HTMLElement])[0]).toBe(fresh);
+  });
+
+  it.each([
+    ["anchor", "floating"],
+    ["floating", "anchor"],
+  ])("starts tracking when the %s arrives after the %s", async (arriving, present) => {
+    document.body.innerHTML = `<div id="root" data-controller="stimeo--anchored">
+      <div data-stimeo--anchored-target="${present}"></div>
+    </div>`;
+    application = Application.start();
+    application.register("stimeo--anchored", AnchoredController);
+    await tick();
+    expect(autoUpdate).not.toHaveBeenCalled();
+
+    const target = document.createElement("div");
+    target.setAttribute("data-stimeo--anchored-target", arriving);
+    query("#root").append(target);
+    await tick();
+
+    expect(autoUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases the observer when the anchor leaves without a replacement", async () => {
+    await mount();
+
+    query("#anchor").remove();
+    await tick();
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(autoUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["flip", "false"],
+    ["padding", "6"],
+    ["strategy", "fixed"],
+  ])("re-attaches when %s changes while tracking", async (name, value) => {
+    await mount();
+
+    await setValue(name, value);
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(autoUpdate).toHaveBeenCalledTimes(2);
   });
 
   it("starts tracking when the targets arrive after connect", async () => {
@@ -343,4 +399,46 @@ describe("AnchoredController", () => {
     await runUpdate();
     await expectNoA11yViolations(query("#root"));
   });
+  it("releases its morph subscription synchronously when disconnected", async () => {
+    await mount();
+    const root = query("#root");
+    const instance = application.getControllerForElementAndIdentifier(root, "stimeo--anchored");
+    if (!instance) throw new Error("Missing controller");
+    const registrations = vi.spyOn(root, "addEventListener");
+    instance.disconnect();
+    instance.connect();
+    const options = registrations.mock.calls.find(([name]) => name === "turbo:morph-element")?.[2];
+    const signal = typeof options === "object" ? options?.signal : undefined;
+    expect(signal).toBeDefined();
+    expect(signal?.aborted).toBe(false);
+    instance.disconnect();
+    expect(signal?.aborted).toBe(true);
+    registrations.mockRestore();
+  });
+
+  for (const origin of ["own", "descendant"] as const) {
+    it(`repairs ${origin} morph output without replacing tracking or reporting position`, async () => {
+      await mount();
+      await runUpdate();
+      const root = query("#root");
+      const floating = query("#floating");
+      const position = vi.fn();
+      root.addEventListener("stimeo--anchored:position", position);
+      floating.removeAttribute("data-anchored-placement");
+      floating.style.removeProperty("left");
+      floating.style.removeProperty("top");
+      floating.style.removeProperty("position");
+      (origin === "own" ? root : floating).dispatchEvent(
+        new Event("turbo:morph-element", { bubbles: true }),
+      );
+      await tick();
+      expect(floating.getAttribute("data-anchored-placement")).toBe("top-start");
+      expect(floating.style.left).toBe("12px");
+      expect(floating.style.top).toBe("34px");
+      expect(floating.style.position).toBe("absolute");
+      expect(autoUpdate).toHaveBeenCalledTimes(1);
+      expect(cleanup).not.toHaveBeenCalled();
+      expect(position).not.toHaveBeenCalled();
+    });
+  }
 });

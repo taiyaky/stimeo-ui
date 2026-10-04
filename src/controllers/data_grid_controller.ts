@@ -1,8 +1,12 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { commitField, writeFields } from "../utils/field_mirror";
 import { INTERACTIVE_HOST_SELECTOR, isInteractiveHost } from "../utils/interactive_host";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
+import type { StateReason } from "../utils/state_reason";
+import { targetSelector } from "../utils/target_selector";
 
 /** Cycle order for a sortable column header's `aria-sort`. */
 const SORT_CYCLE = ["none", "ascending", "descending"] as const;
@@ -95,6 +99,15 @@ function nextSortDirection(current: string): SortDirection {
  * on a replacement container, on row churn, and whenever `selection`, `name` or
  * `form` changes; a selection the page moved is reported by `reconcile` alone.
  *
+ * User `selectionchange` reports compare the resulting state with the last published
+ * state. A pending page write handled in the same script joins that confirmation;
+ * a browser-delivered listener may settle it first as `reconcile`. Confirming
+ * the last published state reports nothing.
+ *
+ * A synchronous subscriber that confirms another state replaces reports still
+ * pending for the outer confirmation. Reading state or confirming it unchanged
+ * does not replace them. An event already being dispatched cannot be recalled.
+ *
  * @remarks
  * Behavior only — the consumer performs the actual data sort/render in response to
  * the `sort` event and owns all styling. While connected a `MutationObserver`
@@ -124,6 +137,9 @@ function nextSortDirection(current: string): SortDirection {
  *   (`td`, `th`); an interactive host makes the grid stand down on that cell.
  */
 export class DataGridController extends Controller<HTMLElement> {
+  readonly #moves = new MoveCounter();
+  /** The cell this controller last gave the Tab stop. */
+  #stopHolder: HTMLElement | null = null;
   static override targets = ["columnHeader", "row", "cell", "fields"];
   static override values = {
     selection: { type: String, default: "none" },
@@ -151,7 +167,7 @@ export class DataGridController extends Controller<HTMLElement> {
    * the whole grid once per authored cell on mount and once per streamed cell
    * afterwards — quadratic in the cell count both times.
    */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileRows());
+  readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileRows());
   /** Watches the row attributes a page can rewrite in place; set while connected. */
   #observer: MutationObserver | null = null;
   /** The selection last settled: on connect, by the user, or by a reported pass. */
@@ -169,13 +185,13 @@ export class DataGridController extends Controller<HTMLElement> {
   override connect(): void {
     this.#restoreBaseline();
     this.#settled = this.#selection();
-    this.#reconcile.activate();
+    this.#reconcile.observe(this.element);
     this.#observeRows();
   }
 
   /** Releases the row observer and drops a queued pass, so neither outlives the element. */
   override disconnect(): void {
-    this.#reconcile.cancel();
+    this.#reconcile.disconnect();
     this.#observer?.disconnect();
     this.#observer = null;
   }
@@ -187,7 +203,9 @@ export class DataGridController extends Controller<HTMLElement> {
    * selected rows.
    *
    * The tab stop keeps whichever cell already holds it, so a rebuild triggered by
-   * an unrelated row arriving does not throw the user's position away; only when
+   * an unrelated row arriving does not throw the user's position away — the cell
+   * this controller gave it keeps it while it still carries it, even when an
+   * arriving cell brings its own `tabindex="0"` ahead of it in the grid; only when
    * no cell holds it — the grid is fresh, or the holder was removed — does the
    * first navigable cell take over. Without that fallback a grid whose active row
    * is removed keeps every cell at `-1` and drops out of the Tab sequence
@@ -195,7 +213,9 @@ export class DataGridController extends Controller<HTMLElement> {
    */
   #restoreBaseline(): void {
     const cells = this.#navigableCells();
-    const active = cells.find((cell) => cell.tabIndex === 0) ?? cells[0];
+    const holder = this.#stopHolder;
+    const kept = holder !== null && holder.tabIndex === 0 && cells.includes(holder);
+    const active = (kept ? holder : cells.find((cell) => cell.tabIndex === 0)) ?? cells[0];
     if (active) this.#setActiveCell(active, { focus: false }, cells);
     this.#syncSelectable();
     const pageWrote = this.#takePageRecords();
@@ -247,6 +267,11 @@ export class DataGridController extends Controller<HTMLElement> {
 
   /** Seeds a fields container inserted after connect from the current selection. */
   fieldsTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Brings the fields container that stays to the current selection when an earlier one leaves. */
+  fieldsTargetDisconnected(): void {
     this.#reconcile.schedule();
   }
 
@@ -329,16 +354,19 @@ export class DataGridController extends Controller<HTMLElement> {
     }
   }
 
-  /** Cycles the activated column header's sort and emits `sort`. */
-  sort(event: Event): void {
-    const header = event.currentTarget as HTMLElement;
-    if (!this.columnHeaderTargets.includes(header)) return;
-    if (event.defaultPrevented) return;
+  /** Cycles an owned column header's sort from an event, the header, or its descendant. */
+  sort(source: Event | HTMLElement): void {
+    const { event, host, origin, reason } = actionSource(source);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const header = host?.closest<HTMLElement>(targetSelector(this.identifier, "columnHeader"));
+    if (!header || !this.columnHeaderTargets.includes(header)) return;
+    if (event?.defaultPrevented) return;
     // A sortable header hosts a `<button>`, and that button's activation is
     // exactly what this click carries, so it is the one control that does not
     // take the event away. A link or a field inside the header is its own
     // destination, and sorting on its click would act in parallel.
-    const control = this.#claimingControl(event, header);
+    const control = event ? this.#claimingControl(event, header) : null;
     if (control && !(control instanceof HTMLButtonElement)) return;
 
     const direction = nextSortDirection(header.getAttribute("aria-sort") ?? "none");
@@ -349,21 +377,23 @@ export class DataGridController extends Controller<HTMLElement> {
     }
 
     this.#setActiveCell(header, { focus: false });
-    this.dispatch("sort", { detail: { column: header, direction } });
+    this.dispatch("sort", { detail: { column: header, direction, reason } });
   }
 
-  /** Toggles selection of the row owning the event target. Bound optionally. */
-  toggleSelect(event: Event): void {
+  /** Toggles an owned row from an action event, the row, or its descendant. */
+  toggleSelect(source: Event | HTMLElement): void {
+    const { event, host, origin, reason } = actionSource(source);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
     // The pointer path guards on `selection="none"` exactly as the keyboard path
     // does, so a grid that declares itself unselectable never grows selected rows.
     if (this.selectionValue === "none") return;
     // A widget that handled the click owns it, exactly as the keyboard path
     // stands down on a keystroke a descendant consumed.
-    if (event.defaultPrevented) return;
-    const host = event.currentTarget as HTMLElement;
-    if (this.#claimedByDescendant(event, host)) return;
-    const row = host.closest<HTMLElement>("[role='row']");
-    if (row && this.rowTargets.includes(row)) this.#toggleRow(row);
+    if (event?.defaultPrevented) return;
+    if (event && host instanceof HTMLElement && this.#claimedByDescendant(event, host)) return;
+    const row = host?.closest<HTMLElement>(targetSelector(this.identifier, "row"));
+    if (row && this.rowTargets.includes(row)) this.#toggleRow(row, reason);
   }
 
   /** Grid navigation + sort/select activation. Bound to cells and headers. */
@@ -474,7 +504,7 @@ export class DataGridController extends Controller<HTMLElement> {
     for (const other of this.columnHeaderTargets) {
       other.setAttribute("aria-sort", other === header ? direction : "none");
     }
-    this.dispatch("sort", { detail: { column: header, direction } });
+    this.dispatch("sort", { detail: { column: header, direction, reason: "user" } });
   }
 
   /**
@@ -482,7 +512,7 @@ export class DataGridController extends Controller<HTMLElement> {
    *
    * @stimeoRuntimeOnly `selection` decides how this one toggle treats the other rows.
    */
-  #toggleRow(row: HTMLElement): void {
+  #toggleRow(row: HTMLElement, reason: StateReason = "user"): void {
     const selected = row.getAttribute("aria-selected") === "true";
     const pageWrote = this.#takePageRecords();
     // Enforce single-ness on every toggle, not only when turning a row on:
@@ -498,9 +528,17 @@ export class DataGridController extends Controller<HTMLElement> {
 
     // Settled before anything is reported, so a listener that moves the rows
     // again is measured against this selection.
-    this.#settled = this.#selection();
+    const selection = this.#selection();
+    const changed = !sameSelection(selection, this.#settled);
+    this.#settled = selection;
+    if (!changed) {
+      this.#mirrorFields(false);
+      return;
+    }
+    const token = this.#moves.record();
     this.#mirrorFields(true);
-    this.dispatch("selectionchange", { detail: { rows: [...this.#settled.keys()] } });
+    if (!this.#moves.isLatest(token)) return;
+    this.dispatch("selectionchange", { detail: { rows: [...selection.keys()], reason } });
   }
 
   /** The selected rows in DOM order, each with the `data-value` it submits, if any. */
@@ -594,6 +632,7 @@ export class DataGridController extends Controller<HTMLElement> {
     { focus }: { focus: boolean },
     cells?: readonly HTMLElement[],
   ): void {
+    this.#stopHolder = cell;
     for (const candidate of cells ?? this.#navigableCells()) {
       const wanted = candidate === cell ? "0" : "-1";
       if (candidate.getAttribute("tabindex") !== wanted) {

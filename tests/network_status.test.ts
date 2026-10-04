@@ -269,6 +269,75 @@ describe("NetworkStatusController", () => {
     vi.useRealTimers();
   });
 
+  // --- `onlineAutoHide` belongs to one recovery banner -----------------------------
+
+  /**
+   * Rewrites `onlineAutoHide` and delivers its Value callback directly when the
+   * controller defines one, since happy-dom does not reliably run it for an attribute
+   * write.
+   */
+  const declareOnlineAutoHide = (value: number) => {
+    root().setAttribute("data-stimeo--network-status-online-auto-hide-value", String(value));
+    const owner = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--network-status",
+    );
+    const callback: unknown = Reflect.get(owner ?? {}, "onlineAutoHideValueChanged");
+    if (typeof callback === "function") callback.call(owner);
+  };
+
+  it.each([
+    { direction: "shrinks", next: 50 },
+    { direction: "grows", next: 5000 },
+  ])(
+    "keeps a shown banner's hide deadline when onlineAutoHide $direction, and times the next recovery anew",
+    async ({ next }) => {
+      vi.useFakeTimers();
+      setOnline(false);
+      mount(
+        `${OFFLINE_BANNER}${ONLINE_BANNER}`,
+        `data-stimeo--network-status-online-auto-hide-value="1000"`,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      window.dispatchEvent(new Event("online"));
+      vi.advanceTimersByTime(100);
+
+      declareOnlineAutoHide(next);
+      vi.advanceTimersByTime(899);
+      expect(online().hidden).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(online().hidden).toBe(true);
+
+      window.dispatchEvent(new Event("offline"));
+      window.dispatchEvent(new Event("online"));
+      vi.advanceTimersByTime(next - 1);
+      expect(online().hidden).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(online().hidden).toBe(true);
+      vi.useRealTimers();
+    },
+  );
+
+  it("hides and reports nothing from an onlineAutoHide change alone", async () => {
+    vi.useFakeTimers();
+    setOnline(false);
+    mount(`${OFFLINE_BANNER}${ONLINE_BANNER}`);
+    await vi.advanceTimersByTimeAsync(0);
+    const changes: boolean[] = [];
+    root().addEventListener("stimeo--network-status:change", (event) =>
+      changes.push((event as CustomEvent<{ online: boolean }>).detail.online),
+    );
+    window.dispatchEvent(new Event("online")); // shown with no hide promised
+
+    declareOnlineAutoHide(20);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(online().hidden).toBe(false);
+    expect(offline().hidden).toBe(true);
+    expect(root().getAttribute("data-state")).toBe("online");
+    expect(changes).toEqual([true]);
+    vi.useRealTimers();
+  });
+
   it("clears the pending auto-hide timer on disconnect", async () => {
     vi.useFakeTimers();
     setOnline(false);
@@ -303,6 +372,20 @@ describe("NetworkStatusController", () => {
     window.dispatchEvent(new Event("offline"));
     // The window listener was removed; the banner stays hidden.
     expect(el.hidden).toBe(true);
+  });
+
+  it("ignores a recovery after disconnect", async () => {
+    setOnline(false);
+    await start();
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--network-status",
+    ) as NetworkStatusController;
+    controller.disconnect();
+    window.dispatchEvent(new Event("online"));
+    expect(root().getAttribute("data-state")).toBe("offline");
+    expect(online().hidden).toBe(true);
+    expect(offline().hidden).toBe(false);
   });
 
   // The offline banner is the visual half: the announcer carries the wording, so a
@@ -392,5 +475,291 @@ describe("NetworkStatusController", () => {
     await tick();
     expect(offline().textContent).toBe("Offline. Retry");
     expect(offline().querySelector("#retry")).not.toBeNull();
+  });
+
+  describe("banners that arrive or stay", () => {
+    const TARGET = "data-stimeo--network-status-target";
+    /** A banner like the current one of `name`, showing `shown`. */
+    const banner = (name: "offline" | "online", shown: boolean) => {
+      const fresh = query(`[${TARGET}='${name}']`).cloneNode(true) as HTMLElement;
+      fresh.hidden = !shown;
+      return fresh;
+    };
+    const goOffline = () => window.dispatchEvent(new Event("offline"));
+    const goOnline = () => window.dispatchEvent(new Event("online"));
+
+    it("shows an offline banner that replaces the current one while offline", async () => {
+      setOnline(false);
+      await start();
+      const successor = banner("offline", false);
+
+      offline().replaceWith(successor);
+      await tick();
+
+      expect(offline()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("shows an offline banner that stays after an earlier one leaves once offline", async () => {
+      await start();
+      const original = offline();
+      const successor = banner("offline", false);
+      original.after(successor);
+      await tick();
+      goOffline();
+      original.remove();
+      await tick();
+
+      expect(offline()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("hides an offline banner that stays after an earlier one leaves once back online", async () => {
+      setOnline(false);
+      await start();
+      const original = offline();
+      const successor = banner("offline", true);
+      original.after(successor);
+      await tick();
+      goOnline();
+      original.remove();
+      await tick();
+
+      expect(offline()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+    });
+
+    it("shows a recovery banner that replaces the current one while it is up", async () => {
+      setOnline(false);
+      await start();
+      goOnline();
+      const successor = banner("online", false);
+
+      online().replaceWith(successor);
+      await tick();
+
+      expect(online()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("shows a recovery banner that stays after an earlier one leaves once back online", async () => {
+      setOnline(false);
+      await start();
+      const original = online();
+      const successor = banner("online", false);
+      original.after(successor);
+      await tick();
+      goOnline();
+      original.remove();
+      await tick();
+
+      expect(online()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("hides a recovery banner that stays after an earlier one leaves once it auto-hides", async () => {
+      vi.useFakeTimers();
+      setOnline(false);
+      mount(
+        `${OFFLINE_BANNER}${ONLINE_BANNER}`,
+        `data-stimeo--network-status-online-auto-hide-value="1000"`,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      goOnline();
+      const original = online();
+      const successor = banner("online", true);
+      original.after(successor);
+      await vi.advanceTimersByTimeAsync(0);
+      vi.advanceTimersByTime(1000);
+      expect(original.hidden).toBe(true);
+      original.remove();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(online()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+      vi.useRealTimers();
+    });
+
+    it("hides a recovery banner that arrives while it is up once the auto-hide ends", async () => {
+      vi.useFakeTimers();
+      setOnline(false);
+      mount(OFFLINE_BANNER, `data-stimeo--network-status-online-auto-hide-value="1000"`);
+      await vi.advanceTimersByTimeAsync(0);
+      goOnline();
+      root().insertAdjacentHTML("beforeend", ONLINE_BANNER);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(online().hidden).toBe(false);
+
+      vi.advanceTimersByTime(1000);
+
+      expect(online().hidden).toBe(true);
+      vi.useRealTimers();
+    });
+
+    it("brings a banner up to date without an event or an announcement", async () => {
+      setOnline(false);
+      await start(
+        'data-stimeo--network-status-announce-text-value="You are offline." ' +
+          'data-stimeo--network-status-announce-online-text-value="Back online."',
+      );
+      const events: string[] = [];
+      root().addEventListener("stimeo--network-status:change", () => events.push("change"));
+      root().addEventListener("change", () => events.push("native change"));
+      const spoken: string[] = [];
+      const spy = (event: Event) => {
+        spoken.push((event as CustomEvent<{ message: string }>).detail.message);
+      };
+      window.addEventListener("stimeo--announcer:announce", spy);
+      const successor = banner("offline", false);
+
+      offline().replaceWith(successor);
+      await tick();
+      window.removeEventListener("stimeo--announcer:announce", spy);
+
+      expect(successor.hidden).toBe(false);
+      expect(root().getAttribute("data-state")).toBe("offline");
+      expect(events).toEqual([]);
+      expect(spoken).toEqual([]);
+    });
+
+    it.each(["offline", "online"] as const)(
+      "keeps working when its only %s banner leaves",
+      async (name) => {
+        setOnline(false);
+        await start();
+        const errors: unknown[] = [];
+        application.handleError = (error) => {
+          errors.push(error);
+        };
+        query(`[${TARGET}='${name}']`).remove();
+        await tick();
+        goOnline();
+        goOffline();
+        await tick();
+
+        expect(errors).toEqual([]);
+        expect(root().getAttribute("data-state")).toBe("offline");
+      },
+    );
+
+    it("shows an offline banner that arrives after the only one left", async () => {
+      setOnline(false);
+      await start();
+      const template = banner("offline", false);
+      offline().remove();
+      await tick();
+
+      root().append(template);
+      await tick();
+
+      expect(template.hidden).toBe(false);
+    });
+
+    it("shows a recovery banner that arrives after the only one left", async () => {
+      setOnline(false);
+      await start();
+      goOnline();
+      const template = banner("online", false);
+      online().remove();
+      await tick();
+
+      root().append(template);
+      await tick();
+
+      expect(template.hidden).toBe(false);
+    });
+
+    it("gives a banner that stops being one back the hidden it was authored with", async () => {
+      setOnline(false);
+      await start();
+      const departed = offline();
+      expect(departed.hidden).toBe(false);
+
+      departed.removeAttribute(TARGET);
+      await tick();
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("removes the hidden it wrote on a departed banner that was authored without one", async () => {
+      await startWith(`<div data-stimeo--network-status-target="online">Back online</div>`);
+      const departed = online();
+      expect(departed.hidden).toBe(true);
+
+      departed.removeAttribute(TARGET);
+      await tick();
+
+      expect(departed.hasAttribute("hidden")).toBe(false);
+    });
+
+    it("keeps a hidden the page wrote on a banner after the last write", async () => {
+      setOnline(false);
+      await start();
+      const departed = offline();
+      departed.hidden = true;
+
+      departed.removeAttribute(TARGET);
+      await tick();
+      departed.hidden = false;
+      goOnline();
+
+      expect(departed.hidden).toBe(false);
+    });
+
+    it("gives the banners back their own hidden when the widget loses its controller", async () => {
+      setOnline(false);
+      await start();
+      goOnline();
+      goOffline();
+      const departed = offline();
+      expect(departed.hidden).toBe(false);
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("keeps a banner that moves within the widget shown without touching it", async () => {
+      setOnline(false);
+      await start();
+      const moving = offline();
+      const writes: string[] = [];
+      new MutationObserver((records) => {
+        for (const record of records) {
+          if (record.attributeName === "hidden") writes.push(String(record.oldValue));
+        }
+      }).observe(moving, { attributes: true, attributeOldValue: true });
+
+      root().append(moving);
+      await tick();
+
+      expect(offline()).toBe(moving);
+      expect(moving.hidden).toBe(false);
+      expect(writes).toEqual([]);
+    });
+
+    it("keeps what it wrote on a banner when the whole widget leaves the page", async () => {
+      setOnline(false);
+      await start();
+      const kept = offline();
+
+      root().remove();
+      await tick();
+
+      expect(kept.hidden).toBe(false);
+    });
+
+    it("writes nothing onto the banners while Stimulus tears the controller down", async () => {
+      setOnline(false);
+      await start();
+      // A value the page wrote after the last write stays where it was left.
+      offline().hidden = true;
+
+      application.unload("stimeo--network-status");
+      await tick();
+
+      expect(offline().hidden).toBe(true);
+    });
   });
 });

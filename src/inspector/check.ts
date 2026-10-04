@@ -1,4 +1,6 @@
+import { toFiniteNumber } from "../utils/coerce";
 import { compileRegExp, parseJsonObject } from "../utils/declared_value";
+import { decodeNumberValue, matchesNumberBounds } from "../utils/number_bounds";
 import { erbElements, erbRanges, neutralizeErb } from "./erb";
 import {
   type AttributeToken,
@@ -790,16 +792,25 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           continue;
         }
         if (isDynamicValue(written)) continue;
-        // Stimulus hands a literal it cannot parse to the reader untouched, so the
-        // value judged here is what stands between the quotes, surrounding space
-        // included. Trimming first would accept a spelling the widget rejects.
+        // Enum readers compare the raw text; numeric readers use Stimulus's
+        // JSON-first action-param decoder before applying the numeric grammar.
         const value = written.value;
         if (value.length === 0) {
-          // The key arrives holding the empty string, which every reader treats as
-          // nothing supplied: one that falls back to the event settles on the
-          // fallback, and one with no other route to the value returns. Only the
-          // second is a defect, and only where the attribute set can be trusted.
-          if (!rule.required || !readable) continue;
+          // A required empty param supplies no usable instruction. An optional
+          // numeric param still wins over event detail, so report the bad value.
+          if (!readable) continue;
+          if (rule.numeric && !rule.required) {
+            report(
+              element,
+              "invalid-action-param",
+              "error",
+              `"${value}" is not a finite "${rule.param}" this action reads.`,
+              written,
+              rule.suggestion,
+            );
+            continue;
+          }
+          if (!rule.required) continue;
           report(
             element,
             "missing-action-param",
@@ -810,16 +821,19 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           );
           continue;
         }
-        if (rule.integer && !Number.isInteger(Number(value))) {
-          report(
-            element,
-            "invalid-action-param",
-            "error",
-            `"${value}" is not an "${rule.param}" this action reads. It accepts a whole number.`,
-            written,
-            rule.suggestion,
-          );
-          continue;
+        if (rule.numeric || rule.integer) {
+          const numeric = toFiniteNumber(decodeActionParamLiteral(value));
+          if (numeric === null || (rule.integer && !Number.isInteger(numeric))) {
+            report(
+              element,
+              "invalid-action-param",
+              "error",
+              `"${value}" is not an "${rule.param}" this action reads. It accepts ${rule.integer ? "a whole number" : "a finite number"}.`,
+              written,
+              rule.suggestion,
+            );
+            continue;
+          }
         }
         if (!rule.allowedValues || rule.allowedValues.includes(value)) continue;
         const best = nearestName(value, rule.allowedValues);
@@ -1283,11 +1297,13 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       for (const element of elements) {
         if (!hasReadableMarkup(element)) continue;
         if (hostIsAllowed(element, rule) !== false) continue;
-        const type = element.attrs.find((attr) => attr.name === "type");
-        const detail =
-          element.tag === "button"
-            ? `the unsupported ${type ? `type="${type.value}"` : 'implicit type="submit"'}`
-            : `an unsupported interactive <${element.tag}>`;
+        // A button is rejected for its type only where some types are admitted;
+        // a non-interactive rule rejects the tag, whatever type it renders.
+        const byType = element.tag === "button" && rule.mode !== "non-interactive";
+        const type = byType ? element.attrs.find((attr) => attr.name === "type") : undefined;
+        const detail = byType
+          ? `the unsupported ${type ? `type="${type.value}"` : 'implicit type="submit"'}`
+          : `an unsupported interactive <${element.tag}>`;
         report(
           element,
           "invalid-host",
@@ -1664,16 +1680,23 @@ function valueSatisfiesConstraint(
 ): boolean {
   if (constraint.type === "string") return stringValueSatisfies(raw, constraint);
   const value = decodeNumericValue(raw);
-  if (Number.isNaN(value)) return false;
-  if (constraint.finite && !Number.isFinite(value)) return false;
+  if (constraint.finite === true && !matchesNumberBounds(value, { ...constraint, finite: true }))
+    return false;
+  if (constraint.finite !== true) {
+    const bounds = {
+      ...constraint,
+      finite: undefined,
+      allowInfinity: constraint.allowInfinity ?? "both",
+    } as const;
+    if (!matchesNumberBounds(value, bounds)) return false;
+  }
   if (constraint.greaterThan !== undefined && !(value > constraint.greaterThan)) return false;
-  if (constraint.integer && !Number.isInteger(value)) return false;
   return true;
 }
 
 /** Decodes a Number Value exactly as Stimulus does. */
 function decodeNumericValue(raw: string): number {
-  return Number(raw.replace(/_/g, ""));
+  return decodeNumberValue(raw);
 }
 
 /**
@@ -1701,10 +1724,15 @@ function stringValueSatisfies(
 /** Human-readable expectation used in the diagnostic message. */
 function describeValueConstraint(constraint: ValueConstraint | StringSyntaxConstraint): string {
   if (constraint.type === "string") return describeStringConstraint(constraint);
-  const parts = [constraint.finite ? "a finite number" : "a number"];
+  const parts = [constraint.finite || constraint.allowInfinity ? "a finite number" : "a number"];
   if (constraint.greaterThan !== undefined) {
     parts.push(`greater than ${constraint.greaterThan}`);
   }
+  if (constraint.exclusiveMin !== undefined) parts.push(`greater than ${constraint.exclusiveMin}`);
+  if (constraint.min !== undefined) parts.push(`at least ${constraint.min}`);
+  if (constraint.max !== undefined) parts.push(`at most ${constraint.max}`);
+  if (constraint.allowedValues) parts.push(`among ${constraint.allowedValues.join(", ")}`);
+  if (constraint.allowInfinity) parts.push(`or ${constraint.allowInfinity} infinity`);
   if (constraint.integer) parts.push("with no fractional part");
   return parts.join(" ");
 }
@@ -2115,7 +2143,7 @@ function list(names: readonly string[]): string {
 
 /** Describes a set of "any of" attributes, e.g. `aria-labelledby or aria-label`. */
 function describeAttrs(attrs: readonly string[]): string {
-  return attrs.length === 1 ? (attrs[0] as string) : attrs.join(" or ");
+  return attrs.join(" or ");
 }
 
 /**
@@ -2172,4 +2200,13 @@ function levenshtein(a: string, b: string): number {
     prev = curr;
   }
   return prev[cols] as number;
+}
+
+/** Decodes one authored action param with Stimulus's JSON-first, raw-text fallback. */
+function decodeActionParamLiteral(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
 }

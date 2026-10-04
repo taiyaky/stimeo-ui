@@ -1,12 +1,15 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { announce } from "../utils/announce";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { ownerOf } from "../utils/event_owner";
 import { KeyedTimers } from "../utils/keyed_timers";
 import { ListenerSet } from "../utils/listener_set";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { PausableTimers } from "../utils/pausable_timers";
 import { SafeTimeout } from "../utils/safe_timeout";
+import type { StateReason } from "../utils/state_reason";
 import { targetSelector } from "../utils/target_selector";
 import { maxTransitionTotalMs } from "../utils/transition_completion";
 
@@ -19,12 +22,18 @@ const ASSERTIVE_TYPES = new Set(["alert", "error"]);
  */
 const MESSAGE_PART = "message";
 
+/** Suffix of the mark on every message this controller has taken on; see the class remarks. */
+const SHOWN_ATTRIBUTE = "shown";
+
 /**
  * Headless **Rails flash bridge**: turns server-rendered (and Turbo Stream-inserted)
  * `flash` elements into live-region announcements with auto-dismiss and a stacking
  * cap (no dedicated APG pattern; follows the WAI-ARIA status/alert guidance and WCAG
  * 2.2 **4.1.3 Status Messages**). The general-purpose sibling is Toast; this one is
  * specialized to the Rails `flash` convention.
+ *
+ * Capacity evicts by arrival order, independent of DOM order. The same controller
+ * instance preserves that order across reconnects; a new instance uses DOM order.
  *
  * Markup contract (identifier: `stimeo--flash`):
  *   <div data-controller="stimeo--flash" data-stimeo--flash-target="region">
@@ -46,11 +55,13 @@ const MESSAGE_PART = "message";
  * those holds is released.
  * A close button wired to the `dismiss` action removes one manually.
  *
- * `dismiss` dispatches `{ element, reason }`.
+ * `dismiss` dispatches `{ element, reason: StateReason }`.
  *
- * `show` dispatches `{ type, message }`.
- * `reconcile` dispatches `{ removed: number }` — the messages the Turbo cache
- * rewind took out, which no `dismiss` will report because nobody dismissed them.
+ * `show` dispatches `{ type, message }`, once per message: a reconnection of the same
+ * instance — an in-page move, a `data-turbo-permanent` region carried to the next page —
+ * takes its messages on again without showing or announcing them a second time.
+ * `reconcile` dispatches `{ removed: number }` — the messages a page restored from the
+ * Turbo cache still carried, which no `dismiss` will report because nobody dismissed them.
  *
  * @remarks
  * Reading is **delegated to the shared Announcer** — but only for the *initial*,
@@ -67,10 +78,21 @@ const MESSAGE_PART = "message";
  * subtree, and a message that leaves it gives up its stacking slot, its pending
  * auto-dismiss, and any removal already scheduled. The observer, timers,
  * and per-message listeners are torn down on `disconnect()` (Turbo navigation
- * included), and the managed flashes leave the page before Turbo caches it so a
- * restored snapshot does not replay a notification the visitor already received.
+ * included).
+ *
+ * **A restored page does not replay a notification.** Every message taken on carries
+ * `data-<identifier>-shown`. A page Turbo restores from its cache is a copy taken while
+ * its messages were on screen, so a connection that finds marked messages it never took
+ * on itself removes them, silently, before it takes anything else on, and reports how
+ * many as `reconcile`. Server-rendered messages carry no mark and are announced as
+ * usual. Nothing is removed on `turbo:before-cache`, which Turbo also dispatches on
+ * pages that stay — a promoted frame navigation, a state-less `popstate`, a refresh of
+ * a cached URL, a permanent region — where the message is still being read.
  */
 export class FlashController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   /** Selects the message parts, in the namespace this controller is registered under. */
   get #messageSelector(): string {
     return targetSelector(this.identifier, MESSAGE_PART);
@@ -82,6 +104,11 @@ export class FlashController extends Controller<HTMLElement> {
     pauseOnHover: { type: Boolean, default: true },
     max: { type: Number, default: 0 },
   };
+
+  static valueConstraints = {
+    duration: NUMBER_BOUNDS.timer,
+    max: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof FlashController.values>;
   static actions = ["dismiss"] as const;
   static events = ["show", "dismiss", "reconcile"] as const;
 
@@ -106,7 +133,7 @@ export class FlashController extends Controller<HTMLElement> {
    */
   readonly #fixedDismiss = new KeyedTimers<HTMLElement>();
   /** Applies the cap again once the event that released a hold has run its course. */
-  readonly #reapply = new MicrotaskCoalescer(() => this.#reapplyCap());
+  readonly #reapply = new MorphRenderWatcher(() => this.#reapplyCap());
   /** Messages the pointer or focus moved into since the cap was last applied again. */
   #spared: HTMLElement[] = [];
   /** The next pointer movement, listened for while a hover hold waits on it. */
@@ -116,6 +143,8 @@ export class FlashController extends Controller<HTMLElement> {
   #observer: MutationObserver | null = null;
   /** Whether the controller is between `connect()` and `disconnect()`. */
   #connected = false;
+  /** Intake order retained while the same instance reconnects. */
+  readonly #arrivals = new Set<HTMLElement>();
   /**
    * The `max` the stack was last held to, or `null` before the first time. `connect()`
    * applies the cap only when `max` is not that one, so a reconnect of the same instance
@@ -132,7 +161,10 @@ export class FlashController extends Controller<HTMLElement> {
    */
   readonly #leaving = new Set<HTMLElement>();
 
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+  /** The mark above, in the namespace this controller is registered under. */
+  get #shownAttribute(): string {
+    return `data-${this.identifier}-${SHOWN_ATTRIBUTE}`;
+  }
 
   readonly #onEnter = (event: Event): void =>
     this.#pause(event.currentTarget as HTMLElement, event.type === "focusin" ? "focus" : "hover");
@@ -151,54 +183,57 @@ export class FlashController extends Controller<HTMLElement> {
 
   override connect(): void {
     this.#connected = true;
-    this.#reapply.activate();
+    const current = this.messageTargets;
+    for (const item of this.#arrivals) {
+      if (!current.includes(item)) this.#arrivals.delete(item);
+    }
+    this.#discardInherited();
+    this.#reapply.observe(this.element);
     // Initial, server-rendered flashes: bridge them to the Announcer because an
     // in-place live region present at page load is not announced on its own.
     for (const message of this.messageTargets) {
       if (this.#owns(message)) this.#process(message, true);
     }
-    if (!Object.is(this.#appliedMax, this.maxValue)) {
-      this.#appliedMax = this.maxValue;
+    if (!Object.is(this.#appliedMax, this.#safeMax)) {
+      this.#appliedMax = this.#safeMax;
       this.#enforceMax();
     }
     this.#syncObservation();
-    this.#beforeCache.activate();
   }
 
   override disconnect(): void {
     this.#connected = false;
-    this.#beforeCache.deactivate();
     this.#stopObserving();
     this.#timers.clearAll();
     this.#dismiss.clearAll();
     this.#fixedDismiss.clearAll();
-    this.#reapply.cancel();
+    this.#reapply.disconnect();
     this.#spared = [];
     this.#pointer.dispose();
     this.#awaitingPointer.clear();
     for (const message of this.#order) this.#unbindPause(message);
     this.#order.length = 0;
     // The pending finalizes died with the timers above, so a message still marked
-    // `leaving` is free to be shown again by the next connect (a snapshot restore).
+    // `leaving` is free to be shown again when the same instance connects again.
     this.#leaving.clear();
   }
 
   /**
-   * Takes the managed flashes out of the page just before Turbo freezes it, so a
-   * restored snapshot carries no notification the visitor has already received: the
-   * fresh `connect()` there reads a leftover flash as a brand-new one and announces it
-   * a second time. A message that never auto-dismisses (`duration: 0`) is one of these
-   * too — that value governs the timer, not what belongs in a cached page. Removal
-   * only: `dismiss` reports a dismissal, and freezing the page is not one.
+   * Removes the marked messages in the region that this instance never took on: on a
+   * page restored from Turbo's cache they are copies of notifications the visitor
+   * already received, and taking them on would announce them a second time. A message
+   * that never auto-dismisses (`duration: 0`) is one of these too — that value governs
+   * the timer, not what a restored page should show — and so is one copied while it was
+   * leaving. Removal only: `dismiss` reports a dismissal, and nobody dismissed these.
    */
-  #rewindForCache(): void {
-    const removed = this.#order.length;
-    for (const message of [...this.#order]) {
+  #discardInherited(): void {
+    let removed = 0;
+    for (const message of this.messageTargets) {
+      if (!message.hasAttribute(this.#shownAttribute) || this.#arrivals.has(message)) continue;
+      if (!this.#owns(message)) continue;
       message.remove();
-      this.#forget(message);
+      removed += 1;
     }
-    for (const message of this.#leaving) message.remove();
-    this.#leaving.clear();
     if (removed > 0) this.dispatch("reconcile", { detail: { removed } });
   }
 
@@ -222,7 +257,7 @@ export class FlashController extends Controller<HTMLElement> {
    */
   maxValueChanged(): void {
     if (!this.#connected) return;
-    this.#appliedMax = this.maxValue;
+    this.#appliedMax = this.#safeMax;
     this.#enforceMax();
   }
 
@@ -256,6 +291,7 @@ export class FlashController extends Controller<HTMLElement> {
       return;
     }
     this.#forget(message);
+    this.#arrivals.delete(message);
     // Ownership is re-checked at both ends of the leaving transition: dropping the
     // claim here is what the pending finalize reads to leave the node alone.
     this.#leaving.delete(message);
@@ -312,11 +348,17 @@ export class FlashController extends Controller<HTMLElement> {
     message.removeEventListener("focusout", this.#onLeave);
   }
 
-  /** Dismisses the flash whose close control fired the event. */
-  dismiss(event: Event): void {
-    const target = (event.currentTarget || event.target) as HTMLElement | null;
-    const message = target?.closest<HTMLElement>(this.#messageSelector);
-    if (message) this.#beginDismiss(message, "user");
+  /** Dismisses an owned message or descendant, or the message a DOM action operated. */
+  dismiss(input: Event | HTMLElement): void {
+    const source = actionSource(input);
+    if (
+      source.origin &&
+      source.origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element
+    )
+      return;
+    const message = (source.origin ?? source.host)?.closest<HTMLElement>(this.#messageSelector);
+    if (message && this.messageTargets.includes(message))
+      this.#beginDismiss(message, source.reason);
   }
 
   /** Processes messages added after connect (Turbo Stream); their own role announces them. */
@@ -352,14 +394,20 @@ export class FlashController extends Controller<HTMLElement> {
       message.setAttribute("role", assertive ? "alert" : "status");
     }
     message.setAttribute("data-flash-state", "visible");
+    message.setAttribute(this.#shownAttribute, "");
+    // A message this instance took on before it reconnected was already shown.
+    const known = this.#arrivals.has(message);
     this.#order.push(message);
+    this.#arrivals.add(message);
 
     this.#bindPause(message);
     this.#readHolds(message);
 
-    const text = message.textContent?.trim() ?? "";
-    this.dispatch("show", { target: message, detail: { type, message: text } });
-    if (atConnect) announce(text, { assertive });
+    if (!known) {
+      const text = message.textContent?.trim() ?? "";
+      this.dispatch("show", { target: message, detail: { type, message: text } });
+      if (atConnect) announce(text, { assertive });
+    }
 
     this.#startTimer(message);
     if (!atConnect) this.#enforceMax([message]);
@@ -378,9 +426,9 @@ export class FlashController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #enforceMax(spared: readonly HTMLElement[] = []): void {
-    if (!Number.isFinite(this.maxValue) || this.maxValue <= 0) return;
-    for (const message of [...this.#order]) {
-      if (this.#shownCount() <= this.maxValue) return;
+    if (this.#safeMax <= 0) return;
+    for (const message of [...this.#arrivals]) {
+      if (this.#shownCount() <= this.#safeMax) return;
       if (this.#owns(message) && !spared.includes(message) && !this.#dismiss.isHeld(message)) {
         this.#beginDismiss(message, "limit");
       }
@@ -401,10 +449,10 @@ export class FlashController extends Controller<HTMLElement> {
    *   and `pauseOnHover` whether hover and focus hold that timer.
    */
   #startTimer(message: HTMLElement): void {
-    if (this.durationValue <= 0) return;
+    if (this.#safeDuration <= 0) return;
     const dismiss = (): void => this.#beginDismiss(message, "timeout");
-    if (this.pauseOnHoverValue) this.#dismiss.set(message, dismiss, this.durationValue);
-    else this.#fixedDismiss.set(message, dismiss, this.durationValue);
+    if (this.pauseOnHoverValue) this.#dismiss.set(message, dismiss, this.#safeDuration);
+    else this.#fixedDismiss.set(message, dismiss, this.#safeDuration);
   }
 
   /**
@@ -439,6 +487,15 @@ export class FlashController extends Controller<HTMLElement> {
 
   /** Applies the cap again, sparing every message gathered since the last pass. */
   #reapplyCap(): void {
+    for (const message of [...this.#order, ...this.#leaving]) {
+      if (!this.#owns(message)) continue;
+      message.setAttribute("data-flash-state", this.#leaving.has(message) ? "leaving" : "visible");
+      message.setAttribute(this.#shownAttribute, "");
+      if (!message.hasAttribute("role")) {
+        const assertive = ASSERTIVE_TYPES.has(message.getAttribute("data-flash-type") ?? "");
+        message.setAttribute("role", assertive ? "alert" : "status");
+      }
+    }
     const spared = this.#spared;
     this.#spared = [];
     this.#enforceMax(spared);
@@ -507,7 +564,7 @@ export class FlashController extends Controller<HTMLElement> {
   }
 
   /** Marks a message leaving, then removes it after its CSS transition and emits dismiss. */
-  #beginDismiss(message: HTMLElement, reason: "timeout" | "user" | "limit"): void {
+  #beginDismiss(message: HTMLElement, reason: StateReason): void {
     // One removal, one `dismiss`: a close control fired during the leaving
     // transition, or a repeated request, finds the message already released and
     // must not start a second finalize. Reading the bookkeeping rather than
@@ -524,6 +581,8 @@ export class FlashController extends Controller<HTMLElement> {
       // attribute during the transition belongs to the consumer by the time this runs.
       if (!this.#leaving.delete(message)) return;
       message.remove();
+      // Dismissed: put back later, the node is a new arrival to show again.
+      this.#arrivals.delete(message);
       this.dispatch("dismiss", { detail: { element: message, reason } });
     };
 
@@ -539,5 +598,26 @@ export class FlashController extends Controller<HTMLElement> {
   #transitionMs(el: HTMLElement): number {
     if (typeof window.getComputedStyle !== "function") return 0;
     return maxTransitionTotalMs(window.getComputedStyle(el));
+  }
+  /** Current `duration` declaration resolved against its numeric contract. */
+  get #safeDuration(): number {
+    return this.#numbers.read(
+      this,
+      "duration",
+      this.durationValue,
+      FlashController.values.duration.default,
+      FlashController.valueConstraints.duration,
+    );
+  }
+
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      FlashController.values.max.default,
+      FlashController.valueConstraints.max,
+    );
   }
 }

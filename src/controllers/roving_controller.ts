@@ -3,7 +3,7 @@ import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { ownerIndex } from "../utils/event_owner";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { isRtl } from "../utils/logical_scroll";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { RovingTabindex, type RovingWrap, rovingMove } from "../utils/roving_tabindex";
 
 /** Attributes that change whether an item can hold the Tab stop. */
@@ -73,7 +73,7 @@ export class RovingController extends Controller<HTMLElement> {
   declare homeEndValue: boolean;
 
   readonly #roving = new RovingTabindex(() => this.itemTargets);
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#ensureTabStop(true));
+  readonly #reconcile = new MorphRenderWatcher(() => this.#ensureTabStop(true));
   #connected = false;
   #observer: MutationObserver | null = null;
 
@@ -86,12 +86,12 @@ export class RovingController extends Controller<HTMLElement> {
     this.element.addEventListener("focusin", this.#onFocusin);
     this.#watchState();
     this.#connected = true;
-    this.#reconcile.activate();
+    this.#reconcile.observe(this.element);
   }
 
   override disconnect(): void {
     this.#connected = false;
-    this.#reconcile.cancel();
+    this.#reconcile.disconnect();
     this.element.removeEventListener("keydown", this.#onKeydown);
     this.element.removeEventListener("focusin", this.#onFocusin);
     this.#observer?.disconnect();

@@ -157,6 +157,29 @@ describe("erbElements", () => {
       ].join("\n");
       expect(containerEnd(source)).toBeNull();
     });
+
+    it("counts a case block inside the container, so its end does not close the helper", () => {
+      const source = [
+        `<%= form_with url: "/x", data: { controller: "stimeo--menu" } do |f| %>`,
+        `<% case mode %>`,
+        `<% when :compact %>`,
+        `<% end %>`,
+        `<% end %>`,
+      ].join("\n");
+      expect(containerEnd(source)).toBe(source.length);
+    });
+
+    it("drops a comment tag whole, whatever its later lines spell", () => {
+      // `<%#` comments out the entire tag, so the `end` on its second line closes
+      // nothing and the helper still pairs with the last tag.
+      const source = [
+        `<%= form_with url: "/x", data: { controller: "stimeo--menu" } do |f| %>`,
+        `<%# closed by the`,
+        `end below %>`,
+        `<% end %>`,
+      ].join("\n");
+      expect(containerEnd(source)).toBe(source.length);
+    });
   });
 
   it("ignores tags that render nothing", () => {
@@ -186,5 +209,20 @@ describe("erbElements", () => {
     const [element] = erbElements(source);
     expect(element?.sourceLength).toBe("<%=".length);
     expect(element?.attrs[0]?.sourceLength).toBe(`"stimeo--menu-target"`.length);
+  });
+
+  it("spans the whole delimiter of a raw output tag", () => {
+    const [element] = erbElements(`<%== tag.span data: { controller: "stimeo--menu" } %>`);
+    expect(element?.sourceLength).toBe("<%==".length);
+  });
+
+  it("keeps a trimming close out of the helper's code", () => {
+    // The `-` of `-%>` belongs to the delimiter; read as code, it would make
+    // the hash one term of a larger expression.
+    const [element] = erbElements(`<%= tag.div data: { controller: "stimeo--menu" } -%>`);
+    expect(element?.opaque).toBe(false);
+    expect(element?.attrs.map((a) => [a.name, a.value])).toEqual([
+      ["data-controller", "stimeo--menu"],
+    ]);
   });
 });

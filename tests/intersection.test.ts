@@ -25,9 +25,8 @@ type Entry = {
 };
 
 /**
- * Entry factories, each named for a shape a real observer actually delivers —
- * the geometry and `isIntersecting` are kept consistent with the ratio so a
- * test cannot assert on a state the platform never produces.
+ * Entry factories model visible, hidden, and unrendered geometry. A defensive
+ * case below deliberately overrides the ratio with an inconsistent value.
  */
 const visible = (ratio = 1): Entry => ({
   isIntersecting: true,
@@ -72,6 +71,8 @@ describe("IntersectionController", () => {
   let observerCallback: ((entries: Entry[]) => void) | null = null;
   let observerOptions: IntersectionObserverInit | undefined;
   let rejectedRootMargin: string | null = null;
+  /** Observers built so far, so a rebuild — or the absence of one — is countable. */
+  let constructed = 0;
   const observeMock = vi.fn();
   const unobserveMock = vi.fn();
   const disconnectMock = vi.fn();
@@ -80,6 +81,7 @@ describe("IntersectionController", () => {
     observerCallback = null;
     observerOptions = undefined;
     rejectedRootMargin = null;
+    constructed = 0;
     observeMock.mockClear();
     unobserveMock.mockClear();
     disconnectMock.mockClear();
@@ -89,6 +91,7 @@ describe("IntersectionController", () => {
         if (options?.rootMargin === rejectedRootMargin) {
           throw new SyntaxError("invalid rootMargin");
         }
+        constructed += 1;
         observerCallback = callback;
         observerOptions = options;
       }
@@ -161,6 +164,56 @@ describe("IntersectionController", () => {
         <div data-controller="stimeo--intersection" aria-hidden="true"
              data-stimeo--intersection-ratio-steps-value="4"></div>`);
       expect(observerOptions?.threshold).toEqual([0, 0.25, 0.5, 0.75, 1]);
+    });
+
+    it("accepts 1000 at the ratioSteps limit and observes every interval", async () => {
+      await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-ratio-steps-value="1000"></div>`);
+
+      expect(observeMock).toHaveBeenCalledWith(root());
+      expect(observerOptions?.threshold).toEqual(Array.from({ length: 1001 }, (_, i) => i / 1000));
+      expect(root().getAttribute("data-stimeo--intersection-ratio-steps-value")).toBe("1000");
+    });
+
+    it("falls back to zero for 1001 above the ratioSteps limit", async () => {
+      await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-threshold-value="0.3"
+             data-stimeo--intersection-ratio-steps-value="1001"></div>`);
+
+      expect(observeMock).toHaveBeenCalledWith(root());
+      expect(observerOptions?.threshold).toHaveLength(2);
+      expect(observerOptions?.threshold).toEqual([0, 0.3]);
+      expect(root().getAttribute("data-stimeo--intersection-ratio-steps-value")).toBe("1001");
+    });
+
+    it.each(["-1", "NaN", "Infinity", "-Infinity"])(
+      "falls back to zero ratioSteps for %s while preserving the visibility threshold",
+      async (raw) => {
+        await mount(`
+          <div data-controller="stimeo--intersection" aria-hidden="true"
+               data-stimeo--intersection-threshold-value="0.3"
+               data-stimeo--intersection-ratio-steps-value="${raw}"></div>`);
+
+        expect(observeMock).toHaveBeenCalledWith(root());
+        expect(observerOptions?.threshold).toEqual([0, 0.3]);
+        expect(root().getAttribute("data-stimeo--intersection-ratio-steps-value")).toBe(raw);
+      },
+    );
+
+    it.each([
+      ["0", [0, 0.3]],
+      ["0.5", [0, 0.3]],
+      ["1.5", [0, 0.3, 2 / 3]],
+    ])("preserves fractional ratioSteps %s without rounding", async (raw, expected) => {
+      await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-threshold-value="0.3"
+             data-stimeo--intersection-ratio-steps-value="${raw}"></div>`);
+
+      expect(observeMock).toHaveBeenCalledWith(root());
+      expect(observerOptions?.threshold).toEqual(expected);
     });
 
     it("always observes the 0 line alongside a non-zero threshold", async () => {
@@ -316,9 +369,8 @@ describe("IntersectionController", () => {
     });
 
     it("trusts the platform verdict when it reports no intersection", async () => {
-      // At the outgoing crossing the observer can report the threshold's own
-      // ratio with `isIntersecting` already false; the ratio alone would then
-      // keep the element "visible" after it stopped intersecting.
+      // This deliberately inconsistent entry checks that a false intersection
+      // verdict wins over a positive ratio.
       const events = await mount(`
         <div data-controller="stimeo--intersection" aria-hidden="true"
              data-stimeo--intersection-threshold-value="0.5"></div>`);
@@ -464,6 +516,120 @@ describe("IntersectionController", () => {
              data-stimeo--intersection-once-value="true" data-intersecting="true"></div>`);
       expect(observeMock).not.toHaveBeenCalled();
     });
+
+    it("re-arms a spent one-shot when once is turned off", async () => {
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-once-value="true"></div>`);
+      observerCallback?.([visible()]);
+      await tick();
+      expect(events.enter).toHaveLength(1);
+      expect(disconnectMock).toHaveBeenCalledOnce();
+
+      root().setAttribute("data-stimeo--intersection-once-value", "false");
+      await tick();
+      expect(observeMock).toHaveBeenCalledTimes(2);
+
+      // The re-armed observer's first callback is where the element is, not a
+      // movement: still visible, so no second enter for the same episode.
+      observerCallback?.([visible()]);
+      await tick();
+      expect(events.enter).toHaveLength(1);
+      expect(events.change).toHaveLength(2);
+
+      // From here it keeps watching like any `once=false` element.
+      observerCallback?.([hiddenAfter()]);
+      observerCallback?.([visible()]);
+      await tick();
+      expect(events.exit).toEqual([{ ratio: 0, position: "after" }]);
+      expect(events.enter).toHaveLength(2);
+    });
+
+    it("measures a re-armed element against the recorded state, as a reconnect does", async () => {
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-once-value="true"></div>`);
+      observerCallback?.([visible()]);
+      await tick();
+
+      root().setAttribute("data-stimeo--intersection-once-value", "false");
+      await tick();
+      // The element left while nothing watched it; the recorded hook still says
+      // visible, so the first callback corrects it with the exit that was missed.
+      observerCallback?.([hiddenBefore()]);
+      await tick();
+      expect(events.exit).toEqual([{ ratio: 0, position: "before" }]);
+      expect(root().getAttribute("data-intersecting")).toBe("false");
+      expect(events.enter).toHaveLength(1);
+    });
+
+    it("re-arms an element restored with its one-shot spent when once is turned off", async () => {
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-once-value="true" data-intersecting="true"></div>`);
+      expect(observeMock).not.toHaveBeenCalled();
+
+      root().setAttribute("data-stimeo--intersection-once-value", "false");
+      await tick();
+      expect(observeMock).toHaveBeenCalledOnce();
+      observerCallback?.([visible()]);
+      await tick();
+      expect(events.enter).toHaveLength(0);
+    });
+
+    it("re-arms once, after the batch, when the one-shot enter's handler turns once off", async () => {
+      // The handler runs after the shot is spent; the change it makes is applied
+      // by one rebuild once the batch is done, not in the middle of it.
+      const events = await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-once-value="true"></div>`);
+      root().addEventListener("stimeo--intersection:enter", () =>
+        root().setAttribute("data-stimeo--intersection-once-value", "false"),
+      );
+      observerCallback?.([visible(), hiddenAfter()]);
+      await tick();
+      expect(events.enter).toHaveLength(1);
+      expect(events.exit).toHaveLength(0);
+      expect(constructed).toBe(2);
+
+      observerCallback?.([visible()]);
+      observerCallback?.([hiddenAfter()]);
+      await tick();
+      expect(events.enter).toHaveLength(1);
+      expect(events.exit).toHaveLength(1);
+    });
+
+    it("stops observing when once is turned on after the enter was recorded", async () => {
+      const events = await mount(defaultFixture);
+      observerCallback?.([visible()]);
+      await tick();
+      expect(events.enter).toHaveLength(1);
+
+      // The element a reconnect would leave unobserved is left unobserved here too.
+      root().setAttribute("data-stimeo--intersection-once-value", "true");
+      await tick();
+      expect(disconnectMock).toHaveBeenCalledOnce();
+
+      observerCallback?.([hiddenAfter()]);
+      await tick();
+      expect(events.exit).toHaveLength(0);
+      expect(root().getAttribute("data-intersecting")).toBe("true");
+    });
+
+    it("keeps observing when once is turned on before any enter, and spends it on the next", async () => {
+      const events = await mount(defaultFixture);
+      observerCallback?.([hiddenAfter()]);
+      await tick();
+
+      root().setAttribute("data-stimeo--intersection-once-value", "true");
+      await tick();
+      expect(disconnectMock).not.toHaveBeenCalled();
+
+      observerCallback?.([visible()]);
+      await tick();
+      expect(events.enter).toHaveLength(1);
+      expect(disconnectMock).toHaveBeenCalledOnce();
+    });
   });
 
   describe("refresh", () => {
@@ -553,6 +719,109 @@ describe("IntersectionController", () => {
 
       root().setAttribute("data-stimeo--intersection-threshold-value", "0.5");
       await tick();
+      expect(observeMock).toHaveBeenCalledOnce();
+    });
+
+    it("rebuilds the observer when rootMargin changes at runtime", async () => {
+      await mount(defaultFixture);
+      expect(observerOptions?.rootMargin).toBe("0px");
+
+      root().setAttribute("data-stimeo--intersection-root-margin-value", "300px");
+      await tick();
+      expect(observerOptions?.rootMargin).toBe("300px");
+      // The old observer is released before the new one observes, so exactly one is live.
+      expect(disconnectMock).toHaveBeenCalledOnce();
+      expect(observeMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("re-resolves the root when rootSelector changes at runtime", async () => {
+      await mount(`
+        <div id="first"></div><div id="second"></div>
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-root-selector-value="#first"></div>`);
+      expect(observerOptions?.root).toBe(document.querySelector("#first"));
+
+      root().setAttribute("data-stimeo--intersection-root-selector-value", "#second");
+      await tick();
+      expect(observerOptions?.root).toBe(document.querySelector("#second"));
+      expect(observeMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("follows ratioSteps at runtime", async () => {
+      await mount(defaultFixture);
+      expect(observerOptions?.threshold).toEqual([0]);
+
+      root().setAttribute("data-stimeo--intersection-ratio-steps-value", "4");
+      await tick();
+      expect(observerOptions?.threshold).toEqual([0, 0.25, 0.5, 0.75, 1]);
+    });
+
+    it("coalesces several declaration changes in one batch into one rebuild", async () => {
+      await mount(`
+        <div id="scroller"></div>
+        <div data-controller="stimeo--intersection" aria-hidden="true"></div>`);
+      expect(constructed).toBe(1);
+
+      root().setAttribute("data-stimeo--intersection-root-margin-value", "100px");
+      root().setAttribute("data-stimeo--intersection-ratio-steps-value", "2");
+      root().setAttribute("data-stimeo--intersection-root-selector-value", "#scroller");
+      await tick();
+      expect(constructed).toBe(2);
+      expect(observerOptions?.rootMargin).toBe("100px");
+      expect(observerOptions?.threshold).toEqual([0, 0.5, 1]);
+      expect(observerOptions?.root).toBe(document.querySelector("#scroller"));
+    });
+
+    it("keeps the live observer when a changed declaration resolves to the same options", async () => {
+      await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-ratio-steps-value="4"></div>`);
+      expect(constructed).toBe(1);
+
+      // A different spelling of the same number: the observer it asks for is the
+      // one already live, so rebuilding would only re-deliver the current state.
+      root().setAttribute("data-stimeo--intersection-ratio-steps-value", "4.0");
+      await tick();
+      expect(constructed).toBe(1);
+      expect(disconnectMock).not.toHaveBeenCalled();
+    });
+
+    it("builds on a root node that replaced the one the selector named before", async () => {
+      await mount(`
+        <div id="scroller"></div>
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-root-selector-value="#scroller"></div>`);
+      const original = document.querySelector("#scroller") as HTMLElement;
+      expect(observerOptions?.root).toBe(original);
+
+      // The selector string stays the same while the node it names is swapped.
+      const replacement = document.createElement("div");
+      replacement.id = "scroller";
+      original.replaceWith(replacement);
+      root().setAttribute("data-stimeo--intersection-root-margin-value", "10px");
+      await tick();
+      expect(observerOptions?.root).toBe(replacement);
+    });
+
+    it("builds one observer on connect however many Values are declared", async () => {
+      // Stimulus delivers every Value callback ahead of connect(); none of them builds.
+      await mount(`
+        <div data-controller="stimeo--intersection" aria-hidden="true"
+             data-stimeo--intersection-root-margin-value="50px"
+             data-stimeo--intersection-ratio-steps-value="2"
+             data-stimeo--intersection-threshold-value="0.5"
+             data-stimeo--intersection-once-value="false"></div>`);
+      expect(constructed).toBe(1);
+      expect(observeMock).toHaveBeenCalledOnce();
+    });
+
+    it("does not rebuild for a declaration change after disconnect", async () => {
+      await mount(defaultFixture);
+      controller()?.disconnect();
+
+      root().setAttribute("data-stimeo--intersection-root-margin-value", "300px");
+      await tick();
+      expect(constructed).toBe(1);
       expect(observeMock).toHaveBeenCalledOnce();
     });
 

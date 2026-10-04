@@ -133,6 +133,20 @@ describe("CurrencyInputController", () => {
     return events;
   };
 
+  it("cancels a queued morph before reconnecting into an uncommitted display", async () => {
+    await mount({ value: "12" });
+    root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    controller().disconnect();
+    controller().connect();
+    display().value = "34";
+    await tick();
+    expect(display().value).toBe("34");
+    expect(field().value).toBe("12");
+    root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+    expect(field().value).toBe("34");
+  });
+
   it("groups digits as the user types and keeps the field unformatted", async () => {
     await mount();
     typeKeys("1234567");
@@ -293,6 +307,25 @@ describe("CurrencyInputController", () => {
     controller().displayTargetConnected(arriving);
 
     expect(arriving.value).toBe("1.234,00");
+  });
+
+  it("hears typing on a display that replaces one which left mid-composition", async () => {
+    await mount({ value: "1234" });
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    const leaving = display();
+    const arriving = document.createElement("input");
+    arriving.type = "text";
+    arriving.setAttribute("data-stimeo--currency-input-target", "display");
+    leaving.replaceWith(arriving);
+    controller().displayTargetDisconnected(leaving);
+    controller().displayTargetConnected(arriving);
+    await tick();
+
+    arriving.value = "5678";
+    controller().onInput(new Event("input"));
+
+    expect(arriving.value).toBe("5,678");
+    expect(field().value).toBe("5678");
   });
 
   it("keeps the committed value when the locale changes while the controller is away", async () => {
@@ -478,6 +511,151 @@ describe("CurrencyInputController", () => {
     ]);
   });
 
+  describe("a display that stays after a composing one leaves", () => {
+    /** Starts a composition on the focused display and holds a change to one declaration. */
+    const holdChange = async (name: string, value: string) => {
+      display().focus();
+      display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      root().setAttribute(`data-stimeo--currency-input-${name}-value`, value);
+      if (name === "locale") controller().localeValueChanged();
+      else if (name === "currency") controller().currencyValueChanged();
+      else controller().precisionValueChanged();
+      await tick();
+    };
+    /** A display the page wrote for the declarations it carries now. */
+    const pageDisplay = (text: string) => {
+      const successor = document.createElement("input");
+      successor.type = "text";
+      successor.value = text;
+      successor.setAttribute("data-stimeo--currency-input-target", "display");
+      return successor;
+    };
+
+    it.each([
+      ["locale", "de-DE", "9.876,5", "9.876,50", "9876.5", "de-DE", "USD", 9876.5],
+      ["precision", "0", "9876.5", "9,877", "9877", "en-US", "USD", 9877],
+      ["currency", "EUR", "9876.5", "9,876.50", "9876.5", "en-US", "EUR", 9876.5],
+    ])(
+      "reads the successor with the %s change a composition held, and reports it once",
+      async (name, declared, text, shown, submitted, locale, currency, value) => {
+        const spoken = new Intl.NumberFormat(locale, { style: "currency", currency }).format(value);
+        await mount({ value: "1234.5", currency: "USD" });
+        const events = record();
+        await holdChange(name, declared);
+        const composing = display();
+        const successor = pageDisplay(text);
+        composing.after(successor);
+        await tick();
+        composing.remove();
+        await tick();
+
+        expect(display()).toBe(successor);
+        expect(successor.value).toBe(shown);
+        expect(field().value).toBe(submitted);
+        expect(srValue().textContent).toBe(spoken);
+        expect(events).toEqual([{ type: "reconcile", detail: { value, formatted: shown } }]);
+
+        // The held change was taken in with that read: a later composition on the
+        // successor applies nothing a second time.
+        successor.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+        successor.dispatchEvent(new Event("compositionend", { bubbles: true }));
+        expect(successor.value).toBe(shown);
+        expect(events).toHaveLength(1);
+      },
+    );
+
+    it("leaves the composing display's text alone while a successor waits behind it", async () => {
+      await mount({ value: "1234.5" });
+      const events = record();
+      await holdChange("locale", "de-DE");
+      const composing = display();
+      composing.value = "1,234.5６";
+      composing.dispatchEvent(new Event("input", { bubbles: true }));
+      composing.after(pageDisplay("9.876,5"));
+      await tick();
+
+      expect(composing.value).toBe("1,234.5６");
+      expect(field().value).toBe("1234.5");
+      expect(events).toEqual([]);
+    });
+
+    it("leaves the composing display's text alone when a display behind it leaves, and reads the commit", async () => {
+      await mount({ value: "1234.5" });
+      const events = record();
+      const composing = display();
+      composing.focus();
+      composing.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      composing.value = "1,234.5６";
+      composing.dispatchEvent(new Event("input", { bubbles: true }));
+      const behind = pageDisplay("9876.5");
+      composing.after(behind);
+      await tick();
+      behind.remove();
+      await tick();
+
+      expect(display()).toBe(composing);
+      expect(composing.value).toBe("1,234.5６");
+      expect(field().value).toBe("1234.5");
+      expect(events).toEqual([]);
+
+      composing.dispatchEvent(new Event("compositionend", { bubbles: true }));
+
+      expect(composing.value).toBe("1,234.56");
+      expect(field().value).toBe("1234.56");
+      expect(events).toEqual([
+        { type: "change", detail: { value: 1234.56, formatted: "1,234.56" } },
+      ]);
+    });
+
+    it("keeps a held change for the commit when a display behind the composing one leaves", async () => {
+      await mount({ value: "1234.5" });
+      const events = record();
+      await holdChange("locale", "de-DE");
+      const composing = display();
+      composing.value = "1,234.5６";
+      composing.dispatchEvent(new Event("input", { bubbles: true }));
+      const behind = pageDisplay("9.876,5");
+      composing.after(behind);
+      await tick();
+      behind.remove();
+      await tick();
+
+      expect(composing.value).toBe("1,234.5６");
+      expect(field().value).toBe("1234.5");
+      expect(events).toEqual([]);
+
+      composing.dispatchEvent(new Event("compositionend", { bubbles: true }));
+
+      expect(field().value).toBe("1234.56");
+      expect(composing.value).toBe("1.234,56");
+    });
+
+    it("reads a commit on the composing display with the separators it was typed against while a successor waits", async () => {
+      await mount({ value: "1234.5" });
+      const events = record();
+      await holdChange("locale", "de-DE");
+      const composing = display();
+      const successor = pageDisplay("9.876,5");
+      composing.after(successor);
+      await tick();
+      composing.value = "1,234.56";
+      composing.dispatchEvent(new Event("compositionend", { bubbles: true }));
+
+      expect(field().value).toBe("1234.56");
+      expect(composing.value).toBe("1.234,56");
+
+      composing.remove();
+      await tick();
+
+      expect(successor.value).toBe("9.876,50");
+      expect(field().value).toBe("9876.5");
+      expect(events).toEqual([
+        { type: "change", detail: { value: 1234.56, formatted: "1,234.56" } },
+        { type: "reconcile", detail: { value: 9876.5, formatted: "9.876,50" } },
+      ]);
+    });
+  });
+
   it("rounds an entry left unrounded mid-typing when it connects again, as reconcile", async () => {
     await mount();
     typeKeys("1.555");
@@ -610,6 +788,164 @@ describe("CurrencyInputController", () => {
     controller().fieldTargetConnected();
 
     expect(lateField.value).toBe("12");
+  });
+
+  it("syncs a field that stays after an earlier one leaves", async () => {
+    await mount({ value: "1234.5" });
+    const original = field();
+    const successor = original.cloneNode() as HTMLInputElement;
+    successor.value = "";
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(field()).toBe(successor);
+    expect(successor.value).toBe("1234.5");
+  });
+
+  it("syncs a screen-reader span that stays after an earlier one leaves", async () => {
+    await mount({ value: "1234.5" });
+    const original = srValue();
+    const successor = original.cloneNode() as HTMLElement;
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(srValue()).toBe(successor);
+    expect(successor.textContent).toBe("1,234.50");
+  });
+
+  it("says nothing when it syncs a field and a span left behind", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    const native: Event[] = [];
+    root().addEventListener("change", (event) => native.push(event));
+    const fieldSuccessor = field().cloneNode() as HTMLInputElement;
+    fieldSuccessor.value = "";
+    const spanSuccessor = srValue().cloneNode() as HTMLElement;
+    const originals = [field(), srValue()];
+    field().after(fieldSuccessor);
+    srValue().after(spanSuccessor);
+    await tick();
+    for (const original of originals) original.remove();
+    await tick();
+
+    expect(fieldSuccessor.value).toBe("1234.5");
+    expect(spanSuccessor.textContent).toBe("1,234.50");
+    expect(events).toEqual([]);
+    expect(native).toEqual([]);
+  });
+
+  it("keeps the display when its only field and span leave", async () => {
+    await mount({ value: "1234.5" });
+    field().remove();
+    srValue().remove();
+    await tick();
+
+    expect(() => controller().fieldTargetDisconnected()).not.toThrow();
+    expect(() => controller().srValueTargetDisconnected()).not.toThrow();
+    expect(display().value).toBe("1,234.50");
+  });
+
+  it("writes nothing to the field or span from a departure delivered after disconnect", async () => {
+    await mount({ value: "1234.5" });
+    const instance = controller();
+    instance.disconnect();
+    // The page rewrites the display once the controller is gone; the departures
+    // Stimulus delivers after `disconnect()` must not mirror it.
+    display().value = "99";
+
+    instance.fieldTargetDisconnected();
+    instance.srValueTargetDisconnected();
+
+    expect(field().value).toBe("1234.5");
+    expect(srValue().textContent).toBe("1,234.50");
+  });
+
+  it("reads a display holding another amount that stays after an earlier one leaves, as reconcile", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    const original = display();
+    const successor = original.cloneNode() as HTMLInputElement;
+    successor.value = "99";
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(display()).toBe(successor);
+    expect(successor.value).toBe("99.00");
+    expect(field().value).toBe("99");
+    expect(events).toEqual([{ type: "reconcile", detail: { value: 99, formatted: "99.00" } }]);
+  });
+
+  it("normalizes a display holding the same amount that stays after an earlier one leaves, silently", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    const original = display();
+    const successor = original.cloneNode() as HTMLInputElement;
+    successor.value = "1234.5";
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(successor.value).toBe("1,234.50");
+    expect(field().value).toBe("1234.5");
+    expect(events).toEqual([]);
+  });
+
+  it("leaves the entry unrounded on a focused display that stays after an earlier one leaves", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    const original = display();
+    const successor = original.cloneNode() as HTMLInputElement;
+    successor.value = "12.3";
+    original.after(successor);
+    await tick();
+    successor.focus();
+    original.remove();
+    await tick();
+
+    expect(successor.value).toBe("12.3");
+    expect(field().value).toBe("12.3");
+    expect(events).toEqual([{ type: "reconcile", detail: { value: 12.3, formatted: "12.3" } }]);
+  });
+
+  it("reads nothing for an arrival delivered once no display is left", async () => {
+    await mount({ value: "1234.5" });
+    const arrived = display();
+    arrived.remove();
+    await tick();
+
+    expect(() => controller().displayTargetConnected(arrived)).not.toThrow();
+    expect(field().value).toBe("1234.5");
+  });
+
+  it("keeps the field when its only display leaves", async () => {
+    await mount({ value: "1234.5" });
+    const leaving = display();
+    leaving.remove();
+    await tick();
+
+    expect(() => controller().displayTargetDisconnected(leaving)).not.toThrow();
+    expect(field().value).toBe("1234.5");
+  });
+
+  it("reads no display from a departure delivered after disconnect", async () => {
+    await mount({ value: "1234.5" });
+    const events = record();
+    const instance = controller();
+    instance.disconnect();
+    display().value = "99";
+
+    instance.displayTargetDisconnected(display());
+
+    expect(display().value).toBe("99");
+    expect(field().value).toBe("1234.5");
+    expect(events).toEqual([]);
   });
 
   it("strips invalid characters before parsing", async () => {
@@ -1002,6 +1338,20 @@ describe("CurrencyInputController", () => {
     expect(events).toHaveLength(0);
   });
 
+  it("syncs a screen-reader span that arrives after the last one already left", async () => {
+    await mount();
+    typeKeys("1234");
+    srValue().remove();
+    await tick();
+    // Nothing departs in this batch, so the arrival is the only callback that can sync it.
+    const lateSr = document.createElement("span");
+    lateSr.setAttribute("data-stimeo--currency-input-target", "srValue");
+    root().appendChild(lateSr);
+    await tick();
+
+    expect(lateSr.textContent).toBe("1,234.00");
+  });
+
   it("normalizes a swapped-in display and keeps working through it", async () => {
     await mount();
     typeKeys("1234");
@@ -1153,6 +1503,19 @@ describe("CurrencyInputController", () => {
     expect(field().value).toBe("1234.005");
   });
 
+  it("stops reading the previous locale's digits once the locale changes", async () => {
+    await mount({ locale: "ar-EG", value: "1234" });
+    root().setAttribute("data-stimeo--currency-input-locale-value", "en-US");
+    controller().localeValueChanged();
+    await tick();
+    expect(display().value).toBe("1,234.00");
+
+    // An Arabic-Indic digit is not one of en-US's digits, so it is dropped like a symbol.
+    type("5٦");
+
+    expect(field().value).toBe("5");
+  });
+
   it("pairs a null value with an empty formatted even while a sign is displayed", async () => {
     await mount();
     const details: Array<{ value: number | null; formatted: string }> = [];
@@ -1293,5 +1656,34 @@ describe("CurrencyInputController", () => {
     // role "textbox", accessible name "Amount", the grouped display value, then
     // the described value ("$1,234.00") sourced from the srValue span.
     expect(spoken).toEqual(["textbox, Amount, 1,234.00, $1,234.00"]);
+  });
+
+  it("reports a pending display write once when the user confirms it", async () => {
+    await mount({ value: "10" });
+    const changes: unknown[] = [];
+    const repairs: unknown[] = [];
+    root().addEventListener("stimeo--currency-input:change", (event) =>
+      changes.push((event as CustomEvent).detail),
+    );
+    root().addEventListener("stimeo--currency-input:reconcile", (event) =>
+      repairs.push((event as CustomEvent).detail),
+    );
+    display().value = "20";
+    blur();
+    await tick();
+    expect(changes).toEqual([{ value: 20, formatted: "20.00" }]);
+    expect(repairs).toEqual([]);
+  });
+
+  it("stays quiet when a pending display write is returned to the last published amount", async () => {
+    await mount({ value: "10" });
+    const changes: unknown[] = [];
+    root().addEventListener("stimeo--currency-input:change", (event) =>
+      changes.push((event as CustomEvent).detail),
+    );
+    display().value = "20";
+    type("10");
+    expect(field().value).toBe("10");
+    expect(changes).toEqual([]);
   });
 });

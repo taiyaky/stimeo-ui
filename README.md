@@ -62,7 +62,14 @@ registerStimeo(application); // registers every stimeo--* controller
 ```
 
 Need only a few controllers? Import them individually from
-`stimeo-ui/controllers/*` and register them under your own identifiers.
+`stimeo-ui/controllers/*` and register them under your own identifiers. Each
+file loads on its own, yet the coordination between components — which layer
+Escape closes, a focus trap's `Tab` and background, the value two components
+lend the same attribute — is kept once per page, whichever files the
+controllers came from, `stimeo-ui` itself included.
+Copies of the same controller also share dirty-form confirmations, highlight
+deadlines and portal origins. Opt-in Cable copies share the consumer, subscriptions
+and peer departure decisions; generated ARIA ids stay distinct across copies too.
 
 - **Peer dependencies:** `@hotwired/stimulus` (always), `@floating-ui/dom` (only
   if you use the opt-in `stimeo-ui/positioning` module — tooltips, popovers, etc.

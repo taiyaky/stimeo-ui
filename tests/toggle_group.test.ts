@@ -196,6 +196,13 @@ describe("ToggleGroupController", () => {
     expect(document.activeElement).toBe(items()[0]);
   });
 
+  it("consumes the navigation keys it handles", async () => {
+    await start();
+    const keys = ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End"];
+    const prevented = keys.map((name) => key(items()[1] as HTMLElement, name).defaultPrevented);
+    expect(prevented).toEqual([true, true, true, true, true, true]);
+  });
+
   it("leaves modified arrows and Home/End chords to the browser", async () => {
     await start();
     items()[0]?.focus();
@@ -259,6 +266,15 @@ describe("ToggleGroupController", () => {
     expect(tabindexes()).toEqual([-1, -1, 0]);
   });
 
+  it("restores a Tab stop the page removed on a key it does not handle", async () => {
+    await start();
+    // `tabindex` writes are not observed, so they schedule no pass that would repair the stop.
+    for (const candidate of items()) candidate.tabIndex = -1;
+    const tab = key(items()[1] as HTMLElement, "Tab");
+    expect(tab.defaultPrevented).toBe(false);
+    expect(tabindexes()).toEqual([0, -1, -1]);
+  });
+
   it("dispatches the exact change detail only for user activation", async () => {
     await start();
     const details: Array<{ value: string; pressed: boolean; values: string[] }> = [];
@@ -266,7 +282,9 @@ describe("ToggleGroupController", () => {
       details.push((event as CustomEvent).detail);
     });
     items()[1]?.click();
-    expect(details).toEqual([{ value: "italic", pressed: true, values: ["bold", "italic"] }]);
+    expect(details).toEqual([
+      { value: "italic", pressed: true, values: ["bold", "italic"], reason: "user" },
+    ]);
   });
 
   it("respects a consumer-canceled click", async () => {
@@ -291,6 +309,17 @@ describe("ToggleGroupController", () => {
     );
     key(items()[0] as HTMLElement, " ");
     expect(pressed()).toEqual(["true"]);
+  });
+
+  it("serves a per-item key action the group's delegation never hears", async () => {
+    await start(group(`${item("bold", "true", 0)}<span>${item("italic")}</span>`));
+    root()
+      .querySelector("span")
+      ?.addEventListener("keydown", (event) => event.stopPropagation());
+
+    const navigation = key(items()[1] as HTMLElement, "ArrowLeft");
+    expect(navigation.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(items()[0]);
   });
 
   it("ignores declared public actions whose currentTarget is not an item", async () => {
@@ -403,6 +432,21 @@ describe("ToggleGroupController", () => {
     expect(document.activeElement).toBe(items()[0]);
   });
 
+  it("drops an arriving item from the Tab sequence as soon as its target connects", async () => {
+    await start();
+    const late = document.createElement("button");
+    late.type = "button";
+    late.tabIndex = 0;
+    late.setAttribute("data-value", "strike");
+    late.setAttribute("data-stimeo--toggle-group-target", "item");
+    root().append(late);
+
+    controller().itemTargetConnected(late);
+    expect([late.tabIndex, late.getAttribute("aria-pressed")]).toEqual([-1, "false"]);
+    await tick();
+    expect(tabindexes()).toEqual([0, -1, -1, -1]);
+  });
+
   it("navigates from an actionless item immediately after synchronous insertion", async () => {
     await start();
     root().insertAdjacentHTML(
@@ -433,7 +477,26 @@ describe("ToggleGroupController", () => {
     controller().toggle(activation);
     expect(inserted.getAttribute("aria-pressed")).toBe("true");
     expect(tabindexes()).toEqual([-1, -1, -1, 0]);
-    expect(changes).toEqual([{ value: "strike", pressed: true, values: ["bold", "strike"] }]);
+    expect(changes).toEqual([
+      { value: "strike", pressed: true, values: ["bold", "strike"], reason: "user" },
+    ]);
+  });
+
+  it("gives back the pressed state of an item adopted and pressed in the same task", async () => {
+    await start();
+    root().insertAdjacentHTML(
+      "beforeend",
+      `<button type="button" id="adopted" data-value="strike"
+        data-stimeo--toggle-group-target="item">Strike</button>`,
+    );
+    const adopted = root().querySelector("#adopted") as HTMLButtonElement;
+    adopted.click();
+    expect(adopted.getAttribute("aria-pressed")).toBe("true");
+    await tick();
+
+    adopted.setAttribute("type", "submit");
+    await tick();
+    expect(adopted.hasAttribute("aria-pressed")).toBe(false);
   });
 
   it("keeps the current runtime Tab stop when another item is added", async () => {
@@ -568,6 +631,51 @@ describe("ToggleGroupController", () => {
     expect(document.activeElement).toBe(items()[2]);
   });
 
+  it("consumes a disabled item's activation before the item's own listeners", async () => {
+    await start(
+      group(`<div role="button" tabindex="0" aria-pressed="true" data-value="first"
+          data-stimeo--toggle-group-target="item">First</div>
+        <div role="button" tabindex="-1" aria-pressed="false" aria-disabled="true"
+          data-value="second" data-stimeo--toggle-group-target="item">Second</div>`),
+    );
+    const second = items()[1] as HTMLElement;
+    const heard: string[] = [];
+    second.addEventListener("click", () => heard.push("click"));
+    second.addEventListener("keydown", (event) => heard.push(event.key));
+
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    second.dispatchEvent(click);
+    const space = key(second, " ");
+    const enter = key(second, "Enter");
+    key(second, "ArrowLeft");
+
+    expect([click.defaultPrevented, space.defaultPrevented, enter.defaultPrevented]).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    expect(heard).toEqual(["ArrowLeft"]);
+    expect(pressed()).toEqual(["true", "false"]);
+  });
+
+  it("consumes the activation key of an item disabled while the key is dispatched", async () => {
+    await start(
+      group(`<div role="button" tabindex="0" aria-pressed="false" data-value="grid"
+        data-stimeo--toggle-group-target="item">Grid</div>`),
+    );
+    const grid = items()[0] as HTMLElement;
+    grid.addEventListener("keydown", () => grid.setAttribute("aria-disabled", "true"));
+    const outside = vi.fn();
+    document.addEventListener("keydown", outside);
+
+    const enter = key(grid, "Enter");
+    document.removeEventListener("keydown", outside);
+
+    expect(enter.defaultPrevented).toBe(true);
+    expect(outside).not.toHaveBeenCalled();
+    expect(pressed()).toEqual(["false"]);
+  });
+
   it("inherits aria-disabled activation suppression from the group", async () => {
     await start();
     root().setAttribute("aria-disabled", "true");
@@ -639,6 +747,64 @@ describe("ToggleGroupController", () => {
     expect(link.getAttribute("aria-pressed")).toBeNull();
   });
 
+  it("gives back the tabindex and pressed state it supplied to an item added at runtime", async () => {
+    await start();
+    root().insertAdjacentHTML(
+      "beforeend",
+      `<button type="button" id="late" data-value="strike"
+        data-stimeo--toggle-group-target="item">Strike</button>`,
+    );
+    await tick();
+    const late = root().querySelector("#late") as HTMLButtonElement;
+    expect([late.getAttribute("tabindex"), late.getAttribute("aria-pressed")]).toEqual([
+      "-1",
+      "false",
+    ]);
+
+    late.setAttribute("type", "submit");
+    await tick();
+    expect([late.hasAttribute("tabindex"), late.hasAttribute("aria-pressed")]).toEqual([
+      false,
+      false,
+    ]);
+  });
+
+  it("takes back a pressed state the user set on a default it supplied", async () => {
+    await start(
+      group(`<button type="button" tabindex="0" data-value="view"
+        data-stimeo--toggle-group-target="item">View</button>`),
+    );
+    const view = items()[0] as HTMLButtonElement;
+    view.click();
+    expect(view.getAttribute("aria-pressed")).toBe("true");
+    await tick();
+
+    view.setAttribute("type", "submit");
+    await tick();
+    expect(view.hasAttribute("aria-pressed")).toBe(false);
+  });
+
+  it("still takes back a pressed state it wrote after reconnecting", async () => {
+    await start(
+      group(`<button type="button" tabindex="0" data-value="view"
+        data-stimeo--toggle-group-target="item">View</button>`),
+    );
+    const retained = root();
+    retained.removeAttribute("data-controller");
+    await tick();
+    retained.setAttribute("data-controller", "stimeo--toggle-group");
+    await tick();
+
+    const view = items()[0] as HTMLButtonElement;
+    view.click();
+    expect(view.getAttribute("aria-pressed")).toBe("true");
+    await tick();
+
+    view.setAttribute("type", "submit");
+    await tick();
+    expect(view.hasAttribute("aria-pressed")).toBe(false);
+  });
+
   it("treats a page write of the value it supplied as authored", async () => {
     await start(
       group(`<a role="button" tabindex="3" href="/destination" data-value="view"
@@ -655,6 +821,45 @@ describe("ToggleGroupController", () => {
     link.href = "/destination";
     await tick();
     expect(link.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("treats a page write of the default it supplied on connect as authored", async () => {
+    await start(
+      group(`<a role="button" tabindex="3" data-value="view"
+        data-stimeo--toggle-group-target="item">View</a>`),
+    );
+    const link = items()[0] as HTMLAnchorElement;
+    expect(link.getAttribute("aria-pressed")).toBe("false");
+
+    link.setAttribute("aria-pressed", "false");
+    await tick();
+    link.href = "/destination";
+    await tick();
+    expect(link.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("treats a page observer echoing a pressed state it wrote as authored", async () => {
+    await start(
+      group(`<button type="button" tabindex="0" data-value="view"
+        data-stimeo--toggle-group-target="item">View</button>`),
+    );
+    const view = items()[0] as HTMLButtonElement;
+    let echoed = false;
+    const echo = new MutationObserver(() => {
+      if (echoed) return;
+      echoed = true;
+      view.setAttribute("aria-pressed", view.getAttribute("aria-pressed") ?? "false");
+    });
+    echo.observe(document.body, { subtree: true, attributeFilter: ["aria-pressed"] });
+
+    view.click();
+    await tick();
+    echo.disconnect();
+    expect(echoed).toBe(true);
+
+    view.setAttribute("type", "submit");
+    await tick();
+    expect(view.getAttribute("aria-pressed")).toBe("true");
   });
 
   it("preserves an aria-pressed value authored after the controller supplied its default", async () => {
@@ -725,6 +930,34 @@ describe("ToggleGroupController", () => {
     (items()[0] as HTMLButtonElement).disabled = true;
     await tick();
     expect(tabindexes()).toEqual([0, -1, -1]);
+  });
+
+  it("releases every delegated listener on disconnect", async () => {
+    await start(
+      group(`<div role="button" tabindex="0" aria-pressed="false" data-value="grid"
+          data-stimeo--toggle-group-target="item">Grid</div>
+        <div role="button" tabindex="-1" aria-pressed="false" aria-disabled="true"
+          data-value="list" data-stimeo--toggle-group-target="item">List</div>`),
+    );
+    const [grid, list] = items() as [HTMLElement, HTMLElement];
+    const heard: string[] = [];
+    list.addEventListener("click", () => heard.push("click"));
+    list.addEventListener("keydown", (event) => heard.push(event.key));
+    controller().disconnect();
+
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    list.dispatchEvent(click);
+    const enter = key(list, "Enter");
+    const arrow = key(grid, "ArrowRight");
+    list.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+
+    expect([click.defaultPrevented, enter.defaultPrevented, arrow.defaultPrevented]).toEqual([
+      false,
+      false,
+      false,
+    ]);
+    expect(heard).toEqual(["click", "Enter"]);
+    expect(tabindexes()).toEqual([0, -1]);
   });
 
   it("ignores lifecycle callbacks invoked after disconnect", async () => {
@@ -900,6 +1133,50 @@ describe("ToggleGroupController", () => {
 
       expect([...late.querySelectorAll("input")].map((input) => input.value)).toEqual(["bold"]);
       expect(commits.seen).toEqual([]);
+    });
+
+    it("mirrors the pressed set into a container that replaces the current one", async () => {
+      await start(withFields());
+      const events = captureStateEvents("stimeo--toggle-group", ["change", "reconcile"]);
+      commits.clear();
+      const successor = document.createElement("div");
+      successor.setAttribute("data-stimeo--toggle-group-target", "fields");
+      successor.innerHTML = '<input type="hidden" name="values[]" value="stale" />';
+
+      fields().replaceWith(successor);
+      await tick();
+
+      expect(fields()).toBe(successor);
+      expect(submitted()).toEqual(["values[]=bold"]);
+      expect(commits.seen).toEqual([]);
+      expect(events.names()).toEqual([]);
+      events.stop();
+    });
+
+    it("mirrors the pressed set into a container that stays after an earlier one leaves", async () => {
+      await start(withFields());
+      const original = fields();
+      const successor = original.cloneNode(true) as HTMLElement;
+      original.after(successor);
+      await tick();
+      items()[1]?.click();
+      await tick();
+      // While both are present the first one is the target, so the press went there.
+      expect([...original.querySelectorAll("input")].map((input) => input.value)).toEqual([
+        "bold",
+        "italic",
+      ]);
+      const events = captureStateEvents("stimeo--toggle-group", ["change", "reconcile"]);
+      commits.clear();
+
+      original.remove();
+      await tick();
+
+      expect(fields()).toBe(successor);
+      expect(submitted()).toEqual(["values[]=bold", "values[]=italic"]);
+      expect(commits.seen).toEqual([]);
+      expect(events.names()).toEqual([]);
+      events.stop();
     });
 
     it("rebuilds without a native change when a pressed item is removed at runtime", async () => {
@@ -1139,7 +1416,10 @@ describe("ToggleGroupController", () => {
       await tick();
 
       expect(heard()).toEqual([
-        { name: "change", detail: { value: "italic", pressed: true, values: ["bold", "italic"] } },
+        {
+          name: "change",
+          detail: { value: "italic", pressed: true, values: ["bold", "italic"], reason: "user" },
+        },
       ]);
       expect(commits.seen).toEqual([fields()]);
     });
@@ -1180,7 +1460,10 @@ describe("ToggleGroupController", () => {
 
       expect(heard()).toEqual([
         { name: "reconcile", detail: { values: ["bold", "italic"] } },
-        { name: "change", detail: { value: "bold", pressed: false, values: ["italic"] } },
+        {
+          name: "change",
+          detail: { value: "bold", pressed: false, values: ["italic"], reason: "user" },
+        },
       ]);
       expect(submitted()).toEqual(["italic"]);
       expect(commits.seen).toEqual([fields()]);
@@ -1222,7 +1505,10 @@ describe("ToggleGroupController", () => {
       await tick();
 
       expect(heard()).toEqual([
-        { name: "change", detail: { value: "italic", pressed: true, values: ["bold", "italic"] } },
+        {
+          name: "change",
+          detail: { value: "italic", pressed: true, values: ["bold", "italic"], reason: "user" },
+        },
         { name: "reconcile", detail: { values: ["bold", "italic", "underline"] } },
       ]);
       expect(submitted()).toEqual(["bold", "italic", "underline"]);
@@ -1243,7 +1529,10 @@ describe("ToggleGroupController", () => {
       // replaced would describe a set that is no longer there, so it reports
       // nothing further, and no pass reports the listener's press again.
       expect(heard()).toEqual([
-        { name: "change", detail: { value: "bold", pressed: false, values: ["italic"] } },
+        {
+          name: "change",
+          detail: { value: "bold", pressed: false, values: ["italic"], reason: "user" },
+        },
       ]);
       expect(submitted()).toEqual(["italic"]);
     });
@@ -1258,7 +1547,10 @@ describe("ToggleGroupController", () => {
 
       expect(read).toEqual([["bold", "italic"]]);
       expect(heard()).toEqual([
-        { name: "change", detail: { value: "italic", pressed: true, values: ["bold", "italic"] } },
+        {
+          name: "change",
+          detail: { value: "italic", pressed: true, values: ["bold", "italic"], reason: "user" },
+        },
       ]);
     });
 
@@ -1275,8 +1567,14 @@ describe("ToggleGroupController", () => {
 
       // Each change went out while the set it describes was the set on the page.
       expect(heard()).toEqual([
-        { name: "change", detail: { value: "italic", pressed: true, values: ["bold", "italic"] } },
-        { name: "change", detail: { value: "bold", pressed: false, values: ["italic"] } },
+        {
+          name: "change",
+          detail: { value: "italic", pressed: true, values: ["bold", "italic"], reason: "user" },
+        },
+        {
+          name: "change",
+          detail: { value: "bold", pressed: false, values: ["italic"], reason: "user" },
+        },
       ]);
       expect(submitted()).toEqual(["italic"]);
     });
@@ -1317,5 +1615,314 @@ describe("ToggleGroupController", () => {
         { name: "reconcile", detail: { values: [] } },
       ]);
     });
+  });
+});
+
+/** Verifies settled-state comparisons and synchronous nested commits. */
+describe("ToggleGroupController settled reports", () => {
+  let application: Application;
+  const root = () =>
+    document.querySelector<HTMLElement>('[data-controller="stimeo--toggle-group"]') as HTMLElement;
+  const items = () =>
+    Array.from(root().querySelectorAll<HTMLElement>('[data-stimeo--toggle-group-target="item"]'));
+  const act = (index: number) => {
+    items()[index]?.click();
+  };
+  const write = (index: number) => {
+    items().forEach((item, position) => {
+      item.setAttribute("aria-pressed", String(position === index));
+    });
+  };
+  const submitted = () =>
+    Array.from(root().querySelectorAll<HTMLInputElement>("input"))
+      .map((field) => field.value)
+      .join(",");
+  const record = () => {
+    const seen: string[] = [];
+    for (const name of ["change", "reconcile"])
+      root().addEventListener(`stimeo--toggle-group:${name}`, (event) => {
+        const detail = (event as CustomEvent<{ values: string[] }>).detail;
+        seen.push(`${name}:${detail.values.join(",")}`);
+      });
+    return seen;
+  };
+  beforeEach(async () => {
+    document.body.innerHTML = `<div data-controller="stimeo--toggle-group" data-stimeo--toggle-group-mode-value="single"><div role="button" aria-pressed="true" tabindex="0" data-value="a" data-stimeo--toggle-group-target="item" data-action="click->stimeo--toggle-group#toggle">a</div><div role="button" aria-pressed="false" tabindex="-1" data-value="b" data-stimeo--toggle-group-target="item" data-action="click->stimeo--toggle-group#toggle">b</div><div role="button" aria-pressed="false" tabindex="-1" data-value="c" data-stimeo--toggle-group-target="item" data-action="click->stimeo--toggle-group#toggle">c</div><div data-stimeo--toggle-group-target="fields"></div></div>`;
+    application = Application.start();
+    application.register("stimeo--toggle-group", ToggleGroupController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+  it("does not claim a late item after disconnect", () => {
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--toggle-group",
+    ) as ToggleGroupController;
+    instance.disconnect();
+    const late = document.createElement("button");
+    late.type = "button";
+    late.tabIndex = 0;
+    instance.itemTargetConnected(late);
+    expect(late.tabIndex).toBe(0);
+    expect(late.hasAttribute("aria-pressed")).toBe(false);
+  });
+  it("preserves roving state when a target callback arrives after disconnect", () => {
+    act(1);
+    const selected = items()[1] as HTMLElement;
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--toggle-group",
+    ) as ToggleGroupController;
+    instance.disconnect();
+    instance.itemTargetDisconnected(selected);
+    expect(selected.tabIndex).toBe(0);
+    expect(selected.getAttribute("aria-pressed")).toBe("true");
+  });
+  it("includes an undelivered page write in the user's settled change", async () => {
+    const seen = record();
+    write(1);
+    act(2);
+    await tick();
+    expect(seen).toEqual(["change:c"]);
+    expect(submitted()).toBe("c");
+  });
+  it("publishes nothing when the action returns to the last settled selection", async () => {
+    const seen = record();
+    let native = 0;
+    root().addEventListener("change", () => {
+      native += 1;
+    });
+    write(1);
+    act(0);
+    await tick();
+    expect(seen).toEqual([]);
+    expect(native).toBe(0);
+    expect(submitted()).toBe("a");
+  });
+  it("mirrors a replacement field before an unchanged selection returns", async () => {
+    const seen = record();
+    const field = root().querySelector('[data-stimeo--toggle-group-target="fields"]');
+    const replacement = document.createElement("div");
+    replacement.setAttribute("data-stimeo--toggle-group-target", "fields");
+    field?.replaceWith(replacement);
+    let native = 0;
+    replacement.addEventListener("change", () => {
+      native += 1;
+    });
+    write(1);
+    act(0);
+    expect(replacement.querySelector<HTMLInputElement>("input")?.value).toBe("a");
+    expect(native).toBe(0);
+    expect(seen).toEqual([]);
+    await tick();
+    expect(submitted()).toBe("a");
+    expect(native).toBe(0);
+    expect(seen).toEqual([]);
+  });
+  it("drops the outer report after a native subscriber commits a newer selection", async () => {
+    const seen = record();
+    let spent = false;
+    root().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      act(2);
+    });
+    act(1);
+    await tick();
+    expect(seen).toEqual(["change:c"]);
+    expect(submitted()).toBe("c");
+  });
+  it("keeps the outer report when a native subscriber only reads the selection", async () => {
+    const seen = record();
+    const reads: string[] = [];
+    root().addEventListener("change", () => reads.push(submitted()));
+    act(1);
+    await tick();
+    expect(reads).toEqual(["b"]);
+    expect(seen).toEqual(["change:b"]);
+  });
+  it("keeps the outer item detail when a nested toggle confirms the same set", async () => {
+    const seen: string[] = [];
+    root().addEventListener("stimeo--toggle-group:change", (event) =>
+      seen.push((event as CustomEvent<{ value: string }>).detail.value),
+    );
+    let spent = false;
+    root().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      root().setAttribute("data-stimeo--toggle-group-mode-value", "multiple");
+      items()[2]?.setAttribute("aria-pressed", "true");
+      act(2);
+    });
+    act(1);
+    await tick();
+    expect(seen).toEqual(["b"]);
+    expect(submitted()).toBe("b");
+  });
+  it("keeps the outer report when a native subscriber confirms the same selection", async () => {
+    const seen = record();
+    let spent = false;
+    root().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      items()[1]?.setAttribute("aria-pressed", "false");
+      act(1);
+    });
+    act(1);
+    await tick();
+    expect(seen).toEqual(["change:b"]);
+    expect(submitted()).toBe("b");
+  });
+});
+
+/** Explicit target calls share the DOM action while retaining their own provenance. */
+describe("ToggleGroupController target API", () => {
+  let application: Application;
+  const element = (id: string): HTMLElement => {
+    const found = document.getElementById(id);
+    if (!found) throw new Error(`Missing API fixture ${id}`);
+    return found;
+  };
+  const instance = (): ToggleGroupController =>
+    application.getControllerForElementAndIdentifier(
+      element("api-root"),
+      "stimeo--toggle-group",
+    ) as ToggleGroupController;
+  beforeEach(async () => {
+    document.body.innerHTML = `<button id="api-outside">Outside</button><div id="api-root" data-controller="stimeo--toggle-group" data-stimeo--toggle-group-mode-value="single"><button type="button" id="api-a" data-stimeo--toggle-group-target="item" aria-pressed="false" data-value="a" data-action="click->stimeo--toggle-group#toggle"><span>a</span></button><button type="button" id="api-b" data-stimeo--toggle-group-target="item" aria-pressed="false" data-value="b" data-action="click->stimeo--toggle-group#toggle"><span>b</span></button></div>`;
+    application = Application.start();
+    application.register("stimeo--toggle-group", ToggleGroupController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it("retains the existing DOM Event success as a positive control", () => {
+    const reports: Array<{ reason?: string }> = [];
+    element("api-root").addEventListener("stimeo--toggle-group:change", (event) => {
+      reports.push((event as CustomEvent<{ reason?: string }>).detail);
+    });
+    element("api-b").click();
+    expect(element("api-b").getAttribute("aria-pressed")).toBe("true");
+    expect(reports).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    "accepts an owned target or its descendant (%s) after an Event positive control",
+    (descendant) => {
+      const reports: Array<{ reason?: string }> = [];
+      element("api-root").addEventListener("stimeo--toggle-group:change", (event) => {
+        reports.push((event as CustomEvent<{ reason?: string }>).detail);
+      });
+      element("api-b").click();
+      expect(element("api-b").getAttribute("aria-pressed")).toBe("true");
+      expect(reports).toHaveLength(1);
+      element("api-outside").focus();
+      const target = descendant ? element("api-a").querySelector("span") : element("api-a");
+      if (!(target instanceof HTMLElement)) throw new Error("Missing API descendant");
+      instance().toggle(target);
+      expect(element("api-a").getAttribute("aria-pressed")).toBe("true");
+      expect(document.activeElement).toBe(element("api-outside"));
+      expect(reports.at(-1)?.reason).toBe("api");
+      expect(reports[0]?.reason).toBe("user");
+    },
+  );
+  it.each(["foreign", "undeclared", "detached", "nested"])(
+    "rejects %s targets through element and Event entry points before accepting an owned target",
+    (kind) => {
+      const reports: unknown[] = [];
+      element("api-root").addEventListener("stimeo--toggle-group:change", (event) => {
+        reports.push((event as CustomEvent<unknown>).detail);
+      });
+      const invalid = element("api-b").cloneNode(true);
+      if (!(invalid instanceof HTMLElement)) throw new Error("Missing cloned target");
+      invalid.id = "api-invalid";
+      invalid.removeAttribute("data-action");
+      if (kind === "foreign") document.body.append(invalid);
+      if (kind === "undeclared") {
+        invalid.removeAttribute("data-stimeo--toggle-group-target");
+        element("api-root").append(invalid);
+      }
+      if (kind === "nested") {
+        const nested = document.createElement("div");
+        nested.setAttribute("data-controller", "stimeo--toggle-group");
+        nested.append(invalid);
+        element("api-a").append(nested);
+      }
+      element("api-outside").focus();
+      const before = element("api-root").innerHTML;
+      instance().toggle(invalid);
+      invalid.addEventListener("probe", (event) => instance().toggle(event));
+      invalid.dispatchEvent(new Event("probe"));
+      expect(element("api-root").innerHTML).toBe(before);
+      expect(reports).toEqual([]);
+      expect(document.activeElement).toBe(element("api-outside"));
+      instance().toggle(element("api-b"));
+      expect(element("api-b").getAttribute("aria-pressed")).toBe("true");
+      expect(reports).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+    ["click", "user"],
+  ])("retains %s Event provenance for an action bound on a target descendant", (type, reason) => {
+    const reports: Array<{ reason: string }> = [];
+    element("api-root").addEventListener("stimeo--toggle-group:change", (event) => {
+      reports.push((event as CustomEvent<{ reason: string }>).detail);
+    });
+    const child = element("api-b").querySelector("span");
+    if (!(child instanceof HTMLElement)) throw new Error("Missing action descendant");
+    child.addEventListener(type, (event) => instance().toggle(event));
+    child.dispatchEvent(new Event(type));
+    expect(element("api-b").getAttribute("aria-pressed")).toBe("true");
+    expect(reports.map((detail) => detail.reason)).toEqual([reason]);
+  });
+
+  it("rejects a nested origin even when the Event handler belongs to an owned outer target", () => {
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--toggle-group");
+    const child = document.createElement("span");
+    child.setAttribute("data-stimeo--toggle-group-target", "item");
+    nested.append(child);
+    element("api-b").append(nested);
+    const reports = vi.fn();
+    element("api-root").addEventListener("stimeo--toggle-group:change", reports);
+    const before = element("api-root").innerHTML;
+    element("api-b").addEventListener("probe", (event) => instance().toggle(event));
+    child.dispatchEvent(new Event("probe", { bubbles: true }));
+    expect(element("api-root").innerHTML).toBe(before);
+    expect(reports).not.toHaveBeenCalled();
+    instance().toggle(element("api-b"));
+    expect(reports).toHaveBeenCalledOnce();
+  });
+  it("keeps native field publication ahead of a reentrant API report and discards the replaced outer report", async () => {
+    const container = document.createElement("div");
+    container.setAttribute("data-stimeo--toggle-group-target", "fields");
+    element("api-root").append(container);
+    const seen: string[] = [];
+    const submitted = (): string =>
+      element("api-root").querySelector<HTMLInputElement>("input")?.value ?? "";
+    let reentered = false;
+    element("api-root").addEventListener("change", () => {
+      seen.push(`native:${submitted()}`);
+      if (reentered) return;
+      reentered = true;
+      instance().toggle(element("api-a"));
+    });
+    element("api-root").addEventListener("stimeo--toggle-group:change", (event) => {
+      const detail = (event as CustomEvent<{ reason: string }>).detail;
+      seen.push(`${detail.reason}:${submitted()}`);
+    });
+    element("api-b").click();
+    await tick();
+    expect(seen).toEqual(["native:b", "native:a", "api:a"]);
+    expect(submitted()).toBe("a");
   });
 });

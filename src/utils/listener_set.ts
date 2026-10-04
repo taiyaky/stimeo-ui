@@ -22,8 +22,8 @@
  * appears to own.
  *
  * Scope is the registration only. Timers, observers, leases and the order they
- * are unwound in stay with the controller, so `dispose()` belongs exactly where
- * the `removeEventListener` block stood. A receiver that changes at runtime (a
+ * are unwound in stay with the controller, which places `dispose()` in its
+ * cleanup sequence. A receiver that changes at runtime (a
  * swapped target) is rebound by calling `dispose()` and then `add()` again from
  * the rebind, not by a second set.
  *
@@ -32,10 +32,6 @@
  * right to remove it, and this set's `add` for that tuple is discarded. A
  * subscription shared between instances behind a participant count, or one that
  * lives for less than the connection, keeps its own pair of calls.
- *
- * This file's own doc block is dropped from `dist`, but every member comment is
- * inlined into each consumer entry (`tsup` builds with `splitting: false`), so
- * rationale belongs here and only the contract belongs on the members.
  *
  * @example
  * ```ts

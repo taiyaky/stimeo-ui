@@ -461,6 +461,206 @@ describe("HighlightController", () => {
     expect(li.getAttribute("data-highlight")).toBe("true");
   });
 
+  // --- Runtime declaration changes -------------------------------------------
+
+  /** Records `start` / `end` as `type:id` from the document, for events on any element. */
+  const recordEvents = (): { seen: string[]; stop: () => void } => {
+    const seen: string[] = [];
+    const record = (e: Event) =>
+      seen.push(`${e.type.replace("stimeo--highlight:", "")}:${(e.target as Element).id}`);
+    for (const type of ["start", "end"] as const) {
+      document.addEventListener(`stimeo--highlight:${type}`, record);
+    }
+    return {
+      seen,
+      stop: () => {
+        for (const type of ["start", "end"] as const) {
+          document.removeEventListener(`stimeo--highlight:${type}`, record);
+        }
+      },
+    };
+  };
+
+  it("starts watching children when observe is turned on, keeping its own emphasis", async () => {
+    const events = recordEvents();
+    try {
+      await mount('<ul id="list" data-controller="stimeo--highlight"></ul>');
+      expect(events.seen).toEqual(["start:list"]);
+
+      vi.advanceTimersByTime(500);
+      root().setAttribute("data-stimeo--highlight-observe-value", "true");
+      await flush();
+      const li = document.createElement("li");
+      li.id = "row";
+      root().appendChild(li);
+      await flush();
+      expect(li.getAttribute("data-highlight")).toBe("true");
+
+      // The emphasis the element started as an inserted row keeps the deadline it
+      // began with; switching modes neither cuts it short nor restarts it.
+      expect(root().getAttribute("data-highlight")).toBe("true");
+      vi.advanceTimersByTime(1000);
+      expect(root().hasAttribute("data-highlight")).toBe(false);
+      expect(events.seen).toEqual(["start:list", "start:row", "end:list"]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  it("stops watching children when observe is turned off, letting started ones finish", async () => {
+    const events = recordEvents();
+    try {
+      await mount(
+        '<ul id="list" data-controller="stimeo--highlight" ' +
+          'data-stimeo--highlight-observe-value="true"></ul>',
+      );
+      const first = document.createElement("li");
+      first.id = "first";
+      root().appendChild(first);
+      await flush();
+
+      vi.advanceTimersByTime(500);
+      root().setAttribute("data-stimeo--highlight-observe-value", "false");
+      await flush();
+      const second = document.createElement("li");
+      second.id = "second";
+      root().appendChild(second);
+      await flush();
+      expect(second.hasAttribute("data-highlight")).toBe(false);
+
+      // The child already emphasized ends on its own deadline, and turning the
+      // mode off is not an insertion of the element itself.
+      vi.advanceTimersByTime(1000);
+      expect(first.hasAttribute("data-highlight")).toBe(false);
+      expect(root().hasAttribute("data-highlight")).toBe(false);
+      expect(events.seen).toEqual(["start:first", "end:first"]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  it("clears hooks the children arrived with when observe is turned on", async () => {
+    const events = recordEvents();
+    try {
+      await mount(
+        '<ul id="list" data-controller="stimeo--highlight">' +
+          '<li id="stale" data-highlight="true">restored</li></ul>',
+      );
+      vi.advanceTimersByTime(1500); // the element's own emphasis ends
+      events.seen.length = 0;
+
+      root().setAttribute("data-stimeo--highlight-observe-value", "true");
+      await flush();
+      // No timer of this connection would ever take it off.
+      expect(query("#stale").hasAttribute("data-highlight")).toBe(false);
+      expect(events.seen).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  it("keeps a child emphasis still running across an off-and-on switch", async () => {
+    const events = recordEvents();
+    try {
+      await mount(
+        '<ul id="list" data-controller="stimeo--highlight" ' +
+          'data-stimeo--highlight-observe-value="true"></ul>',
+      );
+      const li = document.createElement("li");
+      li.id = "row";
+      root().appendChild(li);
+      await flush();
+
+      vi.advanceTimersByTime(500);
+      root().setAttribute("data-stimeo--highlight-observe-value", "false");
+      await flush();
+      root().setAttribute("data-stimeo--highlight-observe-value", "true");
+      await flush();
+      // The timer that owns the hook is still pending, so it is not a leftover.
+      expect(li.getAttribute("data-highlight")).toBe("true");
+      vi.advanceTimersByTime(999);
+      expect(li.getAttribute("data-highlight")).toBe("true");
+      vi.advanceTimersByTime(1);
+      expect(li.hasAttribute("data-highlight")).toBe(false);
+      expect(events.seen).toEqual(["start:row", "end:row"]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  it("builds one observer when a changed spelling keeps the same mode", async () => {
+    const events = recordEvents();
+    try {
+      await mount(
+        '<ul id="list" data-controller="stimeo--highlight" ' +
+          'data-stimeo--highlight-observe-value="true"></ul>',
+      );
+      root().setAttribute("data-stimeo--highlight-observe-value", "TRUE");
+      await flush();
+      const li = document.createElement("li");
+      li.id = "row";
+      root().appendChild(li);
+      await flush();
+      expect(events.seen).toEqual(["start:row"]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  it("does not start watching from a mode change outside the connected window", async () => {
+    await mount('<ul data-controller="stimeo--highlight"></ul>');
+    const controller = application?.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--highlight",
+    ) as HighlightController;
+    controller.disconnect();
+
+    root().setAttribute("data-stimeo--highlight-observe-value", "true");
+    controller.observeValueChanged();
+    const li = document.createElement("li");
+    root().appendChild(li);
+    await flush();
+    expect(li.hasAttribute("data-highlight")).toBe(false);
+  });
+
+  it("keeps a started emphasis to the duration it began with", async () => {
+    // `duration` is read as each emphasis starts: a change applies from the next
+    // one, and a running one keeps the deadline it was given.
+    await mount(
+      '<ul data-controller="stimeo--highlight" data-stimeo--highlight-observe-value="true"></ul>',
+    );
+    const a = document.createElement("li");
+    root().appendChild(a);
+    await flush();
+
+    vi.advanceTimersByTime(500);
+    root().setAttribute("data-stimeo--highlight-duration-value", "5000");
+    await flush();
+    vi.advanceTimersByTime(999);
+    expect(a.getAttribute("data-highlight")).toBe("true");
+    vi.advanceTimersByTime(1);
+    expect(a.hasAttribute("data-highlight")).toBe(false);
+
+    const b = document.createElement("li");
+    root().appendChild(b);
+    await flush();
+    vi.advanceTimersByTime(4999);
+    expect(b.getAttribute("data-highlight")).toBe("true");
+    vi.advanceTimersByTime(1);
+    expect(b.hasAttribute("data-highlight")).toBe(false);
+  });
+
+  it("does not cut a started emphasis short when duration shrinks", async () => {
+    await mount('<li data-controller="stimeo--highlight">New</li>');
+    vi.advanceTimersByTime(500);
+    root().setAttribute("data-stimeo--highlight-duration-value", "100");
+    await flush();
+    vi.advanceTimersByTime(100);
+    expect(root().getAttribute("data-highlight")).toBe("true");
+    vi.advanceTimersByTime(900);
+    expect(root().hasAttribute("data-highlight")).toBe(false);
+  });
+
   it("declares the two public events the Inspector manifest reflects", () => {
     // `static events` is a pure declaration, so no behavioral test can reach it: the
     // manifest reads it verbatim, and losing an entry silently drops that event from

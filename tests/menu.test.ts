@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MenuController } from "../src/controllers/menu_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
@@ -97,6 +97,22 @@ describe("MenuController", () => {
     expect(document.activeElement).toBe(items()[0]);
   });
 
+  it("claims ArrowDown and ArrowUp on the trigger", () => {
+    const down = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    trigger().dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+
+    trigger().click(); // close again
+    const up = new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true });
+    trigger().dispatchEvent(up);
+    expect(up.defaultPrevented).toBe(true);
+    expect(menu().hidden).toBe(false);
+  });
+
   it("does not handle Enter/Space on the trigger (left to the native button click)", () => {
     trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     trigger().dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
@@ -132,6 +148,28 @@ describe("MenuController", () => {
     expect(document.activeElement).toBe(items()[0]);
   });
 
+  it("claims ArrowUp, Home and End on an item", () => {
+    trigger().click();
+    for (const key of ["ArrowUp", "Home", "End"]) {
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      items()[0]?.dispatchEvent(event);
+      expect(event.defaultPrevented, key).toBe(true);
+    }
+  });
+
+  it("moves roving focus through the per-element action when an ancestor stops the key", () => {
+    trigger().click();
+    // The key never reaches the controller element, so only the action bound on the
+    // item itself can handle it.
+    items()[0]?.parentElement?.addEventListener("keydown", (event) => event.stopPropagation());
+
+    items()[0]?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+    );
+
+    expect(document.activeElement).toBe(items()[1]);
+  });
+
   it("closes on Escape and returns focus to the trigger", () => {
     trigger().click();
     items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
@@ -152,6 +190,22 @@ describe("MenuController", () => {
     expect(document.activeElement).not.toBe(trigger());
   });
 
+  it("keeps one pending close when both key handlers see the same Tab", () => {
+    vi.useFakeTimers();
+    try {
+      trigger().click();
+      items()[0]?.focus();
+      const tab = () =>
+        items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+      tab();
+      tab();
+
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("discards a pending Tab close when the menu is reopened in the same task", async () => {
     trigger().click();
     items()[0]?.focus();
@@ -163,6 +217,35 @@ describe("MenuController", () => {
     // The stale Tab close must not slam the reopened menu shut.
     expect(menu().hidden).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("discards a pending Tab close when open() runs on the open menu", async () => {
+    const controller = application.getControllerForElementAndIdentifier(root(), "stimeo--menu");
+    if (!(controller instanceof MenuController)) throw new Error("menu controller not found");
+    trigger().click();
+    items()[0]?.focus();
+    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+
+    controller.open();
+    await tick();
+
+    expect(menu().hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("discards a pending Tab close when another path closes the menu first", async () => {
+    trigger().click();
+    items()[0]?.focus();
+    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    (document.getElementById("outside") as HTMLElement).click();
+    expect(menu().hidden).toBe(true);
+
+    // The hooks move only when they change, so the page showing the menu again by hand
+    // is what makes a deferred close that still fired observable.
+    menu().hidden = false;
+    await tick();
+
+    expect(menu().hidden).toBe(false);
   });
 
   it("closes when an item is activated", () => {
@@ -301,6 +384,39 @@ describe("MenuController", () => {
     expect(menu().hidden).toBe(false);
   });
 
+  it("removes every listener it adds to its element and the document", () => {
+    const controller = application.getControllerForElementAndIdentifier(root(), "stimeo--menu");
+    if (!controller) throw new Error("menu controller not found");
+    controller.disconnect();
+
+    const capture = (options?: boolean | EventListenerOptions): boolean =>
+      typeof options === "boolean" ? options : (options?.capture ?? false);
+    const spies = [root(), document].map((target) => ({
+      add: vi.spyOn(target, "addEventListener"),
+      remove: vi.spyOn(target, "removeEventListener"),
+    }));
+    try {
+      controller.connect();
+      controller.disconnect();
+
+      // Each registration, keyed the way `removeEventListener` matches it.
+      const added = spies.flatMap(({ add }) =>
+        add.mock.calls.map(([type, listener, options]) => [type, listener, capture(options)]),
+      );
+      const removed = spies.flatMap(({ remove }) =>
+        remove.mock.calls.map(([type, listener, options]) => [type, listener, capture(options)]),
+      );
+      expect(added.length).toBeGreaterThan(0);
+      expect(removed).toHaveLength(added.length);
+      expect(removed).toEqual(expect.arrayContaining(added));
+    } finally {
+      for (const { add, remove } of spies) {
+        add.mockRestore();
+        remove.mockRestore();
+      }
+    }
+  });
+
   const itemKey = (index: number, key: string) =>
     items()[index]?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
 
@@ -324,6 +440,15 @@ describe("MenuController", () => {
     expect(document.activeElement).toBe(items()[0]);
   });
 
+  it("skips a hidden item in the roving order", () => {
+    (items()[1] as HTMLButtonElement).hidden = true;
+    trigger().click();
+    itemKey(0, "ArrowDown");
+    expect(document.activeElement).toBe(items()[2]);
+    itemKey(2, "ArrowUp");
+    expect(document.activeElement).toBe(items()[0]);
+  });
+
   it("closes when the trigger is clicked a second time", () => {
     trigger().click();
     expect(menu().hidden).toBe(false);
@@ -331,6 +456,376 @@ describe("MenuController", () => {
     expect(menu().hidden).toBe(true);
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
   });
+
+  // --- A trigger or a menu that takes over ---
+
+  /**
+   * The open state lives on the trigger (`aria-expanded`) and the menu (`hidden`).
+   * A trigger or a menu that takes over — in one task, or after an earlier one
+   * leaves in a later task — carries that state, silently.
+   */
+  describe("a trigger or a menu that takes over", () => {
+    const controller = () => {
+      const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--menu");
+      if (!(instance instanceof MenuController)) throw new Error("menu controller not found");
+      return instance;
+    };
+    /** A server-rendered copy of the trigger that still reads closed. */
+    const staleTrigger = (): HTMLButtonElement => {
+      const copy = trigger().cloneNode(true) as HTMLButtonElement;
+      copy.removeAttribute("id");
+      copy.setAttribute("aria-expanded", "false");
+      return copy;
+    };
+    /** A server-rendered copy of the menu with `hidden` as given and items of its own. */
+    const staleMenu = (hidden: boolean): HTMLElement => {
+      const copy = menu().cloneNode(true) as HTMLElement;
+      copy.id = "menu-successor";
+      copy.hidden = hidden;
+      return copy;
+    };
+
+    it("reflects the open menu into a trigger replaced in one task", async () => {
+      controller().open();
+      const successor = staleTrigger();
+      trigger().replaceWith(successor);
+      await tick();
+
+      expect(trigger()).toBe(successor);
+      expect(successor.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("reflects the open menu into the trigger that stays after an earlier one leaves", async () => {
+      controller().open();
+      const original = trigger();
+      const successor = staleTrigger();
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(trigger()).toBe(successor);
+      expect(successor.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("keeps the menu open on a menu replaced in one task", async () => {
+      controller().open();
+      const successor = staleMenu(true);
+      menu().replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("keeps the menu open on the menu that stays after an earlier one leaves", async () => {
+      controller().open();
+      const original = menu();
+      const successor = staleMenu(true);
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(successor.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("leaves focus where it was when a menu is replaced in one task", async () => {
+      controller().open();
+      trigger().focus();
+      const successor = staleMenu(true);
+      menu().replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(false);
+      expect(document.activeElement).toBe(trigger());
+    });
+
+    it("leaves focus where it was when the menu that stays takes over after an earlier one leaves", async () => {
+      controller().open();
+      trigger().focus();
+      const original = menu();
+      const successor = staleMenu(true);
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(successor.hidden).toBe(false);
+      expect(document.activeElement).toBe(trigger());
+    });
+
+    it("keeps the menu closed on a menu that takes over authored open", async () => {
+      const successor = staleMenu(false);
+      menu().replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("leaves the Escape stack and reads closed once the only menu leaves", async () => {
+      trigger().click();
+      menu().remove();
+      await tick();
+
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      trigger().focus();
+      const press = new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      });
+      trigger().dispatchEvent(press);
+      expect(press.defaultPrevented).toBe(false);
+    });
+
+    it("lets a pending Tab close close the menu that took over", async () => {
+      trigger().click();
+      (items()[0] as HTMLButtonElement).dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+      );
+      const successor = staleMenu(true);
+      menu().replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("brings a trigger that arrives after the only one left to the open state", async () => {
+      controller().open();
+      const late = staleTrigger();
+      trigger().remove();
+      await tick();
+
+      root().prepend(late);
+      await tick();
+
+      expect(late.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("closes a menu that arrives after the only one left, even one authored open", async () => {
+      controller().open();
+      const late = staleMenu(false);
+      menu().remove();
+      await tick();
+
+      root().append(late);
+      await tick();
+
+      expect(late.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps the menu open when the trigger and the menu are replaced together", async () => {
+      controller().open();
+      const newTrigger = staleTrigger();
+      const newMenu = staleMenu(true);
+      trigger().replaceWith(newTrigger);
+      menu().replaceWith(newMenu);
+      await tick();
+
+      expect(newMenu.hidden).toBe(false);
+      expect(newTrigger.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("keeps closed a menu the page closed, when it is then replaced", async () => {
+      controller().open();
+      menu().hidden = true;
+      const successor = staleMenu(false);
+      menu().replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("brings the trigger to a menu the page hid when another menu arrives behind it", async () => {
+      controller().open();
+      menu().hidden = true;
+      menu().after(staleMenu(true));
+      await tick();
+
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("leaves a hidden value the page wrote on the menu alone when another menu arrives behind it", async () => {
+      controller().open();
+      menu().setAttribute("hidden", "until-found");
+      menu().after(staleMenu(true));
+      await tick();
+
+      expect(menu().getAttribute("hidden")).toBe("until-found");
+    });
+
+    it("writes nothing when a trigger or a menu arrives behind the current one", async () => {
+      controller().open();
+      const writes: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => writes.push(...records));
+      observer.observe(root(), { attributes: true, subtree: true });
+      const behindTrigger = staleTrigger();
+      const behindMenu = staleMenu(true);
+      trigger().after(behindTrigger);
+      menu().after(behindMenu);
+      await tick();
+      writes.push(...observer.takeRecords());
+      observer.disconnect();
+
+      expect(writes.map((write) => write.attributeName)).toEqual([]);
+      expect(behindTrigger.getAttribute("aria-expanded")).toBe("false");
+      expect(behindMenu.hidden).toBe(true);
+    });
+
+    it("reports nothing while it moves the open state", async () => {
+      controller().open();
+      const events = captureStateEvents("stimeo--menu");
+      const changes: Event[] = [];
+      const onChange = (event: Event): void => {
+        changes.push(event);
+      };
+      document.addEventListener("change", onChange);
+      const original = menu();
+      original.after(staleMenu(true));
+      trigger().after(staleTrigger());
+      await tick();
+      original.remove();
+      trigger().remove();
+      await tick();
+
+      expect(events.seen).toEqual([]);
+      expect(changes).toEqual([]);
+      events.stop();
+      document.removeEventListener("change", onChange);
+    });
+
+    it("tolerates the removal of the only trigger and the only menu", () => {
+      controller().open();
+      const onlyTrigger = trigger();
+      const onlyMenu = menu();
+      onlyTrigger.remove();
+      onlyMenu.remove();
+
+      // Drive the callbacks directly: happy-dom delivers target callbacks unreliably.
+      expect(() => controller().triggerTargetDisconnected(onlyTrigger)).not.toThrow();
+      expect(() => controller().menuTargetDisconnected(onlyMenu)).not.toThrow();
+    });
+
+    it("writes nothing into the trigger or the menu that stay once it has disconnected", async () => {
+      const original = trigger();
+      const successorTrigger = staleTrigger();
+      original.after(successorTrigger);
+      const originalMenu = menu();
+      const successorMenu = staleMenu(true);
+      originalMenu.after(successorMenu);
+      await tick();
+      controller().open();
+      const instance = controller();
+      instance.disconnect();
+      original.remove();
+      originalMenu.remove();
+      instance.triggerTargetDisconnected(original);
+      instance.menuTargetDisconnected(originalMenu);
+      instance.triggerTargetConnected();
+      instance.menuTargetConnected();
+      await tick();
+
+      expect(successorTrigger.getAttribute("aria-expanded")).toBe("false");
+      expect(successorMenu.hidden).toBe(true);
+    });
+
+    it("gives a trigger that stops being the trigger its own aria-expanded back", async () => {
+      controller().open();
+      const former = trigger();
+      const successor = staleTrigger();
+      former.after(successor);
+      await tick();
+
+      // The element stays; only the attribute naming it the trigger goes.
+      former.removeAttribute("data-stimeo--menu-target");
+      await tick();
+
+      expect(former.getAttribute("aria-expanded")).toBe("false");
+      expect(successor.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("gives a menu that stops being the menu its own hidden back", async () => {
+      controller().open();
+      const former = menu();
+      const successor = staleMenu(true);
+      former.after(successor);
+      await tick();
+
+      former.removeAttribute("data-stimeo--menu-target");
+      await tick();
+
+      expect(former.hidden).toBe(true);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("gives the trigger and the menu their own values back when the menu button loses its controller", async () => {
+      controller().open();
+      const departedTrigger = trigger();
+      const departedMenu = menu();
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(departedTrigger.getAttribute("aria-expanded")).toBe("false");
+      expect(departedMenu.hidden).toBe(true);
+    });
+
+    it("keeps values the page wrote on a trigger and a menu that stop being targets", async () => {
+      controller().open();
+      const former = trigger();
+      const formerMenu = menu();
+      former.setAttribute("aria-expanded", "mixed");
+      formerMenu.setAttribute("hidden", "until-found");
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(former.getAttribute("aria-expanded")).toBe("mixed");
+      expect(formerMenu.getAttribute("hidden")).toBe("until-found");
+    });
+
+    it("keeps what it wrote on a trigger and a menu that move within the menu button", async () => {
+      controller().open();
+      const movingTrigger = trigger();
+      const movingMenu = menu();
+      const writes: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => writes.push(...records));
+      observer.observe(root(), {
+        attributes: true,
+        subtree: true,
+        attributeFilter: ["aria-expanded", "hidden"],
+      });
+
+      root().append(movingTrigger);
+      root().prepend(movingMenu);
+      await tick();
+      writes.push(...observer.takeRecords());
+      observer.disconnect();
+
+      expect(movingTrigger.getAttribute("aria-expanded")).toBe("true");
+      expect(movingMenu.hidden).toBe(false);
+      expect(writes.map((write) => write.attributeName)).toEqual([]);
+    });
+
+    it("keeps what it wrote when the whole menu button leaves the page", async () => {
+      controller().open();
+      const keptTrigger = trigger();
+      const keptMenu = menu();
+
+      root().remove();
+      await tick();
+
+      expect(keptTrigger.getAttribute("aria-expanded")).toBe("true");
+      expect(keptMenu.hidden).toBe(false);
+    });
+  });
+
   // --- State events ---
 
   describe("state events", () => {
@@ -600,6 +1095,15 @@ describe("MenuController disabled items", () => {
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
   });
 
+  it("cancels the default action of a click on an aria-disabled item", () => {
+    trigger().click();
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+
+    items()[2]?.dispatchEvent(click);
+
+    expect(click.defaultPrevented).toBe(true);
+  });
+
   it("removes the disabled-item activation blocker on disconnect", () => {
     const disabledItem = items()[2] as HTMLButtonElement;
     let consumerActivations = 0;
@@ -755,13 +1259,26 @@ describe("MenuController delegated item handling", () => {
     menu().dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(menu().hidden).toBe(false);
   });
+
+  it("stops handling item keys after disconnect", () => {
+    trigger().click();
+    const root = document.querySelector("[data-controller='stimeo--menu']") as HTMLElement;
+    const controller = application.getControllerForElementAndIdentifier(root, "stimeo--menu");
+    if (!controller) throw new Error("menu controller not found");
+
+    controller.disconnect();
+    const unclaimed = key(items()[0] as Element, "ArrowDown");
+
+    expect(unclaimed).toBe(true);
+    expect(document.activeElement).toBe(items()[0]);
+  });
 });
 
 /**
  * The per-element form is supported as well. What "both bindings" means differs by
- * event: a focus-moving key is claimed by whichever handler runs first, so it runs
- * once; `activate` has no claim protocol and runs on both paths, which is safe only
- * while it stays idempotent. These pin both halves of that contract.
+ * event: a focus-moving key is claimed through `preventDefault()` by whichever
+ * handler runs first, so it runs once; `activate` claims the click event itself, so
+ * one gesture activates once. These pin both halves of that contract.
  */
 describe("MenuController per-element and delegated bindings together", () => {
   let application: Application;
@@ -845,19 +1362,74 @@ describe("MenuController per-element and delegated bindings together", () => {
     await tick();
     observer.disconnect();
 
-    // `hidden` and `aria-expanded` are public state hooks, so a second `close()`
-    // is observable even though it lands on the same value: an identical reassign still
-    // queues a MutationRecord. One gesture must produce one write of each.
+    // `hidden` and `aria-expanded` are public state hooks: one gesture must produce
+    // one write of each.
     expect(seen).toEqual(["menu.hidden", "menu-trigger.aria-expanded"]);
   });
 
-  it("stays consistent when activate runs on both paths", () => {
+  it("keeps a menu that a handler between the two paths opens again", () => {
     trigger().click();
-    // No claim protocol on click: `activate` runs twice here. The contract is that
-    // the second pass is unobservable, not that it does not happen.
+    const controller = application.getControllerForElementAndIdentifier(
+      menu().parentElement as HTMLElement,
+      "stimeo--menu",
+    );
+    if (!(controller instanceof MenuController)) throw new Error("menu controller not found");
+    // The handler sits on the item's row, so it runs after the per-element action and
+    // before the delegate on the controller element.
+    const row = items()[1]?.parentElement as HTMLElement;
+    row.addEventListener("click", () => controller.open(), { once: true });
+
+    items()[1]?.click();
+
+    expect(menu().hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("stays consistent when activate is reached on both paths", () => {
+    trigger().click();
+    // `activate` is reached twice here and claims the click on the first path, so
+    // the second finds it claimed.
     items()[1]?.click();
     expect(menu().hidden).toBe(true);
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
     expect(document.activeElement).toBe(trigger());
+  });
+});
+
+describe("MenuController without a menu target", () => {
+  let application: Application;
+
+  beforeEach(async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--menu">
+        <button id="menu-trigger" data-stimeo--menu-target="trigger"
+                aria-haspopup="menu" aria-expanded="false">Actions</button>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--menu", MenuController);
+    await tick();
+  });
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it("keeps open, close and toggle inert and registers no Escape layer", () => {
+    const root = document.querySelector<HTMLElement>(
+      "[data-controller='stimeo--menu']",
+    ) as HTMLElement;
+    const controller = application.getControllerForElementAndIdentifier(root, "stimeo--menu");
+    if (!(controller instanceof MenuController)) throw new Error("menu controller not found");
+
+    expect(() => {
+      controller.open();
+      controller.toggle();
+      controller.close();
+    }).not.toThrow();
+
+    const press = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    document.dispatchEvent(press);
+    expect(press.defaultPrevented).toBe(false);
   });
 });

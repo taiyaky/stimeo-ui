@@ -26,10 +26,6 @@
  * - **The entry is detached before the callback runs**, so a controller that
  *   decides the update is still unsafe can simply defer again.
  *
- * This file's own doc block is dropped from `dist`, but every member comment is
- * inlined into each consumer entry (`tsup` builds with `splitting: false`), so
- * rationale belongs here and contracts belong on the members.
- *
  * @example
  * ```ts
  * readonly #deferred = new BlurDeferral<HTMLElement>((trigger) => {

@@ -77,6 +77,27 @@ describe("MeterController", () => {
     expect(root().getAttribute("data-state")).toBe("medium");
   });
 
+  it("decodes bound action params and keeps an invalid param ahead of detail", async () => {
+    await start();
+    const attr = "data-stimeo--meter-amount-param";
+    const send = (value: string): void => {
+      root().setAttribute(attr, value);
+      root().dispatchEvent(new CustomEvent("meter:set", { detail: { value: 80 } }));
+    };
+    send('"25"');
+    expect(root().getAttribute("aria-valuenow")).toBe("25");
+    for (const invalid of [" ", '"  "', "true", "[1]", "Infinity", "2_0"]) {
+      send(invalid);
+      expect(root().getAttribute("aria-valuenow")).toBe("25");
+    }
+    // A JSON null is nullish and keeps the existing detail fallback.
+    send("null");
+    expect(root().getAttribute("aria-valuenow")).toBe("80");
+    root().removeAttribute(attr);
+    root().dispatchEvent(new CustomEvent("meter:set", { detail: { value: 80 } }));
+    expect(root().getAttribute("aria-valuenow")).toBe("80");
+  });
+
   it("honors custom min/max when normalizing the ratio", async () => {
     await start(
       'data-stimeo--meter-min-value="200" data-stimeo--meter-max-value="400" data-stimeo--meter-value-value="300"',
@@ -112,6 +133,51 @@ describe("MeterController", () => {
     });
     root().dispatchEvent(new CustomEvent("meter:set", { detail: { value: 90 } }));
     expect(detail).toEqual({ value: 90, ratio: 0.9, state: "high" });
+  });
+
+  it("announces the segment only when an update moves it", async () => {
+    await start(
+      'data-stimeo--meter-value-value="50" data-stimeo--meter-low-value="30" ' +
+        'data-stimeo--meter-high-value="80" ' +
+        'data-stimeo--meter-announce-text-value="Disk {state} at {value}"',
+    );
+    const announced: string[] = [];
+    const listener = (event: Event) => {
+      announced.push((event as CustomEvent<{ message: string }>).detail.message);
+    };
+    window.addEventListener("stimeo--announcer:announce", listener);
+    try {
+      for (const value of [90, 95, 50]) {
+        root().dispatchEvent(new CustomEvent("meter:set", { detail: { value } }));
+      }
+      expect(announced).toEqual(["Disk high at 90", "Disk medium at 50"]);
+    } finally {
+      window.removeEventListener("stimeo--announcer:announce", listener);
+    }
+  });
+
+  it.each([
+    ["the segment shown at connect", "50", 60],
+    ["a segment a Value change showed", "90", 95],
+  ])("announces nothing for an update that stays in %s", async (_case, shown, update) => {
+    await start(
+      'data-stimeo--meter-value-value="50" data-stimeo--meter-low-value="30" ' +
+        'data-stimeo--meter-high-value="80" ' +
+        'data-stimeo--meter-announce-text-value="Disk {state}"',
+    );
+    root().setAttribute("data-stimeo--meter-value-value", shown);
+    await tick();
+    const announced: string[] = [];
+    const listener = (event: Event) => {
+      announced.push((event as CustomEvent<{ message: string }>).detail.message);
+    };
+    window.addEventListener("stimeo--announcer:announce", listener);
+    try {
+      root().dispatchEvent(new CustomEvent("meter:set", { detail: { value: update } }));
+      expect(announced).toEqual([]);
+    } finally {
+      window.removeEventListener("stimeo--announcer:announce", listener);
+    }
   });
 
   // A single event can carry both forms; the action param is the more specific
@@ -190,7 +256,7 @@ describe("MeterController", () => {
     await start('data-stimeo--meter-value-value="72"');
     const spoken = await captureSpeech({ container: root(), steps: 0 });
     // Freeze the whole ordered array (not a name-only `toContain`): the meter role,
-    // name, and value range are all the AT announces.
+    // name, and value range are all in the virtual reader's announcement.
     expect(spoken).toEqual(["meter, Disk usage, min value 0, max value 100, 72"]);
   });
 

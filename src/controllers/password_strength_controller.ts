@@ -1,8 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { toFiniteNumber } from "../utils/coerce";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { parseStringList } from "../utils/string_list";
 
@@ -97,14 +98,20 @@ const MIN_LEVELS = 2;
  * The score is a pure function of the field value (no module-scope state), so
  * `connect()` re-evaluates idempotently; the initial reflection never dispatches
  * or announces. Runtime Value and target changes repaint on a microtask and
- * dispatch `reconcile` only when the public derived state actually moves. Because
- * the field value is not part of a Turbo snapshot, everything derived from it is
- * rewound on `turbo:before-cache` — silently, since `connect()` derives it again
- * after a restore. The estimator is intentionally not a dictionary/zxcvbn-grade
+ * dispatch `reconcile` only when the public derived state actually moves; so does
+ * the reading `connect()` takes again once the batch that connected it has settled,
+ * which a controller connecting later may have changed by rewriting the field. Turbo
+ * empties a password field in the copy it caches, and the connection that adopts a
+ * restored copy derives the reading from the field as it comes back, so
+ * `turbo:before-cache`, which Turbo also dispatches on pages that stay, changes
+ * nothing. The estimator is intentionally not a dictionary/zxcvbn-grade
  * one (kept zero-dep); a consumer that needs a stronger one computes the score
  * itself and hands it over through {@link setScore}.
  */
 export class PasswordStrengthController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["input", "meter", "label"];
   static override values = {
     minScore: { type: Number, default: 0 },
@@ -114,6 +121,10 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
     levels: { type: String, default: "" },
     announceText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    minScore: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof PasswordStrengthController.values>;
   static actions = ["evaluate", "setScore"] as const;
   static events = ["change", "reconcile"] as const;
 
@@ -132,8 +143,7 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
   static readonly #announceDelay = 200;
 
   readonly #timers = new SafeTimeout();
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
-  readonly #repaint = new MicrotaskCoalescer(() => this.#reconcile());
+  readonly #repaint = new MorphRenderWatcher(() => this.#reconcile());
   #levels: string[] = [...DEFAULT_LEVELS];
   #announceId: number | null = null;
   #announcedLevel: string | null = null;
@@ -142,18 +152,20 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
 
   /** Reflects the current DOM state and opens the reconciliation window. */
   override connect(): void {
-    this.#repaint.activate();
-    this.#beforeCache.activate();
+    this.#repaint.observe(this.element);
     // Reflect the current value synchronously (no event, no announcement): an
     // autofilled or cache-restored field shows the right strength without
     // queuing a screen-reader message.
     this.#lastDetail = this.#detail(this.#render());
+    // A controller connecting after this one in the same batch may rewrite the field
+    // without an input event, as a password reveal empties a revealed field that a
+    // restored copy carries: the field is read again once the batch has settled.
+    this.#repaint.schedule();
   }
 
-  /** Releases the reconciliation window, the cache subscription and the debounce. */
+  /** Releases the reconciliation window and the debounce. */
   override disconnect(): void {
-    this.#repaint.cancel();
-    this.#beforeCache.deactivate();
+    this.#repaint.disconnect();
     this.#cancelAnnouncement();
     this.#announcedLevel = null;
     this.#externalScore = null;
@@ -241,7 +253,6 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
     // template that held when it was queued, and both can move here. It is
     // retargeted at the settled reading so the reader hears what ends up shown.
     const owed = this.#announceId !== null;
-    this.#cancelAnnouncement();
     const reading = this.#render();
     const detail = this.#detail(reading);
     this.#lastDetail = detail;
@@ -281,7 +292,7 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
    * own Value the way an unreadable scale is.
    */
   get #minScore(): number {
-    return Number.isFinite(this.minScoreValue) ? this.minScoreValue : 0;
+    return this.#safeMinScore;
   }
 
   /** The externally supplied score when one stands, else the heuristic's. */
@@ -406,26 +417,6 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
     this.#announceId = null;
   }
 
-  /**
-   * Returns every output derived from the field value to its pristine form.
-   *
-   * The value itself is not carried in a Turbo snapshot, so a band, a fill or a
-   * readout left behind would describe a password the restored page no longer
-   * holds. The pass is silent: `connect()` derives the state again from whatever
-   * the restored field contains.
-   */
-  #rewindForCache(): void {
-    this.#cancelAnnouncement();
-    this.#announcedLevel = null;
-    this.#externalScore = null;
-    this.#lastDetail = null;
-    this.#reflectMeter(0, this.#levels.length);
-    this.#toggle("data-strength", "", false);
-    this.#toggle("data-below-min", "true", false);
-    this.element.style.removeProperty("--stimeo--password-strength");
-    this.#writeLabel("");
-  }
-
   /** Selects the public event state from the richer internal reading. */
   #detail(reading: StrengthReading): PasswordStrengthDetail {
     return {
@@ -443,6 +434,16 @@ export class PasswordStrengthController extends Controller<HTMLElement> {
       left.level !== right.level ||
       left.max !== right.max ||
       left.meetsMin !== right.meetsMin
+    );
+  }
+  /** Current `minScore` declaration resolved against its numeric contract. */
+  get #safeMinScore(): number {
+    return this.#numbers.read(
+      this,
+      "minScore",
+      this.minScoreValue,
+      PasswordStrengthController.values.minScore.default,
+      PasswordStrengthController.valueConstraints.minScore,
     );
   }
 }

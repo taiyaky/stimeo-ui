@@ -69,6 +69,102 @@ describe("RangeSliderController", () => {
   const press = (thumb: HTMLElement, key: string) =>
     thumb.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
 
+  it.each(["replace", "read", "repeat"])(
+    "writes both fields before reporting and suppresses replaced reports: %s",
+    async (mode) => {
+      for (const name of ["startField", "endField"]) {
+        const field = document.createElement("input");
+        field.type = "hidden";
+        field.setAttribute("data-stimeo--range-slider-target", name);
+        root().append(field);
+      }
+      await tick();
+      const first = root().querySelector<HTMLInputElement>(
+        "[data-stimeo--range-slider-target='startField']",
+      ) as HTMLInputElement;
+      const second = root().querySelector<HTMLInputElement>(
+        "[data-stimeo--range-slider-target='endField']",
+      ) as HTMLInputElement;
+      const changes: unknown[] = [];
+      const native: string[] = [];
+      root().addEventListener("stimeo--range-slider:change", (event) =>
+        changes.push((event as CustomEvent).detail),
+      );
+      second.addEventListener("change", () => native.push(second.value));
+      const snapshots: string[] = [];
+      let handled = false;
+      first.addEventListener(
+        "change",
+        () => {
+          if (handled) return;
+          handled = true;
+          snapshots.push(second.value);
+          if (mode === "replace") press(endThumb(), "Home");
+          if (mode === "repeat") press(startThumb(), "Home");
+        },
+        { once: true },
+      );
+      root().setAttribute("data-stimeo--range-slider-end-value", "90");
+      press(startThumb(), "Home");
+      expect(snapshots).toEqual(["90"]);
+      expect(changes).toEqual(
+        mode === "replace" ? [{ start: 0, end: 0 }] : [{ start: 0, end: 90 }],
+      );
+      expect(second.value).toBe(mode === "replace" ? "0" : "90");
+      expect(native).toEqual(mode === "replace" ? ["0"] : ["90"]);
+    },
+  );
+
+  it("does not repeat a second field report after nested confirmations return to its value", async () => {
+    const first = document.createElement("input");
+    const second = document.createElement("input");
+    first.type = second.type = "hidden";
+    first.setAttribute("data-stimeo--range-slider-target", "startField");
+    second.setAttribute("data-stimeo--range-slider-target", "endField");
+    root().append(first, second);
+    await tick();
+    const native: string[] = [];
+    second.addEventListener("change", () => native.push(second.value));
+    let handled = false;
+    first.addEventListener("change", () => {
+      if (handled) return;
+      handled = true;
+      press(endThumb(), "Home");
+      press(endThumb(), "End");
+    });
+    root().setAttribute("data-stimeo--range-slider-end-value", "100");
+    press(startThumb(), "Home");
+    expect(native).toEqual(["0", "100"]);
+  });
+
+  it("reports the pending second field when a nested commit changes only the first", async () => {
+    const first = document.createElement("input");
+    const second = document.createElement("input");
+    first.type = second.type = "hidden";
+    first.setAttribute("data-stimeo--range-slider-target", "startField");
+    second.setAttribute("data-stimeo--range-slider-target", "endField");
+    root().append(first, second);
+    await tick();
+    const seen: unknown[] = [];
+    const native: string[] = [];
+    root().addEventListener("stimeo--range-slider:change", (event) =>
+      seen.push((event as CustomEvent).detail),
+    );
+    second.addEventListener("change", () => native.push(second.value));
+    let handled = false;
+    first.addEventListener("change", () => {
+      if (handled) return;
+      handled = true;
+      press(startThumb(), "End");
+    });
+    root().setAttribute("data-stimeo--range-slider-end-value", "90");
+    press(startThumb(), "Home");
+    expect(first.value).toBe("90");
+    expect(second.value).toBe("90");
+    expect(seen).toEqual([{ start: 90, end: 90 }]);
+    expect(native).toEqual(["90"]);
+  });
+
   it("orders a reversed initial start/end by swapping (not collapsing)", async () => {
     const events = captureStateEvents("stimeo--range-slider", ["change", "reconcile"]);
     document.body.innerHTML = `
@@ -156,6 +252,23 @@ describe("RangeSliderController", () => {
     events.stop();
   });
 
+  it("republishes the pair when only step changes at runtime", async () => {
+    const events = captureStateEvents("stimeo--range-slider", ["change", "reconcile"]);
+    // On a step of 30 the declared 20 and 80 snap to 30 and 90.
+    root().setAttribute("data-stimeo--range-slider-step-value", "30");
+    controller().stepValueChanged();
+    await flushMicrotasks();
+
+    expect(startThumb().getAttribute("aria-valuenow")).toBe("30");
+    expect(endThumb().getAttribute("aria-valuemin")).toBe("30");
+    expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+    expect(root().style.getPropertyValue("--stimeo--range-slider-start")).toBe("0.3");
+    expect(events.seen.map(({ name, detail }) => ({ name, detail }))).toEqual([
+      { name: "reconcile", detail: { start: 30, end: 90 } },
+    ]);
+    events.stop();
+  });
+
   it("reports a pair the shrunk range clamps as reconcile, without writing Values back", async () => {
     const events = captureStateEvents("stimeo--range-slider", ["change", "reconcile"]);
     root().setAttribute("data-stimeo--range-slider-min-value", "40");
@@ -230,6 +343,130 @@ describe("RangeSliderController", () => {
     expect(replacement.getAttribute("aria-valuenow")).toBe("20");
   });
 
+  it.each([
+    ["start", "40", "aria-valuemax", "80", "--stimeo--range-slider-start", "0.4"],
+    ["end", "60", "aria-valuemin", "20", "--stimeo--range-slider-end", "0.6"],
+  ] as const)(
+    "hydrates a replacement %s thumb and its fraction from the current Values at once",
+    (kind, value, bound, boundValue, property, fraction) => {
+      // A morph that moves the Value and swaps the thumb in one batch: the thumb
+      // carries the pair as soon as it is connected, before any repaint runs.
+      root().setAttribute(`data-stimeo--range-slider-${kind}-value`, value);
+      const previous = kind === "start" ? startThumb() : endThumb();
+      const replacement = document.createElement("div");
+      replacement.setAttribute("data-stimeo--range-slider-target", `${kind}Thumb`);
+      replacement.setAttribute("role", "slider");
+      replacement.setAttribute("tabindex", "0");
+      replacement.setAttribute("aria-label", kind === "start" ? "Minimum" : "Maximum");
+      previous.replaceWith(replacement);
+
+      if (kind === "start") controller().startThumbTargetConnected(replacement);
+      else controller().endThumbTargetConnected(replacement);
+
+      expect(replacement.getAttribute("aria-valuenow")).toBe(value);
+      expect(replacement.getAttribute(bound)).toBe(boundValue);
+      expect(root().style.getPropertyValue(property)).toBe(fraction);
+    },
+  );
+
+  it.each(["start", "end"] as const)(
+    "repaints the partner thumb after the %s thumb is replaced",
+    async (kind) => {
+      // Something outside the controller left the partner's value stale; the pass a
+      // replacement thumb schedules puts the whole pair back.
+      const partner = kind === "start" ? endThumb() : startThumb();
+      partner.removeAttribute("aria-valuenow");
+      const previous = kind === "start" ? startThumb() : endThumb();
+      const replacement = previous.cloneNode(true) as HTMLElement;
+      previous.replaceWith(replacement);
+
+      if (kind === "start") controller().startThumbTargetConnected(replacement);
+      else controller().endThumbTargetConnected(replacement);
+      await flushMicrotasks();
+
+      expect(partner.getAttribute("aria-valuenow")).toBe(kind === "start" ? "80" : "20");
+    },
+  );
+
+  it.each([
+    ["start", "ArrowRight", "30"],
+    ["end", "ArrowLeft", "70"],
+  ] as const)(
+    "brings a %s thumb that stays to a pair moved while an earlier one was first",
+    async (kind, key, expected) => {
+      const original = kind === "start" ? startThumb() : endThumb();
+      const successor = original.cloneNode(true) as HTMLElement;
+      original.after(successor);
+      await tick();
+      press(original, key);
+      await tick();
+      const events = captureStateEvents("stimeo--range-slider", ["change", "reconcile"]);
+      original.remove();
+      await tick();
+
+      expect(kind === "start" ? startThumb() : endThumb()).toBe(successor);
+      expect(successor.getAttribute("aria-valuenow")).toBe(expected);
+      // The thumb that stays is brought to the pair silently.
+      expect(events.seen).toEqual([]);
+      events.stop();
+    },
+  );
+
+  it.each([
+    ["start", "ArrowRight", "data-stimeo--range-slider-start-value", "30"],
+    ["end", "ArrowLeft", "data-stimeo--range-slider-end-value", "70"],
+  ] as const)(
+    "steps the %s value from a key pressed on a thumb that coexists behind an earlier one",
+    async (kind, key, attribute, expected) => {
+      const original = kind === "start" ? startThumb() : endThumb();
+      const successor = original.cloneNode(true) as HTMLElement;
+      original.after(successor);
+      await tick();
+
+      press(successor, key);
+
+      expect(root().getAttribute(attribute)).toBe(expected);
+      original.remove();
+      await tick();
+      expect(successor.getAttribute("aria-valuenow")).toBe(expected);
+    },
+  );
+
+  it("ignores a key pressed on an element that is not a thumb", () => {
+    const stray = document.createElement("div");
+    stray.setAttribute("data-action", "keydown->stimeo--range-slider#onKeydown");
+    track().append(stray);
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(event, "currentTarget", { value: stray });
+
+    controller().onKeydown(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(root().getAttribute("data-stimeo--range-slider-start-value")).toBe("20");
+    expect(root().getAttribute("data-stimeo--range-slider-end-value")).toBe("80");
+  });
+
+  it("keeps stepping the other thumb when the sole start thumb leaves", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const leaving = startThumb();
+      leaving.remove();
+      await tick();
+      expect(() => controller().startThumbTargetDisconnected(leaving)).not.toThrow();
+      await tick();
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+
+    press(endThumb(), "ArrowLeft");
+    expect(endThumb().getAttribute("aria-valuenow")).toBe("70");
+  });
+
   it("transfers focus to a replacement start thumb during its active drag", () => {
     const activeTrack = track();
     const previousThumb = startThumb();
@@ -285,6 +522,17 @@ describe("RangeSliderController", () => {
     expect(startThumb().getAttribute("aria-valuenow")).toBe("20");
     expect(endThumb().getAttribute("aria-valuemin")).toBe("20");
   });
+
+  it.each(["ArrowRight", "ArrowDown", "PageUp", "Home", "End"])(
+    "consumes %s on a thumb so the page does not scroll",
+    (key) => {
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+
+      startThumb().dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(true);
+    },
+  );
 
   it("ignores a keyboard action dispatched by a non-thumb element", async () => {
     const unrelated = document.createElement("button");
@@ -462,6 +710,22 @@ describe("RangeSliderController", () => {
     document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 13, bubbles: true }));
   });
 
+  it("consumes a track press it turns into a move", () => {
+    track().getBoundingClientRect = () => stubRect(200);
+    const event = new PointerEvent("pointerdown", {
+      clientX: 180,
+      pointerId: 24,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    track().dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 24, bubbles: true }));
+  });
+
   it("ignores a pointer press when the track has zero width", () => {
     track().getBoundingClientRect = () => new DOMRect();
     const event = new PointerEvent("pointerdown", {
@@ -519,6 +783,40 @@ describe("RangeSliderController", () => {
       new PointerEvent("pointerdown", { clientX: 0, pointerId: 9, bubbles: true }),
     );
     expect(startThumb().getAttribute("aria-valuenow")).toBe("0");
+  });
+
+  it("keeps moving the thumb a press picked while the pair and range change, and picks anew at the next press", async () => {
+    track().getBoundingClientRect = () => stubRect(200);
+    // X=60 → value 30, nearer the start thumb (20).
+    track().dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 60, pointerId: 11, bubbles: true }),
+    );
+    expect(startThumb().getAttribute("aria-valuenow")).toBe("30");
+
+    root().setAttribute("data-stimeo--range-slider-end-value", "40");
+    root().setAttribute("data-stimeo--range-slider-max-value", "200");
+    await tick();
+    // Each move maps onto the range as it stands at that move…
+    document.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 30, pointerId: 11, bubbles: true }),
+    );
+    expect(startThumb().getAttribute("aria-valuenow")).toBe("30");
+    // …and keeps moving the start thumb, which stops at its partner, although the
+    // end thumb now lies nearer the pointer.
+    document.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 160, pointerId: 11, bubbles: true }),
+    );
+    expect(startThumb().getAttribute("aria-valuenow")).toBe("40");
+    expect(endThumb().getAttribute("aria-valuenow")).toBe("40");
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 11, bubbles: true }));
+
+    // The next press picks from the pair it finds: above the overlap, the end thumb.
+    track().dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 180, pointerId: 12, bubbles: true }),
+    );
+    expect(endThumb().getAttribute("aria-valuenow")).toBe("180");
+    expect(startThumb().getAttribute("aria-valuenow")).toBe("40");
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 12, bubbles: true }));
   });
 
   it("keeps the drag alive when the track loses pointer capture", () => {
@@ -597,6 +895,30 @@ describe("RangeSliderController", () => {
       ),
     ).not.toThrow();
     expect(activeEnd.getAttribute("aria-valuenow")).toBe("90");
+  });
+
+  it("ends the drag at a move that finds the track detached, so the track coming back does not resume it", () => {
+    const activeTrack = track();
+    const activeEnd = endThumb();
+    const parent = activeTrack.parentElement as HTMLElement;
+    activeTrack.getBoundingClientRect = () => stubRect(200);
+    activeTrack.dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 180, pointerId: 16, bubbles: true }),
+    );
+    expect(activeEnd.getAttribute("aria-valuenow")).toBe("90");
+
+    // No target callback runs in between: the move itself sees the detached track.
+    activeTrack.remove();
+    document.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 0, pointerId: 16, bubbles: true }),
+    );
+    parent.append(activeTrack);
+    document.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 100, pointerId: 16, bubbles: true }),
+    );
+
+    expect(activeEnd.getAttribute("aria-valuenow")).toBe("90");
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 16, bubbles: true }));
   });
 
   it("ends when the live track remains connected but ceases to be a target", () => {
@@ -729,6 +1051,29 @@ describe("RangeSliderController", () => {
       expect(endThumb().getAttribute("aria-valuenow")).toBe("80");
     });
 
+    it("keeps the direction a drag started with when logicalTrack changes, and reads it anew at the next press", async () => {
+      root().style.direction = "rtl";
+      track().getBoundingClientRect = () => stubRect(200);
+      // X=180 → value 90 on the physical mapping, nearer the end thumb.
+      track().dispatchEvent(
+        new PointerEvent("pointerdown", { clientX: 180, pointerId: 3, bubbles: true }),
+      );
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+
+      root().setAttribute("data-stimeo--range-slider-logical-track-value", "true");
+      await tick();
+      // The live drag keeps the physical mapping it resolved at its press.
+      document.dispatchEvent(
+        new PointerEvent("pointermove", { clientX: 140, pointerId: 3, bubbles: true }),
+      );
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("70");
+      document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 3, bubbles: true }));
+
+      // 20 / 200 mirrors to 0.9, which lands nearest the end thumb.
+      pressTrack(20);
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+    });
+
     it("trades the horizontal arrows on a logical track under RTL", () => {
       root().setAttribute("data-stimeo--range-slider-logical-track-value", "true");
       root().style.direction = "rtl";
@@ -799,6 +1144,56 @@ describe("RangeSliderController", () => {
       commits.stop();
     });
 
+    it.each([
+      ["start", false],
+      ["start", true],
+      ["end", false],
+      ["end", true],
+    ] as const)(
+      "canonicalizes an invalid %s Value before reports (published: %s)",
+      async (name, published) => {
+        await mount();
+        root().setAttribute("data-stimeo--range-slider-min-value", "-100.25");
+        root().setAttribute("data-stimeo--range-slider-max-value", "100.25");
+        root().setAttribute("data-stimeo--range-slider-step-value", "0.25");
+        controller().minValueChanged();
+        controller().maxValueChanged();
+        controller().stepValueChanged();
+        await flushMicrotasks();
+        const attribute = `data-stimeo--range-slider-${name}-value`;
+        root().setAttribute(attribute, "NaN");
+        if (published) {
+          if (name === "start") controller().startValueChanged();
+          else controller().endValueChanged();
+          await flushMicrotasks();
+        }
+        const expected = name === "start" ? -100.25 : 100.25;
+        const activeField = name === "start" ? startField() : endField();
+        const activeThumb = name === "start" ? startThumb() : endThumb();
+        const readings: Array<[string, number, number, string]> = [];
+        const read = (event: string) =>
+          readings.push([event, controller().startValue, controller().endValue, activeField.value]);
+        activeField.addEventListener("change", () => read("native"));
+        root().addEventListener("stimeo--range-slider:change", () => read("change"));
+        expect(root().getAttribute(attribute)).toBe("NaN");
+
+        press(activeThumb, name === "start" ? "Home" : "End");
+
+        expect(root().getAttribute(attribute)).toBe(String(expected));
+        expect(activeField.value).toBe(String(expected));
+        expect(activeThumb.getAttribute("aria-valuenow")).toBe(String(expected));
+        const pair = name === "start" ? [-100.25, 80] : [20, 100.25];
+        expect(readings).toEqual(
+          published
+            ? []
+            : [
+                ["native", ...pair, String(expected)],
+                ["change", ...pair, String(expected)],
+              ],
+        );
+      },
+    );
+
     it("seeds both fields without reporting a commit", async () => {
       await mount();
 
@@ -862,6 +1257,51 @@ describe("RangeSliderController", () => {
         events.stop();
       },
     );
+
+    it.each([
+      ["startField", "20"],
+      ["endField", "80"],
+    ] as const)(
+      "reflects the pair into a %s that stays after an earlier one leaves",
+      async (target, expected) => {
+        await mount();
+        commits.clear();
+        const events = captureStateEvents("stimeo--range-slider", ["change", "reconcile"]);
+        const original = target === "startField" ? startField() : endField();
+        const successor = original.cloneNode() as HTMLInputElement;
+        successor.value = "";
+        original.after(successor);
+        await tick();
+        original.remove();
+        await tick();
+
+        expect(target === "startField" ? startField() : endField()).toBe(successor);
+        expect(successor.value).toBe(expected);
+        // The field that stays is brought to the pair silently.
+        expect(commits.seen).toEqual([]);
+        expect(events.seen).toEqual([]);
+        events.stop();
+      },
+    );
+
+    it("keeps stepping when the sole start and end fields leave", async () => {
+      await mount();
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        startField().remove();
+        endField().remove();
+        await tick();
+        expect(() => controller().startFieldTargetDisconnected()).not.toThrow();
+        expect(() => controller().endFieldTargetDisconnected()).not.toThrow();
+        await tick();
+        expect(errors).not.toHaveBeenCalled();
+      } finally {
+        errors.mockRestore();
+      }
+
+      press(startThumb(), "ArrowRight");
+      expect(startThumb().getAttribute("aria-valuenow")).toBe("30");
+    });
   });
 
   // --- Page-driven reconciliation ---

@@ -1,5 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { authoredInteger } from "../utils/authored_integer";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { prefersReducedMotion } from "../utils/reduced_motion";
 
 /** The animation length used when `duration` falls outside its domain. */
@@ -21,7 +23,9 @@ const DEFAULT_DURATION = 1200;
  * real value); `start` animates the displayed text from `from` to it over
  * `duration` ms with an ease-out curve, then restores the exact authored text.
  * With `once` (default) later starts are ignored (`data-count-up-done` records
- * a finished run across Turbo cache restores).
+ * a finished run across Turbo cache restores). `from` and `duration` are read as
+ * a run starts: a running animation keeps the values it began with, the next run
+ * reads the new ones, and a change on its own starts nothing.
  *
  * Only the text node holding the number is animated, so sibling markup — a unit
  * in a `<small>`, a label in a `<b>` — is left where the author put it.
@@ -41,11 +45,19 @@ const DEFAULT_DURATION = 1200;
  * `disconnect()` (Turbo navigation included) and the authored text restored.
  */
 export class CountUpController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override values = {
     duration: { type: Number, default: DEFAULT_DURATION },
     from: { type: Number, default: 0 },
     once: { type: Boolean, default: true },
   };
+
+  static valueConstraints = {
+    duration: NUMBER_BOUNDS.positive,
+    from: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof CountUpController.values>;
   static actions = ["start"] as const;
   static events = ["end"] as const;
 
@@ -57,14 +69,12 @@ export class CountUpController extends Controller<HTMLElement> {
 
   /** The animation length, with a declaration outside its domain read as the default. */
   get #duration(): number {
-    return Number.isFinite(this.durationValue) && this.durationValue > 0
-      ? this.durationValue
-      : DEFAULT_DURATION;
+    return this.#safeDuration;
   }
 
   /** The starting value, with a declaration that is not a finite number read as zero. */
   get #from(): number {
-    return Number.isFinite(this.fromValue) ? this.fromValue : 0;
+    return this.#safeFrom;
   }
 
   override connect(): void {
@@ -80,14 +90,14 @@ export class CountUpController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
-    // A run cannot survive the element: settle instantly so the cached
-    // snapshot holds the real value, never a mid-animation frame.
+    // Cancel the live run and restore the element's authored text.
     if (this.#frame !== null) this.#settle();
   }
 
   /**
    * Starts the animation (typically from `stimeo--intersection:enter` via
    * `data-action`). No-ops while running, and after a finished run when `once`.
+   * The run keeps the `from` and `duration` read here to its last frame.
    */
   start(): void {
     if (this.#frame !== null) return;
@@ -111,9 +121,10 @@ export class CountUpController extends Controller<HTMLElement> {
     // authored text AT should hear instead of the ticks.
     const ticker = this.#wrap(node, authored);
     const from = this.#from;
+    const duration = this.#duration;
     const started = performance.now();
     const step = (now: number): void => {
-      const t = Math.min((now - started) / this.#duration, 1);
+      const t = Math.min((now - started) / duration, 1);
       const eased = 1 - (1 - t) ** 3; // ease-out cubic
       ticker.textContent = String(Math.round(from + (target - from) * eased));
       if (t < 1) {
@@ -164,5 +175,26 @@ export class CountUpController extends Controller<HTMLElement> {
     const ticker = this.#ownedTicker();
     if (ticker !== null) this.#unwrap(ticker, ticker.getAttribute("aria-label"));
     this.element.setAttribute("data-count-up-done", "true");
+  }
+  /** Current `duration` declaration resolved against its numeric contract. */
+  get #safeDuration(): number {
+    return this.#numbers.read(
+      this,
+      "duration",
+      this.durationValue,
+      CountUpController.values.duration.default,
+      CountUpController.valueConstraints.duration,
+    );
+  }
+
+  /** Current `from` declaration resolved against its numeric contract. */
+  get #safeFrom(): number {
+    return this.#numbers.read(
+      this,
+      "from",
+      this.fromValue,
+      CountUpController.values.from.default,
+      CountUpController.valueConstraints.from,
+    );
   }
 }

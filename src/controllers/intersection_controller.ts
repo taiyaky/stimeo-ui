@@ -1,5 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
+import { validSelector } from "../utils/declared_value";
 import { IntersectionWatcher, isBeforeRootStart } from "../utils/intersection_watcher";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 
 /** Name of the CSS custom property exposing the visible ratio (0..1). */
 const RATIO_PROPERTY = "--stimeo--intersection-ratio";
@@ -43,14 +47,22 @@ const RATIO_EPSILON = 0.01;
  * idempotent: the previous state is read back from `data-intersecting`/
  * `data-passed`, so a Turbo cache restore does not re-fire `enter` for an
  * element that was already visible (and with `once`, an element whose enter
- * already fired is not observed again). `threshold` is re-read when Turbo morphs
- * the attribute in place, and a `rootSelector` that does not parse observes the
- * viewport rather than leaving the element unobserved. Without
- * `IntersectionObserver` (very old browsers) the controller stays inert —
- * consumers keep whatever no-JS fallback their markup provides. The observer is
- * disconnected on `disconnect()` (Turbo navigation included).
+ * already fired is not observed again). Every Value follows a runtime change —
+ * a Turbo morph, a Stream, an author script: the observer is rebuilt once per
+ * batch from the current declaration, and only when the root node, `rootMargin`
+ * or the lines it observes differ from the live one. `once` follows the same
+ * way: turned off after its enter, the element is observed again and the first
+ * callback is measured against the recorded hooks, exactly as on a reconnect;
+ * turned on once an enter is recorded, observing stops. A `rootSelector` that
+ * does not parse observes the viewport rather than leaving the element
+ * unobserved. Without `IntersectionObserver` (very old browsers) the controller
+ * stays inert — consumers keep whatever no-JS fallback their markup provides.
+ * The observer is disconnected on `disconnect()` (Turbo navigation included).
  */
 export class IntersectionController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override values = {
     threshold: { type: Number, default: 0 },
     ratioSteps: { type: Number, default: 0 },
@@ -58,6 +70,11 @@ export class IntersectionController extends Controller<HTMLElement> {
     rootSelector: { type: String, default: "" },
     once: { type: Boolean, default: false },
   };
+
+  static valueConstraints = {
+    threshold: NUMBER_BOUNDS.finite,
+    ratioSteps: { finite: true, min: 0, max: 1000 },
+  } satisfies NumberValueConstraints<typeof IntersectionController.values>;
   static actions = ["refresh"] as const;
   static events = ["enter", "exit", "change", "passed"] as const;
 
@@ -67,8 +84,20 @@ export class IntersectionController extends Controller<HTMLElement> {
   declare rootSelectorValue: string;
   declare onceValue: boolean;
 
-  /** Shared IO plumbing (support guard, root resolution, active guard, re-arm). */
+  /** Shared IO plumbing (support guard, active guard, re-arm). */
   readonly #watcher = new IntersectionWatcher((entries) => this.#onIntersect(entries));
+  /**
+   * One rebuild for every Value a batch changes, inside the connected window
+   * only: Stimulus delivers Value callbacks ahead of `connect()`, which builds
+   * the observer itself, and a pass queued before `disconnect()` is dropped.
+   */
+  readonly #rebuild = new MicrotaskCoalescer(() => this.#sync());
+  /** Validated `rootSelector`; an unparsable declaration reads as the viewport. */
+  #rootSelector = "";
+  /** The root node the live observer was built on. */
+  #builtRoot: Element | null = null;
+  /** `rootMargin` and the observed lines the live observer was built from. */
+  #builtOptions = "";
   /** Threshold actually installed in the live observer (0 after option fallback). */
   #effectiveThreshold = 0;
   /** Bumped by `refresh()`: an in-flight batch becomes stale and stops. */
@@ -114,36 +143,77 @@ export class IntersectionController extends Controller<HTMLElement> {
   }
 
   override connect(): void {
-    // A cache restore may bring back an element whose one-shot enter already
-    // fired; honor it instead of re-observing (mirrors `data-lazy-loaded`).
-    if (this.onceValue && this.element.getAttribute("data-intersecting") === "true") return;
-    this.#observe();
+    this.#rebuild.activate();
+    this.#sync();
   }
 
   override disconnect(): void {
+    this.#rebuild.cancel();
     this.#watcher.stop();
   }
 
   /**
-   * Re-reads the visibility line and rebuilds the observer. Turbo 8 morphing
-   * rewrites the attribute in place without a reconnect, and the line is what
-   * the intersection callback compares every ratio against, so a value frozen at
-   * connect time would decide `data-intersecting` wrongly for the rest of the
-   * page's life. Nothing to rebuild before the first `connect()`; after a spent
-   * one-shot the watcher is deliberately stopped, and re-observing would deliver
-   * the current state and fire `enter` a second time.
+   * Follows the visibility line: the intersection callback compares every ratio
+   * against it, so a line frozen at connect time would decide
+   * `data-intersecting` wrongly for the rest of the page's life.
    */
   thresholdValueChanged(): void {
-    if (this.#watcher.active) this.#observe();
+    this.#rebuild.schedule();
   }
 
-  /** (Re)installs the observer from the current Values. */
-  #observe(): void {
-    this.#effectiveThreshold = this.#clampedThreshold();
+  /** Follows the fine-grained `change` steps the observer notifies at. */
+  ratioStepsValueChanged(): void {
+    this.#rebuild.schedule();
+  }
+
+  /** Follows the margin the observer grows or shrinks its root by. */
+  rootMarginValueChanged(): void {
+    this.#rebuild.schedule();
+  }
+
+  /** Validates `rootSelector` once per change, then follows the root it names. */
+  rootSelectorValueChanged(): void {
+    this.#rootSelector = validSelector(this.element, this.rootSelectorValue, "");
+    this.#rebuild.schedule();
+  }
+
+  /** Follows whether one recorded enter ends the observation. */
+  onceValueChanged(): void {
+    this.#rebuild.schedule();
+  }
+
+  /**
+   * Brings the observer in line with the current declaration: a spent one-shot
+   * observes nothing, and anything else observes with the root, margin and
+   * lines declared now. A live observer already built from the same root node
+   * and options is kept, since a rebuild re-delivers the current state as a
+   * fresh callback.
+   *
+   * A spent one-shot is `once` with an enter recorded in `data-intersecting` —
+   * the state a cache restore brings back too — so a declaration change and a
+   * reconnect reach the same observer. Re-arming leaves the recorded hooks in
+   * place: the first callback reports where the element is, and it is measured
+   * against them like the first callback after a reconnect, never as a fresh
+   * `enter` for an element that is still visible.
+   */
+  #sync(): void {
+    if (this.onceValue && this.element.getAttribute("data-intersecting") === "true") {
+      this.#watcher.stop();
+      return;
+    }
+    const root = this.#rootSelector ? document.querySelector(this.#rootSelector) : null;
+    const threshold = this.#clampedThreshold();
+    const thresholds = this.#thresholds();
+    const options = `${this.rootMarginValue} ${threshold} ${thresholds.join(",")}`;
+    if (this.#watcher.active && root === this.#builtRoot && options === this.#builtOptions) return;
+
+    this.#builtRoot = root;
+    this.#builtOptions = options;
+    this.#effectiveThreshold = threshold;
     this.#watcher.start(this.element, {
-      rootSelector: this.rootSelectorValue,
+      root,
       rootMargin: this.rootMarginValue,
-      threshold: this.#thresholds(),
+      threshold: thresholds,
     });
     if (this.#watcher.usingPlatformDefaults) this.#effectiveThreshold = 0;
   }
@@ -229,7 +299,7 @@ export class IntersectionController extends Controller<HTMLElement> {
 
   /** The configured `threshold`, clamped to the 0..1 the observer accepts. */
   #clampedThreshold(): number {
-    return Math.min(1, Math.max(0, this.thresholdValue));
+    return Math.min(1, Math.max(0, this.#safeThreshold));
   }
 
   /**
@@ -243,12 +313,33 @@ export class IntersectionController extends Controller<HTMLElement> {
    */
   #thresholds(): number[] {
     const thresholds = new Set<number>([0, this.#clampedThreshold()]);
-    if (this.ratioStepsValue > 0) {
+    if (this.#safeRatioSteps > 0) {
       // i counts up to ratioSteps, so i/ratioSteps is inherently 0..1.
-      for (let i = 0; i <= this.ratioStepsValue; i += 1) {
-        thresholds.add(i / this.ratioStepsValue);
+      for (let i = 0; i <= this.#safeRatioSteps; i += 1) {
+        thresholds.add(i / this.#safeRatioSteps);
       }
     }
     return [...thresholds].sort((a, b) => a - b);
+  }
+  /** Current `threshold` declaration resolved against its numeric contract. */
+  get #safeThreshold(): number {
+    return this.#numbers.read(
+      this,
+      "threshold",
+      this.thresholdValue,
+      IntersectionController.values.threshold.default,
+      IntersectionController.valueConstraints.threshold,
+    );
+  }
+
+  /** Current `ratioSteps` declaration resolved against its numeric contract. */
+  get #safeRatioSteps(): number {
+    return this.#numbers.read(
+      this,
+      "ratioSteps",
+      this.ratioStepsValue,
+      IntersectionController.values.ratioSteps.default,
+      IntersectionController.valueConstraints.ratioSteps,
+    );
   }
 }

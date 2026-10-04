@@ -4,7 +4,7 @@ import { DateRangePickerController } from "../src/controllers/date_range_picker_
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 // The month label is formatted in the resolved locale, so a case that declares
@@ -167,6 +167,279 @@ describe("DateRangePickerController", () => {
     cell(iso).dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
   const key = (el: HTMLElement, k: string, init: KeyboardEventInit = {}) =>
     el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, ...init }));
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+  ])("preserves preset action event modality %s", async (type, reason) => {
+    await mount();
+    const reports: CustomEvent[] = [];
+    root().addEventListener("stimeo--date-range-picker:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    const button = preset("today");
+    button.addEventListener(type, (event) => controller().applyPreset(event));
+    button.dispatchEvent(new Event(type));
+    expect(reports[0]?.detail.reason).toBe(reason);
+  });
+
+  it("ignores keyboard input without an element target and still accepts an owned cell", async () => {
+    await mount();
+    const reports: CustomEvent[] = [];
+    root().addEventListener("stimeo--date-range-picker:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    click("2026-06-12");
+    expect(() =>
+      controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" })),
+    ).not.toThrow();
+    expect(reports).toHaveLength(0);
+    key(cell("2026-06-14"), "Enter");
+    expect(reports).toHaveLength(1);
+  });
+
+  it("ignores a nested grid's cell on bubbling keyboard confirmation", async () => {
+    await mount();
+    click("2026-06-12");
+    const target = cell("2026-06-14");
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--date-range-picker");
+    const foreign = target.cloneNode(true) as HTMLElement;
+    foreign.removeAttribute("data-action");
+    nested.append(foreign);
+    root().append(nested);
+    const reports: CustomEvent[] = [];
+    root().addEventListener("stimeo--date-range-picker:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    foreign.addEventListener("keydown", (event) => controller().onKeydown(event));
+    key(foreign, "Enter");
+    expect(reports).toHaveLength(0);
+    key(target, "Enter");
+    expect(reports).toHaveLength(1);
+  });
+
+  it("rejects nested-origin action events while accepting owned descendants", async () => {
+    await mount();
+    const element = document.querySelector<HTMLElement>(
+      "[data-controller='stimeo--date-range-picker']",
+    );
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--date-range-picker",
+    ) as DateRangePickerController;
+    const target = cell("2026-06-14");
+    if (!target) throw new Error("Missing target");
+    click("2026-06-12");
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--date-range-picker");
+    const inner = document.createElement("span");
+    nested.append(inner);
+    target.append(nested);
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--date-range-picker:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener("pointerup", (event) => instance.selectDate(event));
+    inner.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(0);
+    nested.remove();
+    const owned = document.createElement("span");
+    target.append(owned);
+    owned.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe("user");
+  });
+
+  it("element API yields deferred preset focus when a subscriber hands focus outside", async () => {
+    await mount();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    preset("today").focus();
+    root().addEventListener("stimeo--date-range-picker:change", () => outside.focus(), {
+      once: true,
+    });
+    controller().applyPreset(preset("today"));
+    await tick();
+    expect(document.activeElement).toBe(outside);
+  });
+
+  it.each([false, true])(
+    "previews through the element API without moving the tab stop (descendant=%s)",
+    async (descendant) => {
+      await mount();
+      click("2026-06-05");
+      const target = cell("2026-06-09");
+      const child = document.createElement("span");
+      target.append(child);
+      const tabStop = root().querySelector("[tabindex='0']");
+      const before = root().innerHTML;
+      const foreign = target.cloneNode(true) as HTMLElement;
+      controller().previewTo(foreign);
+      document.body.append(foreign);
+      controller().previewTo(foreign);
+      const nested = document.createElement("div");
+      nested.setAttribute("data-controller", "stimeo--date-range-picker");
+      const inner = document.createElement("span");
+      nested.append(inner);
+      target.append(nested);
+      controller().previewTo(inner);
+      nested.remove();
+      expect(root().innerHTML).toBe(before);
+      controller().previewTo(descendant ? child : target);
+      expect(cell("2026-06-07").hasAttribute("data-in-range")).toBe(true);
+      expect(target.hasAttribute("data-range-end")).toBe(true);
+      expect(root().querySelector("[tabindex='0']")).toBe(tabStop);
+    },
+  );
+
+  it.each([false, true])(
+    "applies an owned preset through the element API (descendant=%s)",
+    async (descendant) => {
+      await mount();
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      outside.focus();
+      const button = preset("today");
+      const child = document.createElement("span");
+      button.append(child);
+      const reports: CustomEvent[] = [];
+      root().addEventListener("stimeo--date-range-picker:change", (event) =>
+        reports.push(event as CustomEvent),
+      );
+      const foreign = button.cloneNode(true) as HTMLElement;
+      document.body.append(foreign);
+      controller().applyPreset(foreign);
+      expect(reports).toHaveLength(0);
+      controller().applyPreset(descendant ? child : button);
+      await tick();
+      expect(field("start").value).toBe(field("end").value);
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.detail.reason).toBe("api");
+      expect(document.activeElement).toBe(outside);
+    },
+  );
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+  ])("preserves action event modality %s", async (type, reason) => {
+    await mount();
+    const element = document.querySelector<HTMLElement>(
+      "[data-controller='stimeo--date-range-picker']",
+    );
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--date-range-picker",
+    ) as DateRangePickerController;
+    const target = cell("2026-06-14");
+    if (!target) throw new Error("Missing action target");
+    click("2026-06-12");
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--date-range-picker:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener(type, (event) => instance.selectDate(event), { once: true });
+    target.dispatchEvent(new Event(type));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe(reason);
+  });
+
+  it.each([false, true])(
+    "accepts an owned element API source (descendant=%s) without stealing outside focus",
+    async (descendant) => {
+      await mount();
+      const element = document.querySelector<HTMLElement>(
+        "[data-controller='stimeo--date-range-picker']",
+      );
+      if (!element) throw new Error("Missing controller root");
+      const instance = application.getControllerForElementAndIdentifier(
+        element,
+        "stimeo--date-range-picker",
+      ) as DateRangePickerController;
+      const target = cell("2026-06-14");
+      if (!target) throw new Error("Missing action target");
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      outside.focus();
+      const reports: CustomEvent[] = [];
+      element.addEventListener("stimeo--date-range-picker:change", (event) =>
+        reports.push(event as CustomEvent),
+      );
+      instance.selectDate(cell("2026-06-12"));
+      const child = document.createElement("span");
+      target.append(child);
+      const foreign = target.cloneNode(true) as HTMLElement;
+      foreign.removeAttribute("data-action");
+      const nested = document.createElement("div");
+      nested.setAttribute("data-controller", "stimeo--date-range-picker");
+      const nestedTarget = foreign.cloneNode(true) as HTMLElement;
+      nested.append(nestedTarget);
+      element.append(nested);
+      const before = element.innerHTML;
+      instance.selectDate(foreign);
+      document.body.append(foreign);
+      instance.selectDate(foreign);
+      instance.selectDate(nestedTarget);
+      expect(element.innerHTML).toBe(before);
+      expect(reports).toHaveLength(0);
+      instance.selectDate(descendant ? child : target);
+      expect(field("start").value).toBe("2026-06-12");
+      expect(field("end").value).toBe("2026-06-14");
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.detail.reason).toBe("api");
+      expect(document.activeElement).toBe(outside);
+    },
+  );
+
+  it.each(["a", "b"])(
+    "compares a range confirmed after an availability write with the last publication: %s",
+    async (mode) => {
+      await mount();
+      const start = mode === "a" ? "2026-06-12" : "2026-06-10";
+      root()
+        .querySelector<HTMLElement>("[data-date='" + start + "']")
+        ?.click();
+      const seen: unknown[] = [];
+      root().addEventListener("stimeo--date-range-picker:change", (event) =>
+        seen.push((event as CustomEvent).detail),
+      );
+      root().setAttribute("data-stimeo--date-range-picker-min-value", start);
+      root().querySelector<HTMLElement>("[data-date='2026-06-20']")?.click();
+      expect(seen).toEqual(mode === "a" ? [{ start, end: "2026-06-20", reason: "user" }] : []);
+    },
+  );
+
+  it("does not repeat an end field report after nested ranges return to its value", async () => {
+    await mount();
+    const native: string[] = [];
+    field("end").addEventListener("change", () => native.push(field("end").value));
+    let handled = false;
+    field("start").addEventListener("change", () => {
+      if (handled) return;
+      handled = true;
+      click("2026-06-13");
+      click("2026-06-16");
+      click("2026-06-12");
+      click("2026-06-18");
+    });
+    click("2026-06-12");
+    click("2026-06-18");
+    expect(native).toEqual(["2026-06-16", "2026-06-18"]);
+  });
+
+  it("does not report confirming the published range again", async () => {
+    await mount();
+    const seen: unknown[] = [];
+    root().addEventListener("stimeo--date-range-picker:change", (event) =>
+      seen.push((event as CustomEvent).detail),
+    );
+    root().querySelector<HTMLElement>("[data-date='2026-06-10']")?.click();
+    root().querySelector<HTMLElement>("[data-date='2026-06-20']")?.click();
+    expect(seen).toEqual([]);
+  });
 
   it("labels the month in the language of the nearest ancestor", async () => {
     // `lang` is inherited, so the language that applies to the grid is the
@@ -440,7 +713,7 @@ describe("DateRangePickerController", () => {
     expect(detail).toEqual([]); // not confirmed yet
 
     click("2026-06-08"); // confirm end
-    expect(detail).toEqual([{ start: "2026-06-05", end: "2026-06-08" }]);
+    expect(detail).toEqual([{ start: "2026-06-05", end: "2026-06-08", reason: "user" }]);
     expect(field("start").value).toBe("2026-06-05");
     expect(field("end").value).toBe("2026-06-08");
     expect(status().textContent).toBe("2026-06-05 – 2026-06-08");
@@ -464,7 +737,7 @@ describe("DateRangePickerController", () => {
     expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(true);
 
     click("2026-06-08"); // confirmed from a cell that declares the name alone
-    expect(detail).toEqual([{ start: "2026-06-05", end: "2026-06-08" }]);
+    expect(detail).toEqual([{ start: "2026-06-05", end: "2026-06-08", reason: "user" }]);
   });
 
   it("moves the roving stop to the first endpoint selected by click", async () => {
@@ -595,6 +868,27 @@ describe("DateRangePickerController", () => {
     expect(cell("2026-06-11").getAttribute("tabindex")).toBe("-1");
   });
 
+  it("claims every grid key it acts on", async () => {
+    await mount();
+    const press = (iso: string, k: string): [string, boolean] => {
+      const event = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true });
+      cell(iso).dispatchEvent(event);
+      return [k, event.defaultPrevented];
+    };
+
+    expect([
+      press("2026-06-10", "Enter"),
+      press("2026-06-10", "Escape"),
+      press("2026-06-10", "ArrowRight"),
+      press("2026-06-11", " "),
+    ]).toEqual([
+      ["Enter", true],
+      ["Escape", true],
+      ["ArrowRight", true],
+      [" ", true],
+    ]);
+  });
+
   it("moves roving focus with the arrow keys", async () => {
     await mount();
     expect(cell("2026-06-10").getAttribute("tabindex")).toBe("0");
@@ -665,6 +959,43 @@ describe("DateRangePickerController", () => {
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(detail).toHaveLength(1);
     expect(detail[0]?.start).toBe(detail[0]?.end);
+  });
+
+  it("preserves the pending preview when a disabled endpoint is clicked", async () => {
+    await mount({ disabledDates: ["2026-06-13"] });
+    click("2026-06-11");
+    hover("2026-06-12");
+
+    click("2026-06-13");
+
+    expect(cell("2026-06-11").hasAttribute("data-range-start")).toBe(true);
+    expect(cell("2026-06-12").hasAttribute("data-range-end")).toBe(true);
+    expect(field("start").value).toBe("2026-06-10");
+    expect(field("end").value).toBe("2026-06-20");
+  });
+
+  it("preserves the confirmed range and preview when an unavailable preset is refused", async () => {
+    const today = new Date();
+    const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+    await mount({ disabledDates: [todayIso] });
+    click("2026-06-11");
+    hover("2026-06-12");
+    const month = monthLabel().textContent;
+    const announcement = status().textContent;
+    const seen: string[] = [];
+    for (const name of ["change", "reconcile", "monthchange"]) {
+      root().addEventListener(`stimeo--date-range-picker:${name}`, () => seen.push(name));
+    }
+
+    preset("today").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(field("start").value).toBe("2026-06-10");
+    expect(field("end").value).toBe("2026-06-20");
+    expect(monthLabel().textContent).toBe(month);
+    expect(status().textContent).toBe(announcement);
+    expect(cell("2026-06-11").hasAttribute("data-range-start")).toBe(true);
+    expect(cell("2026-06-12").hasAttribute("data-range-end")).toBe(true);
+    expect(seen).toEqual([]);
   });
 
   it("refuses a preset whose endpoint is an unavailable day", async () => {
@@ -889,6 +1220,44 @@ describe("DateRangePickerController", () => {
     expect(monthLabel().textContent).toBe("July 2026");
   });
 
+  it("cancels the default action of the prev and next controls", async () => {
+    await mount();
+    const clickNav = (action: "prev" | "next"): boolean => {
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      navButton(action).dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    expect(clickNav("prev")).toBe(true);
+    expect(clickNav("next")).toBe(true);
+  });
+
+  it("keeps the focused day of the month across prev and next, clamped to the month", async () => {
+    await mount({ start: "2026-05-31", end: "2026-05-31" });
+
+    navButton("next").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(cell("2026-06-30").getAttribute("tabindex")).toBe("0");
+
+    navButton("next").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(cell("2026-07-30").getAttribute("tabindex")).toBe("0");
+  });
+
+  it("marks the days outside the painted month and today's cell", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 5, 17));
+    try {
+      await mount();
+
+      expect(cell("2026-05-31").getAttribute("data-outside")).toBe("true");
+      expect(cell("2026-06-01").getAttribute("data-outside")).toBe("false");
+      expect(cell("2026-07-01").getAttribute("data-outside")).toBe("true");
+      expect(cell("2026-06-17").getAttribute("data-today")).toBe("true");
+      expect(cell("2026-06-18").getAttribute("data-today")).toBe("false");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports each painted month change after the cells are updated", async () => {
     await mount();
     const details: Array<{ month: string; firstDate: string | null }> = [];
@@ -956,7 +1325,7 @@ describe("DateRangePickerController", () => {
     key(cell("2026-06-10"), "ArrowRight"); // roving focus → 06-11
     expect(cell("2026-06-11").getAttribute("tabindex")).toBe("0");
     key(cell("2026-06-11"), " "); // Space confirms
-    expect(detail).toEqual([{ start: "2026-06-10", end: "2026-06-11" }]);
+    expect(detail).toEqual([{ start: "2026-06-10", end: "2026-06-11", reason: "user" }]);
   });
 
   it("moves to week edges with Home/End", async () => {
@@ -986,6 +1355,18 @@ describe("DateRangePickerController", () => {
 
     expect(monthLabel().textContent).toBe("July 2026");
     expect(cell("2026-07-10").getAttribute("tabindex")).toBe("0");
+  });
+
+  it("keeps focus on a same-month move made before a deferred month focus lands", async () => {
+    await mount();
+
+    key(cell("2026-06-10"), "PageDown");
+    key(cell("2026-07-10"), "ArrowRight");
+    expect(document.activeElement).toBe(cell("2026-07-11"));
+    await tick();
+
+    expect(document.activeElement).toBe(cell("2026-07-11"));
+    expect(cell("2026-07-11").getAttribute("tabindex")).toBe("0");
   });
 
   it("moves by year with Shift+PageUp and Shift+PageDown", async () => {
@@ -1026,7 +1407,7 @@ describe("DateRangePickerController", () => {
 
     preset("last7").dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    expect(detail).toEqual([{ start: iso(start), end: iso(today) }]);
+    expect(detail).toEqual([{ start: iso(start), end: iso(today), reason: "user" }]);
   });
 
   it("focuses the confirmed endpoint after applying a preset", async () => {
@@ -1070,7 +1451,7 @@ describe("DateRangePickerController", () => {
 
     preset("last7").dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    expect(detail).toEqual([{ start: iso(minDate), end: iso(today) }]);
+    expect(detail).toEqual([{ start: iso(minDate), end: iso(today), reason: "user" }]);
   });
 
   it("intersects the last-7-days preset with max", async () => {
@@ -1089,7 +1470,7 @@ describe("DateRangePickerController", () => {
 
     preset("last7").dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    expect(detail).toEqual([{ start: iso(startDate), end: iso(maxDate) }]);
+    expect(detail).toEqual([{ start: iso(startDate), end: iso(maxDate), reason: "user" }]);
   });
 
   it("ignores a preset that has no overlap with the selectable interval", async () => {
@@ -1122,7 +1503,7 @@ describe("DateRangePickerController", () => {
 
     preset("thisMonth").dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    expect(detail).toEqual([{ start: iso(first), end: iso(last) }]);
+    expect(detail).toEqual([{ start: iso(first), end: iso(last), reason: "user" }]);
   });
 
   it("ignores an unknown preset name", async () => {
@@ -1135,51 +1516,47 @@ describe("DateRangePickerController", () => {
     expect(detail).toEqual([]);
   });
 
-  it("rewinds an in-progress range before Turbo caches the page", async () => {
+  it("keeps an in-progress range through turbo:before-cache, which Turbo also dispatches on pages that stay", async () => {
     await mount();
     click("2026-06-05");
     hover("2026-06-08");
     expect(cell("2026-06-08").hasAttribute("data-range-end")).toBe(true);
-
-    document.dispatchEvent(new CustomEvent("turbo:before-cache"));
-
-    expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(false);
-    expect(cell("2026-06-10").hasAttribute("data-range-start")).toBe(true);
-    expect(cell("2026-06-20").hasAttribute("data-range-end")).toBe(true);
-  });
-
-  it("does not repaint an idle range before Turbo caches the page", async () => {
-    await mount();
-    const label = monthLabel();
-    const textContent = Object.getOwnPropertyDescriptor(Element.prototype, "textContent");
-    if (!textContent?.get || !textContent.set) {
-      throw new Error("Expected Element.textContent accessors");
-    }
-    let renders = 0;
-    Object.defineProperty(label, "textContent", {
-      configurable: true,
-      get: () => textContent.get?.call(label),
-      set: (value: string | null) => {
-        renders += 1;
-        textContent.set?.call(label, value);
-      },
-    });
-
-    document.dispatchEvent(new CustomEvent("turbo:before-cache"));
-
-    expect(renders).toBe(0);
-  });
-
-  it("unsubscribes the cache rewind on disconnect", async () => {
-    await mount();
-    click("2026-06-05");
-    hover("2026-06-08");
-    controller().disconnect();
 
     document.dispatchEvent(new CustomEvent("turbo:before-cache"));
 
     expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(true);
     expect(cell("2026-06-08").hasAttribute("data-range-end")).toBe(true);
+    click("2026-06-08");
+    expect(field("start").value).toBe("2026-06-05");
+    expect(field("end").value).toBe("2026-06-08");
+  });
+
+  it("keeps a deferred month-transition focus through turbo:before-cache", async () => {
+    await mount();
+    key(cell("2026-06-10"), "PageUp");
+    const target = cell("2026-05-10");
+    const focused = vi.fn();
+    target.addEventListener("focus", focused);
+
+    document.dispatchEvent(new CustomEvent("turbo:before-cache"));
+    await tick();
+
+    expect(focused).toHaveBeenCalled();
+  });
+
+  it("drops an in-progress range on a copy of the page Turbo restores", async () => {
+    await mount();
+    click("2026-06-05");
+    hover("2026-06-08");
+
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--date-range-picker", DateRangePickerController),
+    );
+
+    expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(false);
+    expect(cell("2026-06-08").hasAttribute("data-range-end")).toBe(false);
+    expect(cell("2026-06-10").hasAttribute("data-range-start")).toBe(true);
+    expect(cell("2026-06-20").hasAttribute("data-range-end")).toBe(true);
   });
 
   it("cancels a deferred month-transition focus on disconnect", async () => {
@@ -1209,7 +1586,7 @@ describe("DateRangePickerController", () => {
     click(start);
     click(end);
 
-    expect(detail).toEqual([{ start, end }]);
+    expect(detail).toEqual([{ start, end, reason: "user" }]);
     expect(status().textContent).toBe(`${start} – ${end}`);
   });
 
@@ -1475,7 +1852,7 @@ describe("DateRangePickerController", () => {
       expect(heard).toEqual([
         {
           type: "stimeo--date-range-picker:change",
-          detail: { start: "2026-06-12", end: "2026-06-18" },
+          detail: { start: "2026-06-12", end: "2026-06-18", reason: "user" },
         },
       ]);
     });
@@ -1585,7 +1962,11 @@ describe("DateRangePickerController", () => {
       expect(reports).toEqual([
         { type: "startField:change", detail: "2026-06-05", ...confirmed },
         { type: "endField:change", detail: "2026-06-08", ...confirmed },
-        { type: "change", detail: { start: "2026-06-05", end: "2026-06-08" }, ...confirmed },
+        {
+          type: "change",
+          detail: { start: "2026-06-05", end: "2026-06-08", reason: "user" },
+          ...confirmed,
+        },
       ]);
 
       await tick();
@@ -1614,7 +1995,11 @@ describe("DateRangePickerController", () => {
       expect(reports).toEqual([
         { type: "startField:change", detail: "2026-09-17", ...confirmed },
         { type: "endField:change", detail: "2026-09-23", ...confirmed },
-        { type: "change", detail: { start: "2026-09-17", end: "2026-09-23" }, ...confirmed },
+        {
+          type: "change",
+          detail: { start: "2026-09-17", end: "2026-09-23", reason: "user" },
+          ...confirmed,
+        },
       ]);
 
       await tick();
@@ -1639,7 +2024,11 @@ describe("DateRangePickerController", () => {
         { type: "startField:change", detail: "2026-09-17", ...confirmed },
         { type: "endField:change", detail: "2026-09-23", ...confirmed },
         { type: "monthchange", detail: { month: "2026-09" }, ...confirmed },
-        { type: "change", detail: { start: "2026-09-17", end: "2026-09-23" }, ...confirmed },
+        {
+          type: "change",
+          detail: { start: "2026-09-17", end: "2026-09-23", reason: "user" },
+          ...confirmed,
+        },
       ]);
     });
 
@@ -1658,7 +2047,11 @@ describe("DateRangePickerController", () => {
       expect(reports).toEqual([
         { type: "startField:change", detail: "2026-06-05", ...confirmed },
         { type: "endField:change", detail: "2026-06-08", ...confirmed },
-        { type: "change", detail: { start: "2026-06-05", end: "2026-06-08" }, ...confirmed },
+        {
+          type: "change",
+          detail: { start: "2026-06-05", end: "2026-06-08", reason: "user" },
+          ...confirmed,
+        },
         {
           type: "reconcile",
           detail: { start: "2026-06-05", end: "2026-06-07" },
@@ -1686,7 +2079,11 @@ describe("DateRangePickerController", () => {
         { type: "monthchange", detail: { month: "2026-09" }, ...month },
         { type: "startField:change", detail: "2026-09-23", ...today },
         { type: "endField:change", detail: "2026-09-23", ...today },
-        { type: "change", detail: { start: "2026-09-23", end: "2026-09-23" }, ...today },
+        {
+          type: "change",
+          detail: { start: "2026-09-23", end: "2026-09-23", reason: "user" },
+          ...today,
+        },
       ]);
       // Focus stays where the replacing preset put it.
       expect(document.activeElement).toBe(cell("2026-09-23"));
@@ -1710,7 +2107,11 @@ describe("DateRangePickerController", () => {
         { type: "startField:change", detail: "2026-06-05", ...holding("2026-06-05", "2026-06-08") },
         { type: "startField:change", detail: "2026-06-15", ...replacing },
         { type: "endField:change", detail: "2026-06-17", ...replacing },
-        { type: "change", detail: { start: "2026-06-15", end: "2026-06-17" }, ...replacing },
+        {
+          type: "change",
+          detail: { start: "2026-06-15", end: "2026-06-17", reason: "user" },
+          ...replacing,
+        },
       ]);
     });
 
@@ -1731,7 +2132,11 @@ describe("DateRangePickerController", () => {
       expect(reports).toEqual([
         { type: "startField:change", detail: "2026-06-05", ...holding("2026-06-05", "2026-06-08") },
         { type: "startField:change", detail: "2026-06-06", ...replacing },
-        { type: "change", detail: { start: "2026-06-06", end: "2026-06-08" }, ...replacing },
+        {
+          type: "change",
+          detail: { start: "2026-06-06", end: "2026-06-08", reason: "user" },
+          ...replacing,
+        },
         { type: "endField:change", detail: "2026-06-08", ...replacing },
       ]);
     });
@@ -1792,7 +2197,11 @@ describe("DateRangePickerController", () => {
         },
         { type: "startField:change", detail: "2026-07-02", ...replacing },
         { type: "endField:change", detail: "2026-07-04", ...replacing },
-        { type: "change", detail: { start: "2026-07-02", end: "2026-07-04" }, ...replacing },
+        {
+          type: "change",
+          detail: { start: "2026-07-02", end: "2026-07-04", reason: "user" },
+          ...replacing,
+        },
       ]);
     });
 
@@ -1811,6 +2220,350 @@ describe("DateRangePickerController", () => {
 
       expect(reports).toEqual([]);
       expect([field("start").value, field("end").value]).toEqual(["2026-06-10", "2026-06-20"]);
+    });
+  });
+
+  // A grid, month label or field the page swaps in — in one task, or ahead of the
+  // one in charge that leaves in a later task — is painted with the state on screen,
+  // silently. Text and form values stay where they were written.
+  describe("targets that change", () => {
+    const grid = () =>
+      document.querySelector<HTMLElement>(
+        "[data-stimeo--date-range-picker-target='grid']",
+      ) as HTMLElement;
+    const next = () => navButton("next").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const stops = (scope: HTMLElement) =>
+      [...scope.querySelectorAll<HTMLElement>("[role='gridcell']")].filter(
+        (candidate) => candidate.getAttribute("tabindex") === "0",
+      );
+    /** Records every report and native change while a swap runs. */
+    const watch = () => {
+      const heard: string[] = [];
+      for (const type of ["change", "monthchange", "reconcile"]) {
+        root().addEventListener(`stimeo--date-range-picker:${type}`, () => heard.push(type));
+      }
+      root().addEventListener("change", (event) =>
+        heard.push(`native:${(event.target as Element).tagName}`),
+      );
+      return heard;
+    };
+
+    it("writes the month on screen into a month label that replaces the current one", async () => {
+      await mount();
+      const original = monthLabel();
+      const shown = original.textContent;
+      const successor = original.cloneNode() as HTMLElement;
+      successor.textContent = "Stale";
+
+      original.replaceWith(successor);
+      await tick();
+
+      expect(monthLabel()).toBe(successor);
+      expect(successor.textContent).toBe(shown);
+    });
+
+    it("writes the month on screen into a month label that stays after an earlier one leaves", async () => {
+      await mount();
+      const original = monthLabel();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.removeAttribute("id");
+      original.after(successor);
+      await tick();
+      const before = successor.textContent;
+      next();
+      await tick();
+      const shown = original.textContent;
+      expect(shown).not.toBe(before);
+
+      original.remove();
+      await tick();
+
+      expect(monthLabel()).toBe(successor);
+      expect(successor.textContent).toBe(shown);
+    });
+
+    it("writes the month on screen into a month label that arrives after the only one left", async () => {
+      await mount();
+      monthLabel().remove();
+      await tick();
+      next();
+      await tick();
+
+      const late = document.createElement("span");
+      late.setAttribute("data-stimeo--date-range-picker-target", "monthLabel");
+      root().prepend(late);
+      await tick();
+
+      expect(late.textContent).toBe("July 2026");
+    });
+
+    it("marks a grid that replaces the current one as multiselectable and paints it", async () => {
+      await mount();
+      const successor = grid().cloneNode(true) as HTMLElement;
+      successor.removeAttribute("aria-multiselectable");
+      for (const stale of successor.querySelectorAll("[role='gridcell']")) {
+        stale.setAttribute("tabindex", "-1");
+      }
+
+      grid().replaceWith(successor);
+      await tick();
+
+      expect(grid()).toBe(successor);
+      expect(successor.getAttribute("aria-multiselectable")).toBe("true");
+      expect(stops(successor)).toHaveLength(1);
+    });
+
+    it("marks a grid that stays after an earlier one leaves as multiselectable and paints it", async () => {
+      await mount();
+      const original = grid();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.removeAttribute("aria-multiselectable");
+      original.after(successor);
+      await tick();
+      click("2026-06-12");
+      await tick();
+      // While both are present the first grid is the target, and its cells come first.
+      expect(original.getAttribute("aria-multiselectable")).toBe("true");
+      expect(stops(successor)).toHaveLength(0);
+
+      original.remove();
+      await tick();
+
+      expect(grid()).toBe(successor);
+      expect(successor.getAttribute("aria-multiselectable")).toBe("true");
+      expect(stops(successor)).toHaveLength(1);
+      expect(cell("2026-06-12").hasAttribute("data-range-start")).toBe(true);
+    });
+
+    it("marks a grid that arrives after the only one left as multiselectable", async () => {
+      await mount();
+      const late = grid().cloneNode(true) as HTMLElement;
+      late.removeAttribute("aria-multiselectable");
+      grid().remove();
+      await tick();
+
+      root().append(late);
+      await tick();
+
+      expect(late.getAttribute("aria-multiselectable")).toBe("true");
+    });
+
+    it.each(["start", "end"] as const)(
+      "writes the confirmed range into a %s field that replaces the current one",
+      async (which) => {
+        await mount();
+        const successor = field(which).cloneNode() as HTMLInputElement;
+        successor.value = "2001-01-01";
+
+        field(which).replaceWith(successor);
+        await tick();
+
+        expect(successor.value).toBe(which === "start" ? "2026-06-10" : "2026-06-20");
+      },
+    );
+
+    it.each(["start", "end"] as const)(
+      "writes the confirmed range into a %s field that stays after an earlier one leaves",
+      async (which) => {
+        await mount();
+        const original = field(which);
+        const successor = original.cloneNode() as HTMLInputElement;
+        original.after(successor);
+        await tick();
+        click("2026-06-12");
+        click("2026-06-14");
+        await tick();
+        const confirmed = which === "start" ? "2026-06-12" : "2026-06-14";
+        // While both are present the first field is the target, so the range went there.
+        expect(original.value).toBe(confirmed);
+        expect(successor.value).toBe(which === "start" ? "2026-06-10" : "2026-06-20");
+
+        original.remove();
+        await tick();
+
+        expect(field(which)).toBe(successor);
+        expect(successor.value).toBe(confirmed);
+      },
+    );
+
+    it.each(["start", "end"] as const)(
+      "writes the confirmed range into a %s field that arrives after the only one left",
+      async (which) => {
+        await mount();
+        field(which).remove();
+        await tick();
+        click("2026-06-12");
+        click("2026-06-14");
+        await tick();
+
+        const late = document.createElement("input");
+        late.type = "hidden";
+        late.setAttribute("data-stimeo--date-range-picker-target", `${which}Field`);
+        root().append(late);
+        await tick();
+
+        expect(late.value).toBe(which === "start" ? "2026-06-12" : "2026-06-14");
+      },
+    );
+
+    it("brings swapped targets up to date without a report, a native change or an announcement", async () => {
+      await mount();
+      click("2026-06-12");
+      click("2026-06-14");
+      await tick();
+      const announced = status().textContent;
+      const heard = watch();
+      const label = monthLabel().cloneNode() as HTMLElement;
+      const start = field("start").cloneNode() as HTMLInputElement;
+      start.value = "";
+      const freshStatus = status().cloneNode() as HTMLElement;
+
+      monthLabel().replaceWith(label);
+      field("start").replaceWith(start);
+      status().replaceWith(freshStatus);
+      await tick();
+
+      expect(label.textContent).toBe("June 2026");
+      expect(start.value).toBe("2026-06-12");
+      expect(heard).toEqual([]);
+      // The status announces what the user confirms, so a swap leaves the new one empty.
+      expect(announced).toBe("2026-06-12 – 2026-06-14");
+      expect(freshStatus.textContent).toBe("");
+    });
+
+    it("announces the next confirmation in a status replaced in one task", async () => {
+      await mount();
+      click("2026-06-12");
+      click("2026-06-14");
+      await tick();
+      const successor = status().cloneNode() as HTMLElement;
+      status().replaceWith(successor);
+      await tick();
+      expect(successor.textContent).toBe("");
+
+      click("2026-06-15");
+      click("2026-06-18");
+      await tick();
+
+      expect(successor.textContent).toBe("2026-06-15 – 2026-06-18");
+    });
+
+    it("announces the next confirmation in the status that stays after an earlier one leaves", async () => {
+      await mount();
+      click("2026-06-12");
+      click("2026-06-14");
+      await tick();
+      const original = status();
+      const successor = original.cloneNode() as HTMLElement;
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      click("2026-06-15");
+      click("2026-06-18");
+      await tick();
+
+      expect(status()).toBe(successor);
+      expect(successor.textContent).toBe("2026-06-15 – 2026-06-18");
+    });
+
+    it("keeps working when its only month label, field or grid leaves", async () => {
+      await mount();
+      const handleError = vi.spyOn(application, "handleError").mockImplementation(() => {});
+
+      monthLabel().remove();
+      field("start").remove();
+      field("end").remove();
+      await tick();
+      next();
+      grid().remove();
+      await tick();
+
+      expect(handleError).not.toHaveBeenCalled();
+    });
+
+    it("writes nothing into targets that stay once disconnected", async () => {
+      await mount();
+      const instance = controller();
+      const label = monthLabel();
+      const labelAfter = label.cloneNode() as HTMLElement;
+      labelAfter.textContent = "Page";
+      label.after(labelAfter);
+      const start = field("start");
+      const startAfter = start.cloneNode() as HTMLInputElement;
+      startAfter.value = "2001-01-01";
+      start.after(startAfter);
+      const gridNow = grid();
+      const gridAfter = document.createElement("div");
+      gridAfter.setAttribute("data-stimeo--date-range-picker-target", "grid");
+      gridNow.after(gridAfter);
+      await tick();
+
+      instance.disconnect();
+      label.remove();
+      start.remove();
+      gridNow.remove();
+      instance.monthLabelTargetDisconnected();
+      instance.startFieldTargetDisconnected();
+      instance.gridTargetDisconnected(gridNow);
+      await tick();
+
+      expect(labelAfter.textContent).toBe("Page");
+      expect(startAfter.value).toBe("2001-01-01");
+      expect(gridAfter.hasAttribute("aria-multiselectable")).toBe(false);
+    });
+
+    it("gives a grid that loses its token its own aria-multiselectable back", async () => {
+      await mount();
+      const original = grid();
+      expect(original.getAttribute("aria-multiselectable")).toBe("true");
+
+      original.removeAttribute("data-stimeo--date-range-picker-target");
+      await tick();
+
+      expect(original.isConnected).toBe(true);
+      expect(original.hasAttribute("aria-multiselectable")).toBe(false);
+    });
+
+    it("keeps a value the page wrote on a grid that loses its token", async () => {
+      await mount();
+      const original = grid();
+      original.setAttribute("aria-multiselectable", "false");
+
+      original.removeAttribute("data-stimeo--date-range-picker-target");
+      await tick();
+
+      expect(original.getAttribute("aria-multiselectable")).toBe("false");
+    });
+
+    it("gives the grid its own aria-multiselectable back when the identifier leaves", async () => {
+      await mount();
+      const original = grid();
+
+      root().setAttribute("data-controller", "");
+      await tick();
+
+      expect(original.hasAttribute("aria-multiselectable")).toBe(false);
+    });
+
+    it("keeps aria-multiselectable on a grid that moves within the picker", async () => {
+      await mount();
+      const original = grid();
+      const writes: Array<string | null> = [];
+      const observer = new MutationObserver((records) => {
+        for (const record of records)
+          writes.push(original.getAttribute(record.attributeName ?? ""));
+      });
+      observer.observe(original, { attributes: true, attributeFilter: ["aria-multiselectable"] });
+
+      root().append(original);
+      await tick();
+      observer.disconnect();
+
+      // Not taken off and put back: the grid stays the target, so nothing is given back.
+      expect(writes).toEqual([]);
+      expect(original.getAttribute("aria-multiselectable")).toBe("true");
     });
   });
 });

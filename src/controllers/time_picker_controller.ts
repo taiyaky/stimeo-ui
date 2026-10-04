@@ -1,7 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { commitField, writeField } from "../utils/field_mirror";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { targetSelector } from "../utils/target_selector";
 
 /** A time segment kind, as declared by `data-segment` on each spinbutton. */
@@ -47,6 +50,12 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  *
  * `reconcile` dispatches `{ value: string }`.
  *
+ * All published state is settled before its reports. A synchronous listener
+ * that confirms another value leaves that newer confirmation to report itself;
+ * reports still pending for the replaced value are not sent. A read-only listener
+ * or a confirmation that moves no published value leaves pending reports intact.
+ * An event already being dispatched still reaches its remaining listeners.
+ *
  * @remarks
  * `segment` targets declare the spinbuttons; the optional `field` target receives
  * the composed form value. `hourCycle` selects 12- or 24-hour presentation
@@ -61,7 +70,8 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  * step the focused spinbutton; wrapping seconds or minutes carries into the next
  * unit, and 12-hour stepping crosses AM/PM at noon and midnight. Typing digits
  * enters a value directly and advances after completion. The digit buffer is
- * discarded on another action, target replacement, or focus departure.
+ * discarded on another action, a segment target change, a page write taken in
+ * from a segment, or focus departure.
  *
  * A user action that changes the composed value dispatches exactly one bubbling
  * native `change` from the field, when present, and one
@@ -74,6 +84,12 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  * Initial connection reports neither.
  */
 export class TimePickerController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
+  readonly #moves = new MoveCounter();
+  #move = 0;
+
   static override targets = ["segment", "field"];
   static override values = {
     hourCycle: { type: Number, default: 24 },
@@ -81,6 +97,11 @@ export class TimePickerController extends Controller<HTMLElement> {
     seconds: { type: Boolean, default: false },
     wrap: { type: Boolean, default: true },
   };
+
+  static valueConstraints = {
+    hourCycle: { finite: true, allowedValues: [12, 24] },
+    step: NUMBER_BOUNDS.positive,
+  } satisfies NumberValueConstraints<typeof TimePickerController.values>;
   static actions = ["onKeydown"] as const;
   static events = ["change", "reconcile"] as const;
 
@@ -96,7 +117,7 @@ export class TimePickerController extends Controller<HTMLElement> {
    * Collapses target, Value, and retained-attribute morphs into one render that
    * dispatches no `change`.
    */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileDom());
+  readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileDom());
   /** Canonical state; the displayed hour and meridiem are derived from this value. */
   #state: TimeState = { hour: 0, minute: 0, second: 0 };
   /** Direct-entry digit buffer and the segment it belongs to. */
@@ -106,12 +127,16 @@ export class TimePickerController extends Controller<HTMLElement> {
   #lastValue = "";
   #observer: MutationObserver | null = null;
   #connected = false;
+  /**
+   * Whether the segments changed since state was last adopted from them. The next
+   * adoption also discards the direct-entry buffer, and runs before any key reads it.
+   */
   #domDirty = false;
 
   /** Seeds state from the DOM, renders canonical ARIA, and starts morph observation. */
   override connect(): void {
     this.#connected = true;
-    this.#reconcile.activate();
+    this.#reconcile.observe(this.element);
     this.element.addEventListener("focusout", this.#onFocusOut);
     this.#domDirty = false;
     this.#adoptDomState();
@@ -122,7 +147,7 @@ export class TimePickerController extends Controller<HTMLElement> {
   /** Releases the observer, listener, queued reconciliation, and transient input state. */
   override disconnect(): void {
     this.#connected = false;
-    this.#reconcile.cancel();
+    this.#reconcile.disconnect();
     this.element.removeEventListener("focusout", this.#onFocusOut);
     this.#observer?.disconnect();
     this.#observer = null;
@@ -144,14 +169,12 @@ export class TimePickerController extends Controller<HTMLElement> {
   /** Adopts a segment inserted or replaced by a Turbo morph. */
   segmentTargetConnected(): void {
     this.#domDirty = true;
-    this.#clearTypeBuffer();
     this.#reconcile.schedule();
   }
 
   /** Rebuilds state after a segment leaves the retained controller element. */
   segmentTargetDisconnected(): void {
     this.#domDirty = true;
-    this.#clearTypeBuffer();
     this.#reconcile.schedule();
   }
 
@@ -178,6 +201,10 @@ export class TimePickerController extends Controller<HTMLElement> {
     const key = logicalArrowKey(event.key, this.element);
     if ((key === "Home" || key === "End") && hasModifier(event)) return;
 
+    // Taking in the page's writes consumes the records the observer would have
+    // answered, so the pass it would have queued is queued here. A key that renders
+    // leaves that pass nothing to report.
+    if (this.#adoptPendingDom()) this.#reconcile.schedule();
     switch (key) {
       case "ArrowUp":
         event.preventDefault();
@@ -228,8 +255,8 @@ export class TimePickerController extends Controller<HTMLElement> {
   /** Uses the normalized positive-integer minute step; other segments step by one. */
   #delta(kind: SegmentKind): number {
     if (kind !== "minute") return 1;
-    const step = Math.trunc(this.stepValue);
-    return Number.isFinite(step) && step > 0 ? step : 1;
+    const step = Math.trunc(this.#safeStep);
+    return step > 0 ? step : 1;
   }
 
   /** Mutates one complete action and then renders/notifies its final value once. */
@@ -284,13 +311,25 @@ export class TimePickerController extends Controller<HTMLElement> {
     this.#typeSegment = null;
   }
 
+  /**
+   * Adopts authored segment state before a synchronous user operation consumes it,
+   * and reports whether it did.
+   */
+  #adoptPendingDom(): boolean {
+    const pending = this.#observer?.takeRecords() ?? [];
+    if (pending.some(({ target }) => this.segmentTargets.includes(target as HTMLElement))) {
+      this.#domDirty = true;
+    }
+    if (!this.#domDirty) return false;
+    this.#domDirty = false;
+    this.#clearTypeBuffer();
+    this.#adoptDomState();
+    return true;
+  }
+
   /** Reconciles one coalesced target, Value, or retained-attribute mutation batch. */
   #reconcileDom(): void {
-    if (this.#domDirty) {
-      this.#domDirty = false;
-      this.#clearTypeBuffer();
-      this.#adoptDomState();
-    }
+    this.#adoptPendingDom();
     this.#render();
   }
 
@@ -313,7 +352,7 @@ export class TimePickerController extends Controller<HTMLElement> {
 
     this.#state = {
       hour:
-        this.hourCycleValue === 12
+        this.#safeHourCycle === 12
           ? (displayedHour % 12) + (meridiem === PM ? 12 : 0)
           : displayedHour,
       minute,
@@ -335,7 +374,7 @@ export class TimePickerController extends Controller<HTMLElement> {
     const value = Math.min(max, Math.max(min, Math.trunc(raw)));
     if (kind === "hour") {
       this.#state.hour =
-        this.hourCycleValue === 12 ? (value % 12) + (this.#state.hour >= 12 ? 12 : 0) : value;
+        this.#safeHourCycle === 12 ? (value % 12) + (this.#state.hour >= 12 ? 12 : 0) : value;
     } else if (kind === "minute" || kind === "second") {
       this.#state[kind] = value;
     } else {
@@ -378,6 +417,7 @@ export class TimePickerController extends Controller<HTMLElement> {
     // user's, so it is reported apart from `change`. The empty baseline is the
     // initial connection, which reports nothing.
     if (previous !== "" && value !== previous) {
+      this.#move = this.#moves.record();
       this.dispatch("reconcile", { detail: { value } });
     }
   }
@@ -386,9 +426,13 @@ export class TimePickerController extends Controller<HTMLElement> {
   #commitRender(): void {
     this.#renderSegments();
     const value = this.#composedValue;
-    if (this.#writeField(value)) commitField(this.fieldTarget);
-    if (value !== this.#lastValue) this.dispatch("change", { detail: { value } });
+    const changed = value !== this.#lastValue;
     this.#lastValue = value;
+    if (changed) this.#move = this.#moves.record();
+    const move = this.#move;
+    if (this.#writeField(value)) commitField(this.fieldTarget);
+    if (!this.#moves.isLatest(move)) return;
+    if (changed) this.dispatch("change", { detail: { value } });
   }
 
   /** Reflects one segment's value and controller-owned ARIA bounds/text. */
@@ -421,7 +465,7 @@ export class TimePickerController extends Controller<HTMLElement> {
   /** Returns a canonical unit in the presentation form exposed by its segment. */
   #displayValue(kind: SegmentKind): number {
     if (kind === "hour") {
-      return this.hourCycleValue === 12 ? this.#state.hour % 12 || 12 : this.#state.hour;
+      return this.#safeHourCycle === 12 ? this.#state.hour % 12 || 12 : this.#state.hour;
     }
     if (kind === "meridiem") return this.#state.hour >= 12 ? PM : AM;
     return this.#state[kind];
@@ -431,7 +475,7 @@ export class TimePickerController extends Controller<HTMLElement> {
   #bounds(kind: SegmentKind): { min: number; max: number } {
     switch (kind) {
       case "hour":
-        return this.hourCycleValue === 12 ? { min: 1, max: 12 } : { min: 0, max: 23 };
+        return this.#safeHourCycle === 12 ? { min: 1, max: 12 } : { min: 0, max: 23 };
       case "minute":
       case "second":
         return { min: 0, max: 59 };
@@ -448,7 +492,6 @@ export class TimePickerController extends Controller<HTMLElement> {
       );
       if (!changed) return;
       this.#domDirty = true;
-      this.#clearTypeBuffer();
       this.#reconcile.schedule();
     });
     this.#observer = observer;
@@ -490,6 +533,27 @@ export class TimePickerController extends Controller<HTMLElement> {
       this.#state.hour * SECONDS_PER_HOUR +
       this.#state.minute * SECONDS_PER_MINUTE +
       this.#state.second
+    );
+  }
+  /** Current `hourCycle` declaration resolved against its numeric contract. */
+  get #safeHourCycle(): number {
+    return this.#numbers.read(
+      this,
+      "hourCycle",
+      this.hourCycleValue,
+      TimePickerController.values.hourCycle.default,
+      TimePickerController.valueConstraints.hourCycle,
+    );
+  }
+
+  /** Current `step` declaration resolved against its numeric contract. */
+  get #safeStep(): number {
+    return this.#numbers.read(
+      this,
+      "step",
+      this.stepValue,
+      TimePickerController.values.step.default,
+      TimePickerController.valueConstraints.step,
     );
   }
 }

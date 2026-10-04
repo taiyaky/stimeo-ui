@@ -1,6 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeInterval } from "../utils/safe_timeout";
 
 /** Display granularity: the slots render whole seconds, so amounts snap to these. */
@@ -71,9 +73,15 @@ const OWNED_STATUS = "owns-status";
  * source of truth — `autostart` only decides the state of a timer whose markup does
  * not carry one. The interval is owned by `SafeInterval` and torn down on
  * `disconnect()` (Turbo navigation included); nothing else needs carrying across,
- * because every reading is re-derived from `deadline` and the wall clock.
+ * because every reading is re-derived from `deadline` and the wall clock. A change to
+ * `interval` while the timer runs re-arms the tick at the new period, keeping the run
+ * state, the reading and the completion; a paused or completed timer picks it up when
+ * it next runs.
  */
 export class CountdownController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   /** The status marker, in the namespace this controller is registered under. */
   get #ownedStatus(): string {
     return `data-${this.identifier}-${OWNED_STATUS}`;
@@ -88,6 +96,10 @@ export class CountdownController extends Controller<HTMLElement> {
     completeLabel: { type: String, default: "" },
     announceText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    interval: NUMBER_BOUNDS.positiveTimer,
+  } satisfies NumberValueConstraints<typeof CountdownController.values>;
   static actions = ["pause", "reset", "resume", "start"] as const;
   static events = ["complete", "tick"] as const;
 
@@ -96,6 +108,7 @@ export class CountdownController extends Controller<HTMLElement> {
   declare readonly minutesTarget: HTMLElement;
   declare readonly secondsTarget: HTMLElement;
   declare readonly statusTarget: HTMLElement;
+  declare readonly statusTargets: HTMLElement[];
   declare readonly hasDaysTarget: boolean;
   declare readonly hasHoursTarget: boolean;
   declare readonly hasMinutesTarget: boolean;
@@ -111,8 +124,10 @@ export class CountdownController extends Controller<HTMLElement> {
 
   readonly #intervals = new SafeInterval();
   #intervalId: number | null = null;
+  /** The period the running interval was armed with, which a new `interval` is compared with. */
+  #armedPeriod = 0;
   /** Collapses a morph that swaps several render inputs at once into one re-derive. */
-  readonly #resync = new MicrotaskCoalescer(() => this.#resyncToValues());
+  readonly #resync = new MorphRenderWatcher(() => this.#resyncToValues());
   /**
    * Whether `connect()` has run for this connection. Stimulus delivers Value
    * callbacks ahead of it, while the run state is still the markup's own and not
@@ -131,10 +146,14 @@ export class CountdownController extends Controller<HTMLElement> {
    * makes the first tick after a resume step by two units.
    */
   #renderedAmount = 0;
+  #phase = "paused";
+  #valuesDirty = false;
+  readonly #statusWrites = new WeakMap<HTMLElement, { original: string; text: string }>();
 
   override connect(): void {
     this.#connected = true;
-    this.#resync.activate();
+    this.#resync.observe(this.element);
+    this.#valuesDirty = false;
     this.#initReference();
     const amount = this.#currentAmount();
     this.#render(amount);
@@ -143,6 +162,7 @@ export class CountdownController extends Controller<HTMLElement> {
     this.#pausedAmount = this.#renderedAmount;
 
     const authored = this.element.getAttribute("data-state");
+    this.#phase = authored ?? "paused";
     // A completion that is still settled stands. Dropping it to the resting state
     // would let a later resume() cross zero a second time and announce the same
     // completion again; only a reading that no longer settles it — a deadline
@@ -152,13 +172,13 @@ export class CountdownController extends Controller<HTMLElement> {
       // Nothing to honor: this is the declarative first render, which is the only
       // thing `autostart` governs.
       if (this.autostartValue && this.#isValidDeadline) this.start();
-      else this.element.setAttribute("data-state", "paused");
+      else this.#setPhase("paused");
     } else if (!settled) {
       // A pause the user made survives the round trip, but nothing carries a live
       // timer across it — a restored "running" has to be re-armed here or it renders
       // once and freezes, because start() is a no-op while the attribute still says
       // "running".
-      this.element.setAttribute("data-state", "paused");
+      this.#setPhase("paused");
       if (authored === "running") this.start();
     }
     // Value callbacks ran ahead of this, before the run state above was settled, so a
@@ -168,18 +188,78 @@ export class CountdownController extends Controller<HTMLElement> {
 
   override disconnect(): void {
     this.#connected = false;
-    this.#resync.cancel();
+    this.#resync.disconnect();
     this.#intervals.clearAll();
     this.#intervalId = null;
   }
 
+  /** Writes the reading on screen into a days slot that arrives at runtime. */
+  daysTargetConnected(): void {
+    this.#resync.schedule();
+  }
+
+  /** Writes the reading on screen into the days slot that stays after another leaves. */
+  daysTargetDisconnected(): void {
+    this.#resync.schedule();
+  }
+
+  /** Writes the reading on screen into an hours slot that arrives at runtime. */
+  hoursTargetConnected(): void {
+    this.#resync.schedule();
+  }
+
+  /** Writes the reading on screen into the hours slot that stays after another leaves. */
+  hoursTargetDisconnected(): void {
+    this.#resync.schedule();
+  }
+
+  /** Writes the reading on screen into a minutes slot that arrives at runtime. */
+  minutesTargetConnected(): void {
+    this.#resync.schedule();
+  }
+
+  /** Writes the reading on screen into the minutes slot that stays after another leaves. */
+  minutesTargetDisconnected(): void {
+    this.#resync.schedule();
+  }
+
+  /** Writes the reading on screen into a seconds slot that arrives at runtime. */
+  secondsTargetConnected(): void {
+    this.#resync.schedule();
+  }
+
+  /** Writes the reading on screen into the seconds slot that stays after another leaves. */
+  secondsTargetDisconnected(): void {
+    this.#resync.schedule();
+  }
+
+  /** Brings a status that arrives at runtime, when it shows this controller's text, in line. */
+  statusTargetConnected(): void {
+    this.#resync.schedule();
+  }
+
+  /**
+   * Takes the claim off a status that no longer resolves, even after `disconnect()`, when
+   * it still shows this controller's text alone; the text stays. Brings the status that
+   * stays in line.
+   */
+  statusTargetDisconnected(status: HTMLElement): void {
+    if (!this.statusTargets.includes(status) && this.#ownsStatus(status)) {
+      status.removeAttribute(this.#ownedStatus);
+      this.#statusWrites.delete(status);
+    }
+    this.#resync.schedule();
+  }
+
   /** Re-derives the display when a morph swaps the deadline in place. */
   deadlineValueChanged(): void {
+    this.#valuesDirty = true;
     this.#resync.schedule();
   }
 
   /** Re-derives the display when a morph flips the counting direction in place. */
   directionValueChanged(): void {
+    this.#valuesDirty = true;
     this.#resync.schedule();
   }
 
@@ -194,6 +274,20 @@ export class CountdownController extends Controller<HTMLElement> {
    */
   completeLabelValueChanged(): void {
     if (this.#connected) this.#syncStatus();
+  }
+
+  /**
+   * Follows a tick period changed at runtime. A running countdown swaps its one interval
+   * for one at the new period, starting from now; its run state, reading, deadline and
+   * completion are untouched, and nothing ticks or repaints until the next period ends. A
+   * paused or completed countdown starts nothing and uses the new period when it next
+   * runs, and a declaration that resolves to the period already running changes nothing.
+   * Stimulus also calls this ahead of `connect()`, when no interval runs.
+   */
+  intervalValueChanged(): void {
+    if (this.#intervalId === null || this.#armedPeriod === this.#safeInterval) return;
+    this.#teardownInterval();
+    this.#armTick();
   }
 
   /**
@@ -215,24 +309,36 @@ export class CountdownController extends Controller<HTMLElement> {
    *
    * Render only: it starts no interval and emits no event, so a morph cannot make a
    * paused timer run or replay a milestone. A running one needs no restart either —
-   * every tick reads the anchor, so moving it is enough. While paused the stored
-   * amount follows the new reading, or resume would continue from the old deadline.
-   * A completion the new reading no longer settles (a deadline moved forward, or a
-   * count turned `up`) is handed back paused, as `connect()` hands back a restored
-   * one, so `resume()` counts again; the completion text this controller wrote goes
-   * with it, from a status slot that still shows it and nothing else.
+   * every tick reads the anchor, so moving it is enough. A running one left without a
+   * parseable deadline stops instead and rests paused at zero, since `start()` and
+   * `resume()` arm nothing on such an anchor; a parseable deadline declared later
+   * repaints it and waits for `resume()`. While paused the stored amount follows the
+   * new reading, or resume would continue from the old deadline. A completion the new
+   * reading no longer settles (a deadline moved forward, or a count turned `up`) is
+   * handed back paused, as `connect()` hands back a restored one, so `resume()` counts
+   * again; the completion text this controller wrote goes with it, from a status slot
+   * that still shows it and nothing else.
    *
    * @stimeoRenderRoot
    */
   #resyncToValues(): void {
+    this.#setPhase(this.#state);
+    if (!this.#valuesDirty) {
+      this.#render(this.#renderedAmount);
+      this.#syncStatus();
+      return;
+    }
+    this.#valuesDirty = false;
     this.#initReference();
     const amount = this.#currentAmount();
     this.#render(amount);
-    if (this.#state === "complete" && !this.#isSettled(amount)) {
-      this.element.setAttribute("data-state", "paused");
-      this.#syncStatus();
+    if (this.#state === "running" && !this.#isValidDeadline) {
+      this.#teardownInterval();
+      this.#setPhase("paused");
     }
+    if (this.#state === "complete" && !this.#isSettled(amount)) this.#setPhase("paused");
     if (this.#state !== "running") this.#pausedAmount = this.#renderedAmount;
+    this.#syncStatus();
   }
 
   /**
@@ -256,7 +362,7 @@ export class CountdownController extends Controller<HTMLElement> {
     if (this.#state !== "running") return;
     this.#pausedAmount = this.#renderedAmount;
     this.#teardownInterval();
-    this.element.setAttribute("data-state", "paused");
+    this.#setPhase("paused");
   }
 
   /** Resumes from a pause, continuing from the preserved amount. */
@@ -284,7 +390,7 @@ export class CountdownController extends Controller<HTMLElement> {
     this.#render(amount);
     // teardownInterval() leaves data-state untouched; drop any lingering "running" to a
     // resting "paused" so start() (a no-op while "running") can re-arm when we resume.
-    this.element.setAttribute("data-state", "paused");
+    this.#setPhase("paused");
     // A reset timer has left the complete state, so the completion text this
     // controller wrote leaves the status slot with it; a slot the consumer rewrote or
     // put an element in stays as it is.
@@ -307,14 +413,21 @@ export class CountdownController extends Controller<HTMLElement> {
    * text in the status, so the status is settled here as on every other way out of
    * `complete`: `start()` leaves a completion directly when `direction` flips to
    * `up` and `start()` runs in the same task, ahead of the direction callback.
-   *
-   * @stimeoRuntimeOnly `interval` is the period of the one timer this call arms; the running state
-   *   it writes does not depend on a Value.
    */
   #runInterval(): void {
-    this.element.setAttribute("data-state", "running");
+    this.#setPhase("running");
     this.#syncStatus();
-    this.#intervalId = this.#intervals.set(() => this.#tick(), this.intervalValue);
+    this.#armTick();
+  }
+
+  /**
+   * Arms the repeating tick at the declared period and records that period.
+   *
+   * @stimeoRuntimeOnly `interval` is the period of the one timer this call arms.
+   */
+  #armTick(): void {
+    this.#armedPeriod = this.#safeInterval;
+    this.#intervalId = this.#intervals.set(() => this.#tick(), this.#armedPeriod);
   }
 
   /** Cancels the repeating tick, if any. */
@@ -342,13 +455,11 @@ export class CountdownController extends Controller<HTMLElement> {
   /**
    * Stops at zero, marks completion, writes the completion label, emits `complete`,
    * and announces it.
-   *
-   * @stimeoRenderRoot
    */
   #complete(): void {
     this.#teardownInterval();
     this.#render(0);
-    this.element.setAttribute("data-state", "complete");
+    this.#setPhase("complete");
     this.#claimStatus();
     this.dispatch("complete", { detail: {} });
     this.#announceCompletion();
@@ -376,6 +487,14 @@ export class CountdownController extends Controller<HTMLElement> {
    * matches the slot whenever it is empty.
    */
   #ownsStatus(status: HTMLElement): boolean {
+    const held = this.#statusWrites.get(status);
+    if (
+      !status.hasAttribute(this.#ownedStatus) &&
+      held &&
+      status.firstElementChild === null &&
+      (status.textContent === held.text || status.textContent === held.original)
+    )
+      return true;
     return (
       status.getAttribute(this.#ownedStatus) === status.textContent &&
       status.firstElementChild === null
@@ -389,14 +508,18 @@ export class CountdownController extends Controller<HTMLElement> {
 
   /** Puts `text` into the status slot and records it as this controller's. */
   #writeStatus(status: HTMLElement, text: string): void {
+    const original = this.#statusWrites.get(status)?.original ?? status.textContent ?? "";
+    this.#statusWrites.set(status, { original, text });
     if (status.textContent !== text) status.textContent = text;
-    status.setAttribute(this.#ownedStatus, text);
+    if (status.getAttribute(this.#ownedStatus) !== text)
+      status.setAttribute(this.#ownedStatus, text);
   }
 
   /** Takes this controller's text out of the status slot, marker and all. */
   #releaseStatus(status: HTMLElement): void {
     status.textContent = "";
     status.removeAttribute(this.#ownedStatus);
+    this.#statusWrites.delete(status);
   }
 
   /**
@@ -456,8 +579,24 @@ export class CountdownController extends Controller<HTMLElement> {
     return !Number.isNaN(this.#reference);
   }
 
+  /** Publishes the phase and retains it while a morph removes its output. */
+  #setPhase(phase: string): void {
+    this.#phase = phase;
+    this.element.setAttribute("data-state", phase);
+  }
+
   /** Current lifecycle phase as reflected on `data-state`. */
   get #state(): string {
-    return this.element.getAttribute("data-state") ?? "paused";
+    return this.element.getAttribute("data-state") ?? this.#phase;
+  }
+  /** Current `interval` declaration resolved against its numeric contract. */
+  get #safeInterval(): number {
+    return this.#numbers.read(
+      this,
+      "interval",
+      this.intervalValue,
+      CountdownController.values.interval.default,
+      CountdownController.valueConstraints.interval,
+    );
   }
 }

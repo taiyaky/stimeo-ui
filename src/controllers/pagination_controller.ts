@@ -1,7 +1,13 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { canTakeFocus } from "../utils/focus_candidate";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
+import { type StateReason, stateReasonFor } from "../utils/state_reason";
 import { TabindexLoan } from "../utils/tabindex_loan";
+import { targetSelector } from "../utils/target_selector";
 
 /**
  * Headless, accessible pagination behavior.
@@ -28,10 +34,19 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * `prev`/`next` must be real `<button>` elements: the boundary state is applied
  * through the native `disabled` property, which a `<div>` or `<a>` does not honor.
  *
- * `change` dispatches `{ page: number, total: number, previous: number }`, and
- * `reconcile` dispatches the same `{ page: number, total: number, previous: number }`
+ * `change` dispatches `{ page: number, total: number, previous: number, reason: StateReason }`;
+ * `reconcile` dispatches `{ page: number, total: number, previous: number }`
  * — `previous` is the page shown before — when a change the page made moves the
  * current page.
+ *
+ * User `change` reports compare the resulting state with the last published
+ * state. A pending page write handled in the same script joins that confirmation;
+ * a browser-delivered listener may settle it first as `reconcile`. Confirming
+ * the last published state reports nothing.
+ *
+ * A synchronous subscriber that confirms another state replaces reports still
+ * pending for the outer confirmation. Reading state or confirming it unchanged
+ * does not replace them. An event already being dispatched cannot be recalled.
  *
  * @remarks
  * Behavior only — each control is in the natural Tab order (no roving). When a
@@ -55,7 +70,7 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  *   Once connected, a batch that moves the current page away from the one shown
  *   dispatches `stimeo--pagination:reconcile` once; the initial render reports
  *   nothing.
- * - Every navigation dispatches `stimeo--pagination:change`, whose `detail.total`
+ * - A navigation that moves the published page dispatches `stimeo--pagination:change`, whose `detail.total`
  *   is the same clamped total the boundary state is derived from.
  *
  * The boundary `disabled` is **owned**: the controller marks what it disabled
@@ -67,11 +82,21 @@ import { TabindexLoan } from "../utils/tabindex_loan";
  * strand or steal the flag.
  */
 export class PaginationController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
+  readonly #moves = new MoveCounter();
+  #moveToken = 0;
   static override targets = ["page", "prev", "next"];
   static override values = {
     page: { type: Number, default: 1 },
     total: { type: Number, default: 1 },
   };
+
+  static valueConstraints = {
+    page: NUMBER_BOUNDS.finite,
+    total: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof PaginationController.values>;
   static actions = ["next", "prev", "select"] as const;
   static events = ["change", "reconcile"] as const;
 
@@ -82,34 +107,37 @@ export class PaginationController extends Controller<HTMLElement> {
 
   declare readonly pageTargets: HTMLElement[];
   declare readonly prevTarget: HTMLButtonElement;
+  declare readonly prevTargets: HTMLButtonElement[];
   declare readonly nextTarget: HTMLButtonElement;
+  declare readonly nextTargets: HTMLButtonElement[];
   declare readonly hasPrevTarget: boolean;
   declare readonly hasNextTarget: boolean;
   declare pageValue: number;
   declare totalValue: number;
 
   /** The `tabindex` this instance lends the root for the focus fallback. */
-  readonly #tabindex = new TabindexLoan();
+  readonly #tabindex = new TabindexLoan("-1", this.identifier);
 
   /**
    * Collapses the Value and target callbacks of one mutation into one pass, and
    * refuses the ones Stimulus delivers before `connect()`, which renders itself.
    */
-  readonly #repaint = new MicrotaskCoalescer(() => this.#reconcilePage());
+  readonly #repaint = new MorphRenderWatcher(() => this.#reconcilePage());
 
   /** The page shown last, which the next move of the current page is measured from. */
   #shown = 1;
 
   /** Renders the initial state from the clamped `page` and `total`. */
   override connect(): void {
-    this.#repaint.activate();
+    this.#tabindex.reclaim(this.element);
+    this.#repaint.observe(this.element);
     this.#shown = this.#page;
     this.#render();
   }
 
   /** Drops a pending pass and reverts the one attribute added outside the state hooks. */
   override disconnect(): void {
-    this.#repaint.cancel();
+    this.#repaint.disconnect();
     this.#tabindex.returnAll();
   }
 
@@ -133,46 +161,71 @@ export class PaginationController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
+  /**
+   * Gives a `prev` that is no longer a target back the boundary `disabled` this
+   * controller set, and brings the one that stays to the current boundary state.
+   */
+  prevTargetDisconnected(button: HTMLButtonElement): void {
+    this.#releaseDeparted(button, this.prevTargets);
+    this.#repaint.schedule();
+  }
+
   /** Syncs a `next` button appended/replaced at runtime. */
   nextTargetConnected(): void {
     this.#repaint.schedule();
   }
 
+  /**
+   * Gives a `next` that is no longer a target back the boundary `disabled` this
+   * controller set, and brings the one that stays to the current boundary state.
+   */
+  nextTargetDisconnected(button: HTMLButtonElement): void {
+    this.#releaseDeparted(button, this.nextTargets);
+    this.#repaint.schedule();
+  }
+
   /** Makes the clicked page button (its `data-page`) current. */
-  select(event: Event): void {
-    const button = event.currentTarget as HTMLElement;
+  select(source: Event | HTMLElement): void {
+    const { host, origin, reason } = actionSource(source);
+    const button = host?.closest<HTMLElement>(targetSelector(this.identifier, "page"));
+    if (!button || !this.pageTargets.includes(button)) return;
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
     const raw = button.dataset.page;
     if (raw === undefined || raw.trim() === "") return;
     const page = Number(raw);
     // Integer-only, matching `stimeo--stepper`: `Number("")` is 0 and `Number("2.7")`
     // is a fraction, so a bare finite check would accept meaningless page numbers.
     if (!Number.isInteger(page)) return;
-    this.#goto(page);
+    this.#goto(page, reason);
   }
 
   /** Steps to the previous page. */
-  prev(): void {
-    this.#goto(this.#page - 1);
+  prev(event?: Event): void {
+    this.#goto(this.#page - 1, stateReasonFor(event));
   }
 
   /** Steps to the next page. */
-  next(): void {
-    this.#goto(this.#page + 1);
+  next(event?: Event): void {
+    this.#goto(this.#page + 1, stateReasonFor(event));
   }
 
   /** Moves to `page` (clamped to `[1, total]`), re-renders, and dispatches `change`. */
-  #goto(page: number): void {
-    if (!Number.isFinite(page)) return;
-    const previous = this.#page;
+  #goto(page: number, reason: StateReason): void {
+    const previous = this.#shown;
     const target = this.#clamp(page);
-    if (target === previous) return;
+    if (target === previous && target === this.#page) return;
     this.pageValue = target;
     // Settled before the report, so the pass the Value write starts finds the page
     // already shown, and a listener that navigates on is measured from this page.
     this.#shown = target;
+    const changed = target !== previous;
+    if (changed) this.#moveToken = this.#moves.record();
+    const token = this.#moveToken;
     this.#render();
+    if (!changed || !this.#moves.isLatest(token)) return;
     this.dispatch("change", {
-      detail: { page: target, total: this.#total, previous },
+      detail: { page: target, total: this.#total, previous, reason },
     });
   }
 
@@ -184,8 +237,9 @@ export class PaginationController extends Controller<HTMLElement> {
     const previous = this.#shown;
     const page = this.#page;
     this.#shown = page;
+    const token = this.#moveToken;
     this.#render();
-    if (page !== previous) {
+    if (page !== previous && this.#moves.isLatest(token)) {
       this.dispatch("reconcile", { detail: { page, total: this.#total, previous } });
     }
   }
@@ -199,6 +253,7 @@ export class PaginationController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #render(): void {
+    const token = this.#moveToken;
     const page = this.#page;
     for (const button of this.pageTargets) {
       if (Number(button.dataset.page) === page) {
@@ -212,17 +267,16 @@ export class PaginationController extends Controller<HTMLElement> {
     const next = this.hasNextTarget ? this.nextTarget : null;
     const atStart = page <= 1;
     const atEnd = page >= this.#total;
-    // Resolve both post-render states up front: a focus hand-off must target the
-    // opposite button as it will be *after* this pass, not as it is now (moving
-    // between the two boundaries of a 2-page set re-enables it in the same pass).
-    const prevStaysDisabled = this.#disabledAfter(prev, atStart);
+    // Resolve the next button's future state before disabling the previous one.
+    // The previous button is already settled when the next one hands focus off.
     const nextStaysDisabled = this.#disabledAfter(next, atEnd);
     // Release before disabling, so the hand-off can land on a button this same
     // pass re-enables (focusing a still-`disabled` button is a no-op).
     this.#release(prev, atStart);
     this.#release(next, atEnd);
     this.#disable(prev, atStart, nextStaysDisabled ? null : next);
-    this.#disable(next, atEnd, prevStaysDisabled ? null : prev);
+    if (!this.#moves.isLatest(token)) return;
+    this.#disable(next, atEnd, prev);
   }
 
   /** Whether a boundary button will still be `disabled` once this render applies. */
@@ -231,6 +285,16 @@ export class PaginationController extends Controller<HTMLElement> {
     if (atBoundary) return true;
     // Away from a boundary, only the controller's own `disabled` is released.
     return button.disabled && !this.#owns(button);
+  }
+
+  /**
+   * Releases the boundary `disabled` this controller owns on a button that has
+   * stopped being a target. A button still among `targets` has only moved inside
+   * the element, or is torn down along with it, and keeps its marker for the next
+   * connection to read.
+   */
+  #releaseDeparted(button: HTMLButtonElement, targets: readonly HTMLButtonElement[]): void {
+    if (!targets.includes(button)) this.#release(button, false);
   }
 
   /** Releases the boundary `disabled` this controller owns, once away from it. */
@@ -251,7 +315,9 @@ export class PaginationController extends Controller<HTMLElement> {
   ): void {
     if (!button || !atBoundary) return;
     if (button.disabled && !this.#owns(button)) return;
+    const token = this.#moveToken;
     if (button === document.activeElement) this.#moveFocusAwayFrom(opposite);
+    if (!this.#moves.isLatest(token)) return;
     button.disabled = true;
     button.setAttribute(this.#boundaryAttribute, "");
   }
@@ -290,23 +356,43 @@ export class PaginationController extends Controller<HTMLElement> {
 
   /** Total pages, normalized to a finite integer >= 1. */
   get #total(): number {
-    const total = this.totalValue;
-    return Number.isFinite(total) ? Math.max(1, Math.trunc(total)) : 1;
+    const total = this.#safeTotal;
+    return Math.max(1, Math.trunc(total));
   }
 
   /** The current page, normalized into `[1, total]`. */
   get #page(): number {
-    return this.#clamp(this.pageValue);
+    return this.#clamp(this.#safePage);
   }
 
-  /** Constrains `page` to `[1, total]`; a non-finite page falls back to page 1. */
+  /** Constrains a finite page to the live `[1, total]` range. */
   #clamp(page: number): number {
-    if (!Number.isFinite(page)) return 1;
     return Math.min(this.#total, Math.max(1, Math.trunc(page)));
   }
 
   /** Whether the button's current `disabled` was applied by boundary control. */
   #owns(button: HTMLButtonElement): boolean {
     return button.hasAttribute(this.#boundaryAttribute);
+  }
+  /** Current `page` declaration resolved against its numeric contract. */
+  get #safePage(): number {
+    return this.#numbers.read(
+      this,
+      "page",
+      this.pageValue,
+      PaginationController.values.page.default,
+      PaginationController.valueConstraints.page,
+    );
+  }
+
+  /** Current `total` declaration resolved against its numeric contract. */
+  get #safeTotal(): number {
+    return this.#numbers.read(
+      this,
+      "total",
+      this.totalValue,
+      PaginationController.values.total.default,
+      PaginationController.valueConstraints.total,
+    );
   }
 }

@@ -188,6 +188,28 @@ describe("FormResetWatcher", () => {
     expect(onReset).not.toHaveBeenCalled();
   });
 
+  it("cancels only the frames still pending when it disconnects", async () => {
+    document.body.innerHTML = `<form></form>`;
+    watcher = new FormResetWatcher(() => true, vi.fn());
+    watcher.observe();
+    dispatchMidFlight(form());
+    await microtask();
+    paint();
+
+    watcher.disconnect();
+    expect(cancelled).toEqual([]);
+
+    watcher.observe();
+    dispatchMidFlight(form());
+    await microtask();
+    watcher.disconnect();
+    expect(cancelled).toEqual([2]);
+
+    watcher.observe();
+    watcher.disconnect();
+    expect(cancelled).toEqual([2]);
+  });
+
   it("stops receiving resets after disconnect", async () => {
     document.body.innerHTML = `<form></form>`;
     const onReset = vi.fn();

@@ -1,5 +1,5 @@
 /**
- * Why a component's public open/closed state moved, carried as `detail.reason`
+ * Why a component's public state moved, carried as `detail.reason`
  * on the state event that reports the move.
  *
  * The attribute a component publishes (`aria-expanded`, `hidden`, `data-state`)
@@ -22,6 +22,9 @@
  * | `"pointer"` | the pointer entered or left it |
  * | `"scroll"` | a tracked scroll container scrolled |
  * | `"api"` | a public action was called with no DOM event |
+ * | `"timeout"` | an automatic timer advanced or dismissed the state |
+ * | `"limit"` | a capacity limit dismissed an item |
+ * | `"media"` | an operating-system media preference changed |
  */
 export type StateReason =
   | "user"
@@ -31,7 +34,10 @@ export type StateReason =
   | "focus"
   | "pointer"
   | "scroll"
-  | "api";
+  | "api"
+  | "timeout"
+  | "limit"
+  | "media";
 
 /** Focus modality: the events a focus move delivers to an action. */
 const FOCUS_EVENTS = new Set(["blur", "focus", "focusin", "focusout"]);

@@ -1,7 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { type StateReason, stateReasonFor } from "../utils/state_reason";
 import { StateRegions } from "../utils/state_regions";
+import { targetSelector } from "../utils/target_selector";
 
 /**
  * Headless, accessible accordion behavior.
@@ -67,14 +69,22 @@ export class AccordionController extends Controller<HTMLElement> {
   declare readonly collapsedLabelTargets: HTMLElement[];
 
   /** Owns `hidden` on the label pair a header declares, narrowed to that header. */
-  readonly #labels = new StateRegions({
-    whenTrue: () => this.expandedLabelTargets,
-    whenFalse: () => this.collapsedLabelTargets,
-  });
+  readonly #labels = new StateRegions(
+    {
+      whenTrue: () => this.expandedLabelTargets,
+      whenFalse: () => this.collapsedLabelTargets,
+    },
+    this.identifier,
+  );
 
   /** Settles the label pair of a header as it joins the group. */
   triggerTargetConnected(trigger: HTMLButtonElement): void {
     this.#reflectLabels(trigger);
+  }
+
+  /** Gives a header that no longer resolves as a trigger the label pair its author wrote. */
+  triggerTargetDisconnected(trigger: HTMLButtonElement): void {
+    if (!this.triggerTargets.includes(trigger)) this.#labels.release(trigger);
   }
 
   /** Settles the pair of the header an arriving expanded half belongs to. */
@@ -93,18 +103,17 @@ export class AccordionController extends Controller<HTMLElement> {
     if (trigger) this.#reflectLabels(trigger);
   }
 
-  /** Toggles the panel controlled by the activated header. */
-  toggle(event: Event): void {
-    const trigger = event.currentTarget as HTMLButtonElement;
+  /** Toggles the panel of an owned header, supplied directly or through an action event. */
+  toggle(source: Event | HTMLElement): void {
+    const { host, origin, reason } = actionSource(source);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const trigger = host?.closest<HTMLButtonElement>(targetSelector(this.identifier, "trigger"));
+    if (!trigger || !this.triggerTargets.includes(trigger)) return;
     const panel = this.#panelFor(trigger);
     if (!panel) return;
 
-    this.#setExpanded(
-      trigger,
-      panel,
-      trigger.getAttribute("aria-expanded") !== "true",
-      stateReasonFor(event),
-    );
+    this.#setExpanded(trigger, panel, trigger.getAttribute("aria-expanded") !== "true", reason);
   }
 
   /** Opens every panel. Bound via `data-action` on an "expand all" control. */

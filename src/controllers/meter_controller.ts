@@ -1,7 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { toFiniteNumber } from "../utils/coerce";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { rangeFraction } from "../utils/range";
 
 /**
@@ -57,6 +59,9 @@ const OWNED_VALUE_TEXT = "owns-valuetext";
  * *attributes* (an absent attribute means "no threshold"), not from a sentinel value.
  */
 export class MeterController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   /** The marker above, in the namespace this controller is registered under. */
   get #ownedValueText(): string {
     return `data-${this.identifier}-${OWNED_VALUE_TEXT}`;
@@ -73,6 +78,15 @@ export class MeterController extends Controller<HTMLElement> {
     optimum: { type: Number, default: 0 },
     valueText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    value: NUMBER_BOUNDS.finite,
+    min: NUMBER_BOUNDS.finite,
+    max: NUMBER_BOUNDS.finite,
+    low: NUMBER_BOUNDS.finite,
+    high: NUMBER_BOUNDS.finite,
+    optimum: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof MeterController.values>;
   static actions = ["setValue"] as const;
   static events = ["change"] as const;
 
@@ -93,21 +107,21 @@ export class MeterController extends Controller<HTMLElement> {
    * A single update usually rewrites the whole set, and each Value would otherwise
    * repaint on its own.
    */
-  readonly #repaint = new MicrotaskCoalescer(() => {
+  readonly #repaint = new MorphRenderWatcher(() => {
     this.#render();
   });
 
-  /** The segment last announced, so only a change is read out. */
-  #announcedState: MeterState | null = null;
+  /** The segment shown last, so an update announces only when it moves the segment. */
+  #shownState: MeterState | null = null;
 
   override connect(): void {
-    this.#repaint.activate();
+    this.#repaint.observe(this.element);
     this.#render();
   }
 
   /** Closes the window in which a queued repaint may still run. */
   override disconnect(): void {
-    this.#repaint.cancel();
+    this.#repaint.disconnect();
   }
 
   /**
@@ -119,12 +133,12 @@ export class MeterController extends Controller<HTMLElement> {
     const next = toFiniteNumber(event.params?.amount ?? event.detail?.value);
     if (next === null) return;
     this.valueValue = this.#clamp(next);
+    const shown = this.#shownState;
     const reading = this.#render();
     this.dispatch("change", { detail: reading });
     // Only the segment is news: reading every value would be unusable, and the
     // number itself is already exposed through `aria-valuenow`.
-    if (reading.state !== this.#announcedState) {
-      this.#announcedState = reading.state;
+    if (reading.state !== shown) {
       announce(
         fillTemplate(this.announceTextValue, { state: reading.state, value: reading.value }),
       );
@@ -163,7 +177,7 @@ export class MeterController extends Controller<HTMLElement> {
 
   /** Clamps `raw` into the configured `[min, max]` range. */
   #clamp(raw: number): number {
-    return Math.min(this.maxValue, Math.max(this.minValue, raw));
+    return Math.min(this.#safeMax, Math.max(this.#safeMin, raw));
   }
 
   /** Whether a threshold attribute is present (absent = no threshold). */
@@ -177,8 +191,8 @@ export class MeterController extends Controller<HTMLElement> {
    * neither threshold present, everything is `medium`.
    */
   #stateOf(value: number): MeterState {
-    if (this.#hasThreshold("low") && value <= this.lowValue) return "low";
-    if (this.#hasThreshold("high") && value >= this.highValue) return "high";
+    if (this.#hasThreshold("low") && value <= this.#safeLow) return "low";
+    if (this.#hasThreshold("high") && value >= this.#safeHigh) return "high";
     return "medium";
   }
 
@@ -190,18 +204,19 @@ export class MeterController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #render(): MeterReading {
-    const value = this.#clamp(this.valueValue);
+    const value = this.#clamp(this.#safeValue);
     const reading: MeterReading = {
       value,
-      ratio: rangeFraction(value, this.minValue, this.maxValue),
+      ratio: rangeFraction(value, this.#safeMin, this.#safeMax),
       state: this.#stateOf(value),
     };
-    this.element.setAttribute("aria-valuemin", String(this.minValue));
-    this.element.setAttribute("aria-valuemax", String(this.maxValue));
+    this.element.setAttribute("aria-valuemin", String(this.#safeMin));
+    this.element.setAttribute("aria-valuemax", String(this.#safeMax));
     this.element.setAttribute("aria-valuenow", String(reading.value));
     this.element.style.setProperty("--stimeo--meter-ratio", String(reading.ratio));
     this.element.setAttribute("data-state", reading.state);
     this.#applyValueText(reading);
+    this.#shownState = reading.state;
     return reading;
   }
 
@@ -226,5 +241,59 @@ export class MeterController extends Controller<HTMLElement> {
       .replaceAll("{state}", state);
     this.element.setAttribute("aria-valuetext", text);
     this.element.setAttribute(this.#ownedValueText, "");
+  }
+  /** Current `value` declaration resolved against its numeric contract. */
+  get #safeValue(): number {
+    return this.#numbers.read(
+      this,
+      "value",
+      this.valueValue,
+      MeterController.values.value.default,
+      MeterController.valueConstraints.value,
+    );
+  }
+
+  /** Current `min` declaration resolved against its numeric contract. */
+  get #safeMin(): number {
+    return this.#numbers.read(
+      this,
+      "min",
+      this.minValue,
+      MeterController.values.min.default,
+      MeterController.valueConstraints.min,
+    );
+  }
+
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      MeterController.values.max.default,
+      MeterController.valueConstraints.max,
+    );
+  }
+
+  /** Current `low` declaration resolved against its numeric contract. */
+  get #safeLow(): number {
+    return this.#numbers.read(
+      this,
+      "low",
+      this.lowValue,
+      MeterController.values.low.default,
+      MeterController.valueConstraints.low,
+    );
+  }
+
+  /** Current `high` declaration resolved against its numeric contract. */
+  get #safeHigh(): number {
+    return this.#numbers.read(
+      this,
+      "high",
+      this.highValue,
+      MeterController.values.high.default,
+      MeterController.valueConstraints.high,
+    );
   }
 }

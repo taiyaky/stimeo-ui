@@ -1,9 +1,14 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { validSelector } from "../utils/declared_value";
 import { FrameCoalescer } from "../utils/frame_coalescer";
 import { IntersectionWatcher } from "../utils/intersection_watcher";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { prefersReducedMotion } from "../utils/reduced_motion";
 import { resolveScrollContainer, scrollOffset } from "../utils/scroll_source";
+import { targetSelector } from "../utils/target_selector";
 
 /**
  * The attributes a link may anchor its section with, and therefore the only
@@ -72,6 +77,9 @@ const ANCHOR_ATTRIBUTES = ["href", "data-href"];
  * (re)built — swap those alone and nothing tells this controller to look again.
  */
 export class ScrollspyController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["link"];
   static override values = {
     offset: { type: Number, default: 0 },
@@ -79,6 +87,10 @@ export class ScrollspyController extends Controller<HTMLElement> {
     rootSelector: { type: String, default: "" },
     focusSection: { type: Boolean, default: false },
   };
+
+  static valueConstraints = {
+    offset: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof ScrollspyController.values>;
   static actions = ["scrollTo"] as const;
   static events = ["change"] as const;
 
@@ -96,7 +108,7 @@ export class ScrollspyController extends Controller<HTMLElement> {
    * the observer margin while selection and scrolling still receive `NaN`.
    */
   get #offset(): number {
-    return Number.isFinite(this.offsetValue) ? this.offsetValue : 0;
+    return this.#safeOffset;
   }
 
   /** Shared IO plumbing (support guard, active guard, teardown). */
@@ -138,10 +150,17 @@ export class ScrollspyController extends Controller<HTMLElement> {
   /** Watches the link targets' anchor attributes for an in-place morph rewrite. */
   #anchorObserver: MutationObserver | null = null;
 
-  /** True while a coalesced observation rebuild is queued; see {@link #scheduleResync}. */
-  #resyncQueued = false;
+  #resyncInputsChanged = false;
+
+  readonly #resync = new MorphRenderWatcher(() => {
+    const retainStates = !this.#resyncInputsChanged;
+    this.#resyncInputsChanged = false;
+    this.#initializeObserver(retainStates);
+    this.#evaluateActiveSection();
+  });
 
   override connect(): void {
+    this.#resync.observe(this.element);
     this.#isConnected = true;
     this.#observeAnchorAttributes();
     this.#initializeObserver();
@@ -149,15 +168,13 @@ export class ScrollspyController extends Controller<HTMLElement> {
 
   override disconnect(): void {
     this.#isConnected = false;
-    // Dropping the flag is what discards a rebuild queued moments ago: the
-    // drain reads it, so the queued microtask becomes a no-op.
-    this.#resyncQueued = false;
+    this.#resync.disconnect();
+    this.#resyncInputsChanged = false;
     this.#watcher.stop();
     this.#anchorObserver?.disconnect();
     this.#anchorObserver = null;
     this.#detachScrollListener();
     this.#frames.cancel();
-    this.#intersectionStates.clear();
     this.#activeSectionId = "";
     this.#rootElement = null;
   }
@@ -200,23 +217,13 @@ export class ScrollspyController extends Controller<HTMLElement> {
    *
    * A single Turbo morph can append one link, drop another, and rewrite a
    * third's `href`, and those arrive through two independent channels —
-   * Stimulus's target callbacks and {@link #anchorObserver}. Each channel just
-   * raises the flag and queues a drain; the first drain to run does the work and
-   * clears it, so every later drain in the same batch finds nothing to do and
-   * the set is rebuilt once instead of three times. `disconnect()` clears the
-   * same flag, which is how a queued rebuild is dropped rather than run against
-   * a detached controller.
+   * Stimulus's target callbacks and {@link #anchorObserver}. Both channels share one
+   * microtask queue, whose pending pass is cancelled on disconnect.
    */
   #scheduleResync(): void {
-    this.#resyncQueued = true;
-    queueMicrotask(this.#drainResync);
+    this.#resyncInputsChanged = true;
+    this.#resync.schedule();
   }
-
-  readonly #drainResync = (): void => {
-    if (!this.#resyncQueued) return;
-    this.#resyncQueued = false;
-    this.#initializeObserver();
-  };
 
   /**
    * Watches the link targets' anchor attributes so an in-place rewrite re-syncs.
@@ -264,12 +271,17 @@ export class ScrollspyController extends Controller<HTMLElement> {
    * `focusSection` enabled it also moves the sequential focus starting point
    * into the destination; the URL fragment is deliberately not touched.
    */
-  scrollTo(event: Event): void {
-    const link = event.currentTarget as HTMLElement;
+  scrollTo(source: Event | HTMLElement): void {
+    const { event, host, origin } = actionSource(source);
+    const link = host?.closest<HTMLElement>(targetSelector(this.identifier, "link"));
+    if (!link || !this.linkTargets.includes(link)) return;
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const moveFocus = event !== null || this.element.contains(document.activeElement);
     const id = this.#getAnchorId(link);
     if (!id) return;
 
-    event.preventDefault();
+    event?.preventDefault();
 
     const targetElement = document.getElementById(id);
     if (!targetElement) return;
@@ -291,7 +303,7 @@ export class ScrollspyController extends Controller<HTMLElement> {
       window.scrollTo({ top: scrollPosition, behavior });
     }
 
-    if (this.focusSectionValue) this.#focusSection(targetElement);
+    if (this.focusSectionValue && moveFocus) this.#focusSection(targetElement);
   }
 
   /**
@@ -374,9 +386,11 @@ export class ScrollspyController extends Controller<HTMLElement> {
    * @stimeoRuntimeOnly `rootMargin` wires the observer this call installs; the active section it
    *   republishes is the one already recorded.
    */
-  #initializeObserver(): void {
+  #initializeObserver(retainStates = false): void {
     this.#watcher.stop();
-    this.#intersectionStates.clear();
+    const previousStates = retainStates ? this.#intersectionStates : null;
+    const previousRoot = this.#rootElement;
+    this.#intersectionStates = new Map();
     // The DOM is the source of truth for the current location **only when this
     // controller has none of its own** — a fresh `connect()`, which is also the
     // Turbo cache-restore case, where the links still carry `aria-current` from
@@ -404,7 +418,13 @@ export class ScrollspyController extends Controller<HTMLElement> {
       const id = this.#getAnchorId(link);
       if (!id) continue;
       const section = document.getElementById(id);
-      if (section && !sections.includes(section)) sections.push(section);
+      if (section && !sections.includes(section)) {
+        sections.push(section);
+        const previous = previousStates?.get(id);
+        if (previous?.element === section && previousRoot === this.#rootElement) {
+          this.#intersectionStates.set(id, previous);
+        }
+      }
     }
 
     this.#watcher.start(sections, {
@@ -582,5 +602,15 @@ export class ScrollspyController extends Controller<HTMLElement> {
   #fragmentId(value: string | null): string | null {
     if (!value?.startsWith("#")) return null;
     return value.substring(1) || null;
+  }
+  /** Current `offset` declaration resolved against its numeric contract. */
+  get #safeOffset(): number {
+    return this.#numbers.read(
+      this,
+      "offset",
+      this.offsetValue,
+      ScrollspyController.values.offset.default,
+      ScrollspyController.valueConstraints.offset,
+    );
   }
 }

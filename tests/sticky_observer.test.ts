@@ -333,6 +333,213 @@ describe("StickyObserverController", () => {
     expect(lateElement.getAttribute("data-stuck")).toBe("true");
   });
 
+  it("reflects either snapshot onto a sticky element that replaces the current one", async () => {
+    await start();
+    const replaceElement = (): HTMLElement => {
+      const fresh = document.createElement("header");
+      fresh.setAttribute("data-stimeo--sticky-observer-target", "element");
+      element().replaceWith(fresh);
+      // Driven directly: happy-dom's MutationObserver delivers target
+      // callbacks unreliably, and the callback's contract is what matters.
+      controller().elementTargetConnected(fresh);
+      return fresh;
+    };
+
+    currentObserver().callback([entry({ isIntersecting: true, bottom: 41, rootTop: 40 })]);
+    expect(replaceElement().getAttribute("data-stuck")).toBe("false");
+
+    currentObserver().callback([entry({ isIntersecting: false, bottom: 40, rootTop: 40 })]);
+    expect(replaceElement().getAttribute("data-stuck")).toBe("true");
+  });
+
+  /** Inserts a copy of the sticky element after the current one and lets Stimulus connect it. */
+  const addSuccessor = async (): Promise<{ original: HTMLElement; successor: HTMLElement }> => {
+    const original = element();
+    const successor = original.cloneNode(true) as HTMLElement;
+    original.after(successor);
+    await tick();
+    return { original, successor };
+  };
+
+  it("reflects the stuck state onto a sticky element that stays after an earlier one leaves", async () => {
+    await start();
+    currentObserver().callback([entry({ isIntersecting: true, bottom: 41, rootTop: 40 })]);
+    const { original, successor } = await addSuccessor();
+    expect(successor.getAttribute("data-stuck")).toBe("false");
+    currentObserver().callback([entry({ isIntersecting: false, bottom: 40, rootTop: 40 })]);
+    original.remove();
+    await tick();
+
+    expect(element()).toBe(successor);
+    expect(successor.getAttribute("data-stuck")).toBe("true");
+  });
+
+  it("clears the stuck state on a sticky element that stays after an earlier one leaves", async () => {
+    await start();
+    currentObserver().callback([entry({ isIntersecting: false, bottom: 40, rootTop: 40 })]);
+    const { original, successor } = await addSuccessor();
+    expect(successor.getAttribute("data-stuck")).toBe("true");
+    currentObserver().callback([entry({ isIntersecting: true, bottom: 41, rootTop: 40 })]);
+    original.remove();
+    await tick();
+
+    expect(element()).toBe(successor);
+    expect(successor.getAttribute("data-stuck")).toBe("false");
+  });
+
+  it("brings the staying sticky element up to date without dispatching", async () => {
+    await start();
+    currentObserver().callback([entry({ isIntersecting: true, bottom: 41, rootTop: 40 })]);
+    const { original } = await addSuccessor();
+    currentObserver().callback([entry({ isIntersecting: false, bottom: 40, rootTop: 40 })]);
+    const events: string[] = [];
+    for (const type of ["stimeo--sticky-observer:change", "stimeo--sticky-observer:reconcile"]) {
+      root().addEventListener(type, () => events.push(type));
+    }
+    root().addEventListener("change", () => events.push("change"));
+
+    original.remove();
+    await tick();
+
+    expect(events).toEqual([]);
+  });
+
+  it("leaves a staying sticky element unmarked while no snapshot has arrived", async () => {
+    await start();
+    const { original, successor } = await addSuccessor();
+    original.remove();
+    await tick();
+
+    expect(element()).toBe(successor);
+    expect(successor.hasAttribute("data-stuck")).toBe(false);
+  });
+
+  it("keeps working when its only sticky element leaves", async () => {
+    await start();
+    const errors: unknown[] = [];
+    if (application) {
+      application.handleError = (error) => {
+        errors.push(error);
+      };
+    }
+    const changes: boolean[] = [];
+    root().addEventListener("stimeo--sticky-observer:change", (event) => {
+      changes.push((event as CustomEvent<{ stuck: boolean }>).detail.stuck);
+    });
+    currentObserver().callback([entry({ isIntersecting: true, bottom: 41, rootTop: 40 })]);
+    element().remove();
+    await tick();
+    currentObserver().callback([entry({ isIntersecting: false, bottom: 40, rootTop: 40 })]);
+
+    expect(errors).toEqual([]);
+    expect(changes).toEqual([false, true]);
+  });
+
+  it("writes nothing onto the sticky element while Stimulus tears the controller down", async () => {
+    await start();
+    currentObserver().callback([entry({ isIntersecting: false, bottom: 40, rootTop: 40 })]);
+    expect(element().getAttribute("data-stuck")).toBe("true");
+
+    application?.unload("stimeo--sticky-observer");
+
+    expect(element().getAttribute("data-stuck")).toBe("true");
+  });
+
+  describe("sticky element that stops resolving", () => {
+    /** Drops only the element token from `departing`, which stays where it is. */
+    const dropElementToken = async (departing: HTMLElement): Promise<void> => {
+      departing.removeAttribute("data-stimeo--sticky-observer-target");
+      await tick();
+    };
+    const stick = (): void => {
+      currentObserver().callback([entry({ isIntersecting: false, bottom: 40, rootTop: 40 })]);
+    };
+
+    it("gives a sticky element that stops being one back the data-stuck it was authored with", async () => {
+      await start(fixture().replace('target="element">', 'target="element" data-stuck="false">'));
+      stick();
+      const departed = element();
+      expect(departed.getAttribute("data-stuck")).toBe("true");
+      const events: string[] = [];
+      for (const type of ["stimeo--sticky-observer:change", "change"]) {
+        root().addEventListener(type, () => events.push(type));
+      }
+
+      await dropElementToken(departed);
+
+      expect(departed.getAttribute("data-stuck")).toBe("false");
+      expect(events).toEqual([]);
+    });
+
+    it("removes the data-stuck it wrote on a departed sticky element that was authored without one", async () => {
+      await start();
+      stick();
+      const departed = element();
+
+      await dropElementToken(departed);
+
+      expect(departed.hasAttribute("data-stuck")).toBe(false);
+    });
+
+    it("gives the departed sticky element its own data-stuck back while the one that stays carries the snapshot", async () => {
+      await start();
+      const { original, successor } = await addSuccessor();
+      stick();
+      expect(successor.hasAttribute("data-stuck")).toBe(false);
+
+      await dropElementToken(original);
+
+      expect(element()).toBe(successor);
+      expect(original.hasAttribute("data-stuck")).toBe(false);
+      expect(successor.getAttribute("data-stuck")).toBe("true");
+    });
+
+    it("keeps a data-stuck the page wrote on a sticky element after the last write", async () => {
+      await start();
+      stick();
+      const departed = element();
+      departed.setAttribute("data-stuck", "pinned");
+
+      await dropElementToken(departed);
+
+      expect(departed.getAttribute("data-stuck")).toBe("pinned");
+    });
+
+    it("keeps the data-stuck of a sticky element that moves within the observer", async () => {
+      await start();
+      stick();
+      const moving = element();
+
+      root().append(moving);
+      await tick();
+
+      expect(element()).toBe(moving);
+      expect(moving.getAttribute("data-stuck")).toBe("true");
+    });
+
+    it("gives the sticky element back its own data-stuck when the observer loses its controller", async () => {
+      await start();
+      stick();
+      const departed = element();
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(departed.hasAttribute("data-stuck")).toBe(false);
+    });
+
+    it("keeps what it wrote on the sticky element when the whole observer leaves the page", async () => {
+      await start();
+      stick();
+      const kept = element();
+
+      root().remove();
+      await tick();
+
+      expect(kept.getAttribute("data-stuck")).toBe("true");
+    });
+  });
+
   it("rebuilds observation for runtime Values and normalizes offset numerically", async () => {
     await start();
     const alternateRoot = document.createElement("div");

@@ -62,6 +62,28 @@ export function isCompatibleManifest(value: unknown): value is Manifest {
     for (const field of CONTROLLER_ARRAY_FIELDS) {
       if (!Array.isArray((entry as Record<string, unknown>)[field])) return false;
     }
+    const constraints = (entry as Record<string, unknown>).valueConstraints as unknown[];
+    for (const constraint of constraints) {
+      if (typeof constraint !== "object" || constraint === null) return false;
+      const numeric = constraint as Record<string, unknown>;
+      if (numeric.type !== "number") continue;
+      for (const field of ["min", "max", "exclusiveMin"] as const) {
+        const bound = numeric[field];
+        if (bound !== undefined && (typeof bound !== "number" || !Number.isFinite(bound)))
+          return false;
+      }
+      if (
+        numeric.allowedValues !== undefined &&
+        (!Array.isArray(numeric.allowedValues) ||
+          !numeric.allowedValues.every((item) => typeof item === "number" && Number.isFinite(item)))
+      )
+        return false;
+      if (
+        numeric.allowInfinity !== undefined &&
+        !["negative", "positive", "both"].includes(String(numeric.allowInfinity))
+      )
+        return false;
+    }
   }
   return true;
 }

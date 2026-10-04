@@ -1,5 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
+import { leasedAuthorValue } from "../utils/attribute_lease";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { readLocalStorage, removeLocalStorage, writeLocalStorage } from "../utils/safe_storage";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { parseStringList } from "../utils/string_list";
@@ -101,8 +104,10 @@ const isPersistField = (node: unknown): node is PersistField =>
  *
  * The optional `field` targets restrict persistence to explicitly targeted
  * controls. The public `clear` action removes the active draft. `key`,
- * `debounce`, `exclude`, and `clearOn` Values can change while connected;
- * `clearOn` is an event name whose occurrence invokes `clear`.
+ * `exclude`, and `clearOn` Values can change while connected; `clearOn` is an
+ * event name whose occurrence invokes `clear`. `debounce` is read as each edit
+ * schedules its save: a pending save keeps the deadline its edit gave it, and
+ * the next edit takes the new value.
  *
  * `restore`, `save`, and `clear` dispatch `{ key: string }`. `error` dispatches
  * `{ key: string, operation: "read" | "write" | "remove", reason:
@@ -120,6 +125,9 @@ const isPersistField = (node: unknown): node is PersistField =>
  * path. A reconnect removes stale restored state before reading storage.
  */
 export class PersistController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["field"];
   static override values = {
     key: { type: String, default: "" },
@@ -128,6 +136,10 @@ export class PersistController extends Controller<HTMLElement> {
     exclude: { type: String, default: "" },
     clearOn: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    debounce: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof PersistController.values>;
   static actions = ["clear"] as const;
   static events = ["restore", "save", "clear", "error"] as const;
 
@@ -168,8 +180,6 @@ export class PersistController extends Controller<HTMLElement> {
     this.#connected = true;
     this.#logicalKey = this.#resolveLogicalKey();
     this.#excluded = parseStringList(this.excludeValue, DEFAULT_EXCLUDE);
-    this.#knownFields = new WeakSet<PersistField>();
-    this.#forcedRestore.clear();
 
     this.element.addEventListener("input", this.#onInput);
     this.element.addEventListener("change", this.#onInput);
@@ -177,6 +187,7 @@ export class PersistController extends Controller<HTMLElement> {
     this.#restoreDynamic.activate();
     this.#observer.observe(this.element, {
       attributes: true,
+      attributeOldValue: true,
       attributeFilter: [
         "checked",
         "data-controller",
@@ -202,8 +213,6 @@ export class PersistController extends Controller<HTMLElement> {
     this.#unbindClearOn();
     this.#observer.disconnect();
     this.#restoreDynamic.cancel();
-    this.#forcedRestore.clear();
-    this.#timeouts.clearAll();
     TRANSIENT.reset(this.element);
     this.#payload = null;
   }
@@ -233,11 +242,6 @@ export class PersistController extends Controller<HTMLElement> {
     if (this.#connected) this.#switchLogicalKey();
   }
 
-  /** Reschedules a pending write against the current debounce delay. */
-  debounceValueChanged(): void {
-    if (this.#connected && this.#pendingSave !== null) this.#scheduleSave();
-  }
-
   /** Restores every field the new exclusion list makes eligible. */
   excludeValueChanged(): void {
     const previous = this.#excluded;
@@ -254,7 +258,10 @@ export class PersistController extends Controller<HTMLElement> {
     this.#restoreDynamic.schedule();
   }
 
-  /** Schedules a debounced save. */
+  /**
+   * Schedules a debounced save on the current `debounce`, replacing a pending one.
+   * The save keeps this deadline when `debounce` changes later.
+   */
   #scheduleSave(): void {
     const logicalKey = this.#logicalKey;
     if (logicalKey === null) return;
@@ -274,12 +281,19 @@ export class PersistController extends Controller<HTMLElement> {
     this.#pendingSave = null;
   }
 
-  /** Flushes a pending edit through the same success/error event path as a timer. */
+  /**
+   * Flushes a pending edit through the same success/error event path as a timer. The
+   * flush is the last write of the namespace the edit was scheduled for, so a save that
+   * a `save` or `error` listener schedules while it runs is dropped with it: that save
+   * would write whatever the fields hold once the namespace has switched or the
+   * controller has disconnected.
+   */
   #flushPendingSave(): void {
     const pending = this.#pendingSave;
     if (pending === null) return;
     this.#cancelPendingSave();
     this.#save(pending.logicalKey);
+    this.#cancelPendingSave();
   }
 
   /** Writes the active payload and emits `save` only after storage succeeds. */
@@ -322,10 +336,7 @@ export class PersistController extends Controller<HTMLElement> {
     this.#knownFields = new WeakSet<PersistField>();
     this.#forcedRestore.clear();
     const logicalKey = this.#logicalKey;
-    if (logicalKey === null) {
-      this.#markCurrentFieldsKnown();
-      return;
-    }
+    if (logicalKey === null) return;
 
     const result = readLocalStorage(this.#storageKey(logicalKey));
     if (!result.ok) {
@@ -479,9 +490,14 @@ export class PersistController extends Controller<HTMLElement> {
     return entries;
   }
 
-  /** Whether a field carries a restorable, non-excluded value. */
+  /**
+   * Whether a field carries a restorable, non-excluded value. A password field is never one,
+   * also while a reveal has turned it into a text field: the lease that took its `type` over
+   * still records the author's `password`.
+   */
   #persistable(field: PersistField, excluded: readonly string[]): boolean {
     if (NON_VALUE_TYPES.has(field.type) || SENSITIVE_TYPES.has(field.type)) return false;
+    if (SENSITIVE_TYPES.has(leasedAuthorValue(field, "type") ?? "")) return false;
     if (excluded.includes(field.type)) return false;
     if (field.name.length > 0 && excluded.includes(field.name)) return false;
     return true;
@@ -542,32 +558,47 @@ export class PersistController extends Controller<HTMLElement> {
    */
   #onMutations(records: MutationRecord[]): void {
     let rootIdChanged = false;
+    // The first record for an element carries its `data-controller` from before the batch.
+    const ownershipBefore = new Map<Element, string | null>();
     for (const record of records) {
       if (record.type === "attributes") {
         if (record.target === this.element && record.attributeName === "id") {
           rootIdChanged = true;
         }
-        this.#collectAttributeCandidate(record.target, record.attributeName);
+        if (record.attributeName === OWNERSHIP_ATTRIBUTE) {
+          // An attribute record's target is always an element.
+          const element = record.target as Element;
+          if (!ownershipBefore.has(element)) ownershipBefore.set(element, record.oldValue);
+          continue;
+        }
+        this.#collectControlCandidate(record.target);
         continue;
       }
       for (const node of record.addedNodes) this.#collectRestoreCandidate(node);
+    }
+    for (const [element, before] of ownershipBefore) {
+      this.#collectOwnershipCandidate(element, before);
     }
     if (rootIdChanged && this.keyValue.length === 0) this.#switchLogicalKey();
     this.#restoreDynamic.schedule();
   }
 
   /**
-   * Adds the controls one mutated attribute can affect. Only an ownership change on a
-   * descendant moves fields between Persist hosts, so that is the single case worth a
-   * subtree sweep; every other observed attribute describes one control, and sweeping
-   * from its container would re-apply the stored draft over edits still being debounced.
+   * Adds the controls under an element whose `data-controller` gained or lost this
+   * identifier across the batch. That is the only attribute change that moves fields
+   * between Persist hosts, so it is the single case worth a subtree sweep; any other
+   * `data-controller` change leaves ownership where it was, and sweeping for it would
+   * re-apply the stored draft over edits still being debounced.
    */
-  #collectAttributeCandidate(target: Node, attributeName: string | null): void {
-    if (attributeName === OWNERSHIP_ATTRIBUTE && target !== this.element) {
-      this.#collectRestoreCandidate(target);
-      return;
-    }
-    this.#collectControlCandidate(target);
+  #collectOwnershipCandidate(element: Element, before: string | null): void {
+    const after = element.getAttribute(OWNERSHIP_ATTRIBUTE);
+    if (this.#namesThisIdentifier(before) === this.#namesThisIdentifier(after)) return;
+    this.#collectRestoreCandidate(element);
+  }
+
+  /** Whether a `data-controller` value lists this controller's identifier. */
+  #namesThisIdentifier(tokens: string | null): boolean {
+    return (tokens ?? "").split(/\s+/).includes(this.identifier);
   }
 
   /** Adds a native control, or the select that owns a mutated option. */
@@ -609,12 +640,21 @@ export class PersistController extends Controller<HTMLElement> {
 
   /** Normalizes an invalid `debounce` Value to the `debounce` default. */
   get #debounceDelay(): number {
-    const value = this.debounceValue;
-    return Number.isFinite(value) && value >= 0 ? value : DEFAULT_DEBOUNCE;
+    return this.#safeDebounce;
   }
 
   /** Dispatches one observable storage failure without exposing browser errors. */
   #dispatchError(key: string, operation: PersistOperation, reason: PersistErrorReason): void {
     this.dispatch("error", { detail: { key, operation, reason } });
+  }
+  /** Current `debounce` declaration resolved against its numeric contract. */
+  get #safeDebounce(): number {
+    return this.#numbers.read(
+      this,
+      "debounce",
+      this.debounceValue,
+      PersistController.values.debounce.default,
+      PersistController.valueConstraints.debounce,
+    );
   }
 }

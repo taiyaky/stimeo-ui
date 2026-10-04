@@ -1,5 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import { IntersectionWatcher, isBeforeRootStart } from "../utils/intersection_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 
 /**
  * Headless **Sticky State Observer**: detects whether a `position: sticky`
@@ -34,15 +37,23 @@ import { IntersectionWatcher, isBeforeRootStart } from "../utils/intersection_wa
  * changes, and is disconnected on `disconnect()` (Turbo navigation included).
  */
 export class StickyObserverController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["sentinel", "element"];
   static override values = {
     rootSelector: { type: String, default: "" },
     offset: { type: Number, default: 0 },
   };
+
+  static valueConstraints = {
+    offset: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof StickyObserverController.values>;
   static events = ["change"] as const;
 
   declare readonly sentinelTarget: HTMLElement;
   declare readonly elementTarget: HTMLElement;
+  declare readonly elementTargets: HTMLElement[];
   declare readonly hasSentinelTarget: boolean;
   declare readonly hasElementTarget: boolean;
 
@@ -51,6 +62,8 @@ export class StickyObserverController extends Controller<HTMLElement> {
 
   /** Shared IO plumbing (support guard, root resolution, active guard). */
   readonly #watcher = new IntersectionWatcher((entries) => this.#onIntersect(entries));
+  /** Owns each sticky element's `data-stuck`, so one that departs gets its own back. */
+  readonly #stuckLease = new AttributeLease<HTMLElement>("data-stuck", this.identifier);
   /** Last reported stuck state, so `change` fires only on transitions. */
   #stuck: boolean | null = null;
   /** Target currently owned by the watcher; comparing it avoids duplicate restarts. */
@@ -65,7 +78,7 @@ export class StickyObserverController extends Controller<HTMLElement> {
       // A sentinel with no layout box (hidden tab panel, collapsed section, an
       // undisplayed Turbo Frame) reports an empty rect that the shared edge test
       // deliberately refuses, so an unrendered sticky element is never published
-      // as stuck; the state stays put until the sentinel is actually laid out.
+      // as stuck; the state is not-stuck until the sentinel is actually laid out.
       this.#setStuck(!entry.isIntersecting && isBeforeRootStart(entry));
     }
   }
@@ -95,8 +108,17 @@ export class StickyObserverController extends Controller<HTMLElement> {
 
   /** Reflects the last snapshot onto an element inserted after that snapshot. */
   elementTargetConnected(element: HTMLElement): void {
-    if (this.#stuck !== null) {
-      element.setAttribute("data-stuck", this.#stuck ? "true" : "false");
+    if (this.#stuck !== null) this.#stuckLease.write(element, String(this.#stuck));
+  }
+
+  /**
+   * Gives a sticky element that no longer resolves its own `data-stuck` back, even after
+   * `disconnect()`, and while connected reflects the last snapshot onto the one that stays.
+   */
+  elementTargetDisconnected(element: HTMLElement): void {
+    if (!this.elementTargets.includes(element)) this.#stuckLease.return(element);
+    if (this.#connected && this.#stuck !== null && this.hasElementTarget) {
+      this.#stuckLease.write(this.elementTarget, String(this.#stuck));
     }
   }
 
@@ -118,8 +140,8 @@ export class StickyObserverController extends Controller<HTMLElement> {
     this.#observedSentinel = null;
     if (!sentinel) return;
 
-    const configuredOffset = this.offsetValue;
-    const offset = Number.isFinite(configuredOffset) ? configuredOffset : 0;
+    const configuredOffset = this.#safeOffset;
+    const offset = configuredOffset;
     const started = this.#watcher.start(sentinel, {
       rootSelector: this.rootSelectorValue,
       rootMargin: `${-offset}px 0px 0px 0px`,
@@ -132,9 +154,17 @@ export class StickyObserverController extends Controller<HTMLElement> {
   #setStuck(next: boolean): void {
     if (next === this.#stuck) return;
     this.#stuck = next;
-    if (this.hasElementTarget) {
-      this.elementTarget.setAttribute("data-stuck", next ? "true" : "false");
-    }
+    if (this.hasElementTarget) this.#stuckLease.write(this.elementTarget, String(next));
     this.dispatch("change", { detail: { stuck: next } });
+  }
+  /** Current `offset` declaration resolved against its numeric contract. */
+  get #safeOffset(): number {
+    return this.#numbers.read(
+      this,
+      "offset",
+      this.offsetValue,
+      StickyObserverController.values.offset.default,
+      StickyObserverController.valueConstraints.offset,
+    );
   }
 }

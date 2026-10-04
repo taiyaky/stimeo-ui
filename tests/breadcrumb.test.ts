@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BreadcrumbController } from "../src/controllers/breadcrumb_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
@@ -75,6 +75,8 @@ const markup = buildMarkup();
 class FakeResizeObserver implements ResizeObserver {
   static instances: FakeResizeObserver[] = [];
   readonly observed = new Set<Element>();
+  /** Every element passed to `observe`, in call order. */
+  readonly observeCalls: Element[] = [];
   disconnected = false;
 
   constructor(private readonly callback: ResizeObserverCallback) {
@@ -83,6 +85,7 @@ class FakeResizeObserver implements ResizeObserver {
 
   observe(element: Element): void {
     this.observed.add(element);
+    this.observeCalls.push(element);
   }
 
   unobserve(element: Element): void {
@@ -286,6 +289,10 @@ describe("BreadcrumbController", () => {
     expect(hiddenStates()).toEqual([false, false]);
     expect(ellipsis().hidden).toBe(true);
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    // The next overflow starts collapsed rather than re-opening the earlier expansion.
+    resizeTo(500, 100);
+    expect(hiddenStates()).toEqual([true, true]);
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
   });
 
   it("ignores toggle while the trail fits (no stale aria-expanded, no event)", async () => {
@@ -363,6 +370,39 @@ describe("BreadcrumbController", () => {
 
       expect(ellipsis().hidden).toBe(false); // no post-disconnect mutation
     });
+
+    /** Focuses the trigger and lets the trail fit, so hiding the ellipsis waits for its blur. */
+    const deferEllipsisHide = async () => {
+      await start(markup, { scrollWidth: 500, clientWidth: 100 });
+      const button = trigger();
+      const added = vi.spyOn(button, "addEventListener");
+      const removed = vi.spyOn(button, "removeEventListener");
+      button.focus();
+      resizeTo(80, 500);
+      expect(ellipsis().hidden).toBe(false);
+      const onBlur = added.mock.calls.find(([type]) => type === "blur")?.[1];
+      expect(onBlur).toBeDefined();
+      return { button, onBlur, removed };
+    };
+
+    it("stops waiting for the ellipsis blur once the trail overflows again", async () => {
+      const { onBlur, removed } = await deferEllipsisHide();
+
+      resizeTo(500, 100);
+
+      expect(ellipsis().hidden).toBe(false);
+      expect(removed).toHaveBeenCalledWith("blur", onBlur);
+    });
+
+    it("hides the ellipsis and stops waiting when the focused trigger is removed", async () => {
+      const { button, onBlur, removed } = await deferEllipsisHide();
+
+      button.remove();
+      await tick();
+
+      expect(ellipsis().hidden).toBe(true);
+      expect(removed).toHaveBeenCalledWith("blur", onBlur);
+    });
   });
 
   describe("reconnect / Turbo cache restore", () => {
@@ -376,7 +416,7 @@ describe("BreadcrumbController", () => {
       expect(ellipsis().hidden).toBe(false);
     });
 
-    it("re-reads the expanded state when a new instance connects to the same DOM", async () => {
+    it("re-reads the expanded state when the same instance reconnects to the DOM", async () => {
       await start(markup, { scrollWidth: 500, clientWidth: 100 });
       trigger().click(); // expanded, written to the DOM
       expect(trigger().getAttribute("aria-expanded")).toBe("true");
@@ -390,6 +430,23 @@ describe("BreadcrumbController", () => {
 
       expect(trigger().getAttribute("aria-expanded")).toBe("true");
       expect(hiddenStates()).toEqual([false, false]);
+    });
+
+    it("keeps re-measuring on list resizes after disconnect and connect", async () => {
+      originalResizeObserver = globalThis.ResizeObserver;
+      globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof globalThis.ResizeObserver;
+      await start(markup, { scrollWidth: 80, clientWidth: 500 });
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--breadcrumb",
+      ) as BreadcrumbController;
+      controller.disconnect();
+      controller.connect();
+
+      stubGeometry(list(), { scrollWidth: 900, clientWidth: 500 });
+      for (const observer of FakeResizeObserver.instances) observer.trigger(list());
+
+      expect(hiddenStates()).toEqual([true, true]);
     });
   });
 
@@ -498,6 +555,79 @@ describe("BreadcrumbController", () => {
       expect(hiddenStates()).toEqual([true, true]);
       expect(ellipsis().hidden).toBe(false);
       expect(button.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    // A marker added to or taken from an element already in the trail changes no
+    // children, so the list's own mutation watch never sees it: only the target
+    // callbacks can re-measure.
+    it("collapses once the button inside the ellipsis gains the trigger marker", async () => {
+      await start(buildMarkup({ trigger: false }), { scrollWidth: 500, clientWidth: 100 });
+      expect(hiddenStates()).toEqual([false, false]);
+      const button = ellipsis().querySelector("button") as HTMLButtonElement;
+
+      button.setAttribute("data-stimeo--breadcrumb-target", "trigger");
+      await tick();
+
+      expect(hiddenStates()).toEqual([true, true]);
+      expect(ellipsis().hidden).toBe(false);
+    });
+
+    it("restores every item when the trigger loses its marker while collapsed", async () => {
+      await start(markup, { scrollWidth: 500, clientWidth: 100 });
+      expect(hiddenStates()).toEqual([true, true]);
+
+      trigger().removeAttribute("data-stimeo--breadcrumb-target");
+      await tick();
+
+      expect(hiddenStates()).toEqual([false, false]);
+      expect(ellipsis().hidden).toBe(true);
+    });
+
+    it("collapses once the trigger's item gains the ellipsis marker", async () => {
+      await start(triggerWithoutEllipsis, { scrollWidth: 500, clientWidth: 100 });
+      expect(hiddenStates()).toEqual([false, false]);
+      const item = trigger().closest("li") as HTMLElement;
+
+      item.setAttribute("data-stimeo--breadcrumb-target", "ellipsis");
+      await tick();
+
+      expect(hiddenStates()).toEqual([true, true]);
+      expect(item.hidden).toBe(false);
+    });
+
+    it("restores every item when the ellipsis loses its marker while collapsed", async () => {
+      await start(markup, { scrollWidth: 500, clientWidth: 100 });
+      expect(hiddenStates()).toEqual([true, true]);
+
+      ellipsis().removeAttribute("data-stimeo--breadcrumb-target");
+      await tick();
+
+      expect(hiddenStates()).toEqual([false, false]);
+    });
+
+    it("collapses an item that gains the collapsible marker", async () => {
+      await start(buildMarkup({ collapsible: false }), { scrollWidth: 500, clientWidth: 100 });
+      expect(ellipsis().hidden).toBe(true);
+      const item = document.querySelector<HTMLElement>("#bc-a") as HTMLElement;
+
+      item.setAttribute("data-stimeo--breadcrumb-target", "collapsible");
+      await tick();
+
+      expect(item.hidden).toBe(true);
+      expect(ellipsis().hidden).toBe(false);
+    });
+
+    it("collapses once the list gains its target marker", async () => {
+      await start(buildMarkup({ list: false }));
+      const trail = document.querySelector<HTMLElement>("ol") as HTMLElement;
+      stubGeometry(trail, { scrollWidth: 500, clientWidth: 100 });
+      expect(hiddenStates()).toEqual([false, false]);
+
+      trail.setAttribute("data-stimeo--breadcrumb-target", "list");
+      await tick();
+
+      expect(hiddenStates()).toEqual([true, true]);
+      expect(ellipsis().hidden).toBe(false);
     });
 
     it("keeps two trails on the same page independent", async () => {
@@ -625,6 +755,80 @@ describe("BreadcrumbController", () => {
       expect(ellipsis().hidden).toBe(false);
     });
 
+    it("degrades to the full trail when the list loses its target marker", async () => {
+      await start(markup, { scrollWidth: 500, clientWidth: 100 });
+      expect(hiddenStates()).toEqual([true, true]);
+
+      list().removeAttribute("data-stimeo--breadcrumb-target");
+      await tick();
+
+      // With no list to measure, nothing counts as overflowing.
+      expect(hiddenStates()).toEqual([false, false]);
+      expect(ellipsis().hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("stops observing a list that loses its target marker", async () => {
+      originalResizeObserver = globalThis.ResizeObserver;
+      globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof globalThis.ResizeObserver;
+      await start(markup, { scrollWidth: 500, clientWidth: 100 });
+      const former = list();
+      expect(FakeResizeObserver.instances[0]?.observed.has(former)).toBe(true);
+
+      // The element stays in the document, so an observation left on it would keep
+      // re-measuring the trail on its resizes.
+      former.removeAttribute("data-stimeo--breadcrumb-target");
+      await tick();
+
+      const observing = FakeResizeObserver.instances.filter((observer) =>
+        observer.observed.has(former),
+      );
+      expect(observing).toEqual([]);
+    });
+
+    it("re-measures on edits to a replacement list and no longer on the replaced one", async () => {
+      await start(markup, { scrollWidth: 80, clientWidth: 500 });
+      const former = list();
+      const replacement = former.cloneNode(true) as HTMLElement;
+      stubGeometry(replacement, { scrollWidth: 80, clientWidth: 500 });
+      former.replaceWith(replacement);
+      await tick();
+      expect(hiddenStates()).toEqual([false, false]);
+
+      // The replacement now overflows; only an edit the controller observes can tell it so.
+      stubGeometry(replacement, { scrollWidth: 900, clientWidth: 500 });
+      former.append(document.createElement("li"));
+      await tick();
+      expect(hiddenStates()).toEqual([false, false]);
+
+      replacement.append(document.createElement("li"));
+      await tick();
+      expect(hiddenStates()).toEqual([true, true]);
+    });
+
+    it("keeps one resize subscription on the list while item targets change", async () => {
+      originalResizeObserver = globalThis.ResizeObserver;
+      globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof globalThis.ResizeObserver;
+      await start(markup, { scrollWidth: 500, clientWidth: 100 });
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--breadcrumb",
+      ) as BreadcrumbController;
+
+      const added = document.createElement("li");
+      added.setAttribute("data-stimeo--breadcrumb-target", "collapsible");
+      added.innerHTML = '<a href="/a/b/c2">Added</a>';
+      list().appendChild(added);
+      controller.collapsibleTargetConnected();
+      await tick();
+
+      // Each `observe` of an element starts a new observation, which a real engine
+      // answers with a notification of its own.
+      const calls = FakeResizeObserver.instances.flatMap((observer) => observer.observeCalls);
+      expect(calls).toEqual([list()]);
+      expect(hiddenStates()).toEqual([true, true, true]);
+    });
+
     it("re-measures on demand via the update action", async () => {
       await start(markup, { scrollWidth: 80, clientWidth: 500 });
       expect(hiddenStates()).toEqual([false, false]);
@@ -690,6 +894,37 @@ describe("BreadcrumbController", () => {
       );
       controller?.disconnect();
       expect(observer?.disconnected).toBe(true);
+    });
+
+    it("leaves the collapsed trail as it is when update runs after disconnect", async () => {
+      await start(markup, { scrollWidth: 500, clientWidth: 100 });
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--breadcrumb",
+      ) as BreadcrumbController;
+      controller.disconnect();
+
+      stubGeometry(list(), { scrollWidth: 80, clientWidth: 500 });
+      controller.update();
+
+      expect(hiddenStates()).toEqual([true, true]);
+      expect(ellipsis().hidden).toBe(false);
+    });
+
+    it("leaves nothing observing the list after the controller is unloaded", async () => {
+      originalResizeObserver = globalThis.ResizeObserver;
+      globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof globalThis.ResizeObserver;
+      await start(markup, { scrollWidth: 500, clientWidth: 100 });
+      expect(FakeResizeObserver.instances[0]?.observed.has(list())).toBe(true);
+
+      // Unloading stops the target observer after `disconnect()`, which reports every
+      // target as disconnected once more.
+      application.unload("stimeo--breadcrumb");
+
+      const observing = FakeResizeObserver.instances.filter(
+        (observer) => observer.observed.size > 0,
+      );
+      expect(observing).toEqual([]);
     });
 
     it("unbinds the disclosure action after the controller is unloaded", async () => {

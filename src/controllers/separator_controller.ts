@@ -1,8 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { type SteppedRange, snapSteppedValue, stepSteppedValue } from "../utils/stepped_value";
 
 const DEFAULT_MIN = 0;
@@ -33,10 +34,10 @@ const DEFAULT_MAX = 100;
  *
  * The Stimulus Values are the live inputs. The controller reflects them as
  * `role`, `tabindex`, `aria-orientation`, and the range ARIA while connected,
- * then restores the attributes it displaced on disconnect and before Turbo
- * caches the page. Existing finite range ARIA is hydrated into otherwise
- * absent Values once, which preserves progressively enhanced server markup
- * without leaving two live sources of truth. That fill is the one write
+ * then restores the attributes it displaced on disconnect. Existing finite
+ * range ARIA is hydrated into otherwise absent Values once, which preserves
+ * progressively enhanced server markup without leaving two live sources of
+ * truth. That fill is the one write
  * `connect()` makes to a Value: a declared Value is never overwritten, and the
  * normalized value is published through `aria-valuenow` without being written
  * back.
@@ -85,6 +86,9 @@ const DEFAULT_MAX = 100;
  * ArrowRight/ArrowUp raise the value.
  */
 export class SeparatorController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override values = {
     orientation: { type: String, default: "horizontal" },
     focusable: { type: Boolean, default: false },
@@ -93,6 +97,13 @@ export class SeparatorController extends Controller<HTMLElement> {
     step: { type: Number, default: 1 },
     value: { type: Number, default: DEFAULT_MIN },
   };
+
+  static valueConstraints = {
+    min: NUMBER_BOUNDS.finite,
+    max: NUMBER_BOUNDS.finite,
+    step: NUMBER_BOUNDS.positive,
+    value: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof SeparatorController.values>;
   static actions = ["onKeydown"] as const;
   static events = ["change", "reconcile"] as const;
 
@@ -103,18 +114,15 @@ export class SeparatorController extends Controller<HTMLElement> {
   declare stepValue: number;
   declare valueValue: number;
 
-  readonly #role = new AttributeLease<HTMLElement>("role");
-  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex");
-  readonly #orientation = new AttributeLease<HTMLElement>("aria-orientation");
-  readonly #minimum = new AttributeLease<HTMLElement>("aria-valuemin");
-  readonly #maximum = new AttributeLease<HTMLElement>("aria-valuemax");
-  readonly #current = new AttributeLease<HTMLElement>("aria-valuenow");
+  readonly #role = new AttributeLease<HTMLElement>("role", this.identifier);
+  readonly #tabindex = new AttributeLease<HTMLElement>("tabindex", this.identifier);
+  readonly #orientation = new AttributeLease<HTMLElement>("aria-orientation", this.identifier);
+  readonly #minimum = new AttributeLease<HTMLElement>("aria-valuemin", this.identifier);
+  readonly #maximum = new AttributeLease<HTMLElement>("aria-valuemax", this.identifier);
+  readonly #current = new AttributeLease<HTMLElement>("aria-valuenow", this.identifier);
 
   /** Collapses a morph that changes several render Values into one repaint. */
-  readonly #repaint = new MicrotaskCoalescer(() => this.#render());
-
-  /** Restores authored semantics before Turbo snapshots the element. */
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+  readonly #repaint = new MorphRenderWatcher(() => this.#render());
 
   /**
    * The baseline a published value is compared with: the value last published
@@ -134,16 +142,14 @@ export class SeparatorController extends Controller<HTMLElement> {
    */
   override connect(): void {
     this.#hydrateValues();
-    this.#repaint.activate();
-    this.#beforeCache.activate();
+    this.#repaint.observe(this.element);
     this.#settled = null;
     this.#render();
   }
 
   /** Cancels repaint work and returns every semantic attribute this instance controlled. */
   override disconnect(): void {
-    this.#repaint.cancel();
-    this.#beforeCache.deactivate();
+    this.#repaint.disconnect();
     this.#returnAttributes();
   }
 
@@ -184,7 +190,7 @@ export class SeparatorController extends Controller<HTMLElement> {
     const horizontal = this.#effectiveOrientation === "horizontal";
     const range = this.#effectiveRange;
     // Stepping snaps the declaration onto the value it publishes before moving.
-    const declared = this.valueValue;
+    const declared = this.#safeValue;
     let next: number | null = null;
     switch (event.key) {
       case "ArrowUp":
@@ -246,7 +252,7 @@ export class SeparatorController extends Controller<HTMLElement> {
   #render(): void {
     const range = this.#effectiveRange;
     const focusable = this.focusableValue;
-    const published = focusable ? snapSteppedValue(this.valueValue, range) : null;
+    const published = focusable ? snapSteppedValue(this.#safeValue, range) : null;
     this.#role.write(this.element, "separator");
     this.#orientation.write(this.element, this.#effectiveOrientation);
     this.#tabindex.write(this.element, focusable ? "0" : null);
@@ -268,12 +274,12 @@ export class SeparatorController extends Controller<HTMLElement> {
 
   /** Finite, ordered range shared by rendering and keyboard stepping. */
   get #effectiveRange(): SteppedRange {
-    const min = Number.isFinite(this.minValue) ? this.minValue : DEFAULT_MIN;
-    const candidateMax = Number.isFinite(this.maxValue) ? this.maxValue : DEFAULT_MAX;
+    const min = this.#safeMin;
+    const candidateMax = this.#safeMax;
     return {
       min,
       max: Math.max(min, candidateMax),
-      step: this.stepValue,
+      step: this.#safeStep,
       base: min,
     };
   }
@@ -323,9 +329,47 @@ export class SeparatorController extends Controller<HTMLElement> {
     this.#current.return(this.element);
   }
 
-  /** Prevents a queued Value repaint from racing Turbo's restored snapshot. */
-  #rewindForCache(): void {
-    this.#repaint.cancel();
-    this.#returnAttributes();
+  /** Current `min` declaration resolved against its numeric contract. */
+  get #safeMin(): number {
+    return this.#numbers.read(
+      this,
+      "min",
+      this.minValue,
+      SeparatorController.values.min.default,
+      SeparatorController.valueConstraints.min,
+    );
+  }
+
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      SeparatorController.values.max.default,
+      SeparatorController.valueConstraints.max,
+    );
+  }
+
+  /** Current `step` declaration resolved against its numeric contract. */
+  get #safeStep(): number {
+    return this.#numbers.read(
+      this,
+      "step",
+      this.stepValue,
+      SeparatorController.values.step.default,
+      SeparatorController.valueConstraints.step,
+    );
+  }
+
+  /** Current `value` declaration resolved against its numeric contract. */
+  get #safeValue(): number {
+    return this.#numbers.read(
+      this,
+      "value",
+      this.valueValue,
+      this.#effectiveRange.min,
+      SeparatorController.valueConstraints.value,
+    );
   }
 }

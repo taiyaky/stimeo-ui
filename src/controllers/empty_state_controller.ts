@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 
 /**
  * Headless empty-state behavior: shows an "empty" placeholder when a list has no
@@ -64,13 +65,17 @@ export class EmptyStateController extends Controller<HTMLElement> {
   /** Last applied empty state; `null` until the first sync so connect emits nothing. */
   #empty: boolean | null = null;
 
+  readonly #morphRender = new MorphRenderWatcher(() => this.#resync());
+
   override connect(): void {
+    this.#morphRender.observe(this.element);
     this.#connected = true;
     this.#syncObservation();
     this.#update();
   }
 
   override disconnect(): void {
+    this.#morphRender.disconnect();
     this.#connected = false;
     this.#stopObserving();
   }

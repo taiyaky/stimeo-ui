@@ -31,10 +31,6 @@
  * - **`Space` and composition input are never type-ahead.** `Space` natively
  *   activates a `<button>`-based item, and characters still being composed are
  *   not a committed query.
- *
- * This file's own doc block is dropped from `dist`, but every member comment is
- * inlined into each consumer entry (`tsup` builds with `splitting: false`), so
- * rationale belongs here and contracts belong on the members.
  */
 
 import { SafeTimeout } from "./safe_timeout";

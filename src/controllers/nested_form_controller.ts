@@ -1,9 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { AttributeLease } from "../utils/attribute_lease";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { firstTabStop, isTabStop } from "../utils/focus_candidate";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { TabindexLoan } from "../utils/tabindex_loan";
 import { targetSelector } from "../utils/target_selector";
 
@@ -75,6 +76,9 @@ const DESTROYED_VALUES = new Set(["1", "true"]);
  * listener, the observer, and every lease are released on `disconnect()`.
  */
 export class NestedFormController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   /** Selects any root of this controller; the nearest one owns an element. */
   get #rootSelector(): string {
     return `[data-controller~="${this.identifier}"]`;
@@ -98,6 +102,11 @@ export class NestedFormController extends Controller<HTMLElement> {
     announce: { type: Boolean, default: true },
     countMessage: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    min: NUMBER_BOUNDS.nonNegative,
+    max: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof NestedFormController.values>;
   static actions = ["add"] as const;
   static events = ["add", "remove", "reconcile"] as const;
 
@@ -126,12 +135,11 @@ export class NestedFormController extends Controller<HTMLElement> {
   /** Watches the list for row changes the controller did not perform itself. */
   #observer: MutationObserver | null = null;
 
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileNow());
+  readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileNow());
   /** Restores the authored add-button `disabled` when a lease ends. */
-  readonly #addDisabled = new AttributeLease<HTMLButtonElement>("disabled");
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+  readonly #addDisabled = new AttributeLease<HTMLButtonElement>("disabled", this.identifier);
   /** Makes the root a programmatic focus destination when no other candidate survives. */
-  readonly #tabindex = new TabindexLoan();
+  readonly #tabindex = new TabindexLoan("-1", this.identifier);
 
   /**
    * Delegated click handler for the per-row remove buttons (dynamic-safe). Only
@@ -147,11 +155,11 @@ export class NestedFormController extends Controller<HTMLElement> {
   };
 
   override connect(): void {
+    this.#tabindex.reclaim(this.element);
     this.#warnedMissing = false;
     this.#warnedTemplate = false;
     this.element.addEventListener("click", this.#onClick);
-    this.#reconcile.activate();
-    this.#beforeCache.activate();
+    this.#reconcile.observe(this.element);
     if (!this.hasListTarget || !this.hasTemplateTarget) this.#warnMissing();
     this.#refresh();
   }
@@ -160,9 +168,8 @@ export class NestedFormController extends Controller<HTMLElement> {
     this.element.removeEventListener("click", this.#onClick);
     this.#observer?.disconnect();
     this.#observer = null;
-    this.#reconcile.cancel();
-    this.#beforeCache.deactivate();
-    this.#rewindForCache();
+    this.#reconcile.disconnect();
+    this.#addDisabled.returnAll();
     this.#tabindex.returnAll();
     this.#published = null;
   }
@@ -268,8 +275,6 @@ export class NestedFormController extends Controller<HTMLElement> {
    * Removes a row: a persisted row (one carrying its own `destroyFlag`) has the
    * flag set to `1` and is hidden so Rails destroys it on submit; an unsaved row
    * is dropped from the DOM. Returns focus to a surviving row. No-ops at `min`.
-   *
-   * @stimeoRuntimeOnly `min` decides whether this one removal is allowed.
    */
   #removeRow(row: HTMLElement): void {
     const rows = this.#effectiveRows;
@@ -281,7 +286,7 @@ export class NestedFormController extends Controller<HTMLElement> {
       this.#focusAfterRemove(this.#positionAmong(rows, row));
       return;
     }
-    if (rows.length <= this.minValue) return;
+    if (rows.length <= this.#safeMin) return;
 
     const position = rows.indexOf(row);
     const flag = this.#destroyFlagOf(row);
@@ -342,15 +347,15 @@ export class NestedFormController extends Controller<HTMLElement> {
   #refresh(): void {
     if (!this.hasListTarget) return;
     const count = this.#effectiveRows.length;
-    const atMin = count <= this.minValue;
-    const atMax = this.maxValue > 0 && count >= this.maxValue;
+    const atMin = count <= this.#safeMin;
+    const atMax = this.#safeMax > 0 && count >= this.#safeMax;
     this.element.setAttribute("data-nested-count", String(count));
     this.#reflect("data-nested-at-max", atMax);
     this.#reflect("data-nested-at-min", atMin);
     if (this.hasAddTarget) {
       // The button's disabled is controller state only while a max exists;
       // without one there is nothing to derive and the authored value stands.
-      if (this.maxValue > 0) this.#addDisabled.write(this.addTarget, atMax ? "" : null);
+      if (this.#safeMax > 0) this.#addDisabled.write(this.addTarget, atMax ? "" : null);
       else this.#addDisabled.return(this.addTarget);
     }
     this.#published = { count, atMin, atMax };
@@ -390,11 +395,6 @@ export class NestedFormController extends Controller<HTMLElement> {
     else this.element.removeAttribute(attribute);
   }
 
-  /** Returns the disabled lease so an authored value never leaks into a snapshot. */
-  #rewindForCache(): void {
-    if (this.hasAddTarget) this.#addDisabled.return(this.addTarget);
-  }
-
   /** Names the missing required target(s) once per connection. */
   #warnMissing(): void {
     if (this.#warnedMissing) return;
@@ -426,7 +426,7 @@ export class NestedFormController extends Controller<HTMLElement> {
   }
 
   get #atMax(): boolean {
-    return this.maxValue > 0 && this.#effectiveRows.length >= this.maxValue;
+    return this.#safeMax > 0 && this.#effectiveRows.length >= this.#safeMax;
   }
 
   /**
@@ -467,5 +467,26 @@ export class NestedFormController extends Controller<HTMLElement> {
       node = node.parentElement;
     }
     return node as HTMLElement | null;
+  }
+  /** Current `min` declaration resolved against its numeric contract. */
+  get #safeMin(): number {
+    return this.#numbers.read(
+      this,
+      "min",
+      this.minValue,
+      NestedFormController.values.min.default,
+      NestedFormController.valueConstraints.min,
+    );
+  }
+
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      NestedFormController.values.max.default,
+      NestedFormController.valueConstraints.max,
+    );
   }
 }

@@ -5,11 +5,18 @@ import { ChipRow } from "../utils/chip_row";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { matchingPart, writeLabel } from "../utils/element_part";
 import { commitField, writeFields } from "../utils/field_mirror";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { TemplateRow } from "../utils/template_row";
 
 /**
  * Headless, accessible free-input tags / chips field.
+ *
+ * Tags, fields and keyboard stops are settled before notification. Confirmations
+ * compare with the last published tags; synchronous replacements suppress older
+ * notifications and announcements that have not yet been sent.
  *
  * Markup contract (identifier: `stimeo--tags-input`):
  *   <div data-controller="stimeo--tags-input"
@@ -60,6 +67,12 @@ import { TemplateRow } from "../utils/template_row";
  * `{ value: string, reason: "duplicate" | "empty" | "max" }`.
  */
 export class TagsInputController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
+  /** Identifies the latest published state transition. */
+  readonly #moves = new MoveCounter();
+
   static override targets = ["input", "tags", "tag", "tagTemplate", "label", "remove", "fields"];
   static override values = {
     delimiter: { type: String, default: "," },
@@ -70,6 +83,10 @@ export class TagsInputController extends Controller<HTMLElement> {
     announceText: { type: String, default: "" },
     announceRemovedText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    max: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof TagsInputController.values>;
   static actions = ["onKeydown"] as const;
   static events = ["change", "reconcile", "reject"] as const;
 
@@ -105,7 +122,7 @@ export class TagsInputController extends Controller<HTMLElement> {
     noun: "chip template",
   });
   /** Collapses one target/Value mutation batch into one final-DOM repair pass. */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileTags());
+  readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileTags());
   readonly #chipRow = new ChipRow({
     directionElement: this.element,
     getItems: () => this.tagTargets,
@@ -125,12 +142,12 @@ export class TagsInputController extends Controller<HTMLElement> {
     const tags = this.#values;
     this.#syncState(tags);
     this.#tagValues = tags;
-    this.#reconcile.activate();
+    this.#reconcile.observe(this.element);
   }
 
   /** Releases the delegated listeners so no handler outlives the element. */
   override disconnect(): void {
-    this.#reconcile.cancel();
+    this.#reconcile.disconnect();
     this.#composition.disconnect();
     this.#chipRow.disconnect();
   }
@@ -168,6 +185,11 @@ export class TagsInputController extends Controller<HTMLElement> {
 
   /** Seeds a fields target inserted after connect. */
   fieldsTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Brings the fields target that stays to the current tags when an earlier one leaves. */
+  fieldsTargetDisconnected(): void {
     this.#reconcile.schedule();
   }
 
@@ -231,7 +253,7 @@ export class TagsInputController extends Controller<HTMLElement> {
       this.#reject(value, "empty");
       return;
     }
-    if (this.maxValue > 0 && this.tagTargets.length >= this.maxValue) {
+    if (this.#safeMax > 0 && this.tagTargets.length >= this.#safeMax) {
       this.#reject(value, "max");
       return;
     }
@@ -242,10 +264,7 @@ export class TagsInputController extends Controller<HTMLElement> {
     if (!this.#appendTag(value)) return;
     this.inputTarget.value = "";
     const tags = this.#values;
-    this.#syncState(tags, true);
-    this.#tagValues = tags;
-    this.#announceTransition(true, value, tags.length);
-    this.dispatch("change", { detail: { tags } });
+    this.#publishTags(tags, true, value);
   }
 
   /**
@@ -278,10 +297,7 @@ export class TagsInputController extends Controller<HTMLElement> {
     const value = tag.dataset.value ?? "";
     tag.remove();
     const tags = this.#values;
-    this.#syncState(tags, true);
-    this.#tagValues = tags;
-    this.#announceTransition(false, value, tags.length);
-    this.dispatch("change", { detail: { tags } });
+    if (!this.#publishTags(tags, false, value)) return;
     if (focus === "input") {
       this.#focusInput();
       return;
@@ -299,28 +315,44 @@ export class TagsInputController extends Controller<HTMLElement> {
    *
    * @stimeoRenderRoot
    */
-  #syncState(values: readonly string[], notify = false): void {
+  #syncState(values: readonly string[]): boolean {
+    let fieldChanged = false;
     if (this.hasFieldsTarget) {
       const options = { name: this.nameValue, form: this.formValue };
-      if (writeFields(this.fieldsTarget, values, options) && notify) {
-        commitField(this.fieldsTarget);
-      }
+      fieldChanged = writeFields(this.fieldsTarget, values, options);
     }
-    const full = this.maxValue > 0 && values.length >= this.maxValue;
+    const full = this.#safeMax > 0 && values.length >= this.#safeMax;
     this.element.toggleAttribute(`data-${this.identifier}-full`, full);
     // Keep exactly one remove button tabbable so the chip list is a single stop.
     this.#chipRow.ensureTabStop();
+    return fieldChanged;
+  }
+
+  /** Writes the whole tag state before notifying observers of a real transition. */
+  #publishTags(tags: string[], added: boolean, value: string): boolean {
+    const changed = !this.#sameTags(this.#tagValues, tags);
+    const fieldChanged = this.#syncState(tags);
+    this.#tagValues = tags;
+    if (!changed) return true;
+    const token = this.#moves.record();
+    if (fieldChanged) commitField(this.fieldsTarget);
+    if (!this.#moves.isLatest(token)) return false;
+    this.#announceTransition(added, value, tags.length);
+    if (!this.#moves.isLatest(token)) return false;
+    this.dispatch("change", { detail: { tags } });
+    return this.#moves.isLatest(token);
   }
 
   /** Repairs derived state after DOM/Turbo changes and reports a changed tag order. */
   #reconcileTags(): void {
     if (this.hasTagsTarget) this.#chipRow.connect(this.tagsTarget);
-    else this.#chipRow.disconnect();
     const tags = this.#values;
     this.#syncState(tags);
     const changed = !this.#sameTags(this.#tagValues, tags);
     this.#tagValues = tags;
-    if (changed) this.dispatch("reconcile", { detail: { tags } });
+    if (changed) {
+      this.dispatch("reconcile", { detail: { tags } });
+    }
   }
 
   /**
@@ -346,5 +378,15 @@ export class TagsInputController extends Controller<HTMLElement> {
   /** Whether two arrays carry the same values in the same submitted order. */
   #sameTags(left: readonly string[], right: readonly string[]): boolean {
     return left.length === right.length && left.every((value, index) => value === right[index]);
+  }
+  /** Current `max` declaration resolved against its numeric contract. */
+  get #safeMax(): number {
+    return this.#numbers.read(
+      this,
+      "max",
+      this.maxValue,
+      TagsInputController.values.max.default,
+      TagsInputController.valueConstraints.max,
+    );
   }
 }

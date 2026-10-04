@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     environment: "happy-dom",
     globals: true,
+    execArgv: ["--expose-gc"],
     include: ["tests/**/*.test.ts"],
     // happy-dom delivers MutationObserver records only while the callback's WeakRef
     // is still live; under the coverage run's GC pressure it gets reclaimed and the
@@ -16,6 +17,13 @@ export default defineConfig({
       // real-browser loading window (a pending src is complete=false until load/error
       // fires) so the avatar controller's loading/loaded/error phases stay testable.
       "tests/setup/deterministic-image-loading.ts",
+      // A MutationObserver callback that keeps re-triggering an observer holds the
+      // worker in microtasks, where no test timeout fires; this caps the deliveries
+      // of one test's observers and fails the test that set such a loop off.
+      "tests/setup/bounded-mutation-observer.ts",
+      // happy-dom reports a replaceWith as an insertion followed by a removal; this
+      // restores the browser order, where the departing target's callback runs first.
+      "tests/setup/browser-replace-order.ts",
     ],
     // The a11y suites run axe-core on the real clock; under a constrained / loaded
     // runner (CI, Docker) those occasionally brush past Vitest's default 5s, flaking

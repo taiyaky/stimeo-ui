@@ -32,10 +32,6 @@
  * there too: a control associated through `form=` is reached by the consumer's
  * own `control.form` read.
  *
- * This file's own doc block is dropped from `dist`, but every member comment is
- * inlined into each consumer entry (`tsup` builds with `splitting: false`), so
- * rationale belongs here and only the contract belongs on the members.
- *
  * @example
  * ```ts
  * readonly #formReset = new FormResetWatcher(

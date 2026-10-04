@@ -1,11 +1,15 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
 import { ownerOf } from "../utils/event_owner";
 import { commitField, writeFields } from "../utils/field_mirror";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { isInteractiveHost } from "../utils/interactive_host";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
+import type { StateReason } from "../utils/state_reason";
+import { targetSelector } from "../utils/target_selector";
 
 /** Item attributes whose retained-element changes can alter this controller's contract. */
 const ITEM_ATTRIBUTES = [
@@ -43,8 +47,17 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  * exclusive selection with radio semantics, use
  * {@link RadioGroupController | Radio Group} instead.
  *
- * `change` dispatches `{ value: string, pressed: boolean, values: string[] }`;
+ * `change` dispatches `{ value: string, pressed: boolean, values: string[], reason: StateReason }`;
  * `reconcile` dispatches `{ values: string[] }`.
+ *
+ * User `change` reports compare the resulting state with the last published
+ * state. A pending page write handled in the same script joins that confirmation;
+ * a browser-delivered listener may settle it first as `reconcile`. Confirming
+ * the last published state reports nothing.
+ *
+ * A synchronous subscriber that confirms another state replaces reports still
+ * pending for the outer confirmation. Reading state or confirming it unchanged
+ * does not replace them. An event already being dispatched cannot be recalled.
  *
  * @remarks
  * Behavior only — the consumer styles off `[aria-pressed="true"]`. A supported
@@ -65,7 +78,7 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  *   first/last. Native-disabled and hidden items are skipped. ARIA-disabled
  *   items remain discoverable in the roving order but cannot be activated.
  * - `stimeo--toggle-group:change` is dispatched only for user activation. Its
- *   detail is `{ value: string, pressed: boolean, values: string[] }`, where
+ *   detail is `{ value: string, pressed: boolean, values: string[], reason: StateReason }`, where
  *   `values` is the DOM-ordered value list of every item left pressed. A press
  *   that a listener of its native `change` replaces with a press of its own
  *   dispatches no `change`: the newer press reports itself, so every `change`
@@ -87,6 +100,7 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  *   container itself is replaced.
  */
 export class ToggleGroupController extends Controller<HTMLElement> {
+  readonly #moves = new MoveCounter();
   static override targets = ["item", "fields"];
   static override values = {
     mode: { type: String, default: "multiple" },
@@ -106,20 +120,15 @@ export class ToggleGroupController extends Controller<HTMLElement> {
   readonly #roving = new RovingTabindex(() => this.#managedTargets);
   readonly #handledEvents = new WeakSet<Event>();
   readonly #managedItems = new Set<HTMLElement>();
-  readonly #originalTabindex = new Map<HTMLElement, string | null>();
+  readonly #originalTabindex = new WeakMap<HTMLElement, string | null>();
   readonly #ownedPressed = new Set<HTMLElement>();
   readonly #internalPressedValues = new Map<HTMLElement, string>();
   /** One pass per batch of item, Value, and retained-element changes. */
-  readonly #pass = new MicrotaskCoalescer(() => this.#reconcileDom());
+  readonly #pass = new MorphRenderWatcher(() => this.#reconcileDom());
   #observer: MutationObserver | null = null;
   #connected = false;
   /** The pressed set last published: read on connect, then committed or reported. */
   #committedValues: string[] = [];
-  /**
-   * How many presses the user has committed, so a press whose reports are still
-   * going out can tell that a listener has committed a newer one meanwhile.
-   */
-  #presses = 0;
 
   /**
    * Normalizes state and establishes one roving entry point. A single authored
@@ -156,7 +165,7 @@ export class ToggleGroupController extends Controller<HTMLElement> {
     // Writes made before observation started cannot produce records and must
     // not be mistaken for a later retained-element morph.
     this.#internalPressedValues.clear();
-    this.#pass.activate();
+    this.#pass.observe(this.element);
     this.#observeMutations();
   }
 
@@ -166,7 +175,7 @@ export class ToggleGroupController extends Controller<HTMLElement> {
    */
   override disconnect(): void {
     this.#connected = false;
-    this.#pass.cancel();
+    this.#pass.disconnect();
     this.element.removeEventListener("click", this.#onClickCapture, true);
     this.element.removeEventListener("keydown", this.#onKeydownCapture, true);
     this.element.removeEventListener("click", this.#onClick);
@@ -174,7 +183,6 @@ export class ToggleGroupController extends Controller<HTMLElement> {
     this.element.removeEventListener("focusin", this.#onFocusin);
     this.#observer?.disconnect();
     this.#observer = null;
-    this.#internalPressedValues.clear();
   }
 
   /** Drops a newly connected item from the Tab sequence before the batch is reconciled. */
@@ -210,12 +218,15 @@ export class ToggleGroupController extends Controller<HTMLElement> {
    * Toggles the action's item. Per-item action wiring is optional because click
    * is also delegated from the group.
    */
-  toggle(event: Event): void {
-    if (event.defaultPrevented) return;
-    const item = event.currentTarget as HTMLElement | null;
+  toggle(source: Event | HTMLElement): void {
+    const { event, host, origin, reason } = actionSource(source);
+    const item = host?.closest<HTMLElement>(targetSelector(this.identifier, "item"));
     if (!item || !this.itemTargets.includes(item)) return;
-    this.#handledEvents.add(event);
-    this.#toggleItem(item);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    if (event?.defaultPrevented) return;
+    if (event) this.#handledEvents.add(event);
+    this.#toggleItem(item, reason);
   }
 
   /**
@@ -320,7 +331,7 @@ export class ToggleGroupController extends Controller<HTMLElement> {
    * @stimeoRuntimeOnly `mode` is the rule this one press follows; the lasting single-press
    *   normalisation is a render root of its own.
    */
-  #toggleItem(item: HTMLElement): void {
+  #toggleItem(item: HTMLElement, reason: StateReason = "user"): void {
     if (!this.#isSupportedHost(item) || this.#isActivationDisabled(item)) return;
     if (!this.#managedItems.has(item)) this.#reconcileHost(item, true);
     const willPress = !this.#isPressed(item);
@@ -332,13 +343,19 @@ export class ToggleGroupController extends Controller<HTMLElement> {
     }
     this.#setActive(item);
     const values = this.#pressedValues();
+    const previous = this.#committedValues;
+    const changed =
+      values.length !== previous.length || values.some((value, index) => value !== previous[index]);
     this.#committedValues = values;
-    this.#presses += 1;
-    const press = this.#presses;
+    if (!changed) {
+      this.#mirrorFields(false);
+      return;
+    }
+    const token = this.#moves.record();
     this.#mirrorFields(true);
-    if (press !== this.#presses) return;
+    if (!this.#moves.isLatest(token)) return;
     this.dispatch("change", {
-      detail: { value: this.#itemValue(item), pressed: willPress, values: [...values] },
+      detail: { value: this.#itemValue(item), pressed: willPress, values: [...values], reason },
     });
   }
 
@@ -409,9 +426,7 @@ export class ToggleGroupController extends Controller<HTMLElement> {
     const original = this.#originalTabindex.get(item);
     if (original === null) item.removeAttribute("tabindex");
     else if (original !== undefined) item.setAttribute("tabindex", original);
-    this.#originalTabindex.delete(item);
     if (this.#ownedPressed.delete(item)) item.removeAttribute("aria-pressed");
-    this.#internalPressedValues.delete(item);
   }
 
   /** Supplies a missing pressed state and normalizes invalid ARIA tokens. */
@@ -432,7 +447,6 @@ export class ToggleGroupController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #normalizeSelection(): void {
-    for (const item of this.#managedTargets) this.#normalizePressed(item);
     if (this.modeValue !== "single") return;
     let found = false;
     for (const item of this.#managedTargets) {

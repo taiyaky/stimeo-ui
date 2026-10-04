@@ -1,3 +1,4 @@
+import type { NumberBounds } from "../utils/number_bounds";
 /**
  * Shared types for the Stimeo Inspector CLI (`stimeo check`).
  *
@@ -637,6 +638,8 @@ export interface ActionParamRule {
   readonly required?: boolean;
   /** The literal values the reader accepts, when it accepts a fixed set. */
   readonly allowedValues?: readonly string[];
+  /** Whether the reader takes a finite number after Stimulus action-param decoding. */
+  readonly numeric?: boolean;
   /** Whether the reader takes a whole number and returns on anything else. */
   readonly integer?: boolean;
   /** Human-readable fix suggestion shown by the CLI. */
@@ -815,14 +818,14 @@ export interface RequiredActionRule {
  * ""))`) before applying these bounds. ERB-generated values are undecidable and
  * skipped rather than guessed.
  */
-export interface NumericValueConstraint {
+export interface NumericValueConstraint extends Omit<NumberBounds, "finite"> {
   /** Value name (camelCase, as declared in `static values`). */
   readonly value: string;
   /** Decoder family. */
   readonly type: "number";
-  /** Reject `NaN` and infinities when true. */
+  /** Require finite numbers unless an explicit infinity exception applies. */
   readonly finite?: boolean;
-  /** Require a decoded number strictly greater than this bound. */
+  /** Exclusive lower endpoint accepted from compatible manifest readers. */
   readonly greaterThan?: number;
   /** Require a decoded number with no fractional part. */
   readonly integer?: boolean;

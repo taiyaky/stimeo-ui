@@ -1,5 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
+import { AttributeLease } from "../utils/attribute_lease";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -36,16 +39,25 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * removed/cleared on `disconnect()` (Turbo included).
  */
 export class NetworkStatusController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["offline", "online"];
   static override values = {
     announceText: { type: String, default: "" },
     announceOnlineText: { type: String, default: "" },
     onlineAutoHide: { type: Number, default: 0 },
   };
+
+  static valueConstraints = {
+    onlineAutoHide: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof NetworkStatusController.values>;
   static events = ["change"] as const;
 
   declare readonly offlineTarget: HTMLElement;
+  declare readonly offlineTargets: HTMLElement[];
   declare readonly onlineTarget: HTMLElement;
+  declare readonly onlineTargets: HTMLElement[];
   declare readonly hasOfflineTarget: boolean;
   declare readonly hasOnlineTarget: boolean;
 
@@ -54,33 +66,67 @@ export class NetworkStatusController extends Controller<HTMLElement> {
   declare announceOnlineTextValue: string;
 
   readonly #timers = new SafeTimeout();
+  /** Owns the `hidden` written on each banner, so one that departs gets its own back. */
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Whether `connect()` has run and `disconnect()` has not since. */
+  #connected = false;
 
   /** Last known connectivity; guards against duplicate-state re-announcements. */
   #online = true;
+  /** Whether the recovery banner is up: from a recovery until a drop or its auto-hide. */
+  #recoveryShown = false;
 
   readonly #handleOnline = (): void => this.#update(true);
   readonly #handleOffline = (): void => this.#update(false);
 
   override connect(): void {
-    // Normalize initial visibility so a missing `hidden` in the markup cannot
-    // strand a stale banner (e.g. an offline notice showing while online).
-    if (this.hasOfflineTarget) this.offlineTarget.hidden = true;
-    if (this.hasOnlineTarget) this.onlineTarget.hidden = true;
-
+    this.#connected = true;
     this.#online = navigator.onLine;
     // On connect, surface only the offline state; do not flash a "back online"
-    // banner just because the page loaded while connected.
+    // banner just because the page loaded while connected. Both banners are written,
+    // so a missing `hidden` in the markup cannot strand a stale one (e.g. an offline
+    // notice showing while online).
+    this.#recoveryShown = false;
     this.element.setAttribute("data-state", this.#online ? "online" : "offline");
-    if (!this.#online) this.#showOffline();
+    this.#paint();
 
     window.addEventListener("online", this.#handleOnline);
     window.addEventListener("offline", this.#handleOffline);
   }
 
   override disconnect(): void {
+    this.#connected = false;
     window.removeEventListener("online", this.#handleOnline);
     window.removeEventListener("offline", this.#handleOffline);
     this.#timers.clearAll();
+  }
+
+  /** Shows or hides an offline banner that arrives at runtime as connectivity calls for. */
+  offlineTargetConnected(): void {
+    if (this.#connected) this.#paint();
+  }
+
+  /**
+   * Gives an offline banner that no longer resolves its own `hidden` back, even after
+   * `disconnect()`, and while connected repaints the banner that stays.
+   */
+  offlineTargetDisconnected(banner: HTMLElement): void {
+    if (!this.offlineTargets.includes(banner)) this.#hidden.return(banner);
+    if (this.#connected) this.#paint();
+  }
+
+  /** Shows or hides a recovery banner that arrives at runtime as the recovery calls for. */
+  onlineTargetConnected(): void {
+    if (this.#connected) this.#paint();
+  }
+
+  /**
+   * Gives a recovery banner that no longer resolves its own `hidden` back, even after
+   * `disconnect()`, and while connected repaints the banner that stays.
+   */
+  onlineTargetDisconnected(banner: HTMLElement): void {
+    if (!this.onlineTargets.includes(banner)) this.#hidden.return(banner);
+    if (this.#connected) this.#paint();
   }
 
   /**
@@ -112,24 +158,42 @@ export class NetworkStatusController extends Controller<HTMLElement> {
   /** Shows the offline banner and hides the recovery banner. */
   #showOffline(): void {
     this.#timers.clearAll();
-    if (this.hasOnlineTarget) this.onlineTarget.hidden = true;
-    if (this.hasOfflineTarget) this.offlineTarget.hidden = false;
+    this.#recoveryShown = false;
+    this.#paint();
   }
 
   /**
-   * Shows the recovery banner, optionally auto-hiding it after `onlineAutoHide`.
+   * Shows the recovery banner, optionally auto-hiding it after `onlineAutoHide`. The
+   * deadline belongs to the recovery, so a banner that arrives before it is hidden then too.
    *
    * @stimeoRuntimeOnly `onlineAutoHide` is the delay of the one timer that hides the banner this
    *   transition shows.
    */
   #showOnline(): void {
-    if (this.hasOfflineTarget) this.offlineTarget.hidden = true;
-    if (!this.hasOnlineTarget) return;
-    this.onlineTarget.hidden = false;
-    if (this.onlineAutoHideValue > 0) {
+    this.#recoveryShown = true;
+    this.#paint();
+    if (this.#safeOnlineAutoHide > 0) {
       this.#timers.set(() => {
-        this.onlineTarget.hidden = true;
-      }, this.onlineAutoHideValue);
+        this.#recoveryShown = false;
+        this.#paint();
+      }, this.#safeOnlineAutoHide);
     }
+  }
+
+  /** Writes the visibility connectivity and the recovery call for onto the first banners. */
+  #paint(): void {
+    if (this.hasOfflineTarget) this.#hidden.write(this.offlineTarget, this.#online ? "" : null);
+    if (this.hasOnlineTarget)
+      this.#hidden.write(this.onlineTarget, this.#recoveryShown ? null : "");
+  }
+  /** Current `onlineAutoHide` declaration resolved against its numeric contract. */
+  get #safeOnlineAutoHide(): number {
+    return this.#numbers.read(
+      this,
+      "onlineAutoHide",
+      this.onlineAutoHideValue,
+      NetworkStatusController.values.onlineAutoHide.default,
+      NetworkStatusController.valueConstraints.onlineAutoHide,
+    );
   }
 }

@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TabsController } from "../src/controllers/tabs_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
@@ -328,7 +328,7 @@ describe("TabsController", () => {
       tabs()[1]?.click();
 
       expect(capture.names()).toEqual(["change"]);
-      expect(capture.seen[0]?.detail).toEqual({ index: 1, total: 3, previous: 0 });
+      expect(capture.seen[0]?.detail).toEqual({ index: 1, total: 3, previous: 0, reason: "user" });
       expect(states).toEqual(["true false"]);
       expect(capture.seen[0]?.bubbles).toBe(true);
       expect(capture.seen[0]?.cancelable).toBe(false);
@@ -337,7 +337,7 @@ describe("TabsController", () => {
     it("reports an arrow-key move", () => {
       tabs()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
 
-      expect(capture.seen[0]?.detail).toEqual({ index: 1, total: 3, previous: 0 });
+      expect(capture.seen[0]?.detail).toEqual({ index: 1, total: 3, previous: 0, reason: "user" });
     });
 
     it("stays silent when the selected tab is reselected", () => {
@@ -398,5 +398,154 @@ describe("TabsController", () => {
       expect(tabs()[2]?.getAttribute("aria-selected")).toBe("true");
       expect(document.activeElement).not.toBe(tabs()[1]);
     });
+  });
+});
+
+/** Explicit target calls share the DOM action while retaining their own provenance. */
+describe("TabsController target API", () => {
+  let application: Application;
+  const element = (id: string): HTMLElement => {
+    const found = document.getElementById(id);
+    if (!found) throw new Error(`Missing API fixture ${id}`);
+    return found;
+  };
+  const instance = (): TabsController =>
+    application.getControllerForElementAndIdentifier(
+      element("api-root"),
+      "stimeo--tabs",
+    ) as TabsController;
+  beforeEach(async () => {
+    document.body.innerHTML = `<button id="api-outside">Outside</button><div id="api-root" data-controller="stimeo--tabs" ><div role="tablist" data-stimeo--tabs-target="list"><button id="api-a" data-stimeo--tabs-target="tab" role="tab" aria-controls="api-panel-a" data-action="click->stimeo--tabs#select"><span>a</span></button><div id="api-panel-a" role="tabpanel" data-stimeo--tabs-target="panel" hidden>Panel</div><button id="api-b" data-stimeo--tabs-target="tab" role="tab" aria-controls="api-panel-b" data-action="click->stimeo--tabs#select"><span>b</span></button><div id="api-panel-b" role="tabpanel" data-stimeo--tabs-target="panel" hidden>Panel</div></div></div>`;
+    application = Application.start();
+    application.register("stimeo--tabs", TabsController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it("retains the existing DOM Event success as a positive control", () => {
+    const reports: Array<{ reason?: string }> = [];
+    element("api-root").addEventListener("stimeo--tabs:change", (event) => {
+      reports.push((event as CustomEvent<{ reason?: string }>).detail);
+    });
+    element("api-b").click();
+    expect(element("api-b").getAttribute("aria-selected")).toBe("true");
+    expect(reports).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    "accepts an owned target or its descendant (%s) after an Event positive control",
+    (descendant) => {
+      const reports: Array<{ reason?: string }> = [];
+      element("api-root").addEventListener("stimeo--tabs:change", (event) => {
+        reports.push((event as CustomEvent<{ reason?: string }>).detail);
+      });
+      element("api-b").click();
+      expect(element("api-b").getAttribute("aria-selected")).toBe("true");
+      expect(reports).toHaveLength(1);
+      element("api-outside").focus();
+      const target = descendant ? element("api-a").querySelector("span") : element("api-a");
+      if (!(target instanceof HTMLElement)) throw new Error("Missing API descendant");
+      instance().select(target);
+      expect(element("api-a").getAttribute("aria-selected")).toBe("true");
+      expect(document.activeElement).toBe(element("api-outside"));
+      expect(reports.at(-1)?.reason).toBe("api");
+      expect(reports[0]?.reason).toBe("user");
+    },
+  );
+  it.each(["foreign", "undeclared", "detached", "nested"])(
+    "rejects %s targets through element and Event entry points before accepting an owned target",
+    (kind) => {
+      const reports: unknown[] = [];
+      element("api-root").addEventListener("stimeo--tabs:change", (event) => {
+        reports.push((event as CustomEvent<unknown>).detail);
+      });
+      const invalid = element("api-b").cloneNode(true);
+      if (!(invalid instanceof HTMLElement)) throw new Error("Missing cloned target");
+      invalid.id = "api-invalid";
+      invalid.removeAttribute("data-action");
+      if (kind === "foreign") document.body.append(invalid);
+      if (kind === "undeclared") {
+        invalid.removeAttribute("data-stimeo--tabs-target");
+        element("api-root").append(invalid);
+      }
+      if (kind === "nested") {
+        const nested = document.createElement("div");
+        nested.setAttribute("data-controller", "stimeo--tabs");
+        nested.append(invalid);
+        element("api-a").append(nested);
+      }
+      element("api-outside").focus();
+      const before = element("api-root").innerHTML;
+      instance().select(invalid);
+      invalid.addEventListener("probe", (event) => instance().select(event));
+      invalid.dispatchEvent(new Event("probe"));
+      expect(element("api-root").innerHTML).toBe(before);
+      expect(reports).toEqual([]);
+      expect(document.activeElement).toBe(element("api-outside"));
+      instance().select(element("api-b"));
+      expect(element("api-b").getAttribute("aria-selected")).toBe("true");
+      expect(reports).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+    ["click", "user"],
+  ])("retains %s Event provenance for an action bound on a target descendant", (type, reason) => {
+    const reports: Array<{ reason: string }> = [];
+    element("api-root").addEventListener("stimeo--tabs:change", (event) => {
+      reports.push((event as CustomEvent<{ reason: string }>).detail);
+    });
+    const child = element("api-b").querySelector("span");
+    if (!(child instanceof HTMLElement)) throw new Error("Missing action descendant");
+    child.addEventListener(type, (event) => instance().select(event));
+    child.dispatchEvent(new Event(type));
+    expect(element("api-b").getAttribute("aria-selected")).toBe("true");
+    expect(reports.map((detail) => detail.reason)).toEqual([reason]);
+  });
+
+  it("rejects a nested origin even when the Event handler belongs to an owned outer target", () => {
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--tabs");
+    const child = document.createElement("span");
+    child.setAttribute("data-stimeo--tabs-target", "tab");
+    nested.append(child);
+    element("api-b").append(nested);
+    const reports = vi.fn();
+    element("api-root").addEventListener("stimeo--tabs:change", reports);
+    const before = element("api-root").innerHTML;
+    element("api-b").addEventListener("probe", (event) => instance().select(event));
+    child.dispatchEvent(new Event("probe", { bubbles: true }));
+    expect(element("api-root").innerHTML).toBe(before);
+    expect(reports).not.toHaveBeenCalled();
+    instance().select(element("api-b"));
+    expect(reports).toHaveBeenCalledOnce();
+  });
+  it("leaves navigation on a non-target action host untouched while owned tabs still navigate", () => {
+    const invalid = element("api-outside");
+    invalid.addEventListener("keydown", (event) => instance().onKeydown(event));
+    const reports = vi.fn();
+    element("api-root").addEventListener("stimeo--tabs:change", reports);
+    invalid.focus();
+    const before = element("api-root").innerHTML;
+    const rejected = new KeyboardEvent("keydown", { key: "End", cancelable: true });
+    invalid.dispatchEvent(rejected);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(element("api-root").innerHTML).toBe(before);
+    expect(document.activeElement).toBe(invalid);
+    expect(reports).not.toHaveBeenCalled();
+    const owned = element("api-a");
+    owned.addEventListener("keydown", (event) => instance().onKeydown(event));
+    owned.focus();
+    const accepted = new KeyboardEvent("keydown", { key: "End", cancelable: true });
+    owned.dispatchEvent(accepted);
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(element("api-b").getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(element("api-b"));
+    expect(reports).toHaveBeenCalledOnce();
   });
 });

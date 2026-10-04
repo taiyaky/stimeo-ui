@@ -76,6 +76,25 @@ describe("OwnedPointerSession", () => {
     expect(ended).toHaveBeenCalledOnce();
   });
 
+  it("releases its document listeners when the session ends", () => {
+    const owner = document.createElement("div");
+    document.body.append(owner);
+    const added = vi.spyOn(document, "addEventListener");
+    const session = new OwnedPointerSession(pointer("pointerdown", 8, 0), owner, {
+      move: vi.fn(),
+    });
+    const signals = added.mock.calls.map(([, , options]) =>
+      typeof options === "object" ? options.signal : undefined,
+    );
+    added.mockRestore();
+    expect(signals).toHaveLength(3);
+    expect(signals.every((signal) => signal?.aborted === false)).toBe(true);
+
+    session.end();
+
+    expect(signals.every((signal) => signal?.aborted === true)).toBe(true);
+  });
+
   it("keeps document ownership when pointer capture is unavailable at runtime", () => {
     const owner = document.createElement("div");
     document.body.append(owner);

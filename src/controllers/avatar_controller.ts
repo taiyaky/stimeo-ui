@@ -1,7 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { AttributeLease } from "../utils/attribute_lease";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 
 /** Public rendering phases exposed through the root's `data-state`. */
 type AvatarState = "empty" | "loading" | "loaded" | "error";
@@ -49,12 +48,11 @@ export class AvatarController extends Controller<HTMLElement> {
   declare srcValue: string;
 
   /** Collapses one morph's Value, target, and direct-attribute signals into one pass. */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#render());
+  readonly #reconcile = new MorphRenderWatcher(() => this.#render());
   /** Preserves directly-authored source and visibility while targets are controlled. */
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
-  readonly #src = new AttributeLease<HTMLImageElement>("src");
-  readonly #imageHidden = new AttributeLease<HTMLImageElement>("hidden");
-  readonly #fallbackHidden = new AttributeLease<HTMLElement>("hidden");
+  readonly #src = new AttributeLease<HTMLImageElement>("src", this.identifier);
+  readonly #imageHidden = new AttributeLease<HTMLImageElement>("hidden", this.identifier);
+  readonly #fallbackHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
   /** True only while target departure means ownership was actually relinquished. */
   #connected = false;
   /** Watches the non-Value render input used by the direct `<img src>` form. */
@@ -67,8 +65,7 @@ export class AvatarController extends Controller<HTMLElement> {
   /** Starts retained-DOM observation and silently derives the current phase. */
   override connect(): void {
     this.#connected = true;
-    this.#reconcile.activate();
-    this.#beforeCache.activate();
+    this.#reconcile.observe(this.element);
     this.#srcObserver.observe(this.element, {
       attributes: true,
       attributeFilter: ["src"],
@@ -80,8 +77,7 @@ export class AvatarController extends Controller<HTMLElement> {
   /** Cancels asynchronous work while retaining the last materialized visual state. */
   override disconnect(): void {
     this.#connected = false;
-    this.#reconcile.cancel();
-    this.#beforeCache.deactivate();
+    this.#reconcile.disconnect();
     this.#srcObserver.disconnect();
   }
 
@@ -179,7 +175,7 @@ export class AvatarController extends Controller<HTMLElement> {
     }
 
     const desired = this.srcValue.length > 0 ? this.srcValue : null;
-    if (image.getAttribute("src") !== desired) this.#src.write(image, desired);
+    this.#src.write(image, desired);
     return desired;
   }
 
@@ -201,11 +197,5 @@ export class AvatarController extends Controller<HTMLElement> {
       this.#fallbackHidden.write(this.fallbackTarget, showImage ? "" : null);
     }
     this.element.setAttribute("data-state", state);
-  }
-  /** Returns borrowed image and fallback semantics before Turbo snapshots the page. */
-  #rewindForCache(): void {
-    this.#src.returnAll();
-    this.#imageHidden.returnAll();
-    this.#fallbackHidden.returnAll();
   }
 }

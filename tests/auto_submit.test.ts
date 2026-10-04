@@ -3,13 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AutoSubmitController } from "../src/controllers/auto_submit_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link AutoSubmitController}: debounced submission (and the
  * 300ms default), rapid coalescing, the `on` allowlist, the pending/busy state
- * hooks and their `turbo:before-cache` rewind, the submit/done events and the
+ * hooks across Turbo's cache, the submit/done events and the
  * `done` detail shape, the optional Announcer bridge (and its opt-in default),
  * the `form` target across runtime replacement/addition/removal, and teardown.
  */
@@ -75,6 +75,20 @@ describe("AutoSubmitController", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(submit).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["NaN", "Infinity", "-1", "2147483648"])(
+    "uses the default debounce for an invalid declaration %s without rewriting it",
+    async (raw) => {
+      await start(SEARCH.replace('debounce-value="300"', `debounce-value="${raw}"`));
+      const submit = stubSubmit();
+      input().dispatchEvent(new Event("input", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(299);
+      expect(submit).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(submit).toHaveBeenCalledTimes(1);
+      expect(form().getAttribute("data-stimeo--auto-submit-debounce-value")).toBe(raw);
+    },
+  );
 
   it("coalesces rapid inputs into a single submit", async () => {
     await start(SEARCH);
@@ -345,8 +359,35 @@ describe("AutoSubmitController", () => {
       "stimeo--auto-submit",
     ) as AutoSubmitController;
     controller.disconnect();
+    // No reconnection follows within the probe window: a real detach.
+    await flushMicrotasks();
     form().dispatchEvent(new Event("turbo:submit-end"));
     expect(done).toBe(1);
+  });
+
+  it("lets a replacement form submit when the old one left mid-composition", async () => {
+    // The composition in the removed form never ends, so it must not keep holding
+    // the input of the form that took its place.
+    await start(`
+      <div data-controller="stimeo--auto-submit"
+           data-stimeo--auto-submit-debounce-value="300"
+           data-action="input->stimeo--auto-submit#submit">
+        <form data-stimeo--auto-submit-target="form"><input type="search" name="q"></form>
+      </div>`);
+    const host = query<HTMLElement>("[data-controller='stimeo--auto-submit']");
+    input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    form().remove();
+    host.insertAdjacentHTML(
+      "beforeend",
+      `<form data-stimeo--auto-submit-target="form"><input type="search" name="q"></form>`,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    const submit = stubSubmit();
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(submit).toHaveBeenCalledTimes(1);
   });
 
   it("drops the pending submit when the form target is removed mid-debounce", async () => {
@@ -384,45 +425,116 @@ describe("AutoSubmitController", () => {
     expect(host.hasAttribute("aria-busy")).toBe(false);
   });
 
-  it("rewinds data-auto-submit-pending on turbo:before-cache", async () => {
+  it("keeps the pending submit through turbo:before-cache and submits after the delay", async () => {
     await start(SEARCH);
     const submit = stubSubmit();
     input().dispatchEvent(new Event("input", { bubbles: true }));
     expect(form().getAttribute("data-auto-submit-pending")).toBe("true");
+
+    // Turbo dispatches it on pages that stay as well, where the query just typed must
+    // still be submitted.
     document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(form().hasAttribute("data-auto-submit-pending")).toBe(false);
-    // The page is about to be frozen: the pending submit must not fire into it.
+    expect(form().getAttribute("data-auto-submit-pending")).toBe("true");
+
     await vi.advanceTimersByTimeAsync(300);
-    expect(submit).not.toHaveBeenCalled();
+    expect(submit).toHaveBeenCalledOnce();
+    expect(form().hasAttribute("data-auto-submit-pending")).toBe(false);
   });
 
-  it("reports the submission the cache rewind dropped", async () => {
-    await start(SEARCH);
-    stubSubmit();
-    const reports: unknown[] = [];
-    form().addEventListener("stimeo--auto-submit:reconcile", (e) =>
-      reports.push((e as CustomEvent).detail),
-    );
-    input().dispatchEvent(new Event("input", { bubbles: true }));
-
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    // `done` would claim a response arrived; the rewind only says the pending
-    // submission is gone.
-    expect(reports).toEqual([{}]);
-
-    // Nothing pending or busy now, so a second snapshot has nothing to report.
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(reports).toEqual([{}]);
-  });
-
-  it("rewinds aria-busy on turbo:before-cache while a submit is in flight", async () => {
+  it("keeps aria-busy through turbo:before-cache until turbo:submit-end", async () => {
     await start(SEARCH);
     stubSubmit();
     input().dispatchEvent(new Event("input", { bubbles: true }));
     await vi.advanceTimersByTimeAsync(300);
     expect(form().getAttribute("aria-busy")).toBe("true");
+
     document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(form().getAttribute("aria-busy")).toBe("true");
+
+    form().dispatchEvent(new Event("turbo:submit-end"));
     expect(form().hasAttribute("aria-busy")).toBe(false);
+  });
+
+  it("records the author's aria-busy while a submit is in flight and gives it back after", async () => {
+    await start(SEARCH.replace("<form ", '<form aria-busy="false" '));
+    stubSubmit();
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(form().getAttribute("aria-busy")).toBe("true");
+    expect(form().getAttribute("data-stimeo--auto-submit-aria-busy-lease")).toBe(
+      '["false","true"]',
+    );
+
+    form().dispatchEvent(new Event("turbo:submit-end"));
+    expect(form().getAttribute("aria-busy")).toBe("false");
+    expect(form().hasAttribute("data-stimeo--auto-submit-aria-busy-lease")).toBe(false);
+  });
+
+  it("drops the pending hook a restored page carries, reports it, and submits nothing", async () => {
+    await start(SEARCH);
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    const reports: unknown[] = [];
+    document.addEventListener("stimeo--auto-submit:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+
+    application = await restoreFromCache(
+      application,
+      (restored) => restored.register("stimeo--auto-submit", AutoSubmitController),
+      () => vi.advanceTimersByTimeAsync(0),
+    );
+    const submit = stubSubmit();
+    await vi.advanceTimersByTimeAsync(300);
+
+    // `done` would claim a response arrived; the submit died with the page it was on.
+    expect(form().hasAttribute("data-auto-submit-pending")).toBe(false);
+    expect(reports).toEqual([{}]);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("stays silent on a restored page with no submit pending", async () => {
+    await start(SEARCH);
+    const reports: unknown[] = [];
+    document.addEventListener("stimeo--auto-submit:reconcile", (e) =>
+      reports.push((e as CustomEvent).detail),
+    );
+
+    application = await restoreFromCache(
+      application,
+      (restored) => restored.register("stimeo--auto-submit", AutoSubmitController),
+      () => vi.advanceTimersByTimeAsync(0),
+    );
+
+    expect(reports).toEqual([]);
+  });
+
+  it("gives a page restored with a submit in flight the author's aria-busy back and reports it", async () => {
+    // Hosted on a wrapper: happy-dom connects a second instance to a `<form>` host when
+    // one of its attributes changes.
+    await start(`
+      <div data-controller="stimeo--auto-submit" data-stimeo--auto-submit-debounce-value="300">
+        <form aria-busy="false" data-stimeo--auto-submit-target="form"
+              data-action="input->stimeo--auto-submit#submit"><input name="q"></form>
+      </div>`);
+    stubSubmit();
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(form().getAttribute("aria-busy")).toBe("true");
+    const seen: Array<string | null> = [];
+    document.addEventListener("stimeo--auto-submit:reconcile", () =>
+      seen.push(form().getAttribute("aria-busy")),
+    );
+
+    application = await restoreFromCache(
+      application,
+      (restored) => restored.register("stimeo--auto-submit", AutoSubmitController),
+      () => vi.advanceTimersByTimeAsync(0),
+    );
+
+    // `done` would claim a response arrived; the request died with the page it ran on.
+    expect(form().getAttribute("aria-busy")).toBe("false");
+    expect(form().hasAttribute("data-stimeo--auto-submit-aria-busy-lease")).toBe(false);
+    expect(seen).toEqual(["false"]);
   });
 
   it("clears the debounce timer on disconnect", async () => {
@@ -438,6 +550,56 @@ describe("AutoSubmitController", () => {
     expect(submit).not.toHaveBeenCalled();
   });
 
+  it("keeps a pending submit across an in-page move, and submits once on time", async () => {
+    // Hosted on a wrapper: happy-dom connects a second instance to a `<form>` host when
+    // one of its attributes changes.
+    await start(`
+      <div data-controller="stimeo--auto-submit"
+           data-stimeo--auto-submit-debounce-value="300">
+        <form data-stimeo--auto-submit-target="form"
+              data-action="input->stimeo--auto-submit#submit">
+          <input type="search" name="q">
+        </form>
+      </div>`);
+    const submit = stubSubmit();
+    const controller = application.getControllerForElementAndIdentifier(
+      query("[data-controller='stimeo--auto-submit']"),
+      "stimeo--auto-submit",
+    ) as AutoSubmitController;
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(100);
+    controller.disconnect();
+    controller.connect();
+    expect(form().getAttribute("data-auto-submit-pending")).toBe("true");
+    await vi.advanceTimersByTimeAsync(199);
+    expect(submit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(form().hasAttribute("data-auto-submit-pending")).toBe(false);
+  });
+
+  it("holds the submit through a composition that starts after an in-page move", async () => {
+    await start(`
+      <div data-controller="stimeo--auto-submit" data-stimeo--auto-submit-debounce-value="300">
+        <form data-stimeo--auto-submit-target="form"
+              data-action="input->stimeo--auto-submit#submit"><input name="q"></form>
+      </div>`);
+    const submit = stubSubmit();
+    const controller = application.getControllerForElementAndIdentifier(
+      query("[data-controller='stimeo--auto-submit']"),
+      "stimeo--auto-submit",
+    ) as AutoSubmitController;
+    controller.disconnect();
+    controller.connect();
+
+    input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(submit).not.toHaveBeenCalled();
+    expect(form().hasAttribute("data-auto-submit-pending")).toBe(false);
+  });
+
   it("stops listening for turbo:submit-end after disconnect", async () => {
     await start(SEARCH);
     const controller = application.getControllerForElementAndIdentifier(
@@ -449,8 +611,80 @@ describe("AutoSubmitController", () => {
       done += 1;
     });
     controller.disconnect();
+    await flushMicrotasks();
     form().dispatchEvent(new Event("turbo:submit-end"));
     expect(done).toBe(0);
+  });
+
+  // --- `debounce` belongs to one scheduled submit ----------------------------
+
+  /**
+   * Rewrites `debounce` and delivers its Value callback directly when the controller
+   * defines one, since happy-dom does not reliably run it for an attribute write.
+   */
+  const declareDebounce = (value: number) => {
+    const root = query("[data-controller='stimeo--auto-submit']");
+    root.setAttribute("data-stimeo--auto-submit-debounce-value", String(value));
+    const owner = application.getControllerForElementAndIdentifier(root, "stimeo--auto-submit");
+    const callback: unknown = Reflect.get(owner ?? {}, "debounceValueChanged");
+    if (typeof callback === "function") callback.call(owner);
+  };
+
+  it("keeps a pending submit's deadline when debounce shrinks, and times the next input anew", async () => {
+    // Hosted on a wrapper: happy-dom connects a second instance to a `<form>` host when
+    // one of its attributes changes, and that connection drops the pending hook as a
+    // restored page's.
+    await start(`
+      <div data-controller="stimeo--auto-submit"
+           data-stimeo--auto-submit-debounce-value="300"
+           data-action="input->stimeo--auto-submit#submit">
+        <form data-stimeo--auto-submit-target="form"><input type="search" name="q"></form>
+      </div>`);
+    const submit = stubSubmit();
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(100);
+
+    declareDebounce(50);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(submit).not.toHaveBeenCalled();
+    expect(form().getAttribute("data-auto-submit-pending")).toBe("true");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(49);
+    expect(submit).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(submit).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not stretch a pending submit when debounce grows", async () => {
+    await start(SEARCH);
+    const submit = stubSubmit();
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(100);
+
+    declareDebounce(5000);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(submit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it("schedules and reports nothing from a debounce change alone", async () => {
+    await start(SEARCH);
+    const submit = stubSubmit();
+    const seen: string[] = [];
+    for (const type of ["submit", "done", "reconcile"]) {
+      form().addEventListener(`stimeo--auto-submit:${type}`, () => seen.push(type));
+    }
+
+    declareDebounce(10);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(submit).not.toHaveBeenCalled();
+    expect(form().hasAttribute("data-auto-submit-pending")).toBe(false);
+    expect(form().hasAttribute("aria-busy")).toBe(false);
+    expect(seen).toEqual([]);
   });
 
   it("has no machine-detectable a11y violations", async () => {

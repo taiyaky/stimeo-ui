@@ -1,15 +1,20 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { DetachGate } from "../utils/detach_gate";
 import { ownerIndex } from "../utils/event_owner";
 import { ListenerSet } from "../utils/listener_set";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { prefersReducedMotion } from "../utils/reduced_motion";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
 import { SafeInterval } from "../utils/safe_timeout";
+import { type StateReason, stateReasonFor } from "../utils/state_reason";
 import { StateRegions } from "../utils/state_regions";
+import { targetSelector } from "../utils/target_selector";
 
 /** Advance delay used when `interval` is not a finite positive number. */
 const DEFAULT_INTERVAL = 5000;
@@ -23,6 +28,10 @@ const OBSERVED_ATTRIBUTES = ["aria-selected", "data-state", "hidden"];
 
 /**
  * Headless, accessible **Carousel** (slideshow) behavior.
+ *
+ * Stepping reads the current slide markup and compares with the last published
+ * position. Slide and rotation controls settle before notification; synchronous
+ * replacement navigation suppresses any older slide confirmation still pending.
  *
  * Markup contract (identifier: `stimeo--carousel`):
  *   <section data-controller="stimeo--carousel" aria-roledescription="carousel"
@@ -84,16 +93,21 @@ const OBSERVED_ATTRIBUTES = ["aria-selected", "data-state", "hidden"];
  * The rotation ends when the controller really leaves — a Turbo navigation, a
  * removed element, `data-controller` dropping it — and a carousel still in the
  * document hears that end as `pause`. An in-page move reconnects the same
- * instance and keeps the run: no edge, no restarted interval. The leased ARIA
- * is returned before Turbo caches the page. Picker arrow keys, `Home`,
- * and `End` move focus only (manual activation); slide changes never steal focus
+ * instance and keeps the run: no edge, no restarted interval. Picker arrow keys,
+ * `Home`, and `End` move focus only (manual activation); slide changes never steal focus
  * from the control the user operated. A slide change the user drove — including an
  * autoplay tick they started — is reported as `stimeo--carousel:change` with
- * `{ index, total }`; the same detail arrives as `stimeo--carousel:reconcile` when
- * the controller re-derives the position itself, whether a target came or went or
+ * `{ index, total, reason }`. `stimeo--carousel:reconcile` carries `{ index, total }`
+ * when the controller re-derives the position itself, whether a target came or went or
  * a retained element's state attributes were rewritten in place.
  */
 export class CarouselController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
+  /** Identifies the latest published state transition. */
+  readonly #moves = new MoveCounter();
+
   static override targets = [
     "slide",
     "viewport",
@@ -109,6 +123,10 @@ export class CarouselController extends Controller<HTMLElement> {
     interval: { type: Number, default: DEFAULT_INTERVAL },
     loop: { type: Boolean, default: true },
   };
+
+  static valueConstraints = {
+    interval: NUMBER_BOUNDS.positiveTimer,
+  } satisfies NumberValueConstraints<typeof CarouselController.values>;
   static actions = [
     "goto",
     "next",
@@ -123,6 +141,7 @@ export class CarouselController extends Controller<HTMLElement> {
   declare readonly slideTargets: HTMLElement[];
   declare readonly pickerTargets: HTMLElement[];
   declare readonly viewportTarget: HTMLElement;
+  declare readonly viewportTargets: HTMLElement[];
   declare readonly hasViewportTarget: boolean;
   declare readonly prevTargets: HTMLElement[];
   declare readonly nextTargets: HTMLElement[];
@@ -134,20 +153,24 @@ export class CarouselController extends Controller<HTMLElement> {
   declare loopValue: boolean;
 
   readonly #roving = new RovingTabindex(() => this.pickerTargets);
-  readonly #reconcileTargets = new MicrotaskCoalescer(() => this.#reconcileTargetSet());
+  readonly #reconcileTargets = new MorphRenderWatcher(() => this.#reconcileTargetSet());
   readonly #intervals = new SafeInterval();
   /** Unreachable step controls and the toggle of a carousel that cannot rotate. */
-  readonly #ariaDisabled = new AttributeLease<HTMLElement>("aria-disabled");
+  readonly #ariaDisabled = new AttributeLease<HTMLElement>("aria-disabled", this.identifier);
+  /** The play toggle's pressed state, a pure output of the rotation intent. */
+  readonly #ariaPressed = new AttributeLease<HTMLElement>("aria-pressed", this.identifier);
   /** The slide container's live-region politeness, which tracks the rotation. */
-  readonly #ariaLive = new AttributeLease<HTMLElement>("aria-live");
+  readonly #ariaLive = new AttributeLease<HTMLElement>("aria-live", this.identifier);
   /** Pairs with {@link CarouselController.#ariaLive}: only the changed slide is read. */
-  readonly #ariaAtomic = new AttributeLease<HTMLElement>("aria-atomic");
+  readonly #ariaAtomic = new AttributeLease<HTMLElement>("aria-atomic", this.identifier);
   /** The label pair a play toggle may carry, one half per rotation state. */
-  readonly #labels = new StateRegions({
-    whenTrue: () => this.onLabelTargets,
-    whenFalse: () => this.offLabelTargets,
-  });
-  readonly #beforeCache = new BeforeCacheReset(() => this.#returnLeases());
+  readonly #labels = new StateRegions(
+    {
+      whenTrue: () => this.onLabelTargets,
+      whenFalse: () => this.offLabelTargets,
+    },
+    this.identifier,
+  );
   /** Tells an in-page move, which keeps the rotation, from a real detach. */
   readonly #gate = new DetachGate();
   /** The next pointer movement, listened for while a pointer suspension waits on it. */
@@ -162,7 +185,7 @@ export class CarouselController extends Controller<HTMLElement> {
 
   /**
    * Whether `connect()` has run. Scheduling is already inert outside that window
-   * (`MicrotaskCoalescer`), so this gates the Value callbacks Stimulus
+   * (`MorphRenderWatcher`), so this gates the Value callbacks Stimulus
    * delivers ahead of `connect()`.
    */
   #connected = false;
@@ -223,8 +246,7 @@ export class CarouselController extends Controller<HTMLElement> {
     this.#total = this.slideTargets.length;
     this.#syncTimer();
     this.#connected = true;
-    this.#reconcileTargets.activate();
-    this.#beforeCache.activate();
+    this.#reconcileTargets.observe(this.element);
 
     this.element.addEventListener("click", this.#onClick);
     this.element.addEventListener("keydown", this.#onKeydown);
@@ -259,12 +281,11 @@ export class CarouselController extends Controller<HTMLElement> {
     document.removeEventListener("visibilitychange", this.#onVisibilityChange);
     this.#observer?.disconnect();
     this.#observer = null;
-    this.#reconcileTargets.cancel();
+    this.#reconcileTargets.disconnect();
     this.#focusPaused = false;
     this.#hiddenPaused = false;
     this.#activeSlide = null;
     this.#returnLeases();
-    this.#beforeCache.deactivate();
     this.#gate.disconnected(this, () => this.#endRun());
   }
 
@@ -295,6 +316,44 @@ export class CarouselController extends Controller<HTMLElement> {
   /** Re-clamps the active index after a slide is removed. */
   slideTargetDisconnected(): void {
     this.#reconcileTargets.schedule();
+  }
+
+  /** Publishes the live region on a viewport that joins a connected carousel. */
+  viewportTargetConnected(): void {
+    this.#reconcileTargets.schedule();
+  }
+
+  /**
+   * Gives a viewport that no longer resolves its own live region back, even after
+   * `disconnect()`, and republishes it on the viewport that stays.
+   */
+  viewportTargetDisconnected(viewport: HTMLElement): void {
+    if (!this.viewportTargets.includes(viewport)) {
+      this.#ariaLive.return(viewport);
+      this.#ariaAtomic.return(viewport);
+    }
+    this.#reconcileTargets.schedule();
+  }
+
+  /**
+   * Gives a toggle that no longer resolves as one its label pair, its `aria-disabled` and
+   * its `aria-pressed` back, even after `disconnect()`.
+   */
+  playToggleTargetDisconnected(toggle: HTMLElement): void {
+    if (this.playToggleTargets.includes(toggle)) return;
+    this.#labels.release(toggle);
+    this.#ariaDisabled.return(toggle);
+    this.#ariaPressed.return(toggle);
+  }
+
+  /** Gives a button that no longer resolves as a `prev` control its `aria-disabled` back. */
+  prevTargetDisconnected(button: HTMLElement): void {
+    if (!this.prevTargets.includes(button)) this.#ariaDisabled.return(button);
+  }
+
+  /** Gives a button that no longer resolves as a `next` control its `aria-disabled` back. */
+  nextTargetDisconnected(button: HTMLElement): void {
+    if (!this.nextTargets.includes(button)) this.#ariaDisabled.return(button);
   }
 
   /**
@@ -348,22 +407,26 @@ export class CarouselController extends Controller<HTMLElement> {
   next(event?: Event): void {
     if (event?.defaultPrevented) return;
     this.#markHandled(event);
-    this.#select(this.#step(1), { focus: false });
+    this.#select(this.#step(1), { focus: false }, stateReasonFor(event));
   }
 
   /** Returns to the previous slide. Delegated; `data-action` wiring is optional. */
   prev(event?: Event): void {
     if (event?.defaultPrevented) return;
     this.#markHandled(event);
-    this.#select(this.#step(-1), { focus: false });
+    this.#select(this.#step(-1), { focus: false }, stateReasonFor(event));
   }
 
-  /** Jumps to the slide whose picker was activated (click / Enter / Space). */
-  goto(event: Event): void {
-    if (event.defaultPrevented) return;
-    this.#markHandled(event);
-    const index = this.#pickerIndexFor(event.currentTarget);
-    if (index !== -1) this.#select(index, { focus: false });
+  /** Jumps to the slide of an owned picker or descendant, without moving DOM focus. */
+  goto(source: Event | HTMLElement): void {
+    const { event, host, origin, reason } = actionSource(source);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    if (event?.defaultPrevented) return;
+    const picker = host?.closest<HTMLElement>(targetSelector(this.identifier, "picker"));
+    if (!picker || !this.pickerTargets.includes(picker)) return;
+    this.#markHandled(event ?? undefined);
+    this.#select(this.pickerTargets.indexOf(picker), { focus: false }, reason);
   }
 
   /**
@@ -588,7 +651,7 @@ export class CarouselController extends Controller<HTMLElement> {
    */
   #step(delta: number): number {
     const total = this.slideTargets.length;
-    const next = this.#index + delta;
+    const next = this.#resolveIndex() + delta;
     if (this.loopValue) return (next + total) % total;
     return Math.min(total - 1, Math.max(0, next));
   }
@@ -607,19 +670,22 @@ export class CarouselController extends Controller<HTMLElement> {
 
   /**
    * Changes the active slide, updates state hooks, and emits `change` — but only
-   * when the index actually changes, so a `next`/`prev` clamped at the end (or an
+   * when the index or total changes, so a `next`/`prev` clamped at the end (or an
    * autoplay tick at a non-looping boundary) re-renders without a spurious event.
    */
-  #select(index: number, { focus }: { focus: boolean }): void {
+  #select(index: number, { focus }: { focus: boolean }, reason: StateReason = "user"): void {
     const target = this.#clampToSlides(index);
-    const changed = target !== this.#index;
+    const total = this.slideTargets.length;
+    const changed = target !== this.#index || total !== this.#total;
     this.#index = target;
+    this.#total = total;
+    const token = changed ? this.#moves.record() : null;
     this.#render({ focus });
     // Re-evaluate autoplay after every move so reaching the non-looping end stops
     // the timer (see `#syncTimer`); idempotent for moves that don't cross a boundary.
     this.#syncTimer();
-    if (changed) {
-      this.dispatch("change", { detail: { index: target, total: this.slideTargets.length } });
+    if (token !== null && this.#moves.isLatest(token)) {
+      this.dispatch("change", { detail: { index: target, total, reason } });
     }
   }
 
@@ -650,8 +716,8 @@ export class CarouselController extends Controller<HTMLElement> {
     this.pickerTargets.forEach((picker, i) => {
       setAttributeIfChanged(picker, "aria-selected", i === pickerIndex ? "true" : "false");
     });
-    this.#roving.setActive(pickerIndex, { focus });
     this.#syncStepControls();
+    this.#roving.setActive(pickerIndex, { focus });
   }
 
   /** Marks the step control a non-looping carousel has no slide left to reach. */
@@ -701,12 +767,14 @@ export class CarouselController extends Controller<HTMLElement> {
     const previousIndex = this.#index;
     const previousTotal = this.#total;
     this.#index = this.#resolveIndex();
-    this.#render({ focus: false });
     this.#total = this.slideTargets.length;
+    const changed = this.#index !== previousIndex || this.#total !== previousTotal;
+    const token = changed ? this.#moves.record() : null;
+    this.#render({ focus: false });
     this.#syncTimer();
     // `change` stays reserved for user navigation; re-resolving onto a surviving
     // slide, or reporting a set that grew or shrank, is this controller's decision.
-    if (this.#index !== previousIndex || this.#total !== previousTotal) {
+    if (token !== null && this.#moves.isLatest(token)) {
       this.dispatch("reconcile", { detail: { index: this.#index, total: this.#total } });
     }
   }
@@ -725,8 +793,7 @@ export class CarouselController extends Controller<HTMLElement> {
 
   /** The advance delay; a non-finite or non-positive declaration falls back. */
   get #interval(): number {
-    const declared = this.intervalValue;
-    return Number.isFinite(declared) && declared > 0 ? declared : DEFAULT_INTERVAL;
+    return this.#safeInterval;
   }
 
   /**
@@ -754,26 +821,28 @@ export class CarouselController extends Controller<HTMLElement> {
     }
     if (shouldRun && this.#timerId === null) {
       this.#timerInterval = interval;
-      this.#timerId = this.#intervals.set(() => this.next(), interval);
+      this.#timerId = this.#intervals.set(
+        () => this.#select(this.#step(1), { focus: false }, "timeout"),
+        interval,
+      );
     }
     // The events are edges. A consumer that subscribes after `connect()` — which
     // is every consumer on a Turbo restore, where the controller reconnects before
     // the page's own scripts run again — would miss the transition it arrived in
     // the middle of, so the same state is published as a hook it can read.
     setAttributeIfChanged(this.element, "data-state", shouldRun ? "playing" : "paused");
-    if (shouldRun !== wasRunning) {
-      if (shouldRun) this.dispatch("play");
-      else this.dispatch("pause");
-    }
-
     for (const toggle of this.playToggleTargets) {
-      toggle.setAttribute("aria-pressed", pressed ? "true" : "false");
+      this.#ariaPressed.write(toggle, pressed ? "true" : "false");
       this.#ariaDisabled.write(toggle, canAutoplay ? null : "true");
       this.#labels.reflect(toggle, pressed);
     }
     if (this.hasViewportTarget) {
       this.#ariaLive.write(this.viewportTarget, shouldRun ? "off" : "polite");
       this.#ariaAtomic.write(this.viewportTarget, "false");
+    }
+    if (shouldRun !== wasRunning) {
+      if (shouldRun) this.dispatch("play");
+      else this.dispatch("pause");
     }
   }
 
@@ -794,8 +863,19 @@ export class CarouselController extends Controller<HTMLElement> {
   /** Hands every leased attribute back to the value the consumer authored. */
   #returnLeases(): void {
     this.#ariaDisabled.returnAll();
+    this.#ariaPressed.returnAll();
     this.#ariaLive.returnAll();
     this.#ariaAtomic.returnAll();
+  }
+  /** Current `interval` declaration resolved against its numeric contract. */
+  get #safeInterval(): number {
+    return this.#numbers.read(
+      this,
+      "interval",
+      this.intervalValue,
+      CarouselController.values.interval.default,
+      CarouselController.valueConstraints.interval,
+    );
   }
 }
 

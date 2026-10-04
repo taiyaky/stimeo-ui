@@ -1,14 +1,22 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { syncActiveOption } from "../utils/active_option";
 import { isReservedArrowChord } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { commitField } from "../utils/field_mirror";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MoveCounter } from "../utils/move_counter";
 import { scrollOptionIntoView } from "../utils/option_scroll";
+import type { StateReason } from "../utils/state_reason";
 import { StateRegions } from "../utils/state_regions";
+import { targetSelector } from "../utils/target_selector";
 
 /**
  * Headless, accessible combobox behavior (list autocomplete).
+ *
+ * Selection reflects the input and popup before notifying listeners. A synchronous
+ * replacement selection suppresses the older confirmation that has not yet been sent.
  *
  * Markup contract (identifier: `stimeo--combobox`):
  *   <div data-controller="stimeo--combobox">
@@ -22,7 +30,7 @@ import { StateRegions } from "../utils/state_regions";
  *     <ul id="listbox" role="listbox" data-stimeo--combobox-target="list" hidden>
  *       <li role="option" id="opt-apple" data-value="apple"
  *           data-stimeo--combobox-target="option"
- *           data-action="click->stimeo--combobox#selectByClick">Apple</li>
+ *           data-action="click->stimeo--combobox#select">Apple</li>
  *       <!-- more options -->
  *     </ul>
  *     <p data-stimeo--combobox-target="empty" hidden>No fruit matches.</p>
@@ -59,22 +67,39 @@ import { StateRegions } from "../utils/state_regions";
  * - A click outside the combobox closes the listbox.
  */
 export class ComboboxController extends Controller<HTMLElement> {
+  /** Identifies the latest published state transition. */
+  readonly #moves = new MoveCounter();
+  #moveToken = 0;
+
   static override targets = ["input", "list", "option", "empty"];
-  static actions = ["close", "filter", "onKeydown", "open", "selectByClick"] as const;
+  static actions = ["close", "filter", "onKeydown", "open", "select"] as const;
   static events = ["selected"] as const;
 
   declare readonly emptyTargets: HTMLElement[];
   declare readonly inputTarget: HTMLInputElement;
+  declare readonly inputTargets: HTMLInputElement[];
   declare readonly listTarget: HTMLElement;
+  declare readonly listTargets: HTMLElement[];
   declare readonly optionTargets: HTMLElement[];
   declare readonly hasInputTarget: boolean;
   declare readonly hasListTarget: boolean;
 
   /** Owns `hidden` on the regions declared for the empty state. */
-  readonly #emptyRegion = new StateRegions({ whenTrue: () => this.emptyTargets });
+  readonly #emptyRegion = new StateRegions({ whenTrue: () => this.emptyTargets }, this.identifier);
   /** Stable ID of the active option; the live element is resolved before every use. */
   #activeId: string | null = null;
   #connected = false;
+  /** The list the open state was last applied to. */
+  #list: HTMLElement | null = null;
+  /** Borrows `hidden` on the list, to give back when an element stops being the list. */
+  readonly #listHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Borrows `aria-expanded` on the input, to give back when an element stops being the input. */
+  readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
+  /** Borrows `aria-activedescendant` on the input, for the same return. */
+  readonly #activeDescendant = new AttributeLease<HTMLElement>(
+    "aria-activedescendant",
+    this.identifier,
+  );
   /** Collapses one mutation batch of target callbacks into a single pass. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileOptions());
   /**
@@ -91,6 +116,7 @@ export class ComboboxController extends Controller<HTMLElement> {
   override connect(): void {
     if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
     this.close();
+    this.#list = this.hasListTarget ? this.listTarget : null;
     document.addEventListener("click", this.#onOutsideClick, true);
     this.#connected = true;
     this.#reconcile.activate();
@@ -110,9 +136,34 @@ export class ComboboxController extends Controller<HTMLElement> {
     if (this.#connected) this.#queueOptionReconciliation();
   }
 
-  /** Removes composition listeners when the active input is replaced or removed. */
+  /**
+   * Removes composition listeners, gives an input that no longer resolves as one back its
+   * `aria-expanded` and `aria-activedescendant` — after `disconnect()` too, since dropping
+   * the identifier leaves the element on the page — and reconciles the input that stays.
+   */
   inputTargetDisconnected(input: HTMLInputElement): void {
     this.#composition.unobserve(input);
+    if (!this.inputTargets.includes(input)) {
+      this.#expanded.return(input);
+      this.#activeDescendant.return(input);
+    }
+    this.#queueOptionReconciliation();
+  }
+
+  /** Applies the open state to a list that arrives after connect in front of the others. */
+  listTargetConnected(): void {
+    this.#adoptList();
+  }
+
+  /**
+   * Applies the open state to the list left, then gives a list that no longer resolves as
+   * the target its own `hidden` back — after `disconnect()` too, since dropping the
+   * identifier leaves the element on the page. The open state is read off the departing
+   * list first, while it still carries it.
+   */
+  listTargetDisconnected(list: HTMLElement): void {
+    this.#adoptList();
+    if (!this.listTargets.includes(list)) this.#listHidden.return(list);
   }
 
   /** Settles a connecting region on the side the empty state is on. */
@@ -146,8 +197,8 @@ export class ComboboxController extends Controller<HTMLElement> {
   open(): void {
     if (!this.hasListTarget || !this.hasInputTarget || this.#suppressOpen) return;
     this.#applyFilter();
-    this.listTarget.hidden = false;
-    this.inputTarget.setAttribute("aria-expanded", "true");
+    this.#listHidden.write(this.listTarget, null);
+    this.#expanded.write(this.inputTarget, "true");
     this.#setActive(-1);
     this.#reflectEmptyState();
   }
@@ -176,9 +227,9 @@ export class ComboboxController extends Controller<HTMLElement> {
    */
   close(): void {
     if (!this.hasListTarget) return;
-    this.listTarget.hidden = true;
+    this.#listHidden.write(this.listTarget, "");
     this.#reflectEmptyState();
-    if (this.hasInputTarget) this.inputTarget.setAttribute("aria-expanded", "false");
+    if (this.hasInputTarget) this.#expanded.write(this.inputTarget, "false");
     this.#setActive(-1);
   }
 
@@ -299,10 +350,15 @@ export class ComboboxController extends Controller<HTMLElement> {
     if (!this.#isClosed && !this.element.contains(event.target as Node)) this.close();
   };
 
-  /** Selects the clicked option. Bound via `data-action` (click). */
-  selectByClick(event: Event): void {
-    const option = (event.currentTarget as HTMLElement).closest<HTMLElement>('[role="option"]');
-    if (option && this.optionTargets.includes(option)) this.#select(option);
+  /** Selects an owned option or descendant; API calls preserve external focus. */
+  select(source: Event | HTMLElement): void {
+    const { event, host, origin, reason } = actionSource(source);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const option = host?.closest<HTMLElement>(targetSelector(this.identifier, "option"));
+    if (!option || !this.optionTargets.includes(option)) return;
+    const focus = event !== null || this.element.contains(document.activeElement);
+    this.#select(option, reason, focus);
   }
 
   /**
@@ -314,21 +370,25 @@ export class ComboboxController extends Controller<HTMLElement> {
    * the field-bound half — the value write, the focus return, and the native
    * `change` — skipped, because there is no field to carry them.
    */
-  #select(option: HTMLElement): void {
+  #select(option: HTMLElement, reason: StateReason = "user", focus = true): void {
     const value = option.dataset.value ?? (option.textContent ?? "").trim();
     if (!this.hasInputTarget) {
       this.close();
-      this.dispatch("selected", { detail: { value } });
+      this.dispatch("selected", { detail: { value, reason } });
       return;
     }
     const changed = this.inputTarget.value !== value;
+    if (changed) this.#moveToken = this.#moves.record();
+    const token = this.#moveToken;
     this.inputTarget.value = value;
     this.close();
     // Returning focus to the input would re-trigger a `focus`-bound open(); guard
     // it so the listbox stays closed after a selection.
     this.#suppressOpen = true;
-    this.inputTarget.focus();
+    if (focus && (reason !== "api" || this.element.contains(document.activeElement)))
+      this.inputTarget.focus();
     this.#suppressOpen = false;
+    if (!this.#moves.isLatest(token)) return;
     if (changed) {
       // A native bubbling `change` (matching <select>/listbox semantics: only on
       // an actual value change) so form-level behaviors — validation re-checks,
@@ -337,7 +397,8 @@ export class ComboboxController extends Controller<HTMLElement> {
       // the popup on every selection.
       commitField(this.inputTarget);
     }
-    this.dispatch("selected", { detail: { value } });
+    if (!this.#moves.isLatest(token)) return;
+    this.dispatch("selected", { detail: { value, reason } });
   }
 
   /**
@@ -371,21 +432,32 @@ export class ComboboxController extends Controller<HTMLElement> {
     // filtering while active would otherwise keep a stale selected state.
     syncActiveOption(this.optionTargets, active);
     this.#activeId = active?.id || null;
-    if (this.hasInputTarget) {
-      if (active?.id) {
-        this.inputTarget.setAttribute("aria-activedescendant", active.id);
-      } else {
-        this.inputTarget.removeAttribute("aria-activedescendant");
-      }
-    }
+    if (this.hasInputTarget) this.#activeDescendant.write(this.inputTarget, active?.id || null);
     // Virtual focus never triggers the browser's native focus-scrolling, so a
     // scrollable list must follow the active option itself (list-only scroll).
     if (active && this.hasListTarget) scrollOptionIntoView(this.listTarget, active);
   }
 
-  /** Re-applies filtering and active state after a target collection change. */
+  /**
+   * Moves the open state onto the list that is now first, when that list changed. A list
+   * that arrives with none before it arrives closed. Then reconciles the options against it.
+   */
+  #adoptList(): void {
+    if (!this.#connected) return;
+    const list = this.hasListTarget ? this.listTarget : null;
+    const previous = this.#list;
+    if (list === previous) return;
+    this.#list = list;
+    if (list) this.#listHidden.write(list, (previous?.hidden ?? true) ? "" : null);
+    this.#queueOptionReconciliation();
+  }
+
+  /** Re-applies `aria-expanded`, filtering and active state after a target collection change. */
   #reconcileOptions(): void {
-    if (this.hasInputTarget && !this.#isClosed) this.#applyFilter();
+    if (this.hasInputTarget) {
+      this.#expanded.write(this.inputTarget, String(!this.#isClosed));
+      if (!this.#isClosed) this.#applyFilter();
+    }
     this.#reconcileActive();
     this.#reflectEmptyState();
   }

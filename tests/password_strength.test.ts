@@ -14,7 +14,7 @@ import { tick } from "./helpers/timing";
  * property / visible label / `change` updates, the debounced opt-in announcement
  * handed to the shared announcer (driven by a mocked clock), custom and degenerate
  * level scales, the `minScore` gate, external scores, runtime reconciliation, the
- * Turbo cache rewind, and teardown.
+ * reading kept through turbo:before-cache, and teardown.
  */
 
 /** Must match the controller's private announce debounce. */
@@ -376,6 +376,112 @@ describe("PasswordStrengthController", () => {
     expect(root().getAttribute("data-strength")).toBe("strong");
   });
 
+  it("writes the whole meter range onto a meter authored without one", async () => {
+    await boot(`
+      <div data-controller="stimeo--password-strength">
+        <input type="password" aria-label="Password"
+               data-stimeo--password-strength-target="input"
+               data-action="input->stimeo--password-strength#evaluate">
+        <div data-stimeo--password-strength-target="meter" role="meter"
+             aria-label="Password strength"></div>
+      </div>`);
+    expect(meter().getAttribute("aria-valuemin")).toBe("0");
+    expect(meter().getAttribute("aria-valuemax")).toBe("4");
+    expect(meter().getAttribute("aria-valuenow")).toBe("0");
+  });
+
+  it("scores a field added at runtime", async () => {
+    await boot(`
+      <div data-controller="stimeo--password-strength">
+        <div data-stimeo--password-strength-target="meter" role="meter"
+             aria-label="Password strength"></div>
+        <span data-stimeo--password-strength-target="label"></span>
+      </div>`);
+    expect(meter().getAttribute("aria-valuenow")).toBe("0");
+
+    const field = document.createElement("input");
+    field.type = "password";
+    field.value = "Password1!";
+    field.setAttribute("aria-label", "Password");
+    field.setAttribute("data-stimeo--password-strength-target", "input");
+    root().append(field);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(meter().getAttribute("aria-valuenow")).toBe("3");
+    expect(label().textContent).toBe("good");
+  });
+
+  it("syncs a meter added at runtime", async () => {
+    await boot(`
+      <div data-controller="stimeo--password-strength">
+        <input type="password" value="Password1!" aria-label="Password"
+               data-stimeo--password-strength-target="input"
+               data-action="input->stimeo--password-strength#evaluate">
+      </div>`);
+    const fresh = document.createElement("div");
+    fresh.setAttribute("role", "meter");
+    fresh.setAttribute("aria-label", "Password strength");
+    fresh.setAttribute("data-stimeo--password-strength-target", "meter");
+    root().append(fresh);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fresh.getAttribute("aria-valuemax")).toBe("4");
+    expect(fresh.getAttribute("aria-valuenow")).toBe("3");
+  });
+
+  it("syncs the meter that remains when the first one is removed", async () => {
+    await boot(`
+      <div data-controller="stimeo--password-strength">
+        <input type="password" value="Password1!" aria-label="Password"
+               data-stimeo--password-strength-target="input"
+               data-action="input->stimeo--password-strength#evaluate">
+        <div id="first-meter" data-stimeo--password-strength-target="meter" role="meter"
+             aria-label="Password strength"></div>
+        <div id="second-meter" data-stimeo--password-strength-target="meter" role="meter"
+             aria-label="Password strength"></div>
+      </div>`);
+    const second = query("#second-meter");
+    expect(second.hasAttribute("aria-valuenow")).toBe(false);
+
+    query("#first-meter").remove();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(second.getAttribute("aria-valuenow")).toBe("3");
+  });
+
+  it("fills a readout added at runtime", async () => {
+    await boot(`
+      <div data-controller="stimeo--password-strength">
+        <input type="password" value="Password1!" aria-label="Password"
+               data-stimeo--password-strength-target="input"
+               data-action="input->stimeo--password-strength#evaluate">
+      </div>`);
+    const fresh = document.createElement("span");
+    fresh.setAttribute("data-stimeo--password-strength-target", "label");
+    root().append(fresh);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fresh.textContent).toBe("good");
+  });
+
+  it("fills the readout that remains when the first one is removed", async () => {
+    await boot(`
+      <div data-controller="stimeo--password-strength">
+        <input type="password" value="Password1!" aria-label="Password"
+               data-stimeo--password-strength-target="input"
+               data-action="input->stimeo--password-strength#evaluate">
+        <span id="first-label" data-stimeo--password-strength-target="label"></span>
+        <span id="second-label" data-stimeo--password-strength-target="label"></span>
+      </div>`);
+    const second = query("#second-label");
+    expect(second.textContent).toBe("");
+
+    query("#first-label").remove();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(second.textContent).toBe("good");
+  });
+
   it("keeps rendering when the input and meter targets are absent", async () => {
     await boot(`
       <div data-controller="stimeo--password-strength">
@@ -398,6 +504,27 @@ describe("PasswordStrengthController", () => {
 
     type("abc"); // the built-in heuristic takes over again
     expect(meter().getAttribute("aria-valuenow")).toBe("1");
+  });
+
+  it("decodes bound score params and keeps an invalid param ahead of detail", async () => {
+    await start('data-action="password-strength:set->stimeo--password-strength#setScore"');
+    const attr = "data-stimeo--password-strength-score-param";
+    const send = (value: string): void => {
+      root().setAttribute(attr, value);
+      root().dispatchEvent(new CustomEvent("password-strength:set", { detail: { score: 4 } }));
+    };
+    send('"2"');
+    expect(meter().getAttribute("aria-valuenow")).toBe("2");
+    for (const invalid of [" ", '"  "', "true", "[1]", "Infinity", "2_0"]) {
+      send(invalid);
+      expect(meter().getAttribute("aria-valuenow")).toBe("2");
+    }
+    // A JSON null is nullish and keeps the existing detail fallback.
+    send("null");
+    expect(meter().getAttribute("aria-valuenow")).toBe("4");
+    root().removeAttribute(attr);
+    root().dispatchEvent(new CustomEvent("password-strength:set", { detail: { score: 4 } }));
+    expect(meter().getAttribute("aria-valuenow")).toBe("4");
   });
 
   it("clamps an external score into the declared scale and ignores an unusable one", async () => {
@@ -536,7 +663,7 @@ describe("PasswordStrengthController", () => {
     expect(announcementMessages).toEqual([]);
   });
 
-  it("rewinds the derived state before Turbo caches the page, without an event", async () => {
+  it("keeps the reading through turbo:before-cache, which Turbo also dispatches on pages that stay", async () => {
     await start('data-stimeo--password-strength-min-score-value="4"');
     const changes = capture("change");
     const reconciles = capture("reconcile");
@@ -544,16 +671,60 @@ describe("PasswordStrengthController", () => {
     changes.length = 0;
 
     document.dispatchEvent(new Event("turbo:before-cache"));
-    // The field value is not part of the snapshot, so nothing derived from it may
-    // be either — otherwise the restored page shows a strength for an empty field.
-    expect(root().hasAttribute("data-strength")).toBe(false);
-    expect(root().hasAttribute("data-below-min")).toBe(false);
-    expect(root().style.getPropertyValue("--stimeo--password-strength")).toBe("");
-    expect(meter().getAttribute("aria-valuenow")).toBe("0");
-    expect(label().textContent).toBe("");
-    // `connect()` derives the state again after a restore, so the rewind is silent.
+
+    expect(root().getAttribute("data-strength")).toBe("good");
+    expect(root().getAttribute("data-below-min")).toBe("true");
+    expect(meter().getAttribute("aria-valuenow")).toBe("3");
+    expect(label().textContent).toBe("good");
     expect(changes).toEqual([]);
     expect(reconciles).toEqual([]);
+  });
+
+  it("reads the field again once the batch that connected it settles, and reports the move", async () => {
+    // A controller connecting after this one in the same batch may rewrite the field
+    // without an input event: a password reveal empties a revealed field that a copy of
+    // the page Turbo restores carries.
+    await start();
+    type("Password1!");
+    const changes = capture("change");
+    const reconciles = capture("reconcile");
+    const controller = instance();
+    controller.disconnect();
+
+    controller.connect();
+    expect(label().textContent).toBe("good");
+    input().value = "";
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(label().textContent).toBe("");
+    expect(meter().getAttribute("aria-valuenow")).toBe("0");
+    expect(root().hasAttribute("data-strength")).toBe(false);
+    expect(changes).toEqual([]);
+    expect(reconciles).toEqual([{ score: 0, level: "", max: 4, meetsMin: false }]);
+    type("a");
+    expect(changes).toHaveLength(1);
+  });
+
+  it("still announces the settled level after turbo:before-cache", async () => {
+    await start('data-stimeo--password-strength-announce-text-value="{level}"');
+    type("Password1!");
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+    await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
+
+    expect(announcementMessages).toEqual(["good"]);
+  });
+
+  it("keeps a score handed in through setScore through turbo:before-cache", async () => {
+    await start();
+    type("a");
+    instance().setScore({ params: { score: 4 } } as unknown as Event);
+    const reading = meter().getAttribute("aria-valuenow");
+
+    document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(meter().getAttribute("aria-valuenow")).toBe(reading);
+    expect(meter().getAttribute("aria-valuenow")).toBe("4");
   });
 
   it("announces the settled level through the shared polite live region", async () => {

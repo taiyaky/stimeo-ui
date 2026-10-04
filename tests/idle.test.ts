@@ -1,6 +1,7 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IdleController } from "../src/controllers/idle_controller";
+import { MAX_TIMER_DELAY_MS, SafeTimeout } from "../src/utils/safe_timeout";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -61,6 +62,27 @@ describe("IdleController", () => {
 
   const promptRegion = () => query("[data-stimeo--idle-target='prompt']");
   const idleRegion = () => query("[data-stimeo--idle-target='idle']");
+
+  const instance = () =>
+    application?.getControllerForElementAndIdentifier(root(), "stimeo--idle") as IdleController;
+
+  /** The Value callback each declaration change reaches. */
+  const CALLBACKS = {
+    timeout: "timeoutValueChanged",
+    "prompt-before": "promptBeforeValueChanged",
+    events: "eventsValueChanged",
+  } as const;
+
+  /**
+   * Rewrites a Value in place, the way a Turbo morph or a script does, then delivers its
+   * callback directly: happy-dom can deliver the observer's own call late or drop it, and
+   * the contract under test is what the callback does.
+   */
+  const declare = async (name: keyof typeof CALLBACKS, raw: string) => {
+    root().setAttribute(`data-stimeo--idle-${name}-value`, raw);
+    await vi.advanceTimersByTimeAsync(0);
+    instance()[CALLBACKS[name]]();
+  };
 
   /**
    * Records the public events as they bubble to `document`, which outlives the element
@@ -138,6 +160,68 @@ describe("IdleController", () => {
     expect(root().getAttribute("data-idle")).toBe("true");
   });
 
+  it.each(["-1", "0", "NaN", "Infinity", "2147483648"])(
+    "uses the default deadline for invalid timeout %s",
+    async (raw) => {
+      await mount(`data-stimeo--idle-timeout-value="${raw}"`, HIDDEN_REGIONS);
+      const idle = collect("idle");
+      const active = collect("active");
+
+      vi.advanceTimersByTime(899_999);
+      expect(idle).toEqual([]);
+      expect(idleRegion().hidden).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(idle).toHaveLength(1);
+      expect(root().getAttribute("data-idle")).toBe("true");
+      expect(idleRegion().hidden).toBe(false);
+
+      activity();
+      expect(active).toHaveLength(1);
+      expect(idleRegion().hidden).toBe(true);
+      expect(root().hasAttribute("data-idle")).toBe(false);
+      expect(root().getAttribute("data-stimeo--idle-timeout-value")).toBe(raw);
+    },
+  );
+
+  it.each(["-1", "NaN", "Infinity"])(
+    "disables the prompt for invalid promptBefore %s while preserving the idle deadline",
+    async (raw) => {
+      await mount(
+        `data-stimeo--idle-timeout-value="1000" data-stimeo--idle-prompt-before-value="${raw}"`,
+        HIDDEN_REGIONS,
+      );
+      const prompt = collect("prompt");
+      const idle = collect("idle");
+      vi.advanceTimersByTime(999);
+      expect(prompt).toEqual([]);
+      expect(idle).toEqual([]);
+      expect(promptRegion().hidden).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(idle).toHaveLength(1);
+      expect(prompt).toEqual([]);
+      expect(idleRegion().hidden).toBe(false);
+      expect(root().getAttribute("data-stimeo--idle-prompt-before-value")).toBe(raw);
+    },
+  );
+
+  it("withdraws a pending prompt when promptBefore becomes NaN", async () => {
+    await mount(
+      'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-prompt-before-value="300"',
+      HIDDEN_REGIONS,
+    );
+    const prompt = collect("prompt");
+    const idle = collect("idle");
+    vi.advanceTimersByTime(600);
+    root().setAttribute("data-stimeo--idle-prompt-before-value", "NaN");
+    vi.advanceTimersByTime(100);
+    expect(prompt).toEqual([]);
+    expect(promptRegion().hidden).toBe(true);
+    vi.advanceTimersByTime(300);
+    expect(prompt).toEqual([]);
+    expect(idle).toHaveLength(1);
+    expect(idleRegion().hidden).toBe(false);
+  });
+
   it("falls back to the documented default timeout", async () => {
     await mount();
     const idle = collect("idle");
@@ -198,6 +282,75 @@ describe("IdleController", () => {
     } finally {
       timers.restore();
     }
+  });
+
+  it.each([
+    ["idle", false],
+    ["idle", true],
+    ["prompt", false],
+    ["prompt", true],
+  ] as const)(
+    "bounds the derived %s delay and preserves its deadline (clock rewind: %s)",
+    async (phase, rewind) => {
+      await mount(
+        `data-stimeo--idle-timeout-value="1000" data-stimeo--idle-prompt-before-value="${phase === "prompt" ? 300 : 0}"`,
+        HIDDEN_REGIONS,
+      );
+      const idle = collect("idle");
+      const prompt = collect("prompt");
+      vi.advanceTimersByTime(600);
+      const before = Date.now();
+      if (rewind) vi.setSystemTime(before - 2 * MAX_TIMER_DELAY_MS);
+      else activity();
+      expect(Date.now()).toBe(rewind ? before - 2 * MAX_TIMER_DELAY_MS : before);
+      const schedule = vi.spyOn(SafeTimeout.prototype, "set");
+      try {
+        vi.advanceTimersByTime(phase === "prompt" ? 100 : 400);
+        expect(schedule).toHaveBeenCalledTimes(1);
+        expect(schedule.mock.calls[0]?.[1]).toBe(rewind ? MAX_TIMER_DELAY_MS : 600);
+        expect(prompt).toEqual([]);
+        expect(idle).toEqual([]);
+
+        if (rewind) {
+          vi.advanceTimersByTime(MAX_TIMER_DELAY_MS);
+          expect(prompt).toEqual([]);
+          expect(idle).toEqual([]);
+          vi.advanceTimersByTime(MAX_TIMER_DELAY_MS);
+        } else {
+          vi.advanceTimersByTime(600);
+        }
+        expect(phase === "prompt" ? prompt : idle).toHaveLength(1);
+        if (phase === "prompt") {
+          expect(prompt[0]?.detail).toEqual({ remaining: 300 });
+          expect(promptRegion().hidden).toBe(false);
+          expect(idle).toEqual([]);
+          vi.advanceTimersByTime(300);
+          expect(idle).toHaveLength(1);
+        }
+        expect(idleRegion().hidden).toBe(false);
+        expect(promptRegion().hidden).toBe(true);
+        for (const [, delay] of schedule.mock.calls) {
+          expect(delay).toBeGreaterThan(0);
+          expect(delay).toBeLessThanOrEqual(MAX_TIMER_DELAY_MS);
+        }
+      } finally {
+        schedule.mockRestore();
+      }
+    },
+  );
+
+  it("cancels a chunked deadline after a clock rewind on disconnect", async () => {
+    await mount('data-stimeo--idle-timeout-value="1000"');
+    const idle = collect("idle");
+    vi.setSystemTime(Date.now() - 2 * MAX_TIMER_DELAY_MS);
+    vi.advanceTimersByTime(1000);
+    expect(vi.getTimerCount()).toBe(1);
+    const instance = application?.getControllerForElementAndIdentifier(root(), "stimeo--idle");
+    expect(instance).toBeInstanceOf(IdleController);
+    instance?.disconnect();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(2 * MAX_TIMER_DELAY_MS);
+    expect(idle).toEqual([]);
   });
 
   it("reschedules the prompt check once for its remaining time", async () => {
@@ -620,6 +773,355 @@ describe("IdleController", () => {
     expect(root().hasAttribute("data-idle")).toBe(false);
     expect(promptRegion().hidden).toBe(true);
     expect(idleRegion().hidden).toBe(true);
+  });
+
+  describe("activity events changed at runtime", () => {
+    it("listens to the events a runtime change declares and stops listening to the old ones", async () => {
+      await mount(
+        'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-events-value=\'["mousemove"]\'',
+      );
+      const idle = collect("idle");
+      const active = collect("active");
+      await declare("events", '["keydown"]');
+
+      vi.advanceTimersByTime(900);
+      activity("mousemove"); // outside the declared list
+      vi.advanceTimersByTime(100);
+      expect(idle).toHaveLength(1);
+
+      activity("mousemove");
+      expect(active).toHaveLength(0);
+      activity("keydown"); // the declared signal wakes the detector
+      expect(active).toHaveLength(1);
+      expect(root().hasAttribute("data-idle")).toBe(false);
+    });
+
+    it("registers the new list on document in the capture phase and passively", async () => {
+      await mount(
+        'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-events-value=\'["mousemove"]\'',
+      );
+      root().innerHTML = "<div id='inner'></div>";
+      const idle = collect("idle");
+      const add = vi.spyOn(document, "addEventListener");
+      try {
+        await declare("events", '["scroll"]');
+        expect(add.mock.calls.map(([type, , options]) => [type, options])).toEqual([
+          ["scroll", expect.objectContaining({ capture: true, passive: true })],
+        ]);
+      } finally {
+        add.mockRestore();
+      }
+
+      // `scroll` does not bubble, so only a capture-phase listener on document sees it.
+      vi.advanceTimersByTime(900);
+      query("#inner").dispatchEvent(new Event("scroll"));
+      vi.advanceTimersByTime(900);
+      expect(idle).toHaveLength(0);
+      vi.advanceTimersByTime(100);
+      expect(idle).toHaveLength(1);
+    });
+
+    it("registers nothing again when a runtime change declares the same list", async () => {
+      await mount(
+        'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-events-value=\'["mousemove"]\'',
+      );
+      const add = vi.spyOn(document, "addEventListener");
+      const remove = vi.spyOn(document, "removeEventListener");
+      try {
+        await declare("events", '[ "mousemove" ]');
+        expect(add).not.toHaveBeenCalled();
+        expect(remove).not.toHaveBeenCalled();
+      } finally {
+        add.mockRestore();
+        remove.mockRestore();
+      }
+    });
+
+    it("falls back to the default signals for a malformed runtime list", async () => {
+      await mount(
+        'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-events-value=\'["keydown"]\'',
+      );
+      const idle = collect("idle");
+      await declare("events", "[not json");
+
+      vi.advanceTimersByTime(900);
+      activity("wheel"); // one of the default signals
+      vi.advanceTimersByTime(100);
+      expect(idle).toHaveLength(0);
+    });
+
+    it("releases the listeners of a runtime list on disconnect", async () => {
+      await mount(
+        'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-events-value=\'["mousemove"]\'',
+      );
+      const active = collect("active");
+      vi.advanceTimersByTime(1000);
+      await declare("events", '["keydown"]');
+
+      instance().disconnect();
+      activity("keydown");
+      activity("mousemove");
+      expect(active).toHaveLength(0);
+      expect(root().getAttribute("data-idle")).toBe("true");
+    });
+
+    it("registers nothing for a change delivered outside the connection", async () => {
+      await mount('data-stimeo--idle-timeout-value="1000"');
+      const active = collect("active");
+      vi.advanceTimersByTime(1000);
+
+      instance().disconnect();
+      await declare("events", '["keydown"]');
+      activity("keydown");
+      activity("mousemove");
+      expect(active).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
+  describe("timeout and promptBefore changed at runtime", () => {
+    it("brings the idle deadline forward from the same last activity when timeout shortens", async () => {
+      await mount('data-stimeo--idle-timeout-value="10000"');
+      const idle = collect("idle");
+      vi.advanceTimersByTime(3000);
+      await declare("timeout", "5000");
+
+      vi.advanceTimersByTime(1999);
+      expect(idle).toHaveLength(0);
+      vi.advanceTimersByTime(1);
+      expect(idle).toHaveLength(1);
+      expect(root().getAttribute("data-idle")).toBe("true");
+    });
+
+    it("pushes the idle deadline back from the same last activity when timeout lengthens", async () => {
+      await mount('data-stimeo--idle-timeout-value="1000"');
+      const idle = collect("idle");
+      vi.advanceTimersByTime(600);
+      await declare("timeout", "3000");
+
+      vi.advanceTimersByTime(2399);
+      expect(idle).toHaveLength(0);
+      vi.advanceTimersByTime(1);
+      expect(idle).toHaveLength(1);
+    });
+
+    it("goes idle at once when a shortened timeout has already lapsed", async () => {
+      await mount(
+        'data-stimeo--idle-timeout-value="10000" data-stimeo--idle-prompt-before-value="3000"',
+        HIDDEN_REGIONS,
+      );
+      const prompt = collect("prompt");
+      const idle = collect("idle");
+      vi.advanceTimersByTime(6000);
+      await declare("timeout", "5000");
+      vi.advanceTimersByTime(0);
+
+      // Both deadlines are behind the elapsed time, so the cycle is over: no warning for a
+      // window that has already closed.
+      expect(idle).toHaveLength(1);
+      expect(prompt).toEqual([]);
+      expect(root().hasAttribute("data-prompt")).toBe(false);
+      expect(idleRegion().hidden).toBe(false);
+      vi.advanceTimersByTime(10_000);
+      expect(idle).toHaveLength(1);
+      expect(prompt).toEqual([]);
+    });
+
+    it("warns on the new schedule when promptBefore is declared mid-cycle", async () => {
+      await mount('data-stimeo--idle-timeout-value="10000"');
+      const prompt = collect("prompt");
+      const idle = collect("idle");
+      vi.advanceTimersByTime(2000);
+      await declare("prompt-before", "3000");
+
+      vi.advanceTimersByTime(4999);
+      expect(prompt).toEqual([]);
+      vi.advanceTimersByTime(1); // 7000: three seconds before the idle deadline
+      expect(prompt.map((e) => e.detail)).toEqual([{ remaining: 3000 }]);
+      vi.advanceTimersByTime(3000);
+      expect(idle).toHaveLength(1);
+    });
+
+    it("warns at once, with the time actually left, when promptBefore widens past its deadline", async () => {
+      await mount('data-stimeo--idle-timeout-value="10000"', HIDDEN_REGIONS);
+      const prompt = collect("prompt");
+      const idle = collect("idle");
+      vi.advanceTimersByTime(6000);
+      await declare("prompt-before", "5000");
+      vi.advanceTimersByTime(0);
+
+      expect(prompt.map((e) => e.detail)).toEqual([{ remaining: 4000 }]);
+      expect(root().getAttribute("data-prompt")).toBe("true");
+      expect(promptRegion().hidden).toBe(false);
+      vi.advanceTimersByTime(3999);
+      expect(idle).toHaveLength(0);
+      vi.advanceTimersByTime(1);
+      expect(idle).toHaveLength(1);
+      expect(prompt).toHaveLength(1);
+    });
+
+    it("moves the warning and the idle deadline earlier when timeout shortens", async () => {
+      await mount(
+        'data-stimeo--idle-timeout-value="10000" data-stimeo--idle-prompt-before-value="2000"',
+      );
+      const prompt = collect("prompt");
+      const idle = collect("idle");
+      vi.advanceTimersByTime(1000);
+      await declare("timeout", "5000");
+
+      vi.advanceTimersByTime(1999);
+      expect(prompt).toEqual([]);
+      vi.advanceTimersByTime(1); // 3000
+      expect(prompt.map((e) => e.detail)).toEqual([{ remaining: 2000 }]);
+      vi.advanceTimersByTime(1999);
+      expect(idle).toHaveLength(0);
+      vi.advanceTimersByTime(1); // 5000
+      expect(idle).toHaveLength(1);
+    });
+
+    it("enters the warning window at once when a shortened timeout puts the cycle inside it", async () => {
+      await mount(
+        'data-stimeo--idle-timeout-value="10000" data-stimeo--idle-prompt-before-value="3000"',
+      );
+      const prompt = collect("prompt");
+      const idle = collect("idle");
+      vi.advanceTimersByTime(6000);
+      await declare("timeout", "8000");
+      vi.advanceTimersByTime(0);
+
+      expect(prompt.map((e) => e.detail)).toEqual([{ remaining: 2000 }]);
+      vi.advanceTimersByTime(1999);
+      expect(idle).toHaveLength(0);
+      vi.advanceTimersByTime(1);
+      expect(idle).toHaveLength(1);
+    });
+
+    it.each(["1000", "2000"])(
+      "emits no prompt when promptBefore %s is not shorter than timeout, declared or changed",
+      async (raw) => {
+        await mount(
+          `data-stimeo--idle-timeout-value="1000" data-stimeo--idle-prompt-before-value="${raw}"`,
+        );
+        const prompt = collect("prompt");
+        const idle = collect("idle");
+        vi.advanceTimersByTime(1000);
+        expect(idle).toHaveLength(1);
+
+        activity(); // a fresh cycle, then the same declaration arrives at runtime
+        await declare("prompt-before", "300");
+        vi.advanceTimersByTime(100);
+        await declare("prompt-before", raw);
+        vi.advanceTimersByTime(900);
+        expect(prompt).toEqual([]);
+        expect(idle).toHaveLength(2);
+      },
+    );
+
+    it("keeps a raised warning when timeout lengthens and moves only the idle deadline", async () => {
+      await mount(
+        'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-prompt-before-value="300"',
+        HIDDEN_REGIONS,
+      );
+      const prompt = collect("prompt");
+      const idle = collect("idle");
+      const active = collect("active");
+      vi.advanceTimersByTime(800);
+      expect(prompt).toHaveLength(1);
+      await declare("timeout", "3000");
+
+      // The warning is withdrawn only by a return or by the timeout itself.
+      expect(root().getAttribute("data-prompt")).toBe("true");
+      expect(promptRegion().hidden).toBe(false);
+      vi.advanceTimersByTime(2199);
+      expect(idle).toHaveLength(0);
+      expect(prompt).toHaveLength(1);
+      vi.advanceTimersByTime(1);
+      expect(idle).toHaveLength(1);
+      expect(active).toEqual([]);
+      expect(prompt).toHaveLength(1);
+    });
+
+    it("schedules nothing while idle; the next activity arms with the new declaration", async () => {
+      await mount('data-stimeo--idle-timeout-value="1000"');
+      const idle = collect("idle");
+      vi.advanceTimersByTime(1000);
+      expect(idle).toHaveLength(1);
+
+      await declare("timeout", "5000");
+      vi.advanceTimersByTime(10_000);
+      expect(idle).toHaveLength(1);
+      expect(root().getAttribute("data-idle")).toBe("true");
+
+      activity();
+      vi.advanceTimersByTime(4999);
+      expect(idle).toHaveLength(1);
+      vi.advanceTimersByTime(1);
+      expect(idle).toHaveLength(2);
+    });
+
+    it.each([
+      ["timeout first", ["timeout", "prompt-before"]],
+      ["promptBefore first", ["prompt-before", "timeout"]],
+    ] as const)(
+      "settles on one schedule when both change in one batch (%s)",
+      async (_order, names) => {
+        await mount('data-stimeo--idle-timeout-value="10000"');
+        const prompt = collect("prompt");
+        const idle = collect("idle");
+        vi.advanceTimersByTime(1000);
+        root().setAttribute("data-stimeo--idle-timeout-value", "4000");
+        root().setAttribute("data-stimeo--idle-prompt-before-value", "2000");
+        await vi.advanceTimersByTimeAsync(0);
+        for (const name of names) instance()[CALLBACKS[name]]();
+
+        vi.advanceTimersByTime(999);
+        expect(prompt).toEqual([]);
+        vi.advanceTimersByTime(1); // 2000
+        expect(prompt.map((e) => e.detail)).toEqual([{ remaining: 2000 }]);
+        vi.advanceTimersByTime(2000); // 4000
+        expect(idle).toHaveLength(1);
+        expect(prompt).toHaveLength(1);
+      },
+    );
+
+    it("moves the idle deadline for a change made from inside the prompt listener", async () => {
+      await mount(
+        'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-prompt-before-value="300"',
+      );
+      const idle = collect("idle");
+      const prompt = collect("prompt");
+      root().addEventListener("stimeo--idle:prompt", () => {
+        root().setAttribute("data-stimeo--idle-timeout-value", "5000");
+        instance().timeoutValueChanged();
+      });
+
+      vi.advanceTimersByTime(700);
+      expect(prompt).toHaveLength(1);
+      vi.advanceTimersByTime(4299);
+      expect(idle).toHaveLength(0);
+      vi.advanceTimersByTime(1);
+      expect(idle).toHaveLength(1);
+      expect(prompt).toHaveLength(1);
+    });
+
+    it.each(["timeout", "prompt-before"] as const)(
+      "schedules nothing for a %s change delivered outside the connection",
+      async (name) => {
+        await mount(
+          'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-prompt-before-value="300"',
+        );
+        const events = collectOnDocument();
+        try {
+          instance().disconnect();
+          await declare(name, "500");
+          expect(vi.getTimerCount()).toBe(0);
+          vi.advanceTimersByTime(5000);
+          expect(events.types).toEqual([]);
+        } finally {
+          events.stop();
+        }
+      },
+    );
   });
 
   it("declares the three public events the Inspector manifest reflects", () => {

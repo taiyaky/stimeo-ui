@@ -87,6 +87,181 @@ describe("DataGridController", () => {
     return () => spy.mock.calls.filter(([selector]) => selector === "[role='row']").length;
   };
 
+  it("element API selects an interactive descendant while its event remains claimed", async () => {
+    await start("multiple");
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--data-grid",
+    ) as DataGridController;
+    const link = document.createElement("a");
+    link.href = "#example";
+    cell(2).append(link);
+    const reports: CustomEvent[] = [];
+    root().addEventListener("stimeo--data-grid:selectionchange", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    row(1).addEventListener("pointerup", (event) => instance.toggleSelect(event));
+    link.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(0);
+    instance.toggleSelect(link);
+    expect(reports.map(({ detail }) => detail)).toEqual([{ rows: [row(1)], reason: "api" }]);
+  });
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+  ])("preserves row action event modality %s", async (type, reason) => {
+    await start("multiple");
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--data-grid",
+    ) as DataGridController;
+    const reports: CustomEvent[] = [];
+    root().addEventListener("stimeo--data-grid:selectionchange", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    row(1).addEventListener(type, (event) => instance.toggleSelect(event));
+    row(1).dispatchEvent(new Event(type));
+    expect(reports[0]?.detail.reason).toBe(reason);
+  });
+
+  it("rejects nested-origin action events while accepting owned descendants", async () => {
+    await start("multiple");
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--data-grid']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--data-grid",
+    ) as DataGridController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--data-grid-target='columnHeader']",
+    )[1];
+    if (!target) throw new Error("Missing target");
+
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--data-grid");
+    const inner = target.cloneNode(true) as HTMLElement;
+    inner.removeAttribute("data-action");
+    nested.append(inner);
+    target.append(nested);
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--data-grid:sort", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener("pointerup", (event) => instance.sort(event));
+    inner.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(0);
+    nested.remove();
+    const owned = document.createElement("span");
+    target.append(owned);
+    owned.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe("user");
+  });
+
+  it.each([false, true])(
+    "toggles a row through the element API (descendant=%s)",
+    async (descendant) => {
+      await start("multiple");
+      const instance = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--data-grid",
+      ) as DataGridController;
+      const target = row(1);
+      const reports: CustomEvent[] = [];
+      root().addEventListener("stimeo--data-grid:selectionchange", (event) =>
+        reports.push(event as CustomEvent),
+      );
+      const foreign = target.cloneNode(true) as HTMLElement;
+      instance.toggleSelect(foreign);
+      document.body.append(foreign);
+      instance.toggleSelect(foreign);
+      const nested = document.createElement("div");
+      nested.setAttribute("data-controller", "stimeo--data-grid");
+      const inner = document.createElement("span");
+      nested.append(inner);
+      target.append(nested);
+      instance.toggleSelect(inner);
+      expect(reports).toHaveLength(0);
+      expect(target.getAttribute("aria-selected")).toBe("false");
+      instance.toggleSelect(descendant ? cell(2) : target);
+      expect(target.getAttribute("aria-selected")).toBe("true");
+      expect(reports.map(({ detail }) => detail)).toEqual([{ rows: [target], reason: "api" }]);
+    },
+  );
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+  ])("preserves action event modality %s", async (type, reason) => {
+    await start("multiple");
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--data-grid']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--data-grid",
+    ) as DataGridController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--data-grid-target='columnHeader']",
+    )[1];
+    if (!target) throw new Error("Missing action target");
+
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--data-grid:sort", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener(type, (event) => instance.sort(event), { once: true });
+    target.dispatchEvent(new Event(type));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe(reason);
+  });
+
+  it.each([false, true])(
+    "accepts an owned element API source (descendant=%s) without stealing outside focus",
+    async (descendant) => {
+      await start("multiple");
+      const element = document.querySelector<HTMLElement>("[data-controller='stimeo--data-grid']");
+      if (!element) throw new Error("Missing controller root");
+      const instance = application.getControllerForElementAndIdentifier(
+        element,
+        "stimeo--data-grid",
+      ) as DataGridController;
+      const target = element.querySelectorAll<HTMLElement>(
+        "[data-stimeo--data-grid-target='columnHeader']",
+      )[1];
+      if (!target) throw new Error("Missing action target");
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      outside.focus();
+      const reports: CustomEvent[] = [];
+      element.addEventListener("stimeo--data-grid:sort", (event) =>
+        reports.push(event as CustomEvent),
+      );
+
+      const child = document.createElement("span");
+      target.append(child);
+      const foreign = target.cloneNode(true) as HTMLElement;
+      foreign.removeAttribute("data-action");
+      const nested = document.createElement("div");
+      nested.setAttribute("data-controller", "stimeo--data-grid");
+      const nestedTarget = foreign.cloneNode(true) as HTMLElement;
+      nested.append(nestedTarget);
+      element.append(nested);
+      const before = element.innerHTML;
+      instance.sort(foreign);
+      document.body.append(foreign);
+      instance.sort(foreign);
+      instance.sort(nestedTarget);
+      expect(element.innerHTML).toBe(before);
+      expect(reports).toHaveLength(0);
+      instance.sort(descendant ? child : target);
+      expect(target.getAttribute("aria-sort")).toBe("ascending");
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.detail.reason).toBe("api");
+      expect(document.activeElement).toBe(outside);
+    },
+  );
+
   it("reverses the horizontal arrows under RTL, leaving row movement alone", async () => {
     // Logical direction. `dir="rtl"` is the authoring contract, but happy-dom
     // does not resolve it into the computed style, so the direction is set
@@ -145,6 +320,16 @@ describe("DataGridController", () => {
     // The consumer resolves which column to sort from this element, so its
     // identity is part of the event contract.
     expect(detail.every((entry) => entry.column === name)).toBe(true);
+  });
+
+  it("moves the tab stop to a header sorted by click", async () => {
+    await start();
+    expect(cell(0).tabIndex).toBe(0);
+
+    header(1).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const tabbable = [...headers(), ...cells()].filter((el) => el.tabIndex === 0);
+    expect(tabbable).toEqual([header(1)]);
   });
 
   it("advances to ascending from an unexpected aria-sort value", async () => {
@@ -439,6 +624,18 @@ describe("DataGridController", () => {
       expect(selectedStates()).toEqual(["true", "false", "false"]);
     });
 
+    it("gives a row added without cell targets an explicit value", async () => {
+      await startWith("multiple", ["", ""]);
+      const late = document.createElement("tr");
+      late.setAttribute("role", "row");
+      late.setAttribute("data-stimeo--data-grid-target", "row");
+      late.innerHTML = '<td role="gridcell">Loading</td>';
+      (document.querySelector("tbody") as HTMLElement).appendChild(late);
+      await tick();
+
+      expect(selectedStates()).toEqual(["false", "false", "false"]);
+    });
+
     it("normalizes the rows a fixed number of times per mount, not once per row", async () => {
       // Every baseline pass walks the whole row list, and Stimulus reports the
       // authored rows one at a time, so an ungated row callback turns the mount
@@ -527,6 +724,58 @@ describe("DataGridController", () => {
 
       expect(tabbable()).toHaveLength(1);
       expect(tabbable()[0]).toBe(cell(0)); // the established position wins
+    });
+
+    it("keeps the tab stop where it was when a row carrying its own tabindex arrives ahead of it", async () => {
+      await start();
+      const held = cell(0);
+      const late = document.createElement("tr");
+      late.setAttribute("role", "row");
+      late.setAttribute("data-stimeo--data-grid-target", "row");
+      late.innerHTML =
+        '<td role="gridcell" tabindex="0" data-stimeo--data-grid-target="cell"' +
+        ' data-action="keydown->stimeo--data-grid#onKeydown">Late</td>';
+      (document.querySelector("tbody") as HTMLElement).prepend(late);
+      await tick();
+
+      expect(tabbable()).toEqual([held]);
+    });
+
+    it("re-establishes the single tab stop when the active cell alone is removed", async () => {
+      await start();
+      press(cell(0), "ArrowRight");
+      const active = cell(1);
+      expect(active.tabIndex).toBe(0);
+
+      active.remove();
+      await tick();
+
+      expect(tabbable()).toHaveLength(1);
+    });
+
+    it("keeps one tab stop when a cell arrives in an existing row carrying its own tabindex", async () => {
+      await start();
+      const late = document.createElement("td");
+      late.setAttribute("role", "gridcell");
+      late.setAttribute("tabindex", "0");
+      late.setAttribute("data-stimeo--data-grid-target", "cell");
+      (cell(1).closest("tr") as HTMLElement).append(late);
+      await tick();
+
+      expect(tabbable()).toEqual([cell(0)]);
+    });
+
+    it("takes a header added after connect into the roving set", async () => {
+      await start();
+      const late = document.createElement("th");
+      late.setAttribute("role", "columnheader");
+      late.setAttribute("aria-sort", "none");
+      late.setAttribute("data-stimeo--data-grid-target", "columnHeader");
+      (header(1).closest("tr") as HTMLElement).append(late);
+      await tick();
+
+      expect(late.getAttribute("tabindex")).toBe("-1");
+      expect(tabbable()).toEqual([cell(0)]);
     });
   });
   describe("controls nested inside a cell", () => {
@@ -1312,6 +1561,63 @@ describe("DataGridController", () => {
       expect(seen).toEqual([]);
     });
 
+    it("seeds a fields container added after connect without reporting", async () => {
+      await mount("single", [true, false]);
+      (document.querySelector("caption") as HTMLElement).replaceChildren();
+      await tick();
+      const seen = record();
+
+      // Only the container arrives, so its own callback alone brings the pass.
+      const late = document.createElement("div");
+      late.setAttribute("data-stimeo--data-grid-target", "fields");
+      (document.querySelector("caption") as HTMLElement).append(late);
+      await tick();
+
+      expect(submitted()).toEqual(["1"]);
+      expect(seen).toEqual([]);
+    });
+
+    it("mirrors the selection into a fields container that stays after an earlier one leaves", async () => {
+      await mount("single", [true, false]);
+      const seen = record();
+      const original = document.querySelector(
+        "[data-stimeo--data-grid-target='fields']",
+      ) as HTMLElement;
+      const successor = original.cloneNode() as HTMLElement;
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(submitted()).toEqual(["1"]);
+      expect(successor.querySelector("input")?.value).toBe("1");
+      // The container that stays is brought to the selection silently.
+      expect(seen).toEqual([]);
+    });
+
+    it("keeps selecting when the sole fields container leaves", async () => {
+      await mount("single", [true, false]);
+      const instance = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--data-grid",
+      ) as DataGridController;
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        (
+          document.querySelector("[data-stimeo--data-grid-target='fields']") as HTMLElement
+        ).remove();
+        await tick();
+        expect(() => instance.fieldsTargetDisconnected()).not.toThrow();
+        await tick();
+        expect(errors).not.toHaveBeenCalled();
+      } finally {
+        errors.mockRestore();
+      }
+
+      instance.toggleSelect(byId("r2"));
+      expect(states()).toEqual(["false", "true"]);
+    });
+
     it("reports nothing on connect, whatever the authored selection", async () => {
       document.body.innerHTML = grid("single", [true, true]);
       const seen = record();
@@ -1561,5 +1867,124 @@ describe("DataGridController", () => {
       expect(submitted()).toEqual(["1"]);
       expect(seen).toEqual([]);
     });
+  });
+});
+
+/** Verifies settled-state comparisons and synchronous nested commits. */
+describe("DataGridController settled reports", () => {
+  let application: Application;
+  const root = () =>
+    document.querySelector<HTMLElement>('[data-controller="stimeo--data-grid"]') as HTMLElement;
+  const items = () =>
+    Array.from(root().querySelectorAll<HTMLElement>('[data-stimeo--data-grid-target="row"]'));
+  const act = (index: number) => {
+    items()
+      [index]?.querySelector("td")
+      ?.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+  };
+  const write = (index: number) => {
+    items().forEach((item, position) => {
+      item.setAttribute("aria-selected", String(position === index));
+    });
+  };
+  const submitted = () =>
+    Array.from(root().querySelectorAll<HTMLInputElement>("input"))
+      .map((field) => field.value)
+      .join(",");
+  const record = () => {
+    const seen: string[] = [];
+    for (const name of ["selectionchange", "reconcile"])
+      root().addEventListener(`stimeo--data-grid:${name}`, (event) => {
+        const detail = (event as CustomEvent<{ rows: HTMLElement[] }>).detail;
+        seen.push(`${name}:${detail.rows.map((row) => row.dataset.value).join(",")}`);
+      });
+    return seen;
+  };
+  beforeEach(async () => {
+    document.body.innerHTML = `<table role="grid" data-controller="stimeo--data-grid" data-stimeo--data-grid-selection-value="single"><caption data-stimeo--data-grid-target="fields"></caption><tbody><tr role="row" aria-selected="true" data-value="a" data-stimeo--data-grid-target="row"><td role="gridcell" tabindex="0" data-stimeo--data-grid-target="cell" data-action="keydown->stimeo--data-grid#onKeydown">a</td></tr><tr role="row" aria-selected="false" data-value="b" data-stimeo--data-grid-target="row"><td role="gridcell" tabindex="0" data-stimeo--data-grid-target="cell" data-action="keydown->stimeo--data-grid#onKeydown">b</td></tr><tr role="row" aria-selected="false" data-value="c" data-stimeo--data-grid-target="row"><td role="gridcell" tabindex="0" data-stimeo--data-grid-target="cell" data-action="keydown->stimeo--data-grid#onKeydown">c</td></tr></tbody></table>`;
+    application = Application.start();
+    application.register("stimeo--data-grid", DataGridController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+  it("includes an undelivered page write in the user's settled change", async () => {
+    const seen = record();
+    write(1);
+    act(2);
+    await tick();
+    expect(seen).toEqual(["selectionchange:c"]);
+    expect(submitted()).toBe("c");
+  });
+  it("publishes nothing when the action returns to the last settled selection", async () => {
+    const seen = record();
+    let native = 0;
+    root().addEventListener("change", () => {
+      native += 1;
+    });
+    write(1);
+    act(0);
+    await tick();
+    expect(seen).toEqual([]);
+    expect(native).toBe(0);
+    expect(submitted()).toBe("a");
+  });
+  it("mirrors a replacement field container before an unchanged selection returns", async () => {
+    const seen = record();
+    const fields = root().querySelector('[data-stimeo--data-grid-target="fields"]');
+    const replacement = document.createElement("caption");
+    replacement.setAttribute("data-stimeo--data-grid-target", "fields");
+    fields?.replaceWith(replacement);
+    let native = 0;
+    replacement.addEventListener("change", () => {
+      native += 1;
+    });
+    write(1);
+    act(0);
+    expect(replacement.querySelector<HTMLInputElement>("input")?.value).toBe("a");
+    expect(native).toBe(0);
+    expect(seen).toEqual([]);
+    await tick();
+    expect(submitted()).toBe("a");
+    expect(native).toBe(0);
+    expect(seen).toEqual([]);
+  });
+  it("drops the outer report after a native subscriber commits a newer selection", async () => {
+    const seen = record();
+    let spent = false;
+    root().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      act(2);
+    });
+    act(1);
+    await tick();
+    expect(seen).toEqual(["selectionchange:c"]);
+    expect(submitted()).toBe("c");
+  });
+  it("keeps the outer report when a native subscriber only reads the selection", async () => {
+    const seen = record();
+    const reads: string[] = [];
+    root().addEventListener("change", () => reads.push(submitted()));
+    act(1);
+    await tick();
+    expect(reads).toEqual(["b"]);
+    expect(seen).toEqual(["selectionchange:b"]);
+  });
+  it("keeps the outer report when a native subscriber confirms the same selection", async () => {
+    const seen = record();
+    let spent = false;
+    root().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      items()[1]?.setAttribute("aria-selected", "false");
+      act(1);
+    });
+    act(1);
+    await tick();
+    expect(seen).toEqual(["selectionchange:b"]);
+    expect(submitted()).toBe("b");
   });
 });

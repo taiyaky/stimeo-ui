@@ -1,5 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { type StateReason, stateReasonFor } from "../utils/state_reason";
@@ -57,11 +59,18 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *   exactly one layer. `Tab` lets the browser move focus first, then closes on
  *   the next task. An outside click or context-menu invocation closes without
  *   stealing focus from its destination.
+ * - A region or a menu that takes over — in one task, or after an earlier one
+ *   leaves in a later task — carries the open state, and the menu that takes over
+ *   an open one is placed where it was opened; focus stays where the swap left it.
+ *   With no menu left the region reads closed and the menu leaves the Escape stack.
+ *   One that stops resolving as the target gets back the `data-state` or `hidden` it
+ *   carried before this controller wrote on it.
  * - Each move of the open state is reported: `stimeo--context-menu:open` and
  *   `stimeo--context-menu:close` dispatch `{ reason: StateReason }`, after the
  *   state attributes are written. Both are informational, so neither is
  *   cancelable. A call that leaves the state where it already was, the
- *   normalization in {@link connect}, and {@link disconnect} are all silent.
+ *   normalization in {@link connect}, a region or a menu that takes over, and
+ *   {@link disconnect} are all silent.
  *
  * Roving focus skips `hidden` and natively `disabled` items. An
  * `aria-disabled="true"` item stays reachable by arrow keys — APG marks that
@@ -69,12 +78,17 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  * activation is suppressed, so it announces itself and does nothing.
  */
 export class ContextMenuController extends Controller<HTMLElement> {
+  /** The custom properties that carry the coordinate the menu was opened at, x then y. */
+  static readonly #COORDINATE = ["--stimeo--context-menu-x", "--stimeo--context-menu-y"] as const;
+
   static override targets = ["region", "menu", "item"];
   static actions = ["activate", "onItemKeydown", "onRegionKeydown", "open"] as const;
   static events = ["close", "open"] as const;
 
   declare readonly regionTarget: HTMLElement;
+  declare readonly regionTargets: HTMLElement[];
   declare readonly menuTarget: HTMLElement;
+  declare readonly menuTargets: HTMLElement[];
   declare readonly itemTargets: HTMLButtonElement[];
   declare readonly hasRegionTarget: boolean;
   declare readonly hasMenuTarget: boolean;
@@ -83,6 +97,15 @@ export class ContextMenuController extends Controller<HTMLElement> {
 
   /** Escape-stack membership while open; the shared resolver dismisses via it. */
   readonly #escapeLayer = new EscapeLayer();
+  /** Borrows `hidden` on the menu, to give back when an element stops being the menu. */
+  readonly #menuHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Borrows `data-state` on the region, for the same return. */
+  readonly #regionState = new AttributeLease<HTMLElement>("data-state", this.identifier);
+  /** The menu the open state was last applied to. */
+  #menu: HTMLElement | null = null;
+
+  /** Whether `connect()` has run for this connection; target callbacks arrive outside it too. */
+  #connected = false;
 
   /** Whether state moves are reported: set once `connect()` settled the baseline. */
   #reporting = false;
@@ -93,11 +116,13 @@ export class ContextMenuController extends Controller<HTMLElement> {
     this.element.addEventListener("click", this.#onItemClickCapture, true);
     document.addEventListener("click", this.#onOutsidePointer, true);
     document.addEventListener("contextmenu", this.#onOutsidePointer, true);
+    this.#connected = true;
     this.#reporting = true;
   }
 
   /** Releases the listeners, stack membership, and pending Tab-close task. */
   override disconnect(): void {
+    this.#connected = false;
     this.#reporting = false;
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
@@ -106,13 +131,52 @@ export class ContextMenuController extends Controller<HTMLElement> {
     document.removeEventListener("contextmenu", this.#onOutsidePointer, true);
   }
 
+  /** Brings a region that arrives after connect to the open state. */
+  regionTargetConnected(): void {
+    if (this.#connected) this.#reflectRegion();
+  }
+
   /**
-   * Opens the menu from a `contextmenu` event: suppresses the native menu and
-   * places this one at the pointer coordinate.
+   * Gives a region that no longer resolves as one its own `data-state` back — after
+   * `disconnect()` too, since dropping the identifier leaves the element on the page — and
+   * brings the region that stays to the open state.
    */
-  open(event: MouseEvent): void {
-    event.preventDefault();
-    this.#openAt(event.clientX, event.clientY, stateReasonFor(event));
+  regionTargetDisconnected(region: HTMLElement): void {
+    if (!this.regionTargets.includes(region)) this.#regionState.return(region);
+    if (this.#connected) this.#reflectRegion();
+  }
+
+  /** Applies the open state to a menu that arrives after connect in front of the others. */
+  menuTargetConnected(): void {
+    this.#adoptMenu();
+  }
+
+  /**
+   * Applies the open state to the menu left, then gives a menu that no longer resolves as the
+   * target its own `hidden` back — after `disconnect()` too, since dropping the identifier
+   * leaves the element on the page. The open state is read off the departing menu first,
+   * while it still carries it.
+   */
+  menuTargetDisconnected(menu: HTMLElement): void {
+    this.#adoptMenu();
+    if (!this.menuTargets.includes(menu)) this.#menuHidden.return(menu);
+  }
+
+  /**
+   * Opens at a mouse event's coordinate, an explicit element's center, or the
+   * region's center with no argument. Opening focuses the new menu in all paths.
+   * An explicit element may be an anchor outside the controller.
+   */
+  open(input?: Event | HTMLElement): void {
+    const source = actionSource(input);
+    source.event?.preventDefault();
+    if (source.event instanceof MouseEvent) {
+      this.#openAt(source.event.clientX, source.event.clientY, source.reason);
+      return;
+    }
+    const anchor = source.host ?? (this.hasRegionTarget ? this.regionTarget : null);
+    const rect = anchor?.getBoundingClientRect() ?? { left: 0, top: 0, width: 0, height: 0 };
+    this.#openAt(rect.left + rect.width / 2, rect.top + rect.height / 2, source.reason);
   }
 
   /** Keyboard entry on the region: `Shift+F10` / `ContextMenu` open at center. */
@@ -181,15 +245,17 @@ export class ContextMenuController extends Controller<HTMLElement> {
   #openAt(x: number, y: number, reason: StateReason): void {
     if (!this.hasMenuTarget) return;
     this.#timers.clearAll();
+    const menu = this.menuTarget;
     const was = this.#isOpen;
     this.#escapeLayer.activate(document, {
       onDismiss: () => this.#closeAndRestore("escape"),
       claims: claimsWhileFocusWithin(this.element),
     });
-    this.menuTarget.style.setProperty("--stimeo--context-menu-x", `${x}px`);
-    this.menuTarget.style.setProperty("--stimeo--context-menu-y", `${y}px`);
-    this.menuTarget.hidden = false;
-    if (this.hasRegionTarget) this.regionTarget.setAttribute("data-state", "open");
+    menu.style.setProperty(ContextMenuController.#COORDINATE[0], `${x}px`);
+    menu.style.setProperty(ContextMenuController.#COORDINATE[1], `${y}px`);
+    this.#menuHidden.write(menu, null);
+    this.#menu = menu;
+    if (this.hasRegionTarget) this.#regionState.write(this.regionTarget, "open");
     if (!was && this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
     // A subscriber may close it again from the handler above; focusing then puts
     // the caret on an item nobody can see.
@@ -201,11 +267,45 @@ export class ContextMenuController extends Controller<HTMLElement> {
   #closeMenu(reason: StateReason): void {
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
-    if (!this.hasMenuTarget) return;
+    const menu = this.hasMenuTarget ? this.menuTarget : null;
+    this.#menu = menu;
+    if (!menu) return;
     const was = this.#isOpen;
-    this.menuTarget.hidden = true;
-    if (this.hasRegionTarget) this.regionTarget.setAttribute("data-state", "closed");
+    this.#menuHidden.write(menu, "");
+    if (this.hasRegionTarget) this.#regionState.write(this.regionTarget, "closed");
     if (was && this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
+  }
+
+  /**
+   * Moves the open state onto the menu that is now first, when that menu changed: one that
+   * takes over an open menu is shown where that one was opened, and one that arrives with none
+   * before it arrives closed. With none left, the menu leaves the Escape stack. The region then
+   * reads the menu, changed or not. Focus stays where the swap left it, and nothing is
+   * dispatched.
+   */
+  #adoptMenu(): void {
+    if (!this.#connected) return;
+    const menu = this.hasMenuTarget ? this.menuTarget : null;
+    const previous = this.#menu;
+    this.#menu = menu;
+    if (!menu) {
+      this.#escapeLayer.deactivate();
+    } else if (menu !== previous) {
+      const open = previous !== null && !previous.hidden;
+      if (open) {
+        for (const property of ContextMenuController.#COORDINATE) {
+          menu.style.setProperty(property, previous.style.getPropertyValue(property));
+        }
+      }
+      this.#menuHidden.write(menu, open ? null : "");
+    }
+    this.#reflectRegion();
+  }
+
+  /** Writes the open state onto the region that is first. */
+  #reflectRegion(): void {
+    if (!this.hasRegionTarget) return;
+    this.#regionState.write(this.regionTarget, this.#isOpen ? "open" : "closed");
   }
 
   /** Closes the menu and returns focus to the region (Escape / activation). */

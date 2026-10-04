@@ -72,16 +72,25 @@ describe("ToastController", () => {
   };
 
   /**
-   * Disarms auto-dismiss for the fixture. Required by every assertion that runs
-   * on the real clock (axe, the virtual screen reader): those walk the DOM over
-   * many awaited steps, and a toast removed by the fixture's duration timer
-   * mid-walk changes what is being audited. `durationValueChanged` also releases
-   * the timer of any toast already on screen.
+   * Disarms auto-dismiss for the toasts shown after it. Required by every assertion
+   * that runs on the real clock (axe, the virtual screen reader): those walk the DOM
+   * over many awaited steps, and a toast removed by the fixture's duration timer
+   * mid-walk changes what is being audited. `duration` is read as each toast is taken
+   * on, so a toast already on screen keeps the deadline it was given.
    */
   const disableAutoDismiss = (suffix = "") => {
-    const instance = controller(suffix);
-    instance.durationValue = 0;
-    instance.durationValueChanged();
+    controller(suffix).durationValue = 0;
+  };
+
+  /**
+   * Rewrites `duration` and delivers its Value callback directly when the controller
+   * defines one, since happy-dom does not reliably run it for an attribute write.
+   */
+  const declareDuration = (value: number) => {
+    root().setAttribute("data-stimeo--toast-duration-value", String(value));
+    const owner = controller();
+    const callback: unknown = Reflect.get(owner, "durationValueChanged");
+    if (typeof callback === "function") callback.call(owner);
   };
 
   /** Mounts the fixture again with other Values, for a case the default ones do not cover. */
@@ -155,6 +164,240 @@ describe("ToastController", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it.each([false, true])(
+    "crosses the toast boundary with relatedTarget present=%s",
+    async (present) => {
+      vi.useFakeTimers();
+      const toast = showArmed("Boundary");
+      const enter = present
+        ? new MouseEvent("mouseover", { bubbles: true, relatedTarget: null })
+        : new Event("mouseover", { bubbles: true });
+      toast.dispatchEvent(enter);
+      expect(toast.getAttribute("data-paused")).toBe("true");
+      const leave = present
+        ? new MouseEvent("mouseout", { bubbles: true, relatedTarget: null })
+        : new Event("mouseout", { bubbles: true });
+      toast.dispatchEvent(leave);
+      expect(toast.hasAttribute("data-paused")).toBe(false);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(toast.getAttribute("data-state")).toBe("leaving");
+    },
+  );
+
+  it("does not cancel another item's zero-valued animation handle", () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    const handles = [1, 0];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      const handle = handles.shift() ?? 2;
+      frames.set(handle, callback);
+      return handle;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation((handle) => {
+      // Web IDL converts the handle to an unsigned long before cancellation.
+      frames.delete(Number(handle) >>> 0);
+    });
+    showArmed("visible");
+    frames.get(1)?.(0);
+    frames.delete(1);
+    const visible = item();
+    showArmed("entering");
+    const entering = list().lastElementChild as HTMLElement;
+    dismissButton(visible)?.click();
+    frames.get(0)?.(16);
+    expect(entering.getAttribute("data-state")).toBe("visible");
+    expect(visible.getAttribute("data-state")).toBe("leaving");
+  });
+
+  it.each([false, true])(
+    "treats a removed toast returning after reconnect=%s as a new arrival",
+    async (reconnect) => {
+      await remount({ duration: 0, max: 0 });
+      triggerShow("first");
+      triggerShow("second");
+      await tick();
+      const first = list().children[0] as HTMLElement;
+      const second = list().children[1] as HTMLElement;
+      const instance = controller();
+      if (reconnect) instance.disconnect();
+      first.remove();
+      await tick();
+      if (reconnect) {
+        instance.itemTargetConnected(second);
+        instance.connect();
+      }
+      list().append(first);
+      await tick();
+      instance.maxValue = 1;
+      instance.maxValueChanged();
+      expect(second.getAttribute("data-state")).toBe("leaving");
+      expect(first.getAttribute("data-state")).not.toBe("leaving");
+    },
+  );
+
+  it("does not adopt an arriving item already leaving", async () => {
+    await remount({ duration: 0, max: 0 });
+    const toast = document.createElement("li");
+    toast.setAttribute("data-stimeo--toast-target", "item");
+    toast.dataset.state = "leaving";
+    list().append(toast);
+    controller().itemTargetConnected(toast);
+    expect(toast.dataset.state).toBe("leaving");
+  });
+
+  it("does not revive a toast marked leaving before its entry frame", async () => {
+    await remount({ duration: 0, max: 0 });
+    vi.useFakeTimers();
+    const toast = showArmed("Leaving");
+    toast.dataset.state = "leaving";
+    await vi.advanceTimersByTimeAsync(30);
+    expect(toast.dataset.state).toBe("leaving");
+  });
+
+  it("leaves a departing toast's pause hook unchanged when duration changes", async () => {
+    await remount({ duration: 10000, max: 0 });
+    vi.useFakeTimers();
+    const toast = showArmed("Leaving");
+    toast.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    expect(toast.getAttribute("data-paused")).toBe("true");
+    toast.style.transitionProperty = "opacity";
+    toast.style.transitionDuration = "0.1s";
+    dismissButton(toast)?.click();
+    declareDuration(0);
+    expect(toast.getAttribute("data-paused")).toBe("true");
+  });
+
+  it("keeps a hover hold while the pointer moves within one toast", async () => {
+    await remount({ duration: 100, max: 0 });
+    vi.useFakeTimers();
+    const toast = showArmed("Held");
+    const button = dismissButton(toast) as HTMLButtonElement;
+    const label = message(toast) as HTMLElement;
+    button.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: null }));
+    button.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: label }));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(toast.isConnected).toBe(true);
+    expect(toast.getAttribute("data-paused")).toBe("true");
+  });
+
+  it("ignores text-node clicks and itemless pointer transitions", async () => {
+    await remount({ duration: 0, max: 0 });
+    const toast = showArmed("Keep");
+    const text = document.createTextNode("Click");
+    toast.append(text);
+    expect(() => text.dispatchEvent(new MouseEvent("click", { bubbles: true }))).not.toThrow();
+    expect(() =>
+      list().dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: toast })),
+    ).not.toThrow();
+    expect(toast.isConnected).toBe(true);
+  });
+
+  it("leaves show inert when the list or template target is missing", async () => {
+    await remount({ duration: 0, max: 0 });
+    root().querySelector("template")?.remove();
+    expect(() => triggerShow("No template")).not.toThrow();
+    expect(list().children).toHaveLength(0);
+    list().remove();
+    expect(() => triggerShow("No list")).not.toThrow();
+  });
+
+  it("releases delegated actions when the current list target disconnects", async () => {
+    await remount({ duration: 0, max: 0 });
+    const toast = showArmed("Keep");
+    controller().listTargetDisconnected(list());
+    dismissButton(toast)?.click();
+    expect(toast.isConnected).toBe(true);
+  });
+
+  it("uses the current target for an event dispatched by a text node", async () => {
+    await remount({ duration: 10000, max: 0 });
+    const toast = showArmed("Hold");
+    const text = document.createTextNode("text");
+    toast.append(text);
+    toast.addEventListener("customhold", (event) => controller().pause(event));
+    text.dispatchEvent(new Event("customhold", { bubbles: true }));
+    expect(toast.getAttribute("data-paused")).toBe("true");
+  });
+
+  it("does not consume Escape from an item outside its list", async () => {
+    await remount({ duration: 0, max: 0 });
+    const external = document.createElement("li");
+    external.setAttribute("data-stimeo--toast-target", "item");
+    document.body.append(external);
+    external.addEventListener("keydown", (event) => controller().onKeydown(event));
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    external.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(external.isConnected).toBe(true);
+  });
+
+  it("does not remove a toast that leaves the list while its exit transition runs", async () => {
+    await remount({ duration: 0, max: 0 });
+    vi.useFakeTimers();
+    const toast = showArmed("Move");
+    toast.style.transitionProperty = "opacity";
+    toast.style.transitionDuration = "0.1s";
+    dismissButton(toast)?.click();
+    document.body.append(toast);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(toast.isConnected).toBe(true);
+    expect(toast.parentElement).toBe(document.body);
+  });
+
+  it("does not schedule a second exit when a leaving toast is dismissed again", async () => {
+    await remount({ duration: 0, max: 0 });
+    vi.useFakeTimers();
+    const toast = showArmed("Once");
+    toast.style.transitionProperty = "opacity";
+    toast.style.transitionDuration = "0.1s";
+    dismissButton(toast)?.click();
+    const pending = vi.getTimerCount();
+    dismissButton(toast)?.click();
+    expect(vi.getTimerCount()).toBe(pending);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(toast.isConnected).toBe(false);
+  });
+
+  it("connects safely before its list target exists", async () => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = '<div data-controller="stimeo--toast"></div>';
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      application = Application.start();
+      application.register("stimeo--toast", ToastController);
+      await tick();
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("dismisses by arrival order after prepends and same-instance reconnects", async () => {
+    await remount({ duration: 0, max: 0 });
+    const first = showArmed("First");
+    const second = showArmed("Second");
+    list().prepend(second);
+    const instance = controller();
+    instance.disconnect();
+    instance.itemTargetConnected(second);
+    instance.itemTargetConnected(first);
+    instance.connect();
+    instance.maxValue = 1;
+    instance.maxValueChanged();
+    expect(first.isConnected).toBe(false);
+    expect(second.isConnected).toBe(true);
+  });
+
+  it("dismisses the oldest arrival while protecting a newly prepended toast", async () => {
+    await remount({ duration: 0, max: 2 });
+    const first = showArmed("First");
+    const second = showArmed("Second");
+    list().prepend(second);
+    const third = showArmed("Third");
+    expect(first.isConnected).toBe(false);
+    expect(second.isConnected).toBe(true);
+    expect(third.isConnected).toBe(true);
   });
 
   it("starts empty with no elements inside the list", () => {
@@ -598,27 +841,26 @@ describe("ToastController", () => {
     expect(shownNames()).toEqual(["A"]);
   });
 
-  it("keeps the hold across a duration switched off and on, and marks the timer paused again", () => {
+  it("keeps a held toast's hold and banked time across a duration switched off and on", () => {
     vi.useFakeTimers();
     const dismissed = recordDismissals();
     const a = showArmed("A");
-    focusIn(a);
+    vi.advanceTimersByTime(50);
+    focusIn(a); // banks the 150 ms left of the 200 ms the toast was given
     expect(a.getAttribute("data-paused")).toBe("true");
 
-    controller().durationValue = 0;
-    controller().durationValueChanged();
-    expect(a.hasAttribute("data-paused")).toBe(false);
-
-    // A timer set while focus still holds the toast waits for the release.
-    controller().durationValue = 500;
-    controller().durationValueChanged();
+    declareDuration(0);
+    expect(a.getAttribute("data-paused")).toBe("true");
+    declareDuration(500);
     expect(a.getAttribute("data-paused")).toBe("true");
     vi.advanceTimersByTime(5_000);
     expect(a.isConnected).toBe(true);
 
     focusOut(a, document.body);
     expect(a.hasAttribute("data-paused")).toBe(false);
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(149);
+    expect(dismissed).toEqual([]);
+    vi.advanceTimersByTime(1);
     expect(dismissed).toEqual(["timeout A"]);
   });
 
@@ -746,18 +988,23 @@ describe("ToastController", () => {
 
   /**
    * Holds every requested animation frame until a test paints, the way an engine runs
-   * them once per frame; cancelling one drops it.
+   * them once per frame; cancelling one drops it. `stale` lists the handles cancelled
+   * when no frame was pending under them: one already run, or one already cancelled.
    */
   const stubFrames = () => {
     const frames = new Map<number, FrameRequestCallback>();
+    const stale: number[] = [];
     let nextHandle = 1;
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       const handle = nextHandle++;
       frames.set(handle, callback);
       return handle;
     });
-    vi.stubGlobal("cancelAnimationFrame", (handle: number) => frames.delete(handle));
+    vi.stubGlobal("cancelAnimationFrame", (handle: number) => {
+      if (!frames.delete(handle)) stale.push(handle);
+    });
     return {
+      stale: () => [...stale],
       pending: () => frames.size,
       paint: () => {
         const due = [...frames.values()];
@@ -1375,6 +1622,19 @@ describe("ToastController", () => {
     expect(shownNames()).toEqual(["A", "B", "C"]);
   });
 
+  it("writes no phase on a node whose item token is taken off before its entering frame", () => {
+    vi.useFakeTimers();
+    const frames = stubFrames();
+    const a = showArmed("A");
+    expect(a.dataset.state).toBe("entering");
+
+    a.removeAttribute("data-stimeo--toast-target");
+    controller().itemTargetDisconnected(a);
+    frames.paint();
+
+    expect(a.dataset.state).toBe("entering");
+  });
+
   it("auto-dismisses and reports the timeout event detail", () => {
     vi.useFakeTimers();
     const listener = vi.fn();
@@ -1422,8 +1682,6 @@ describe("ToastController", () => {
     const stray = requireElement<HTMLElement>("#stray");
 
     controller().connect();
-    controller().durationValue = 500;
-    controller().durationValueChanged();
 
     expect(stray.getAttribute("data-paused")).toBe("true");
   });
@@ -1523,43 +1781,56 @@ describe("ToastController", () => {
     expect(list().children.length).toBe(0);
   });
 
-  it("clears existing timers when duration changes to zero", () => {
+  // `duration` is read as each toast is taken on: a toast already shown keeps the
+  // deadline it was given, and a change applies from the next toast.
+
+  it("keeps a shown toast's deadline when duration changes to zero, and lets the next one stay", () => {
     vi.useFakeTimers();
-    triggerShow("Persistent notification");
-    const toast = item();
-    controller().itemTargetConnected(toast);
-
-    controller().durationValue = 0;
-    controller().durationValueChanged();
-    vi.advanceTimersByTime(1_000);
-
-    expect(list().children.length).toBe(1);
-    expect(toast.hasAttribute("data-paused")).toBe(false);
-  });
-
-  it("restarts active timers with a new positive duration", () => {
-    vi.useFakeTimers();
-    triggerShow("Reset duration notification");
-    controller().itemTargetConnected(item());
+    const dismissed = recordDismissals();
+    const a = showArmed("A");
     vi.advanceTimersByTime(100);
 
-    controller().durationValue = 500;
-    controller().durationValueChanged();
-    vi.advanceTimersByTime(499);
-    expect(list().children.length).toBe(1);
+    declareDuration(0);
+    vi.advanceTimersByTime(99);
+    expect(dismissed).toEqual([]);
     vi.advanceTimersByTime(1);
-    expect(list().children.length).toBe(0);
+    expect(dismissed).toEqual(["timeout A"]);
+    expect(a.isConnected).toBe(false);
+
+    const b = showArmed("B");
+    vi.advanceTimersByTime(5_000);
+    expect(b.isConnected).toBe(true);
+    expect(b.hasAttribute("data-paused")).toBe(false);
   });
 
-  it("preserves pause while applying a new positive duration", () => {
+  it("neither stretches nor restarts a shown toast's deadline, and times the next one anew", () => {
+    vi.useFakeTimers();
+    const dismissed = recordDismissals();
+    showArmed("A");
+    vi.advanceTimersByTime(100);
+
+    declareDuration(500);
+    vi.advanceTimersByTime(99);
+    expect(dismissed).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(dismissed).toEqual(["timeout A"]);
+
+    showArmed("B");
+    vi.advanceTimersByTime(499);
+    expect(dismissed).toEqual(["timeout A"]);
+    vi.advanceTimersByTime(1);
+    expect(dismissed).toEqual(["timeout A", "timeout B"]);
+  });
+
+  it("keeps a held toast's banked time when duration changes", () => {
     vi.useFakeTimers();
     triggerShow("Paused duration notification");
     const toast = item();
     controller().itemTargetConnected(toast);
+    vi.advanceTimersByTime(50);
     toast.dispatchEvent(new FocusEvent("focusin", { bubbles: true, relatedTarget: document.body }));
 
-    controller().durationValue = 500;
-    controller().durationValueChanged();
+    declareDuration(500);
     vi.advanceTimersByTime(1_000);
     expect(list().children.length).toBe(1);
     expect(toast.getAttribute("data-paused")).toBe("true");
@@ -1567,8 +1838,28 @@ describe("ToastController", () => {
     toast.dispatchEvent(
       new FocusEvent("focusout", { bubbles: true, relatedTarget: document.body }),
     );
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(149);
+    expect(list().children.length).toBe(1);
+    vi.advanceTimersByTime(1);
     expect(list().children.length).toBe(0);
+  });
+
+  it("arms nothing and reports nothing from a duration change alone", async () => {
+    await remount({ duration: 0, max: 0 });
+    vi.useFakeTimers();
+    const dismissed = recordDismissals();
+    const shown: string[] = [];
+    root().addEventListener("stimeo--toast:show", () => shown.push("show"));
+    const toast = showArmed("Standing");
+
+    declareDuration(100);
+    await settle();
+    vi.advanceTimersByTime(1_000);
+    expect(toast.isConnected).toBe(true);
+    expect(toast.getAttribute("data-state")).not.toBe("leaving");
+    expect(toast.hasAttribute("data-paused")).toBe(false);
+    expect(dismissed).toEqual([]);
+    expect(shown).toEqual(["show"]);
   });
 
   it("keeps a toast whose deadline lapsed while it is held, and dismisses it once released", () => {
@@ -1610,8 +1901,8 @@ describe("ToastController", () => {
     const button = dismissButton(toast);
     if (!button) throw new Error("Dismiss button not found");
 
-    // Same lapsed-deadline window, entered by focus instead of the pointer.
-    // Removing the toast here would take the focused control with it (WCAG 2.2 4.1.3).
+    // Real focus enters the lapsed-deadline window.
+    // Removing the toast here would take the focused control with it.
     vi.setSystemTime(new Date("2026-07-20T00:00:01Z"));
     button.focus();
     button.dispatchEvent(
@@ -1736,6 +2027,193 @@ describe("ToastController", () => {
     expect(list().children.length).toBe(0);
   });
 
+  it("delegates interaction from a list that arrives after the only one left", async () => {
+    const arrival = list().cloneNode(false) as HTMLOListElement;
+    const region = list().parentElement as HTMLElement;
+    list().remove();
+    await tick();
+    region.prepend(arrival);
+    await tick();
+
+    triggerShow("Arrival list notification");
+    dismissButton(item())?.click();
+
+    expect(arrival.children.length).toBe(0);
+  });
+
+  it("takes on a toast that arrives after the only one left", () => {
+    vi.useFakeTimers();
+    const first = showArmed("First");
+    dismissButtonOf(first).click();
+    expect(list().children.length).toBe(0);
+    const arrival = showArmed("Arrival");
+
+    expect(arrival.dataset.state).toBe("entering");
+    vi.advanceTimersByTime(200);
+    expect(arrival.isConnected).toBe(false);
+  });
+
+  it("delegates interaction from a list that stays after an earlier one leaves", async () => {
+    const original = list();
+    const successor = original.cloneNode(false) as HTMLOListElement;
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(list()).toBe(successor);
+    triggerShow("Successor list notification");
+    dismissButton(item())?.click();
+
+    expect(successor.children.length).toBe(0);
+  });
+
+  it("keeps delegating from the first list while a later one coexists", async () => {
+    const original = list();
+    const later = original.cloneNode(false) as HTMLOListElement;
+    later.removeAttribute("id");
+    original.after(later);
+    await tick();
+
+    triggerShow("First list notification");
+    dismissButton(item())?.click();
+
+    expect(original.children.length).toBe(0);
+  });
+
+  it("delegates interaction from an earlier list that stays after a later one leaves", async () => {
+    const original = list();
+    const later = original.cloneNode(false) as HTMLOListElement;
+    later.removeAttribute("id");
+    original.after(later);
+    await tick();
+    later.remove();
+    await tick();
+
+    expect(list()).toBe(original);
+    triggerShow("Earlier list notification");
+    dismissButton(item())?.click();
+
+    expect(original.children.length).toBe(0);
+  });
+
+  it("attaches no delegation once it has disconnected", () => {
+    const original = list();
+    const later = original.cloneNode(false) as HTMLOListElement;
+    later.removeAttribute("id");
+    original.after(later);
+    const instance = controller();
+    instance.listTargetConnected();
+    instance.disconnect();
+    const attached = vi.spyOn(original, "addEventListener");
+    later.remove();
+    instance.listTargetDisconnected(later);
+
+    expect(attached).not.toHaveBeenCalled();
+  });
+
+  describe("the toasts a list that stays already holds", () => {
+    /** Server-rendered toasts with the given wordings, as a list's inner markup. */
+    const serverToasts = (...names: string[]): string =>
+      names
+        .map(
+          (name) => `<li data-stimeo--toast-target="item" tabindex="0">
+            <span role="status" data-toast-slot="message">${name}</span>
+            <button type="button" data-toast-dismiss>Dismiss</button></li>`,
+        )
+        .join("");
+
+    /**
+     * Inserts a list holding server-rendered toasts after the current one and delivers the
+     * callbacks Stimulus would, since a DOM-only environment does not reliably fire them.
+     */
+    const insertSuccessor = (...names: string[]): [HTMLOListElement, HTMLOListElement] => {
+      const original = list();
+      const successor = original.cloneNode(false) as HTMLOListElement;
+      successor.removeAttribute("id");
+      successor.innerHTML = serverToasts(...names);
+      original.after(successor);
+      controller().listTargetConnected();
+      for (const toast of Array.from(successor.children)) {
+        controller().itemTargetConnected(toast as HTMLElement);
+      }
+      return [original, successor];
+    };
+    const toastsOf = (holder: HTMLElement) => Array.from(holder.children) as HTMLElement[];
+
+    it("are taken in with a phase and a timer once the earlier list leaves", () => {
+      vi.useFakeTimers();
+      const dismissed = recordDismissals();
+      const [original, successor] = insertSuccessor("Server");
+      const [toast] = toastsOf(successor);
+      expect(toast?.hasAttribute("data-state")).toBe(false);
+      original.remove();
+      controller().listTargetDisconnected(original);
+
+      expect(toast?.dataset.state).toBe("entering");
+      vi.advanceTimersByTime(200);
+      expect(toast?.isConnected).toBe(false);
+      expect(dismissed).toEqual(["timeout Server"]);
+    });
+
+    it("count against the limit once taken in", () => {
+      vi.useFakeTimers();
+      const dismissed = recordDismissals();
+      const [original, successor] = insertSuccessor("First", "Second");
+      original.remove();
+      controller().listTargetDisconnected(original);
+      controller().show(new CustomEvent("show", { detail: { message: "Third" } }));
+      const third = successor.lastElementChild as HTMLElement;
+      controller().itemTargetConnected(third);
+
+      expect(dismissed).toEqual(["limit First"]);
+    });
+
+    it("are taken in silently, with nothing evicted over the limit", () => {
+      vi.useFakeTimers();
+      const dismissed = recordDismissals();
+      const [original, successor] = insertSuccessor("First", "Second", "Third");
+      original.remove();
+      controller().listTargetDisconnected(original);
+
+      expect(dismissed).toEqual([]);
+      expect(toastsOf(successor).map((toast) => toast.dataset.state)).toEqual([
+        "entering",
+        "entering",
+        "entering",
+      ]);
+    });
+
+    it("are left alone once the controller has disconnected", () => {
+      vi.useFakeTimers();
+      const [original, successor] = insertSuccessor("Server");
+      const instance = controller();
+      instance.disconnect();
+      original.remove();
+      instance.listTargetDisconnected(original);
+
+      expect(toastsOf(successor)[0]?.hasAttribute("data-state")).toBe(false);
+    });
+
+    it("tolerates the removal of the only list", () => {
+      const only = list();
+      only.remove();
+
+      expect(() => controller().listTargetDisconnected(only)).not.toThrow();
+    });
+
+    it("meet the limit as they arrive when the list is replaced in one task", async () => {
+      const dismissed = recordDismissals();
+      const replacement = list().cloneNode(false) as HTMLOListElement;
+      replacement.innerHTML = serverToasts("First", "Second", "Third", "Fourth");
+      list().replaceWith(replacement);
+      await tick();
+
+      expect(dismissed).toEqual(["limit First", "limit Second"]);
+      expect(shownNames()).toEqual(["Third", "Fourth"]);
+    });
+  });
+
   it("ignores direct item actions when the required list target is missing", async () => {
     triggerShow("Missing list notification");
     const toast = item();
@@ -1850,6 +2328,83 @@ describe("ToastController", () => {
     expect(listener).not.toHaveBeenCalled();
   });
 
+  it("drops the entering frame of a toast dismissed before it runs, and cancels it once", () => {
+    vi.useFakeTimers();
+    const frames = stubFrames();
+    const toast = showArmed("Early dismissal");
+    toast.style.transitionProperty = "opacity";
+    toast.style.transitionDuration = "100ms";
+
+    dismissButtonOf(toast).click();
+    expect(frames.pending()).toBe(0);
+
+    vi.advanceTimersByTime(100);
+    expect(toast.isConnected).toBe(false);
+    controller().itemTargetDisconnected(toast);
+    controller().disconnect();
+    expect(frames.stale()).toEqual([]);
+  });
+
+  it("forgets an entering frame once it has run, so dismissing the toast cancels none", () => {
+    vi.useFakeTimers();
+    const frames = stubFrames();
+    const toast = showArmed("Settled");
+    frames.paint();
+    expect(toast.dataset.state).toBe("visible");
+
+    dismissButtonOf(toast).click();
+
+    expect(toast.isConnected).toBe(false);
+    expect(frames.stale()).toEqual([]);
+  });
+
+  it("forgets the frames a disconnect cancelled, so the next connection cancels none of them again", () => {
+    vi.useFakeTimers();
+    const frames = stubFrames();
+    const toast = showArmed("Interrupted");
+
+    controller().disconnect();
+    expect(frames.pending()).toBe(0);
+    // Stimulus reports the toasts the list holds ahead of `connect()`.
+    controller().itemTargetConnected(toast);
+    controller().connect();
+    controller().disconnect();
+
+    expect(frames.stale()).toEqual([]);
+  });
+
+  it("forgets the frames a disconnect cancelled for a toast that left while disconnected", () => {
+    vi.useFakeTimers();
+    const frames = stubFrames();
+    const toast = showArmed("Interrupted");
+
+    controller().disconnect();
+    toast.remove();
+    controller().connect();
+    controller().disconnect();
+
+    expect(frames.stale()).toEqual([]);
+  });
+
+  it("moves delegation off the previous list when a replacement list connects before it leaves", () => {
+    const previous = list();
+    const released = vi.spyOn(previous, "removeEventListener");
+    const replacement = document.createElement("ol");
+    replacement.setAttribute("data-stimeo--toast-target", "list");
+    previous.before(replacement);
+
+    controller().listTargetConnected();
+
+    expect(released.mock.calls.map(([type]) => type)).toEqual([
+      "click",
+      "focusin",
+      "focusout",
+      "keydown",
+      "mouseover",
+      "mouseout",
+    ]);
+  });
+
   it("clears a real transition-finalize timer on disconnect", () => {
     vi.useFakeTimers();
     const listener = vi.fn();
@@ -1878,5 +2433,197 @@ describe("ToastController", () => {
     expect(list().children.length).toBe(0);
     expect(list("-second").children.length).toBe(1);
     expect(message(item("-second"))?.textContent).toBe("Second instance");
+  });
+
+  it.each(["entering", "visible", "leaving"] as const)(
+    "repairs retained %s output without resetting its phase or deadline",
+    async (phase) => {
+      await remount({ duration: 1000, max: 0 });
+      vi.useFakeTimers();
+      let frame: FrameRequestCallback | undefined;
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+        frame = callback;
+        return 1;
+      });
+      const toast = showArmed("Phase");
+      expect(toast.dataset.state).toBe("entering");
+      if (phase !== "entering") frame?.(0);
+      if (phase === "leaving") {
+        toast.style.transitionProperty = "opacity";
+        toast.style.transitionDuration = "1s";
+        dismissButton(toast)?.click();
+      }
+      expect(toast.dataset.state).toBe(phase);
+      await vi.advanceTimersByTimeAsync(400);
+      const dispatch = vi.spyOn(controller(), "dispatch");
+      for (const origin of [root(), toast]) {
+        toast.removeAttribute("data-state");
+        origin.dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+        await settle();
+        expect(toast.dataset.state).toBe(phase);
+        expect(dispatch).not.toHaveBeenCalled();
+      }
+      if (phase === "entering") {
+        frame?.(400);
+        expect(toast.dataset.state).toBe("visible");
+      }
+      if (phase === "leaving") dismissButton(toast)?.click();
+      await vi.advanceTimersByTimeAsync(599);
+      expect(toast.isConnected).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(toast.isConnected).toBe(false);
+      expect(dispatch).toHaveBeenCalledExactlyOnceWith("dismiss", {
+        detail: { item: toast, reason: phase === "leaving" ? "user" : "timeout" },
+      });
+    },
+  );
+
+  it("does not overwrite an authored leaving phase during morph repair", async () => {
+    await remount({ duration: 0, max: 0 });
+    vi.useFakeTimers();
+    const toast = showArmed("Authored departure");
+    toast.dataset.state = "leaving";
+    root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await settle();
+    expect(toast.dataset.state).toBe("leaving");
+    toast.removeAttribute("data-state");
+    root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await settle();
+    expect(toast.dataset.state).toBe("leaving");
+    await vi.advanceTimersByTimeAsync(30);
+    expect(toast.dataset.state).toBe("leaving");
+    expect(toast.isConnected).toBe(true);
+  });
+  it("takes a stale pause hook back after the final hold was released", async () => {
+    await remount({ duration: 1000, max: 0 });
+    vi.useFakeTimers();
+    const toast = showArmed("Pause hook");
+    toast.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    expect(toast.dataset.paused).toBe("true");
+    toast.dispatchEvent(new MouseEvent("mouseout", { bubbles: true }));
+    await settle();
+    expect(toast.hasAttribute("data-paused")).toBe(false);
+    toast.setAttribute("data-paused", "true");
+    const dispatch = vi.spyOn(controller(), "dispatch");
+    root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await settle();
+    expect(toast.hasAttribute("data-paused")).toBe(false);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+  it("repairs the current list without reclaiming a transferred item's phase", async () => {
+    disconnectAndStopApplication(application);
+    vi.useFakeTimers();
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    document.body.innerHTML = `<div id="toast-root" data-controller="stimeo--toast" data-stimeo--toast-duration-value="0" data-stimeo--toast-max-value="0"><ol id="toast-list" data-stimeo--toast-target="list"><li id="transferred" data-stimeo--toast-target="item">Transferred</li><li id="owned" data-stimeo--toast-target="item">Owned</li></ol><aside id="outside"></aside></div>`;
+    application = Application.start();
+    application.register("stimeo--toast", ToastController);
+    await vi.advanceTimersByTimeAsync(0);
+    const transferred = requireElement<HTMLElement>("#transferred");
+    const owned = requireElement<HTMLElement>("#owned");
+    expect(transferred.dataset.state).toBe("entering");
+    expect(owned.dataset.state).toBe("entering");
+    root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    requireElement("#outside").append(transferred);
+    transferred.dataset.state = "consumer";
+    owned.removeAttribute("data-state");
+    await Promise.resolve();
+    expect(transferred.dataset.state).toBe("consumer");
+    expect(owned.dataset.state).toBe("entering");
+  });
+
+  describe("element action source", () => {
+    it("leaves Escape on an out-of-list item while dismissing an owned positive control", () => {
+      disableAutoDismiss();
+      const owned = showArmed("Owned");
+      const foreign = owned.cloneNode(true) as HTMLElement;
+      root().append(foreign);
+      foreign.addEventListener("probe", (event) => controller().onKeydown(event as KeyboardEvent));
+      const ignored = new KeyboardEvent("probe", { key: "Escape", cancelable: true });
+      foreign.dispatchEvent(ignored);
+      expect(ignored.defaultPrevented).toBe(false);
+      expect(foreign.isConnected).toBe(true);
+      const accepted = new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      });
+      owned.dispatchEvent(accepted);
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(owned.isConnected).toBe(false);
+    });
+
+    it("dismisses a descendant as api beside a working DOM action", () => {
+      disableAutoDismiss();
+      const seen: string[] = [];
+      root().addEventListener("stimeo--toast:dismiss", (event) =>
+        seen.push((event as CustomEvent).detail.reason),
+      );
+      const dom = showArmed("DOM");
+      dismissButton(dom)?.click();
+      expect(seen).toEqual(["user"]);
+      const api = showArmed("API");
+      const descendant = dismissButton(api);
+      if (!descendant) throw new Error("Missing dismiss control");
+      controller().dismiss(descendant);
+      expect(seen).toEqual(["user", "api"]);
+      expect(api.isConnected).toBe(false);
+    });
+
+    it("pauses and resumes an owned descendant while preserving the focus hold", () => {
+      const toast = showArmed("Hold");
+      const child = dismissButton(toast);
+      if (!child) throw new Error("Missing dismiss control");
+      controller().pause(child);
+      expect(toast.getAttribute("data-paused")).toBe("true");
+      child.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      controller().resume(child);
+      expect(toast.getAttribute("data-paused")).toBe("true");
+      child.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      expect(toast.hasAttribute("data-paused")).toBe(false);
+    });
+
+    it("rejects a foreign item and a nested instance item", async () => {
+      disableAutoDismiss();
+      const foreign = document.createElement("li");
+      foreign.setAttribute("data-stimeo--toast-target", "item");
+      document.body.append(foreign);
+      controller().dismiss(foreign);
+      controller().pause(foreign);
+      controller().resume(foreign);
+      expect(foreign.isConnected).toBe(true);
+      const nested = document.createElement("div");
+      nested.innerHTML = markup({ suffix: "-nested", duration: 0 });
+      nested
+        .querySelector("ol")
+        ?.insertAdjacentHTML(
+          "beforeend",
+          '<li data-stimeo--toast-target="item" id="nested-api-toast">Nested</li>',
+        );
+      list().append(nested);
+      await tick();
+      const nestedItem = requireElement<HTMLElement>("#nested-api-toast");
+      controller().dismiss(nestedItem);
+      expect(nestedItem.isConnected).toBe(true);
+    });
+  });
+
+  it("does not claim an outer item through a nested controller's unmarked descendant", async () => {
+    disableAutoDismiss();
+    const outer = showArmed("Outer");
+    const nested = document.createElement("div");
+    nested.innerHTML = markup({ suffix: "-unmarked", duration: 0 });
+    outer.append(nested);
+    const child = document.createElement("button");
+    child.textContent = "Nested control";
+    nested.querySelector("ol")?.append(child);
+    await tick();
+    child.addEventListener("click", (event) => controller().dismiss(event));
+    child.click();
+    controller().dismiss(child);
+    controller().pause(child);
+    controller().resume(child);
+    expect(outer.isConnected).toBe(true);
+    expect(outer.hasAttribute("data-paused")).toBe(false);
   });
 });

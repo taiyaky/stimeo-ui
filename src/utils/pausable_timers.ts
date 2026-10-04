@@ -26,16 +26,13 @@ interface Entry {
  * the event that holds it. Taking it away there would remove the element under
  * the pointer, or the control that has focus, and focus would fall to the body.
  *
- * Arming a held key keeps the hold and banks the new delay for the resume, so a
- * duration that changes at runtime reaches a held notification without
- * dismissing it or releasing it.
- *
  * A hold is recorded whether or not the key has a timer: one that arrives before
- * the timer is set holds that timer back, and one on a key that never
- * auto-dismisses still answers {@link PausableTimers.isHeld}. That answer is what
- * a consumer that removes keys for reasons of its own — a cap on how many show
- * at once — reads to leave a held one in place. {@link PausableTimers.disarm}
- * drops a timer and keeps its hold, and a key with neither is forgotten.
+ * the timer is set holds that timer back — arming a held key keeps the hold and
+ * banks the delay, which starts running once the last reason is released — and
+ * one on a key that never auto-dismisses still answers
+ * {@link PausableTimers.isHeld}. That answer is what a consumer that removes keys
+ * for reasons of its own — a cap on how many show at once — reads to leave a held
+ * one in place. A key released with no timer is forgotten.
  *
  * Scope is the timer and its hold. Whether a key may be held at all, and the
  * state hook that shows it is held, stay with the consumer.
@@ -115,17 +112,6 @@ export class PausableTimers<K> {
   /** Whether `key` is armed or held — that is, whether this registry drives it at all. */
   tracks(key: K): boolean {
     return this.#entries.has(key);
-  }
-
-  /**
-   * Cancels `key`'s timer and keeps its hold, so a release arms nothing; a key
-   * nothing holds is forgotten.
-   */
-  disarm(key: K): void {
-    this.#timers.clear(key);
-    const entry = this.#entries.get(key);
-    if (entry?.reasons.size) entry.callback = null;
-    else this.#entries.delete(key);
   }
 
   /** Cancels `key`'s timer and drops its hold. */

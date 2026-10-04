@@ -180,6 +180,29 @@ describe("PresenceController", () => {
       window.dispatchEvent(new Event("pagehide"));
       expect(performMock).not.toHaveBeenCalled();
     });
+
+    it("unregisters the pagehide listener it registered", async () => {
+      const added = vi.spyOn(window, "addEventListener");
+      const removed = vi.spyOn(window, "removeEventListener");
+      try {
+        await mount();
+        const onPageHide = added.mock.calls.find(([type]) => type === "pagehide")?.[1];
+        expect(onPageHide).toBeDefined();
+
+        controller()?.disconnect();
+        expect(removed).toHaveBeenCalledWith("pagehide", onPageHide);
+      } finally {
+        added.mockRestore();
+        removed.mockRestore();
+      }
+    });
+
+    it("leaves no heartbeat running after disconnect", async () => {
+      await mount();
+      const pending = vi.getTimerCount(); // the heartbeat interval among them
+      controller()?.disconnect();
+      expect(vi.getTimerCount()).toBe(pending - 1);
+    });
   });
 
   describe("confirmation gating", () => {
@@ -318,6 +341,14 @@ describe("PresenceController", () => {
       expect(root().getAttribute("data-present")).toBe("false");
     });
 
+    it("leaves no expiry pending for a peer that leaves", async () => {
+      await mount();
+      receive("bob", "Bob"); // arms bob's expiry
+      const pending = vi.getTimerCount();
+      receive("bob", "", true);
+      expect(vi.getTimerCount()).toBe(pending - 1);
+    });
+
     it("updates the rendered name when a peer renames", async () => {
       await mount();
       receive("bob", "Bob");
@@ -377,6 +408,17 @@ describe("PresenceController", () => {
         ["change", { users: [] }],
         ["leave", { id: "bob" }],
       ]);
+    });
+
+    it("reports a rename through change", async () => {
+      await mount();
+      receive("bob", "Bob");
+      const changes: unknown[] = [];
+      root().addEventListener("stimeo--presence:change", (event) => {
+        changes.push((event as CustomEvent).detail);
+      });
+      receive("bob", "Robert");
+      expect(changes).toEqual([{ users: [{ id: "bob", name: "Robert" }] }]);
     });
 
     it("works without any rendering targets (hooks + events only)", async () => {
@@ -782,6 +824,118 @@ describe("PresenceController", () => {
     });
   });
 
+  it("draws the roster into count and list targets that arrive where there were none", async () => {
+    await mount(`
+      <div data-controller="stimeo--presence"
+           data-stimeo--presence-channel-value="PresenceChannel"
+           data-stimeo--presence-id-value="alice">
+        <template data-stimeo--presence-target="template">
+          <li><span data-presence-name></span></li>
+        </template>
+      </div>`);
+    receive("bob", "Bob");
+    // Nothing departs here, so the arrivals are the only callbacks that can draw them.
+    const lateCount = document.createElement("span");
+    lateCount.setAttribute("data-stimeo--presence-target", "count");
+    const lateList = document.createElement("ul");
+    lateList.setAttribute("data-stimeo--presence-target", "list");
+    root().append(lateCount, lateList);
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(lateCount.textContent).toBe("1");
+    expect(renderedNames()).toEqual(["Bob"]);
+  });
+
+  describe("targets that stay after an earlier one leaves", () => {
+    /** Inserts an empty copy after `original`, then removes `original` a task later. */
+    const leaveBehindSuccessor = async (original: HTMLElement) => {
+      const successor = original.cloneNode(false) as HTMLElement;
+      original.after(successor);
+      await vi.advanceTimersByTimeAsync(20);
+      original.remove();
+      await vi.advanceTimersByTimeAsync(20);
+      return successor;
+    };
+
+    it("paints the roster size into the count target that stays", async () => {
+      await mount();
+      receive("bob", "Bob");
+      const successor = await leaveBehindSuccessor(count());
+
+      expect(count()).toBe(successor);
+      expect(successor.textContent).toBe("1");
+    });
+
+    it("draws the roster into the list target that stays", async () => {
+      await mount();
+      receive("bob", "Bob");
+      receive("carol", "Carol");
+      const successor = await leaveBehindSuccessor(list());
+
+      expect(list()).toBe(successor);
+      expect(renderedNames()).toEqual(["Bob", "Carol"]);
+    });
+
+    it("says nothing when it draws the count and list targets that stay", async () => {
+      await mount();
+      receive("bob", "Bob");
+      const events: string[] = [];
+      const listening = new AbortController();
+      for (const type of [
+        "stimeo--presence:join",
+        "stimeo--presence:leave",
+        "stimeo--presence:change",
+        "stimeo--presence:reconcile",
+        "change",
+      ]) {
+        root().addEventListener(type, () => events.push(type), { signal: listening.signal });
+      }
+      await leaveBehindSuccessor(count());
+      await leaveBehindSuccessor(list());
+      listening.abort();
+
+      expect(count().textContent).toBe("1");
+      expect(renderedNames()).toEqual(["Bob"]);
+      expect(events).toEqual([]);
+    });
+
+    it("keeps the hooks when its only count and list targets leave", async () => {
+      await mount();
+      receive("bob", "Bob");
+      count().remove();
+      list().remove();
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(() => controller()?.countTargetDisconnected()).not.toThrow();
+      expect(() => controller()?.listTargetDisconnected()).not.toThrow();
+      expect(root().getAttribute("data-present-count")).toBe("1");
+    });
+
+    it("leaves the blanked count alone for a departure delivered after disconnect", async () => {
+      await mount();
+      receive("bob", "Bob");
+      const instance = controller() as PresenceController;
+      instance.disconnect();
+
+      instance.countTargetDisconnected();
+
+      expect(count().textContent).toBe("");
+    });
+
+    it("leaves the list alone for a departure delivered after disconnect", async () => {
+      await mount();
+      const instance = controller() as PresenceController;
+      instance.disconnect();
+      // The page renders its own roster once the controller is gone; the departure
+      // Stimulus delivers after `disconnect()` must not clear it.
+      list().innerHTML = `<li data-presence-id="bob">Bob</li>`;
+
+      instance.listTargetDisconnected();
+
+      expect(renderedNames()).toEqual(["Bob"]);
+    });
+  });
+
   // --- Clone bookkeeping ------------------------------------------------------
 
   describe("clones", () => {
@@ -895,6 +1049,550 @@ describe("PresenceController", () => {
       expect(count().textContent).toBe("1 viewing");
       controller()?.disconnect();
       expect(count().textContent).toBe("");
+    });
+  });
+
+  // --- Following the declaration ----------------------------------------------
+
+  describe("a declaration that changes while connected", () => {
+    /** One wire subscription the double opened. */
+    interface Wire {
+      descriptor: Record<string, unknown> | string;
+      mixin: CableSubscriptionMixin;
+    }
+    let wires: Wire[] = [];
+    /** Every send and release across the wires, in order, as `<wire>:<what>`. */
+    let log: string[] = [];
+
+    beforeEach(() => {
+      wires = [];
+      log = [];
+      setCableConsumer({
+        subscriptions: {
+          create(channel, subscriptionMixin) {
+            const index = wires.length;
+            wires.push({ descriptor: channel, mixin: subscriptionMixin });
+            return {
+              perform: (action: string, data?: Record<string, unknown>) => {
+                log.push(`${index}:${action}:${JSON.stringify(data)}`);
+              },
+              unsubscribe: () => {
+                log.push(`${index}:unsubscribe`);
+              },
+            };
+          },
+        },
+      });
+    });
+
+    const wire = (index: number) => wires[index]?.mixin;
+    const leaving = (index: number, id: string) =>
+      `${index}:appear:${JSON.stringify({ id, leaving: true })}`;
+    const beacon = (index: number, id: string, name = "Alice") =>
+      `${index}:appear:${JSON.stringify({ id, name })}`;
+
+    /**
+     * Rewrites a declaration on `element` and delivers its Value callback directly,
+     * since happy-dom does not reliably run it for an attribute write. A Value
+     * without a callback is left to whatever reads it next.
+     */
+    const declare = (name: string, value: string, element = root()) => {
+      element.setAttribute(`data-stimeo--presence-${name}-value`, value);
+      const owner = application.getControllerForElementAndIdentifier(element, "stimeo--presence");
+      const callback: unknown = Reflect.get(owner ?? {}, `${name}ValueChanged`);
+      if (typeof callback === "function") callback.call(owner);
+    };
+    /** Lets the batch of callbacks settle into the pass it schedules. */
+    const settle = () => vi.advanceTimersByTimeAsync(0);
+    const events = () => {
+      const seen: string[] = [];
+      for (const name of ["join", "leave", "change"]) {
+        root().addEventListener(`stimeo--presence:${name}`, () => seen.push(name));
+      }
+      return seen;
+    };
+
+    it("moves a confirmed subscription to the identifier new params name", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      wire(0)?.received?.({ id: "bob", name: "Bob" });
+      log.length = 0;
+      const seen = events();
+
+      declare("params", '{"room":"doc_8"}');
+      await settle();
+      expect(wires.map((each) => each.descriptor)).toEqual([
+        { channel: "PresenceChannel", room: "doc_7" },
+        { channel: "PresenceChannel", room: "doc_8" },
+      ]);
+      // The leaving notice goes out on the identifier being left, before it is released.
+      expect(log).toEqual([leaving(0, "alice"), "0:unsubscribe"]);
+      // The old room's roster is not a fact of the new one, and dropping it reports nothing.
+      expect(renderedNames()).toEqual([]);
+      expect(root().hasAttribute("data-present")).toBe(false);
+      expect(count().textContent).toBe("0");
+      expect(seen).toEqual([]);
+
+      wire(1)?.connected?.();
+      expect(log.at(-1)).toBe(beacon(1, "alice"));
+    });
+
+    it("releases an unconfirmed subscription without a leaving notice", async () => {
+      await mount();
+      declare("channel", "RoomChannel");
+      await settle();
+      expect(log).toEqual(["0:unsubscribe"]);
+      expect(wires[1]?.descriptor).toEqual({ channel: "RoomChannel", room: "doc_7" });
+
+      wire(0)?.connected?.(); // the identifier it left confirms late
+      expect(log).toEqual(["0:unsubscribe"]);
+    });
+
+    it("sends no leaving notice from a subscription whose connection is down", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      wire(0)?.disconnected?.();
+      log.length = 0;
+
+      declare("channel", "RoomChannel");
+      await settle();
+      expect(log).toEqual(["0:unsubscribe"]);
+    });
+
+    it("keeps a message from the identifier it left out of the new roster", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      declare("params", '{"room":"doc_8"}');
+      await settle();
+
+      wire(0)?.received?.({ id: "bob", name: "Bob" });
+      expect(renderedNames()).toEqual([]);
+      wire(1)?.received?.({ id: "carol", name: "Carol" });
+      expect(renderedNames()).toEqual(["Carol"]);
+    });
+
+    it("counts a peer of the room it left as a newcomer in the new one", async () => {
+      await mount();
+      wire(0)?.received?.({ id: "bob", name: "Bob" });
+      declare("params", '{"room":"doc_8"}');
+      await settle();
+      const seen = events();
+
+      wire(1)?.received?.({ id: "bob", name: "Bob" });
+      expect(renderedNames()).toEqual(["Bob"]);
+      expect(seen).toEqual(["change", "join"]);
+    });
+
+    it("leaves no expiry of the room it left pending", async () => {
+      await mount();
+      wire(0)?.received?.({ id: "bob", name: "Bob" }); // arms bob's expiry
+      const pending = vi.getTimerCount();
+
+      declare("channel", "RoomChannel");
+      await settle();
+      expect(vi.getTimerCount()).toBe(pending - 1); // the heartbeat is re-armed, the expiry gone
+    });
+
+    it("ignores a rejection that arrives for the identifier it left", async () => {
+      await mount();
+      declare("params", '{"room":"doc_8"}');
+      await settle();
+
+      wire(0)?.rejected?.();
+      expect(root().hasAttribute("data-presence-rejected")).toBe(false);
+      wire(1)?.rejected?.();
+      expect(root().getAttribute("data-presence-rejected")).toBe("true");
+    });
+
+    it("clears the rejected hook when the identifier changes", async () => {
+      await mount();
+      wire(0)?.rejected?.();
+      declare("channel", "RoomChannel");
+      await settle();
+      expect(root().hasAttribute("data-presence-rejected")).toBe(false);
+    });
+
+    it("lets no expiry or announcement of the old room reach the new one", async () => {
+      await mount(`
+        <div data-controller="stimeo--presence"
+             data-stimeo--presence-channel-value="PresenceChannel"
+             data-stimeo--presence-id-value="alice"
+             data-stimeo--presence-timeout-value="5000"
+             data-stimeo--presence-announce-join-text-value="{name} joined">
+          <ul data-stimeo--presence-target="list"></ul>
+          <template data-stimeo--presence-target="template"><li data-presence-name></li></template>
+        </div>`);
+      const announced: string[] = [];
+      const onAnnounce = (event: Event) => {
+        announced.push((event as CustomEvent<{ message: string }>).detail.message);
+      };
+      window.addEventListener("stimeo--announcer:announce", onAnnounce);
+      try {
+        wire(0)?.received?.({ id: "bob", name: "Bob" }); // arms bob's expiry and an announcement
+        declare("channel", "RoomChannel");
+        await settle();
+        const seen = events();
+        await vi.advanceTimersByTimeAsync(6000); // past both
+        expect(announced).toEqual([]);
+        expect(seen).toEqual([]); // no expiry of bob runs in the new room
+      } finally {
+        window.removeEventListener("stimeo--announcer:announce", onAnnounce);
+      }
+    });
+
+    it("moves once when several declarations change together", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      log.length = 0;
+
+      declare("channel", "RoomChannel");
+      declare("params", '{"room":"doc_8"}');
+      declare("id", "bob");
+      declare("heartbeat", "4000");
+      await settle();
+      expect(wires.map((each) => each.descriptor)).toEqual([
+        { channel: "PresenceChannel", room: "doc_7" },
+        { channel: "RoomChannel", room: "doc_8" },
+      ]);
+      // The notice names the id peers knew, not the one declared in the same batch.
+      expect(log).toEqual([leaving(0, "alice"), "0:unsubscribe"]);
+
+      wire(1)?.connected?.();
+      expect(log.at(-1)).toBe(beacon(1, "bob"));
+      log.length = 0;
+      await vi.advanceTimersByTimeAsync(4000); // the new subscription beats on the new period
+      expect(log).toEqual([beacon(1, "bob")]);
+    });
+
+    it("keeps everything when a callback repeats the declaration", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      wire(0)?.received?.({ id: "bob", name: "Bob" });
+      log.length = 0;
+
+      const repeated: Array<[string, string]> = [
+        ["channel", "PresenceChannel"],
+        ["params", '{"room":"doc_7"}'],
+        ["id", "alice"],
+        ["heartbeat", "15000"],
+      ];
+      for (const [name, value] of repeated) declare(name, value);
+      await settle();
+      expect(wires).toHaveLength(1);
+      expect(log).toEqual([]);
+      expect(renderedNames()).toEqual(["Bob"]);
+    });
+
+    it("opens a subscription when a channel is declared later", async () => {
+      await mount(`
+        <div data-controller="stimeo--presence"
+             data-stimeo--presence-id-value="alice" data-stimeo--presence-name-value="Alice"></div>`);
+      expect(wires).toHaveLength(0);
+
+      declare("channel", "PresenceChannel");
+      await settle();
+      expect(wires.map((each) => each.descriptor)).toEqual([{ channel: "PresenceChannel" }]);
+      wire(0)?.connected?.();
+      expect(log).toEqual([beacon(0, "alice")]);
+
+      window.dispatchEvent(new Event("pagehide"));
+      expect(log.at(-1)).toBe(leaving(0, "alice"));
+    });
+
+    it("closes the subscription when the channel is removed", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      wire(0)?.received?.({ id: "bob", name: "Bob" });
+      log.length = 0;
+
+      declare("channel", "");
+      await settle();
+      expect(log).toEqual([leaving(0, "alice"), "0:unsubscribe"]);
+      expect(renderedNames()).toEqual([]);
+
+      log.length = 0;
+      await vi.advanceTimersByTimeAsync(60_000); // no heartbeat outlives the subscription
+      window.dispatchEvent(new Event("pagehide"));
+      expect(log).toEqual([]);
+    });
+
+    it("leaves from the identifier it moved to", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      declare("params", '{"room":"doc_8"}');
+      await settle();
+      wire(1)?.connected?.();
+      log.length = 0;
+
+      controller()?.disconnect();
+      expect(log).toEqual([leaving(1, "alice"), "1:unsubscribe"]);
+    });
+
+    it("leaves a sibling on the identifier it left undisturbed", async () => {
+      await mount(`
+        <div data-controller="stimeo--presence" data-testid="mover"
+             data-stimeo--presence-channel-value="PresenceChannel"
+             data-stimeo--presence-id-value="alice"></div>
+        <div data-controller="stimeo--presence" data-testid="stayer"
+             data-stimeo--presence-channel-value="PresenceChannel"
+             data-stimeo--presence-id-value="bob">
+          <span data-stimeo--presence-target="count"></span>
+        </div>`);
+      const mover = document.querySelector("[data-testid='mover']") as HTMLElement;
+      const stayer = document.querySelector("[data-testid='stayer'] span") as HTMLElement;
+      wire(0)?.connected?.();
+      log.length = 0;
+
+      declare("channel", "RoomChannel", mover);
+      await settle();
+      // alice left the room; the wire stays open for the sibling that is still in it.
+      expect(log).toEqual([leaving(0, "alice")]);
+      wire(0)?.received?.({ id: "carol", name: "Carol" });
+      expect(stayer.textContent).toBe("1");
+    });
+
+    it("joins an identifier a sibling already confirmed", async () => {
+      await mount(`
+        <div data-controller="stimeo--presence" data-testid="mover"
+             data-stimeo--presence-channel-value="PresenceChannel"
+             data-stimeo--presence-id-value="alice"></div>
+        <div data-controller="stimeo--presence"
+             data-stimeo--presence-channel-value="RoomChannel"
+             data-stimeo--presence-id-value="bob"></div>`);
+      wire(1)?.connected?.();
+      log.length = 0;
+
+      declare(
+        "channel",
+        "RoomChannel",
+        document.querySelector("[data-testid='mover']") as HTMLElement,
+      );
+      await settle();
+      expect(wires).toHaveLength(2); // no second wire for an identifier already open
+      expect(log).toEqual(["0:unsubscribe", beacon(1, "alice", "")]);
+    });
+
+    it("moves its voice to a changed id without leaving the subscription", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      wire(0)?.received?.({ id: "bob", name: "Bob" });
+      log.length = 0;
+      const seen = events();
+
+      declare("id", "dave");
+      await settle();
+      expect(wires).toHaveLength(1);
+      expect(log).toEqual([leaving(0, "alice"), beacon(0, "dave")]);
+      expect(renderedNames()).toEqual(["Bob"]); // the same room: its roster stays
+      expect(seen).toEqual([]);
+    });
+
+    it("releases the old voice once, so a sibling still speaking for it stays", async () => {
+      await mount(`
+        <div data-controller="stimeo--presence" data-testid="first"
+             data-stimeo--presence-channel-value="PresenceChannel"
+             data-stimeo--presence-id-value="alice"></div>
+        <div data-controller="stimeo--presence" data-testid="second"
+             data-stimeo--presence-channel-value="PresenceChannel"
+             data-stimeo--presence-id-value="alice"></div>`);
+      const at = (testid: string) =>
+        document.querySelector(`[data-testid='${testid}']`) as HTMLElement;
+      const instance = (testid: string) =>
+        application.getControllerForElementAndIdentifier(at(testid), "stimeo--presence");
+      wire(0)?.connected?.();
+      log.length = 0;
+
+      declare("id", "bob", at("first"));
+      await settle();
+      expect(log).toEqual([beacon(0, "bob", "")]); // "second" still speaks for alice
+
+      log.length = 0;
+      instance("second")?.disconnect();
+      expect(log).toEqual([leaving(0, "alice")]);
+      log.length = 0;
+      instance("first")?.disconnect();
+      expect(log).toEqual([leaving(0, "bob"), "0:unsubscribe"]);
+    });
+
+    it("moves its voice without a notice or a beacon before confirmation", async () => {
+      await mount();
+      declare("id", "dave");
+      await settle();
+      expect(log).toEqual([]);
+
+      wire(0)?.connected?.();
+      expect(log).toEqual([beacon(0, "dave")]);
+    });
+
+    it("stops beaconing, and leaves, when the id is cleared", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      log.length = 0;
+
+      declare("id", "");
+      await settle();
+      expect(log).toEqual([leaving(0, "alice")]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(log).toEqual([leaving(0, "alice")]); // an observer sends nothing
+    });
+
+    it("stops counting a peer whose id it takes, without reporting a departure", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      wire(0)?.received?.({ id: "bob", name: "Bob" });
+      wire(0)?.received?.({ id: "carol", name: "Carol" });
+      const seen = events();
+
+      declare("id", "bob");
+      await settle();
+      expect(renderedNames()).toEqual(["Carol"]);
+      expect(root().getAttribute("data-present-count")).toBe("1");
+      expect(count().textContent).toBe("1");
+      expect(seen).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(40_000); // bob's expiry went with the entry
+      expect(seen).toEqual(["change", "leave"]); // carol's, and only hers
+    });
+
+    it("leaves no expiry pending for a peer it stops counting", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      await vi.advanceTimersByTimeAsync(3000); // past the throttle: the answer below is not queued
+      wire(0)?.received?.({ id: "bob", name: "Bob" }); // arms bob's expiry
+      const pending = vi.getTimerCount();
+
+      declare("id", "bob");
+      await settle();
+      expect(vi.getTimerCount()).toBe(pending - 1);
+    });
+
+    it("lets the new id's beacon stand in for a queued convergence answer", async () => {
+      await mount();
+      wire(0)?.connected?.(); // the initial beacon opens the throttle window
+      wire(0)?.received?.({ id: "bob", name: "Bob" }); // answer queued at its trailing edge
+      log.length = 0;
+
+      declare("id", "dave");
+      await settle();
+      expect(log).toEqual([leaving(0, "alice"), beacon(0, "dave")]);
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(log).toEqual([leaving(0, "alice"), beacon(0, "dave")]);
+    });
+
+    it("answers an unknown peer that arrives after the new id's beacon took a queued answer's place", async () => {
+      await mount();
+      wire(0)?.connected?.(); // the initial beacon opens the throttle window
+      wire(0)?.received?.({ id: "bob", name: "Bob" }); // answer queued at its trailing edge
+      await vi.advanceTimersByTimeAsync(500);
+      declare("id", "dave");
+      await settle(); // the new id's beacon stands in for it and opens a new window
+      log.length = 0;
+
+      await vi.advanceTimersByTimeAsync(500);
+      wire(0)?.received?.({ id: "carol", name: "Carol" }); // inside that window: queued again
+      expect(log).toEqual([]);
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(log).toEqual([beacon(0, "dave")]);
+    });
+
+    it("keeps the running heartbeat's rhythm when the id moves or the period is delivered again", async () => {
+      await mount(); // the heartbeat beats every 15 s from the connection
+      wire(0)?.connected?.();
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      declare("id", "dave");
+      declare("heartbeat", "15000");
+      await settle();
+      log.length = 0;
+      await vi.advanceTimersByTimeAsync(5100); // past the 15 s the connection armed
+      expect(log).toEqual([beacon(0, "dave")]);
+      await vi.advanceTimersByTimeAsync(9800); // short of the next beat
+      expect(log).toEqual([beacon(0, "dave")]);
+    });
+
+    it("re-arms a running heartbeat on a changed period", async () => {
+      await mount();
+      wire(0)?.connected?.();
+      log.length = 0;
+      await vi.advanceTimersByTimeAsync(5000);
+
+      declare("heartbeat", "4000");
+      await settle();
+      await vi.advanceTimersByTimeAsync(3900);
+      expect(log).toEqual([]);
+      await vi.advanceTimersByTimeAsync(200); // 4 s after the change
+      expect(log).toEqual([beacon(0, "alice")]);
+      await vi.advanceTimersByTimeAsync(6000); // past where the 15 s period would have beaten
+      expect(log).toEqual([beacon(0, "alice"), beacon(0, "alice")]);
+    });
+
+    it("keeps each peer's deadline and applies a changed timeout from its next beacon", async () => {
+      await mount(); // timeout 40000
+      wire(0)?.received?.({ id: "bob", name: "Bob" });
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      declare("timeout", "5000");
+      await settle();
+      await vi.advanceTimersByTimeAsync(20_000); // 30 s since bob's beacon: its 40 s still holds
+      expect(renderedNames()).toEqual(["Bob"]);
+
+      wire(0)?.received?.({ id: "bob", name: "Bob" }); // armed on the declared 5 s
+      await vi.advanceTimersByTimeAsync(4900);
+      expect(renderedNames()).toEqual(["Bob"]);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(renderedNames()).toEqual([]);
+    });
+
+    it("does not stretch a pending deadline when the timeout grows", async () => {
+      await mount();
+      declare("timeout", "12000");
+      wire(0)?.received?.({ id: "bob", name: "Bob" });
+      await vi.advanceTimersByTimeAsync(1000);
+
+      declare("timeout", "60000");
+      await settle();
+      await vi.advanceTimersByTimeAsync(11_500); // 12.5 s since bob's beacon
+      expect(renderedNames()).toEqual([]);
+    });
+
+    it("leaves nothing of the old room behind when a join subscriber moves it", async () => {
+      await mount();
+      wire(0)?.connected?.(); // the initial beacon opens the throttle window
+      log.length = 0;
+      root().addEventListener("stimeo--presence:join", () => declare("channel", "RoomChannel"), {
+        once: true,
+      });
+
+      // The expiry is armed before the event and the convergence answer queued after it.
+      wire(0)?.received?.({ id: "bob", name: "Bob" });
+      await settle();
+      expect(renderedNames()).toEqual([]);
+      expect(root().hasAttribute("data-present")).toBe(false);
+      expect(log).toEqual([leaving(0, "alice"), "0:unsubscribe"]);
+
+      const seen = events();
+      await vi.advanceTimersByTimeAsync(41_000);
+      expect(seen).toEqual([]);
+      expect(log).toEqual([leaving(0, "alice"), "0:unsubscribe"]); // the answer went with the room
+    });
+
+    it("opens nothing for a callback delivered after disconnect", async () => {
+      await mount();
+      controller()?.disconnect();
+      declare("channel", "RoomChannel");
+      await settle();
+      expect(wires).toHaveLength(1);
+    });
+
+    it("opens one subscription per connection, whatever callbacks precede it", async () => {
+      // Stimulus delivers every Value callback before connect(), and the defaults of
+      // undeclared Values again on each reconnect.
+      await mount();
+      expect(wires).toHaveLength(1);
+      document.body.appendChild(root()); // an in-page move reconnects the same instance
+      await vi.advanceTimersByTimeAsync(20);
+      expect(wires).toHaveLength(2);
+      expect(log).toEqual(["0:unsubscribe"]);
     });
   });
 });

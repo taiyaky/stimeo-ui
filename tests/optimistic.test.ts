@@ -315,6 +315,22 @@ describe("OptimisticController", () => {
       expect(form().hasAttribute("data-optimistic")).toBe(false);
     });
 
+    it("still resolves the moved submission once the move has settled", async () => {
+      await mount();
+      const events: string[] = [];
+      form().addEventListener("stimeo--optimistic:rollback", () => events.push("rollback"));
+      submitStart();
+      const instance = controller() as OptimisticController;
+      instance.disconnect();
+      instance.connect();
+      await Promise.resolve();
+
+      submitEnd(false);
+      expect(events).toEqual(["rollback"]);
+      expect(on().hidden).toBe(true);
+      expect(off().hidden).toBe(false);
+    });
+
     it("still rewinds a restored snapshot, which no move preceded", async () => {
       await mount(`
         <main>

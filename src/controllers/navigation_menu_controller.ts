@@ -1,10 +1,14 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { ownerIndex } from "../utils/event_owner";
 import { isRtl } from "../utils/logical_scroll";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
-import { type StateReason, stateReasonFor } from "../utils/state_reason";
+import type { StateReason } from "../utils/state_reason";
+import { targetSelector } from "../utils/target_selector";
 
 /**
  * Headless, accessible **navigation menu** behavior (disclosure navigation).
@@ -91,11 +95,18 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  * silent.
  */
 export class NavigationMenuController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["trigger", "panel", "hoverArea"];
   static override values = {
     openOnHover: { type: Boolean, default: false },
     hoverDelay: { type: Number, default: 150 },
   };
+
+  static valueConstraints = {
+    hoverDelay: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof NavigationMenuController.values>;
   static actions = ["onTriggerKeydown", "toggle"] as const;
   static events = ["close", "open"] as const;
 
@@ -212,9 +223,12 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    * activation (pointer elsewhere) still toggles it closed, and `Escape` and
    * outside clicks dismiss either way.
    */
-  toggle(event: Event): void {
-    const trigger = event.currentTarget as HTMLElement;
-    const reason = stateReasonFor(event);
+  toggle(source: Event | HTMLElement): void {
+    const { host, origin, reason } = actionSource(source);
+    const trigger = host?.closest<HTMLElement>(targetSelector(this.identifier, "trigger"));
+    if (!trigger || !this.triggerTargets.includes(trigger)) return;
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
     this.#hoverTimers.clearAll();
     if (!this.#isExpanded(trigger)) {
       this.#openPanel(trigger, reason);
@@ -393,7 +407,7 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     if (!trigger) return;
     this.#hoveredTrigger = trigger;
     this.#hoverTimers.clearAll();
-    this.#hoverTimers.set(() => this.#openFromHover(trigger), this.hoverDelayValue);
+    this.#hoverTimers.set(() => this.#openFromHover(trigger), this.#safeHoverDelay);
   };
 
   /**
@@ -409,7 +423,7 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     if (ownerIndex(this.#hoverElements, next) !== -1) return;
     this.#hoveredTrigger = null;
     this.#hoverTimers.clearAll();
-    this.#hoverTimers.set(() => this.#closeFromHover(), this.hoverDelayValue);
+    this.#hoverTimers.set(() => this.#closeFromHover(), this.#safeHoverDelay);
   };
 
   /**
@@ -532,5 +546,15 @@ export class NavigationMenuController extends Controller<HTMLElement> {
   /** Whether any panel is currently open. */
   get #isAnyOpen(): boolean {
     return this.#openTrigger !== null;
+  }
+  /** Current `hoverDelay` declaration resolved against its numeric contract. */
+  get #safeHoverDelay(): number {
+    return this.#numbers.read(
+      this,
+      "hoverDelay",
+      this.hoverDelayValue,
+      NavigationMenuController.values.hoverDelay.default,
+      NavigationMenuController.valueConstraints.hoverDelay,
+    );
   }
 }

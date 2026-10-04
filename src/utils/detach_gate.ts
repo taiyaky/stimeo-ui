@@ -22,6 +22,13 @@
  * check is the synchronous fast path (no probe, no reliance on batching), the
  * microtask probe is the fallback for the genuinely ambiguous remainder.
  *
+ * An element out of the document is a real detach, with one exception: a
+ * `data-turbo-permanent` element, or one inside it, that Turbo carries to the
+ * next page. Turbo takes it out of the old `<body>`, which Stimulus answers with
+ * a `disconnect()` while it is out of the document, and puts it into the new one
+ * a few microtasks later in the same task, where the same instance connects
+ * again. Such a disconnect is probed until the next task instead.
+ *
  * Policy stays with the consumer; this util owns the discrimination only:
  *
  * - **Probe** ({@link disconnected}) when the teardown must eventually happen —
@@ -67,9 +74,13 @@ export interface DetachGateHost {
  *   this.#gate.disconnected(this, () => this.#teardown());
  * }
  *
+ * dismiss(): void {
+ *   this.#gate.cancel(); // a direct path: disarm a probe a disconnect queued
+ *   this.#teardown();
+ * }
+ *
  * #teardown(): void {
- *   this.#gate.cancel(); // disarm a still-queued probe (double-run guard)
- *   // …
+ *   // … (`disconnected` has already disarmed the probe on its own path)
  * }
  * ```
  */
@@ -94,9 +105,7 @@ export class DetachGate {
    * means ambiguous (in-page move or observed-root exit), NOT "alive".
    */
   static isDetached(host: DetachGateHost): boolean {
-    if (!host.element.isConnected) return true;
-    const tokens = (host.element.getAttribute("data-controller") ?? "").split(/\s+/);
-    return !tokens.includes(host.identifier);
+    return !host.element.isConnected || !DetachGate.#listed(host);
   }
 
   /**
@@ -104,10 +113,13 @@ export class DetachGate {
    * detach (fast path), otherwise defers it one microtask — a reconnect
    * ({@link cancel} from `connect()`) keeps the state, no reconnect runs it.
    * One microtask is the whole probe window: Stimulus reconnects a moved
-   * element within the same mutation batch, before the checkpoint drains.
+   * element within the same mutation batch, before the checkpoint drains. An
+   * element Turbo carries to the next page is probed until the next task, by
+   * which time Turbo has put it back.
    */
   disconnected(host: DetachGateHost, teardown: () => void): void {
-    if (DetachGate.isDetached(host)) {
+    const carried = DetachGate.#carried(host);
+    if (!carried && DetachGate.isDetached(host)) {
       // Also disarms a probe a previous ambiguous disconnect left queued
       // (defer, element removed, disconnect again) — exactly one teardown.
       this.#pending = false;
@@ -115,11 +127,32 @@ export class DetachGate {
       return;
     }
     this.#pending = true;
-    queueMicrotask(() => {
+    const probe = (): void => {
       if (!this.#pending) return;
       this.#pending = false;
       teardown();
-    });
+    };
+    if (carried) setTimeout(probe, 0);
+    else queueMicrotask(probe);
+  }
+
+  /**
+   * Whether `host` is out of the document inside a `data-turbo-permanent` element, its
+   * identifier still listed: where Turbo holds an element it carries to the next page.
+   */
+  static #carried(host: DetachGateHost): boolean {
+    const element = host.element;
+    return (
+      !element.isConnected &&
+      element.closest("[data-turbo-permanent]") !== null &&
+      DetachGate.#listed(host)
+    );
+  }
+
+  /** Whether the element's `data-controller` still lists the identifier. */
+  static #listed(host: DetachGateHost): boolean {
+    const tokens = (host.element.getAttribute("data-controller") ?? "").split(/\s+/);
+    return tokens.includes(host.identifier);
   }
 
   /**

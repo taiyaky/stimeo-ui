@@ -2,12 +2,12 @@ import { Controller } from "@hotwired/stimulus";
 import { ensureId } from "../utils/aria_ids";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { compileRegExp } from "../utils/declared_value";
 import { FormResetWatcher } from "../utils/form_reset_watcher";
 import { toHalfWidth } from "../utils/half_width";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MoveCounter } from "../utils/move_counter";
 
 /** The error attributes this component writes on each field while input is rejected. */
 type ErrorAttribute = "aria-invalid" | "aria-errormessage" | "aria-describedby";
@@ -15,9 +15,8 @@ type ErrorAttribute = "aria-invalid" | "aria-errormessage" | "aria-describedby";
 /**
  * Each error attribute's lease, kept on the field itself.
  *
- * `AttributeLease` keeps its records in memory, which the connection that adopts
- * a restored DOM does not have. These records travel with the markup instead,
- * so any connection can give the authored value back — and only while the
+ * These records travel with the markup, so any connection can give the authored
+ * value back — and only while the
  * attribute still holds what this component last wrote there, so a value a
  * consumer changed in the meantime is theirs and stays.
  */
@@ -52,11 +51,18 @@ function readLease(field: Element, marker: string): ErrorLease | null {
   }
 }
 
-/** The field's own description tokens with the error id appended once. */
-function describedByWith(described: string | null, errorId: string): string {
+/**
+ * The field's own description tokens with the error id appended once, dropping the
+ * id of an earlier error target this component pointed the field at.
+ */
+function describedByWith(
+  described: string | null,
+  errorId: string,
+  earlier: string | null,
+): string {
   const tokens = (described ?? "")
     .split(/\s+/)
-    .filter((token) => token.length > 0 && token !== errorId);
+    .filter((token) => token.length > 0 && token !== errorId && token !== earlier);
   return [...tokens, errorId].join(" ");
 }
 
@@ -150,10 +156,9 @@ function statesDiffer(left: OtpState, right: OtpState): boolean {
  * Controller-owned output: `data-filled` on each entered field, `data-state`
  * (`empty` / `partial` / `complete`) on the root, and — while input is being
  * reported invalid — `aria-invalid`, `aria-errormessage`, `aria-describedby`,
- * and the `error` target's `hidden`. Authored values return on teardown and
- * before the page is cached: the three ARIA attributes keep their lease on the
- * field itself, so a connection that adopts a restored DOM can give them back
- * too, and the `hidden` is leased.
+ * and the `error` target's `hidden`. Authored values return on teardown: the
+ * three ARIA attributes keep their lease on the field itself, so a connection
+ * that adopts a restored DOM can give them back too, and the `hidden` is leased.
  *
  * @remarks
  * Behavior only. `connect()` reads the fields back as the source of truth, which
@@ -164,6 +169,9 @@ function statesDiffer(left: OtpState, right: OtpState): boolean {
  * keystroke.
  */
 export class OtpController extends Controller<HTMLElement> {
+  /** Identifies the latest published state transition. */
+  readonly #moves = new MoveCounter();
+
   static override targets = ["field", "value", "error"];
   static override values = {
     pattern: { type: String, default: DEFAULT_PATTERN },
@@ -174,6 +182,7 @@ export class OtpController extends Controller<HTMLElement> {
   declare readonly fieldTargets: HTMLInputElement[];
   declare readonly valueTarget: HTMLInputElement;
   declare readonly errorTarget: HTMLElement;
+  declare readonly errorTargets: HTMLElement[];
   declare readonly hasValueTarget: boolean;
   declare readonly hasErrorTarget: boolean;
 
@@ -195,16 +204,14 @@ export class OtpController extends Controller<HTMLElement> {
   #dropHeld = false;
 
   /**
-   * Collapses one batch of page changes — field target and `pattern` callbacks, a
-   * form reset — into a single reconciliation.
+   * Collapses one batch of page changes — field and value target and `pattern`
+   * callbacks, a form reset — into a single reconciliation.
    */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileFields());
 
-  readonly #errorHidden = new AttributeLease<HTMLElement>("hidden");
-  readonly #state = new AttributeLease<HTMLElement>("data-state");
+  readonly #errorHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  readonly #state = new AttributeLease<HTMLElement>("data-state", this.identifier);
 
-  /** Rewinds the transient error surface before Turbo freezes the page. */
-  readonly #beforeCache = new BeforeCacheReset(() => this.#clearError());
   /** Reads the fields back once a native reset restored them, as a reconciliation. */
   readonly #formReset = new FormResetWatcher(
     (form) => this.#ownedBy(form),
@@ -249,7 +256,6 @@ export class OtpController extends Controller<HTMLElement> {
     this.#connected = true;
     for (const field of this.fieldTargets) this.#bind(field);
     this.#formReset.observe();
-    this.#beforeCache.activate();
     this.#reconcile.activate();
     this.#adopt();
     this.#sync();
@@ -260,7 +266,6 @@ export class OtpController extends Controller<HTMLElement> {
     for (const field of this.fieldTargets) this.#unbind(field);
     this.#composition.disconnect();
     this.#formReset.disconnect();
-    this.#beforeCache.deactivate();
     this.#reconcile.cancel();
     // A drop a composition held goes with the connection, like a pending pass.
     this.#dropHeld = false;
@@ -284,6 +289,35 @@ export class OtpController extends Controller<HTMLElement> {
     this.#unbind(element);
     this.#returnLeases(element);
     this.#reconcile.schedule();
+  }
+
+  /** Writes the combined value into a value field that arrives, in the next reconciliation. */
+  valueTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Writes the combined value into the value field that stays when an earlier one leaves. */
+  valueTargetDisconnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /**
+   * Moves rejected input still being reported onto the first error target as one arrives,
+   * and hides the first one while nothing is reported.
+   */
+  errorTargetConnected(): void {
+    this.#followError();
+  }
+
+  /**
+   * Gives an error target that no longer resolves as one its own `hidden` back — after
+   * `disconnect()` too, since dropping the identifier leaves the element on the page —
+   * and shows rejected input still being reported on the error target that stays, or
+   * hides it while nothing is reported.
+   */
+  errorTargetDisconnected(element: HTMLElement): void {
+    if (!this.errorTargets.includes(element)) this.#errorHidden.return(element);
+    this.#followError();
   }
 
   /**
@@ -477,12 +511,13 @@ export class OtpController extends Controller<HTMLElement> {
     if (this.#composing?.field === field) this.#composing = null;
   }
 
-  /** Reads every field back so a restored or reset group starts consistent. */
+  /**
+   * Reads every field back so a restored or reset group starts consistent: nothing has
+   * been rejected yet, whatever error surface the restored DOM carries.
+   */
   #adopt(): void {
     for (const field of this.fieldTargets) this.#adoptField(field);
     this.#clearError();
-    // Nothing has been rejected yet, whatever visibility the restored DOM carries
-    if (this.hasErrorTarget) this.errorTarget.setAttribute("hidden", "");
   }
 
   /** Writes one error attribute, keeping the first authored value it displaces. */
@@ -540,6 +575,7 @@ export class OtpController extends Controller<HTMLElement> {
     const previous = this.#published;
     const current = this.#sync();
     if (previous && !statesDiffer(previous, current)) return;
+    this.#moves.record();
     this.dispatch("reconcile", { detail: { value: current.value } });
   }
 
@@ -691,7 +727,9 @@ export class OtpController extends Controller<HTMLElement> {
     const { value: combined } = this.#sync();
     if (previous?.value === combined) return;
 
+    const token = this.#moves.record();
     this.dispatch("change", { detail: { value: combined } });
+    if (!this.#moves.isLatest(token)) return;
 
     // Completed state when every field carries a character
     if (this.#isComplete()) {
@@ -705,11 +743,7 @@ export class OtpController extends Controller<HTMLElement> {
 
     for (const field of this.fieldTargets) {
       this.#lease(field, "aria-invalid", "true");
-      if (!errorId) continue;
-      this.#lease(field, "aria-errormessage", errorId);
-      // Assistive tech without aria-errormessage support still reads a description
-      const described = field.getAttribute("aria-describedby");
-      this.#lease(field, "aria-describedby", describedByWith(described, errorId));
+      if (errorId) this.#pointAtError(field, errorId);
     }
     if (this.hasErrorTarget) this.#errorHidden.write(this.errorTarget, null);
 
@@ -718,9 +752,55 @@ export class OtpController extends Controller<HTMLElement> {
     this.dispatch("invalid", { detail: { pattern: this.#patternSource } });
   }
 
-  /** Returns every error lease, restoring the authored error surface. */
+  /** Points one field's error message and description at the error target `errorId` names. */
+  #pointAtError(field: HTMLInputElement, errorId: string): void {
+    const earlier = readLease(field, LEASE_MARKERS["aria-errormessage"])?.written ?? null;
+    this.#lease(field, "aria-errormessage", errorId);
+    // Assistive tech without aria-errormessage support still reads a description
+    const described = field.getAttribute("aria-describedby");
+    this.#lease(field, "aria-describedby", describedByWith(described, errorId, earlier));
+  }
+
+  /**
+   * While connected, brings the error targets in line with the report the fields carry. A
+   * report still standing — the fields it marked invalid carry their record — moves onto the
+   * error target that is now first: it shows, and those fields point at it. With nothing
+   * reported, the first error target is hidden and any other gives its own `hidden` back.
+   * Nothing is dispatched.
+   */
+  #followError(): void {
+    if (!this.#connected) return;
+    const reported = this.fieldTargets.filter(
+      (field) => readLease(field, LEASE_MARKERS["aria-invalid"]) !== null,
+    );
+    if (reported.length === 0) {
+      this.#hideErrors();
+      return;
+    }
+    if (!this.hasErrorTarget) return;
+    const errorId = ensureId(this.errorTarget, "stimeo--otp-error");
+    for (const field of reported) this.#pointAtError(field, errorId);
+    this.#errorHidden.write(this.errorTarget, null);
+  }
+
+  /**
+   * Ends a report: every field's error attributes go back to what the author wrote. While
+   * connected the first error target is hidden again and any other gives its own `hidden`
+   * back; teardown gives every error target its own `hidden` back.
+   */
   #clearError(): void {
     for (const field of this.fieldTargets) this.#returnLeases(field);
-    this.#errorHidden.returnAll();
+    if (!this.#connected) {
+      this.#errorHidden.returnAll();
+      return;
+    }
+    this.#hideErrors();
+  }
+
+  /** Hides the first error target and gives any other its own `hidden` back. */
+  #hideErrors(): void {
+    const [first, ...others] = this.errorTargets;
+    for (const other of others) this.#errorHidden.return(other);
+    if (first) this.#errorHidden.write(first, "");
   }
 }

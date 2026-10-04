@@ -1,7 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { intlFormatter } from "../utils/intl_format";
 import { resolveLocale } from "../utils/locale";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 
 /** A date/time style keyword accepted by `Intl` `dateStyle` / `timeStyle`. */
 type DateTimeStyle = "full" | "long" | "medium" | "short";
@@ -44,7 +44,7 @@ function toStyle(value: string): DateTimeStyle | undefined {
  * Render inputs are followed at runtime: a morph that swaps a Value or the
  * `datetime` attribute on the live element — which keeps the element, so
  * `connect()` never runs again — repaints through one coalesced pass
- * (`MicrotaskCoalescer`) rather than leaving a stale reading on screen.
+ * (`MorphRenderWatcher`) rather than leaving a stale reading on screen.
  */
 export class LocalTimeController extends Controller<HTMLElement> {
   static override values = {
@@ -63,62 +63,73 @@ export class LocalTimeController extends Controller<HTMLElement> {
   declare titleFormatValue: string;
 
   /** Collapses a morph that swaps several render inputs at once into one repaint. */
-  readonly #resync = new MicrotaskCoalescer(() => this.#render());
+  readonly #resync = new MorphRenderWatcher(() => {
+    const datetimeChanged = this.#datetimeWatch.takeRecords().length > 0;
+    const notify = this.#formatPending || datetimeChanged;
+    this.#formatPending = false;
+    this.#render(notify);
+  });
+  #formatPending = false;
   /**
    * Watches the one render input that is not a Value. Only `datetime` is filtered
    * in, so the text and `title` this controller writes cannot re-enter the pass.
    */
   readonly #datetimeWatch = new MutationObserver(() => {
+    this.#formatPending = true;
     this.#resync.schedule();
   });
 
   override connect(): void {
-    this.#resync.activate();
+    this.#resync.observe(this.element);
     this.#datetimeWatch.observe(this.element, { attributeFilter: ["datetime"] });
+    this.#formatPending = false;
     this.#render();
   }
 
   override disconnect(): void {
-    this.#resync.cancel();
+    this.#resync.disconnect();
     this.#datetimeWatch.disconnect();
   }
 
   /** Repaints when application code (or a Turbo morph) changes `locale` at runtime. */
   localeValueChanged(): void {
+    this.#formatPending = true;
     this.#resync.schedule();
   }
 
   /** Repaints when application code (or a Turbo morph) changes `timeZone` at runtime. */
   timeZoneValueChanged(): void {
+    this.#formatPending = true;
     this.#resync.schedule();
   }
 
   /** Repaints when application code (or a Turbo morph) changes `dateStyle` at runtime. */
   dateStyleValueChanged(): void {
+    this.#formatPending = true;
     this.#resync.schedule();
   }
 
   /** Repaints when application code (or a Turbo morph) changes `timeStyle` at runtime. */
   timeStyleValueChanged(): void {
+    this.#formatPending = true;
     this.#resync.schedule();
   }
 
   /** Repaints when application code (or a Turbo morph) changes `titleFormat` at runtime. */
   titleFormatValueChanged(): void {
+    this.#formatPending = true;
     this.#resync.schedule();
   }
 
   /**
    * Formats the instant in `datetime` against the current Values and writes it out.
    *
-   * The `format` event rides with every pass, including a repaint a morph triggers:
-   * its condition is that formatting was applied, and a repaint applies it with a
-   * new result. A pass that cannot format writes nothing and emits nothing, so the
-   * authored absolute text stays as the fallback.
+   * Formatting from a changed input reports `format`; restoring output alone is
+   * silent. A pass that cannot format preserves the authored fallback.
    *
    * @stimeoRenderRoot
    */
-  #render(): void {
+  #render(notify = true): void {
     const date = this.#parse();
     if (date === null) return;
 
@@ -132,7 +143,7 @@ export class LocalTimeController extends Controller<HTMLElement> {
     const title = this.#title(date);
     if (title !== null) this.element.setAttribute("title", title);
 
-    this.dispatch("format", { detail: { formatted } });
+    if (notify) this.dispatch("format", { detail: { formatted } });
   }
 
   /**

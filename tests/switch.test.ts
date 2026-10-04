@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SwitchController } from "../src/controllers/switch_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
@@ -37,6 +37,7 @@ describe("SwitchController", () => {
 
   afterEach(() => {
     if (application) disconnectAndStopApplication(application);
+    vi.unstubAllGlobals();
     document.body.innerHTML = "";
   });
 
@@ -394,6 +395,77 @@ describe("SwitchController", () => {
     expect(sw().getAttribute("tabindex")).toBe("-1");
   });
 
+  it("takes the page's write of the state the user chose as authored", async () => {
+    await mount(genericMarkup());
+    sw().click();
+    await tick();
+
+    sw().setAttribute("aria-checked", "true");
+    await tick();
+    sw().setAttribute("contenteditable", "true");
+    await tick();
+
+    expect(sw().hasAttribute("role")).toBe(false);
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("still owns the checked state the user toggled across a reconnect", async () => {
+    await mount(genericMarkup());
+    sw().click();
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+    instance().disconnect();
+    instance().connect();
+
+    sw().setAttribute("contenteditable", "true");
+    await tick();
+
+    expect(sw().hasAttribute("aria-checked")).toBe(false);
+    expect(sw().hasAttribute("role")).toBe(false);
+  });
+
+  it("keeps a default the page rewrote while disconnected when the host later stands down", async () => {
+    await mount(genericMarkup());
+    instance().disconnect();
+    sw().setAttribute("aria-checked", "true");
+    instance().connect();
+
+    sw().setAttribute("contenteditable", "true");
+    await tick();
+
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+    expect(sw().hasAttribute("role")).toBe(false);
+  });
+
+  it("takes the page's write of the toggled state as authored after a reconnect", async () => {
+    // The reconnect drops the record of the switch's own write before it is read.
+    await mount(genericMarkup());
+    sw().click();
+    instance().disconnect();
+    instance().connect();
+
+    sw().setAttribute("aria-checked", "true");
+    await tick();
+    sw().setAttribute("contenteditable", "true");
+    await tick();
+
+    expect(sw().hasAttribute("role")).toBe(false);
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("claims nothing it has given back when it connects again", async () => {
+    await mount(genericMarkup());
+    sw().setAttribute("contenteditable", "true");
+    await tick();
+    expect(sw().hasAttribute("tabindex")).toBe(false);
+
+    // The page gives its editor a Tab stop while the switch is away.
+    instance().disconnect();
+    sw().setAttribute("tabindex", "0");
+    instance().connect();
+
+    expect(sw().getAttribute("tabindex")).toBe("0");
+  });
+
   it("reconciles defaults when a retained button becomes a supported host", async () => {
     await mount(
       '<button data-controller="stimeo--switch" ' +
@@ -477,6 +549,26 @@ describe("SwitchController", () => {
     expect(sw().getAttribute("aria-checked")).toBe("true");
     expect(disconnectedClick.defaultPrevented).toBe(false);
     expect(downstreamClicks).toBe(1);
+  });
+
+  it("stops recording host attribute changes once disconnected", async () => {
+    const watching: MutationObserver[] = [];
+    const Native = globalThis.MutationObserver;
+    class Recording extends Native {
+      override observe(target: Node, options?: MutationObserverInit): void {
+        if (options?.attributeFilter?.includes("aria-checked")) watching.push(this);
+        super.observe(target, options);
+      }
+    }
+    vi.stubGlobal("MutationObserver", Recording);
+    await mount(genericMarkup());
+    const [observer] = watching;
+    if (!observer) throw new Error("the host's attributes are not observed");
+
+    instance().disconnect();
+    sw().setAttribute("role", "checkbox");
+
+    expect(observer.takeRecords()).toEqual([]);
   });
 
   // --- Hidden form field ---
@@ -729,6 +821,59 @@ describe("SwitchController", () => {
       expect(commits.seen).toEqual([]);
     });
 
+    it("fills a field added after connect without reporting", async () => {
+      await withField("true");
+      field().remove();
+      await tick();
+      events.clear();
+
+      // Only the field arrives, so its own callback alone brings the pass.
+      const late = document.createElement("input");
+      late.type = "hidden";
+      late.name = "notify";
+      late.setAttribute("data-stimeo--switch-target", "field");
+      sw().append(late);
+      await tick();
+
+      expect(late.value).toBe("true");
+      expect(heard()).toEqual([]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("reflects the current state into a field that stays after an earlier one leaves", async () => {
+      await withField("true");
+      const original = field();
+      const successor = original.cloneNode() as HTMLInputElement;
+      successor.value = "false";
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(field()).toBe(successor);
+      expect(successor.value).toBe("true");
+      // The field that stays is brought to the state silently.
+      expect(heard()).toEqual([]);
+      expect(commits.seen).toEqual([]);
+    });
+
+    it("keeps working when the sole field leaves", async () => {
+      await withField("true");
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        field().remove();
+        await tick();
+        expect(() => instance().fieldTargetDisconnected()).not.toThrow();
+        await tick();
+        expect(errors).not.toHaveBeenCalled();
+      } finally {
+        errors.mockRestore();
+      }
+
+      sw().click();
+      expect(sw().getAttribute("aria-checked")).toBe("false");
+    });
+
     it("reports one batch of page changes once, with the state it settles on", async () => {
       await withField("false");
 
@@ -820,7 +965,7 @@ describe("SwitchController", () => {
       sw().click();
       await tick();
 
-      expect(events.names()).toEqual(["change", "change"]);
+      expect(events.names()).toEqual(["change"]);
       expect(sw().getAttribute("aria-checked")).toBe("false");
     });
 
@@ -854,5 +999,120 @@ describe("SwitchController", () => {
       expect(sw().hasAttribute("role")).toBe(false);
       expect(sw().getAttribute("aria-checked")).toBe("true");
     });
+  });
+});
+
+/** Verifies settled-state comparisons and synchronous nested commits. */
+describe("SwitchController settled reports", () => {
+  let application: Application;
+  const root = () =>
+    document.querySelector<HTMLElement>('[data-controller="stimeo--switch"]') as HTMLElement;
+  const act = (_index: number) => {
+    root().click();
+  };
+  const write = (index: number) => {
+    root().setAttribute("aria-checked", String(index !== 0));
+  };
+  const submitted = () =>
+    Array.from(root().querySelectorAll<HTMLInputElement>("input"))
+      .map((field) => field.value)
+      .join(",");
+  const record = () => {
+    const seen: string[] = [];
+    for (const name of ["change", "reconcile"])
+      root().addEventListener(`stimeo--switch:${name}`, (event) => {
+        const detail = (event as CustomEvent<{ checked: boolean }>).detail;
+        seen.push(`${name}:${String(detail.checked)}`);
+      });
+    return seen;
+  };
+  beforeEach(async () => {
+    document.body.innerHTML = `<div data-controller="stimeo--switch" role="switch" tabindex="0" aria-checked="false" data-action="click->stimeo--switch#toggle"><input type="hidden" data-stimeo--switch-target="field"></div>`;
+    application = Application.start();
+    application.register("stimeo--switch", SwitchController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+  it("includes an undelivered page write in the user's settled change", async () => {
+    const seen = record();
+    write(1);
+    act(0);
+    act(1);
+    await tick();
+    expect(seen).toEqual(["change:true"]);
+    expect(submitted()).toBe("true");
+  });
+  it("publishes nothing when the action returns to the last settled selection", async () => {
+    const seen = record();
+    let native = 0;
+    root().addEventListener("change", () => {
+      native += 1;
+    });
+    write(1);
+    act(0);
+    await tick();
+    expect(seen).toEqual([]);
+    expect(native).toBe(0);
+    expect(submitted()).toBe("false");
+  });
+  it("mirrors a replacement field before an unchanged selection returns", async () => {
+    const seen = record();
+    const field = root().querySelector('[data-stimeo--switch-target="field"]');
+    const replacement = document.createElement("input");
+    replacement.type = "hidden";
+    replacement.setAttribute("data-stimeo--switch-target", "field");
+    field?.replaceWith(replacement);
+    let native = 0;
+    replacement.addEventListener("change", () => {
+      native += 1;
+    });
+    write(1);
+    act(0);
+    expect(replacement.value).toBe("false");
+    expect(native).toBe(0);
+    expect(seen).toEqual([]);
+    await tick();
+    expect(submitted()).toBe("false");
+    expect(native).toBe(0);
+    expect(seen).toEqual([]);
+  });
+  it("drops the outer report after a native subscriber commits a newer selection", async () => {
+    const seen = record();
+    let spent = false;
+    root().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      act(0);
+    });
+    act(1);
+    await tick();
+    expect(seen).toEqual(["change:false"]);
+    expect(submitted()).toBe("false");
+  });
+  it("keeps the outer report when a native subscriber only reads the selection", async () => {
+    const seen = record();
+    const reads: string[] = [];
+    root().addEventListener("change", () => reads.push(submitted()));
+    act(1);
+    await tick();
+    expect(reads).toEqual(["true"]);
+    expect(seen).toEqual(["change:true"]);
+  });
+  it("keeps the outer report when a native subscriber confirms the same selection", async () => {
+    const seen = record();
+    let spent = false;
+    root().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      write(0);
+      act(1);
+    });
+    act(1);
+    await tick();
+    expect(seen).toEqual(["change:true"]);
+    expect(submitted()).toBe("true");
   });
 });

@@ -5,7 +5,7 @@ import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
@@ -364,6 +364,35 @@ describe("SeparatorController", () => {
     expect(separator().getAttribute("aria-valuenow")).toBe("11");
   });
 
+  it.each([false, true])(
+    "canonicalizes an invalid splitter Value before reports (published: %s)",
+    async (published) => {
+      await start(`
+        <div data-controller="stimeo--separator" aria-label="Resize"
+             data-stimeo--separator-focusable-value="true"
+             data-stimeo--separator-min-value="-100.25"
+             data-stimeo--separator-step-value="0.25"
+             data-stimeo--separator-value-value="${published ? "NaN" : "-50"}"
+             data-action="keydown->stimeo--separator#onKeydown"></div>`);
+      const instance = application.getControllerForElementAndIdentifier(
+        separator(),
+        "stimeo--separator",
+      ) as SeparatorController;
+      separator().setAttribute("data-stimeo--separator-value-value", "NaN");
+      const readings: number[] = [];
+      separator().addEventListener("stimeo--separator:change", () =>
+        readings.push(instance.valueValue),
+      );
+      expect(separator().getAttribute("data-stimeo--separator-value-value")).toBe("NaN");
+
+      key("Home");
+
+      expect(separator().getAttribute("data-stimeo--separator-value-value")).toBe("-100.25");
+      expect(separator().getAttribute("aria-valuenow")).toBe("-100.25");
+      expect(readings).toEqual(published ? [] : [-100.25]);
+    },
+  );
+
   it("uses finite defaults for non-finite Value inputs", async () => {
     await start(`
       <div data-controller="stimeo--separator" aria-label="Resize"
@@ -411,7 +440,7 @@ describe("SeparatorController", () => {
     expect(separator().getAttribute("aria-valuenow")).toBe("94");
   });
 
-  it("returns managed attributes before Turbo caches the page", async () => {
+  it("keeps its attributes and its morph repaint through turbo:before-cache, which also fires on a page that stays", async () => {
     await start(`
       <div data-controller="stimeo--separator" role="presentation" tabindex="-1"
            aria-label="Resize" aria-orientation="vertical"
@@ -422,21 +451,39 @@ describe("SeparatorController", () => {
            data-stimeo--separator-max-value="90"
            data-stimeo--separator-value-value="30"
            data-action="keydown->stimeo--separator#onKeydown"></div>`);
+    const events = captureStateEvents("stimeo--separator", ["change", "reconcile"]);
+
+    separator().setAttribute("data-stimeo--separator-value-value", "40");
+    document.dispatchEvent(new CustomEvent("turbo:before-cache"));
+    await tick();
 
     expect(separator().getAttribute("role")).toBe("separator");
     expect(separator().getAttribute("tabindex")).toBe("0");
     expect(separator().getAttribute("aria-orientation")).toBe("horizontal");
     expect(separator().getAttribute("aria-valuemin")).toBe("10");
     expect(separator().getAttribute("aria-valuemax")).toBe("90");
-    expect(separator().getAttribute("aria-valuenow")).toBe("30");
+    expect(separator().getAttribute("aria-valuenow")).toBe("40");
+    expect(events.seen.map(({ name }) => name)).toEqual(["reconcile"]);
+    events.stop();
+  });
 
-    // A morph can queue a repaint immediately before Turbo snapshots the page.
-    // The rewind must invalidate that pending pass as well as return the leases,
-    // so the pass neither re-applies them nor reports the move it would have found.
-    const events = captureStateEvents("stimeo--separator", ["change", "reconcile"]);
-    separator().setAttribute("data-stimeo--separator-value-value", "40");
-    document.dispatchEvent(new CustomEvent("turbo:before-cache"));
-    await tick();
+  it("gives the author's attributes back on a page restored from the cache", async () => {
+    await start(`
+      <div data-controller="stimeo--separator" role="presentation" tabindex="-1"
+           aria-label="Resize" aria-orientation="vertical"
+           aria-valuemin="1" aria-valuemax="9" aria-valuenow="4"
+           data-stimeo--separator-orientation-value="horizontal"
+           data-stimeo--separator-focusable-value="true"
+           data-stimeo--separator-min-value="10"
+           data-stimeo--separator-max-value="90"
+           data-stimeo--separator-value-value="30"
+           data-action="keydown->stimeo--separator#onKeydown"></div>`);
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--separator", SeparatorController),
+    );
+    expect(separator().getAttribute("role")).toBe("separator");
+
+    application.unload("stimeo--separator");
 
     expect(separator().getAttribute("role")).toBe("presentation");
     expect(separator().getAttribute("tabindex")).toBe("-1");
@@ -444,8 +491,11 @@ describe("SeparatorController", () => {
     expect(separator().getAttribute("aria-valuemin")).toBe("1");
     expect(separator().getAttribute("aria-valuemax")).toBe("9");
     expect(separator().getAttribute("aria-valuenow")).toBe("4");
-    expect(events.seen).toEqual([]);
-    events.stop();
+    expect(
+      separator()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-lease")),
+    ).toEqual([]);
   });
 
   it("keeps multiple separator instances independent", async () => {
@@ -525,6 +575,22 @@ describe("SeparatorController", () => {
     afterEach(() => {
       events.stop();
     });
+
+    it.each([
+      ["orientation", "horizontal", "aria-orientation", "horizontal"],
+      ["min", "20", "aria-valuemin", "20"],
+      ["step", "1", "aria-valuenow", "47"],
+    ] as const)(
+      "repaints when only the %s Value changes",
+      async (name, value, attribute, expected) => {
+        await start(splitter("47"));
+        separator().setAttribute(`data-stimeo--separator-${name}-value`, value);
+        controller()[`${name}ValueChanged`]();
+        await flushMicrotasks();
+
+        expect(separator().getAttribute(attribute)).toBe(expected);
+      },
+    );
 
     it("keeps an off-grid declaration on connect and publishes the snapped value silently", async () => {
       await start(splitter("47"));

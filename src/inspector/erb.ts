@@ -163,7 +163,6 @@ function readErbTags(source: string): ErbTag[] {
     }
     let close = raw.length - 2; // at "%>"
     if (raw[close - 1] === "-") close--;
-    if (close < open) close = open;
     tags.push({
       start,
       end: start + raw.length,

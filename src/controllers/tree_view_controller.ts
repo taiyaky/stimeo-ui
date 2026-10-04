@@ -1,12 +1,15 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord } from "../utils/arrow_step";
 import { commitField, writeField } from "../utils/field_mirror";
 import { canTakeFocus } from "../utils/focus_candidate";
 import { INTERACTIVE_HOST_SELECTOR, isInteractiveHost } from "../utils/interactive_host";
 import { isRtl } from "../utils/logical_scroll";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
 import { RovingTabindex } from "../utils/roving_tabindex";
-import { SafeTimeout } from "../utils/safe_timeout";
+import type { StateReason } from "../utils/state_reason";
+import { targetSelector } from "../utils/target_selector";
 import { findTypeaheadMatch, isTypeaheadKey, Typeahead, typeaheadLabel } from "../utils/typeahead";
 
 /** Item attributes a page can rewrite in place that move the published selection. */
@@ -49,7 +52,7 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  *         data-value="src"
  *         data-stimeo--tree-view-target="item"
  *         data-action="keydown->stimeo--tree-view#onKeydown
- *                      click->stimeo--tree-view#onClick">
+ *                      click->stimeo--tree-view#select">
  *       <span>src</span>
  *       <button type="button" tabindex="-1" aria-hidden="true"
  *               data-action="click->stimeo--tree-view#toggle"></button>
@@ -94,6 +97,14 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  *   reports nothing. While connected a `MutationObserver` watches the items'
  *   `aria-selected` and `data-value`; `disconnect()` releases it.
  *
+ * User `select` reports compare the resulting item and submitted value with the
+ * last published selection. A pending page write joins a confirmation handled
+ * in the same script; browser-delivered listeners can settle it first as
+ * `reconcile`. Reconfirming the last published selection reports nothing.
+ * A synchronous subscriber that commits another selection replaces the outer
+ * confirmation's reports that have not started dispatching. Reading state or
+ * confirming it unchanged does not replace them.
+ *
  * Contract notes:
  * - A child container is resolved by `role="group"`, not by the target: the
  *   `group` target is what `stimeo check`'s accessibility rule anchors on, which
@@ -111,9 +122,9 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  *   link, but that variant activates on `Enter`, which this pattern has already
  *   spent on selection; a link host is therefore out of contract and would need
  *   `Enter` / click / `select` redefined first.
- * - An out-of-contract host makes `onKeydown` and `onClick` stand down
- *   **entirely** — no movement, no selection, no `select` — rather than respond
- *   partially. `stimeo check` reports the unsupported host before runtime.
+ * - An out-of-contract host makes `onKeydown` and `select` invoked by a DOM event
+ *   stand down entirely: no movement, no selection, and no `select` report.
+ *   `stimeo check` reports the unsupported host before runtime.
  *
  * Consumer contract — controls nested inside a row:
  * - Keep them out of the Tab sequence (`tabindex="-1"`); the tree is one Tab
@@ -125,14 +136,15 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  * - The tree consumes none of the control's events, by two mechanisms:
  *   the nested-interactive selector names controls by *element shape*, the
  *   `defaultPrevented` yield covers widgets no selector can name.
- * `select` dispatches `{ item: HTMLElement }`.
- * `toggle` dispatches `{ item: HTMLElement, expanded: boolean }`.
- * `reconcile` dispatches `{ item: HTMLElement | null }` — the shape of `select`,
+ * `select` dispatches `{ item: HTMLElement, reason: StateReason }`.
+ * `toggle` dispatches `{ item: HTMLElement, expanded: boolean, reason: StateReason }`.
+ * `reconcile` dispatches `{ item: HTMLElement | null }` — selection state without `reason`,
  * with `null` once nothing is selected.
  */
 export class TreeViewController extends Controller<HTMLElement> {
+  readonly #moves = new MoveCounter();
   static override targets = ["item", "group", "field"];
-  static actions = ["onClick", "onKeydown", "toggle"] as const;
+  static actions = ["onKeydown", "select", "toggle"] as const;
   static events = ["select", "toggle", "reconcile"] as const;
 
   declare readonly itemTargets: HTMLElement[];
@@ -141,13 +153,12 @@ export class TreeViewController extends Controller<HTMLElement> {
 
   readonly #roving = new RovingTabindex(() => this.itemTargets);
   readonly #typeahead = new Typeahead();
-  readonly #timers = new SafeTimeout();
   /**
    * Collapses the item and field callbacks and observed item writes of one DOM
    * mutation into a single selection pass; refused before `connect()` and after
    * `disconnect()`.
    */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileSelection());
+  readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileSelection());
   /** Watches the item attributes a page can rewrite in place; set while connected. */
   #observer: MutationObserver | null = null;
   /** The selection last settled: on connect, by the user, or by a reported pass. */
@@ -215,12 +226,17 @@ export class TreeViewController extends Controller<HTMLElement> {
     this.#order = [...this.itemTargets];
     this.#settled = this.#selection();
     this.#connected = true;
-    this.#reconcile.activate();
+    this.#reconcile.observe(this.element);
     this.#observeItems();
   }
 
   /** Fills a form field inserted or replaced at runtime with the current selection. */
   fieldTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Brings the field that stays to the current selection when an earlier one leaves. */
+  fieldTargetDisconnected(): void {
     this.#reconcile.schedule();
   }
 
@@ -232,11 +248,10 @@ export class TreeViewController extends Controller<HTMLElement> {
     this.element.removeEventListener("focusin", this.#onFocusIn);
     this.element.removeEventListener("focusout", this.#onFocusOut);
     this.#connected = false;
-    this.#reconcile.cancel();
+    this.#reconcile.disconnect();
     this.#observer?.disconnect();
     this.#observer = null;
     this.#typeahead.reset();
-    this.#timers.clearAll();
     this.#order = [];
     this.#focused = null;
   }
@@ -248,11 +263,8 @@ export class TreeViewController extends Controller<HTMLElement> {
    * never learn about it.
    */
   #seedFocused(): void {
-    const active = this.element.ownerDocument.activeElement;
     this.#focused =
-      active instanceof HTMLElement && this.element.contains(active)
-        ? active.closest<HTMLElement>('[role="treeitem"]')
-        : null;
+      this.element.ownerDocument.activeElement?.closest<HTMLElement>('[role="treeitem"]') ?? null;
   }
 
   /**
@@ -313,7 +325,9 @@ export class TreeViewController extends Controller<HTMLElement> {
    * rewrites are the next pass's to settle.
    */
   #reconcileSelection(): void {
+    this.#reconcileExpansion();
     this.#normalizeSelection();
+    this.#normalizeTabStop();
     this.#dropOwnRecords();
     this.#mirrorField(false);
     this.#reportMove();
@@ -497,16 +511,19 @@ export class TreeViewController extends Controller<HTMLElement> {
     }
   }
 
-  /** Selects the clicked item (nearest to the target only). */
-  onClick(event: Event): void {
-    const item = this.#ownerItem(event);
-    if (!item) return;
-    // The indentation band of a child group is the group's own box, not the
-    // parent row: a click that lands there must select nothing.
+  /** Selects an owned item from an action or explicit element, preserving external API focus. */
+  select(source: Event | HTMLElement): void {
+    const { event, host, origin, reason } = actionSource(source);
+    const item = host?.closest<HTMLElement>(targetSelector(this.identifier, "item"));
+    if (!item || !this.itemTargets.includes(item)) return;
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    if (event && this.#ownerItem(event) !== item) return;
     const group = this.#childGroup(item);
-    if (group?.contains(event.target as Node)) return;
-    this.#focusItem(item);
-    this.#select(item);
+    if (event && origin && group?.contains(origin)) return;
+    const moveFocus = event !== null || this.element.contains(document.activeElement);
+    this.#focusItem(item, moveFocus);
+    this.#select(item, reason);
   }
 
   /**
@@ -520,12 +537,19 @@ export class TreeViewController extends Controller<HTMLElement> {
    * row, and a decorative `aria-hidden` chevron would hold focus. The synchronous
    * `stimeo--tree-view:toggle` event is observed before this final focus hand-off.
    */
-  toggle(event: Event): void {
-    const item = (event.target as HTMLElement).closest<HTMLElement>('[role="treeitem"]');
-    if (!item || !this.element.contains(item)) return;
-    if (!this.#childGroup(item)) return;
-    this.#setExpanded(item, !this.#isExpanded(item));
-    this.#focusItem(item);
+  toggle(source: Event | HTMLElement): void {
+    const { event, origin, reason } = actionSource(source);
+    const item = origin?.closest<HTMLElement>(targetSelector(this.identifier, "item"));
+    if (!item || !this.itemTargets.includes(item)) return;
+    if (origin?.closest(`[data-controller~="${this.identifier}"]`) !== this.element) return;
+    const group = this.#childGroup(item);
+    if (!group) return;
+    const moveFocus = event !== null || this.element.contains(document.activeElement);
+    this.#setExpanded(item, group, !this.#isExpanded(item), reason);
+    this.#focusItem(
+      item,
+      moveFocus && (event !== null || this.element.contains(document.activeElement)),
+    );
   }
 
   /**
@@ -534,12 +558,13 @@ export class TreeViewController extends Controller<HTMLElement> {
    * from an interactive control inside the item.
    */
   #ownerItem(event: Event): HTMLElement | null {
-    const item = event.currentTarget as HTMLElement;
-    const target = event.target as HTMLElement;
+    const { host, origin: target } = actionSource(event);
+    const item = host?.closest<HTMLElement>('[role="treeitem"]');
+    if (!item || !target) return null;
     if (target.closest('[role="treeitem"]') !== item) return null;
     const control = target.closest<HTMLElement>(NESTED_INTERACTIVE);
     if (control && item.contains(control)) return null;
-    if (isInteractiveHost(target)) return null;
+    if (target instanceof HTMLElement && isInteractiveHost(target)) return null;
     return item;
   }
 
@@ -601,7 +626,7 @@ export class TreeViewController extends Controller<HTMLElement> {
     const group = this.#childGroup(item);
     if (!group) return;
     if (!this.#isExpanded(item)) {
-      this.#setExpanded(item, true);
+      this.#setExpanded(item, group, true);
       return;
     }
     // Never move the only tab stop into a subtree a consumer hid directly.
@@ -617,8 +642,9 @@ export class TreeViewController extends Controller<HTMLElement> {
 
   /** `ArrowLeft`: collapse an expanded parent, else step out to the parent item. */
   #collapseOrLeave(item: HTMLElement): void {
-    if (this.#childGroup(item) && this.#isExpanded(item)) {
-      this.#setExpanded(item, false);
+    const group = this.#childGroup(item);
+    if (group && this.#isExpanded(item)) {
+      this.#setExpanded(item, group, false);
       return;
     }
     const parent = this.#parentItem(item);
@@ -659,7 +685,7 @@ export class TreeViewController extends Controller<HTMLElement> {
    * item stays focusable (APG keeps disabled nodes reachable) but is never
    * activated, so consumers see no `select` for it.
    */
-  #select(item: HTMLElement): void {
+  #select(item: HTMLElement, reason: StateReason = "user"): void {
     if (this.#isDisabled(item)) return;
     for (const candidate of this.itemTargets) {
       setAttributeIfChanged(candidate, "aria-selected", candidate === item ? "true" : "false");
@@ -667,19 +693,31 @@ export class TreeViewController extends Controller<HTMLElement> {
     this.#dropOwnRecords();
     // Settled before anything is reported, so a listener that moves the selection
     // again is measured against this one.
-    this.#settled = this.#selection();
+    const selection = this.#selection();
+    const changed =
+      selection.item !== this.#settled.item || selection.value !== this.#settled.value;
+    this.#settled = selection;
+    if (!changed) {
+      this.#mirrorField(false);
+      return;
+    }
+    const token = this.#moves.record();
     this.#mirrorField(true);
-    this.dispatch("select", { detail: { item } });
+    if (!this.#moves.isLatest(token)) return;
+    this.dispatch("select", { detail: { item, reason } });
   }
 
   /** Updates expansion, reconciles a collapsed subtree, then synchronously dispatches `toggle`. */
-  #setExpanded(item: HTMLElement, expanded: boolean): void {
-    const group = this.#childGroup(item);
-    if (!group) return;
+  #setExpanded(
+    item: HTMLElement,
+    group: HTMLElement,
+    expanded: boolean,
+    reason: StateReason = "user",
+  ): void {
     item.setAttribute("aria-expanded", String(expanded));
     group.hidden = !expanded;
     if (!expanded) this.#escapeCollapsedSubtree(item, group);
-    this.dispatch("toggle", { detail: { item, expanded } });
+    this.dispatch("toggle", { detail: { item, expanded, reason } });
   }
 
   /**
@@ -698,17 +736,17 @@ export class TreeViewController extends Controller<HTMLElement> {
     }
     // Focus is elsewhere on the page: relocate the tab stop without stealing it.
     const activeIndex = this.#roving.activeIndex;
-    const tabbable = activeIndex === -1 ? undefined : this.itemTargets[activeIndex];
+    const tabbable = this.itemTargets[activeIndex];
     if (!tabbable || !group.contains(tabbable)) return;
     const index = this.itemTargets.indexOf(item);
     if (index !== -1) this.#roving.setActive(index);
   }
 
   /** Makes `item` the single tab stop and moves DOM focus to it. */
-  #focusItem(item: HTMLElement): void {
+  #focusItem(item: HTMLElement, focus = true): void {
     const index = this.itemTargets.indexOf(item);
     if (index !== -1) {
-      this.#roving.setActive(index, { focus: true });
+      this.#roving.setActive(index, { focus });
       return;
     }
     // A `role="treeitem"` without the item target is outside roving bookkeeping,
@@ -769,14 +807,14 @@ export class TreeViewController extends Controller<HTMLElement> {
     const items = this.itemTargets;
     const visible = this.#visibleItems;
     const activeIndex = this.#roving.activeIndex;
-    const active = activeIndex === -1 ? undefined : items[activeIndex];
+    const active = items[activeIndex];
     if (active && visible.includes(active)) {
       this.#roving.setActive(activeIndex);
       return;
     }
     const selected = visible.find((item) => item.getAttribute("aria-selected") === "true");
     const next = selected ?? visible[0];
-    this.#roving.setActive(next ? items.indexOf(next) : -1);
+    this.#roving.setActive(items.findIndex((item) => item === next));
   }
 
   /**

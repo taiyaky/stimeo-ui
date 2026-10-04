@@ -3,15 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileDropzoneController } from "../src/controllers/file_dropzone_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link FileDropzoneController}: dialog/keyboard selection,
  * drop handling and drag state, accept/size/duplicate/count validation, preview
  * generation with objectURL release, native-input mirroring, focus hand-off on
- * removal, shared-announcer messages, Turbo rewind, and the `change`/`reject`
- * events.
+ * removal, shared-announcer messages, the selection across Turbo's cache and morphs,
+ * and the `change`/`reject`/`reconcile` events.
  */
 
 /** Announcement templates that make every outcome distinguishable in assertions. */
@@ -248,6 +248,26 @@ describe("FileDropzoneController", () => {
     expect(createdUrls).toHaveLength(0);
   });
 
+  it("decides a thumbnail authored visible from each file's type", async () => {
+    // The authored `hidden` is only a starting state: each row's thumbnail is
+    // shown for an image and hidden for anything else, whatever the template says.
+    const template = ITEM_TEMPLATE.replace(' alt="" hidden />', ' alt="" />');
+    await mount("", 'multiple aria-label="Upload files"', template);
+    const authored = document.querySelector<HTMLTemplateElement>(
+      "[data-stimeo--file-dropzone-target='itemTemplate']",
+    );
+    expect(authored?.content.querySelector("img")?.hasAttribute("hidden")).toBe(false);
+
+    drop(file("photo.jpg", "image/jpeg"), file("notes.txt", "text/plain"));
+
+    const [photo, notes] = items().map((item) => item.querySelector("img") as HTMLImageElement);
+    expect(photo?.hidden).toBe(false);
+    expect(photo?.src).toContain("blob:mock/");
+    expect(notes?.hidden).toBe(true);
+    expect(notes?.hasAttribute("src")).toBe(false);
+    expect(createdUrls).toHaveLength(1);
+  });
+
   it("keeps the authored remove-button label and expands {name} into it", async () => {
     const template = ITEM_TEMPLATE.replace(
       'aria-label="Remove {name}"',
@@ -300,6 +320,24 @@ describe("FileDropzoneController", () => {
 
     expect(names()).toEqual(["a.jpg"]);
     expect(inputNames()).toEqual(["a.jpg"]);
+  });
+
+  it("claims a dragover so the browser lets the files drop", async () => {
+    await mount();
+    const over = new Event("dragover", { bubbles: true, cancelable: true });
+
+    zone().dispatchEvent(over);
+
+    expect(over.defaultPrevented).toBe(true);
+  });
+
+  it("claims a drop so the browser does not open the files itself", async () => {
+    await mount();
+
+    const dropped = drop(file("a.jpg", "image/jpeg"));
+
+    expect(dropped.defaultPrevented).toBe(true);
+    expect(names()).toEqual(["a.jpg"]);
   });
 
   it("sets the drag-over flag and announces the affordance once per drag", async () => {
@@ -590,6 +628,22 @@ describe("FileDropzoneController", () => {
     expect(items()).toHaveLength(1);
   });
 
+  it("stops removing files through a list that is no longer a target", async () => {
+    await mount();
+    drop(file("a.jpg", "image/jpeg"));
+    const changes = changesFrom();
+    const oldList = list();
+
+    oldList.removeAttribute("data-stimeo--file-dropzone-target");
+    // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+    (controller() as FileDropzoneController).listTargetDisconnected(oldList);
+    removeButtons()[0]?.click();
+
+    expect(items()).toHaveLength(1);
+    expect(revokedUrls).toEqual([]);
+    expect(changes).toEqual([]);
+  });
+
   it("moves previews back when a morph empties the list in place", async () => {
     await mount('data-stimeo--file-dropzone-max-files-value="2"');
     drop(file("a.jpg", "image/jpeg"), file("b.jpg", "image/jpeg"));
@@ -601,6 +655,495 @@ describe("FileDropzoneController", () => {
     // Screen and selection agree again: the two survivors are back and still count.
     expect(names()).toEqual(["a.jpg", "b.jpg"]);
     expect(rejects.map((r) => r.reason)).toEqual(["count"]);
+  });
+
+  it("moves the previews into a list that arrives after the only one left", async () => {
+    await mount();
+    drop(file("a.jpg", "image/jpeg"));
+    const original = list();
+    original.remove();
+    await tick();
+    const replacement = original.cloneNode(false) as HTMLElement;
+    root().append(replacement);
+    await tick();
+
+    expect(replacement.querySelectorAll("[data-stimeo--file-dropzone-target='item']")).toHaveLength(
+      1,
+    );
+    removeButtons()[0]?.click();
+    expect(items()).toHaveLength(0);
+    expect(inputNames()).toEqual([]);
+  });
+
+  describe("a zone that replaces the current one", () => {
+    const INVALID = "data-stimeo--file-dropzone-invalid";
+    const DRAGOVER = "data-dragover";
+
+    /** A server-rendered copy of the zone, without the state hooks. */
+    const zoneCopy = (): HTMLElement => {
+      const copy = zone().cloneNode(true) as HTMLElement;
+      copy.removeAttribute(INVALID);
+      copy.removeAttribute(DRAGOVER);
+      return copy;
+    };
+
+    it("carries the rejection hook onto a replacement delivered in one task", async () => {
+      await mount();
+      drop(file("notes.txt", "text/plain"));
+      const successor = zoneCopy();
+      zone().replaceWith(successor);
+      await tick();
+
+      expect(successor.hasAttribute(INVALID)).toBe(true);
+    });
+
+    it("carries a drag in progress onto a replacement delivered in one task", async () => {
+      await mount();
+      dragOver();
+      const successor = zoneCopy();
+      zone().replaceWith(successor);
+      await tick();
+
+      expect(successor.hasAttribute(DRAGOVER)).toBe(true);
+    });
+
+    it("carries the rejection hook onto the zone that stays after an earlier one leaves", async () => {
+      await mount();
+      const original = zone();
+      const successor = zoneCopy();
+      original.after(successor);
+      await tick();
+      drop(file("notes.txt", "text/plain")); // marks the earlier zone only
+      original.remove();
+      await tick();
+
+      expect(zone()).toBe(successor);
+      expect(successor.hasAttribute(INVALID)).toBe(true);
+    });
+
+    it("carries the rejection hook onto a zone that arrives after the only one left", async () => {
+      await mount();
+      drop(file("notes.txt", "text/plain"));
+      const arrival = zoneCopy();
+      zone().remove();
+      await tick();
+      root().prepend(arrival);
+      await tick();
+
+      expect(arrival.hasAttribute(INVALID)).toBe(true);
+    });
+
+    it("takes its hooks off a zone left in the page without its target token", async () => {
+      await mount();
+      const original = zone();
+      const successor = zoneCopy();
+      original.after(successor);
+      await tick();
+      drop(file("notes.txt", "text/plain"));
+      dragOver();
+      original.removeAttribute("data-stimeo--file-dropzone-target");
+      await tick();
+
+      expect(original.hasAttribute(INVALID)).toBe(false);
+      expect(original.hasAttribute(DRAGOVER)).toBe(false);
+      expect(successor.hasAttribute(INVALID)).toBe(true);
+      expect(successor.hasAttribute(DRAGOVER)).toBe(true);
+    });
+
+    it("gives back a rejection mark the zone carried before this wrote it, once it stops being the target", async () => {
+      await mount();
+      const original = zone();
+      original.setAttribute(INVALID, "");
+      dragOver();
+      expect(original.hasAttribute(INVALID)).toBe(false);
+
+      original.removeAttribute("data-stimeo--file-dropzone-target");
+      await tick();
+
+      expect(original.getAttribute(INVALID)).toBe("");
+      expect(original.hasAttribute(DRAGOVER)).toBe(false);
+    });
+
+    it("keeps a hook value the page wrote on a zone that stops being the target", async () => {
+      await mount();
+      drop(file("notes.txt", "text/plain"));
+      const original = zone();
+      original.setAttribute(INVALID, "server");
+
+      original.removeAttribute("data-stimeo--file-dropzone-target");
+      await tick();
+
+      expect(original.getAttribute(INVALID)).toBe("server");
+    });
+
+    it("takes its hooks off the zone when the widget loses its controller", async () => {
+      await mount();
+      drop(file("notes.txt", "text/plain"));
+      dragOver();
+      const departed = zone();
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(departed.hasAttribute(INVALID)).toBe(false);
+      expect(departed.hasAttribute(DRAGOVER)).toBe(false);
+    });
+
+    it("keeps its hooks on a zone that moves within the widget", async () => {
+      await mount();
+      drop(file("notes.txt", "text/plain"));
+      dragOver();
+      const moving = zone();
+      const records: MutationRecord[] = [];
+      const observer = new MutationObserver((batch) => records.push(...batch));
+      observer.observe(moving, { attributes: true, attributeFilter: [INVALID, DRAGOVER] });
+
+      root().append(moving);
+      await tick();
+      records.push(...observer.takeRecords());
+      observer.disconnect();
+
+      expect(moving.hasAttribute(INVALID)).toBe(true);
+      expect(moving.hasAttribute(DRAGOVER)).toBe(true);
+      expect(records.map((record) => record.attributeName)).toEqual([]);
+    });
+
+    it("reports nothing while it moves the hooks", async () => {
+      await mount(ANNOUNCE_ATTRS);
+      drop(file("notes.txt", "text/plain"));
+      const reports = reportsFrom();
+      announcements.length = 0;
+      zone().replaceWith(zoneCopy());
+      await tick();
+
+      expect(reports).toEqual([]);
+      expect(announcements).toEqual([]);
+    });
+
+    it("tolerates the removal of the only zone", async () => {
+      await mount();
+      drop(file("notes.txt", "text/plain"));
+      const only = zone();
+      only.remove();
+
+      expect(() =>
+        (controller() as FileDropzoneController).zoneTargetDisconnected(only),
+      ).not.toThrow();
+    });
+
+    it("moves nothing once it has disconnected", async () => {
+      await mount();
+      const original = zone();
+      const successor = zoneCopy();
+      original.after(successor);
+      await tick();
+      drop(file("notes.txt", "text/plain"));
+      const instance = controller() as FileDropzoneController;
+      instance.disconnect();
+      original.remove();
+      instance.zoneTargetDisconnected(original);
+
+      expect(successor.hasAttribute(INVALID)).toBe(false);
+    });
+  });
+
+  describe("an input that takes over", () => {
+    /** A server-rendered copy of the input, which carries no files. */
+    const inputCopy = (): HTMLInputElement => {
+      const copy = input().cloneNode(true) as HTMLInputElement;
+      copy.files = fileList();
+      return copy;
+    };
+    const namesOn = (element: HTMLInputElement) =>
+      Array.from(element.files ?? []).map((f) => f.name);
+
+    it("mirrors the selection onto an input that replaces the current one in one task", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"), file("b.jpg", "image/jpeg"));
+      const successor = inputCopy();
+      expect(namesOn(successor)).toEqual([]);
+
+      input().replaceWith(successor);
+      await tick();
+
+      expect(input()).toBe(successor);
+      expect(namesOn(successor)).toEqual(["a.jpg", "b.jpg"]);
+    });
+
+    it("mirrors the selection onto an input that stays after an earlier one leaves", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const original = input();
+      const successor = inputCopy();
+      original.after(successor);
+      await tick();
+      drop(file("b.jpg", "image/jpeg")); // mirrored onto the earlier input only
+      expect(namesOn(original)).toEqual(["a.jpg", "b.jpg"]);
+
+      original.remove();
+      await tick();
+
+      expect(input()).toBe(successor);
+      expect(namesOn(successor)).toEqual(["a.jpg", "b.jpg"]);
+      removeButtons()[0]?.click();
+      expect(namesOn(successor)).toEqual(["b.jpg"]);
+    });
+
+    it("takes over silently: no report, no native change, no announcement", async () => {
+      await mount(ANNOUNCE_ATTRS);
+      drop(file("a.jpg", "image/jpeg"));
+      const original = input();
+      const successor = inputCopy();
+      const reports = reportsFrom();
+      const commits: Event[] = [];
+      root().addEventListener("change", (event) => commits.push(event));
+      announcements.length = 0;
+
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(namesOn(successor)).toEqual(["a.jpg"]);
+      expect(reports).toEqual([]);
+      expect(commits).toEqual([]);
+      expect(announcements).toEqual([]);
+    });
+
+    it("mirrors the selection onto an input that arrives after the only one left", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const arrival = inputCopy();
+      input().remove();
+      await tick();
+
+      zone().append(arrival);
+      await tick();
+
+      expect(namesOn(arrival)).toEqual(["a.jpg"]);
+    });
+
+    it("tolerates the removal of the only input", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      input().remove();
+      // Drive the callback directly: happy-dom delivers target callbacks unreliably, and a
+      // throw from one it delivers surfaces outside the test.
+      expect(() =>
+        (controller() as FileDropzoneController).inputTargetDisconnected(),
+      ).not.toThrow();
+      await tick();
+
+      expect(names()).toEqual(["a.jpg"]);
+    });
+
+    it("mirrors nothing onto the input that stays once it has disconnected", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const original = input();
+      const successor = inputCopy();
+      original.after(successor);
+      await tick();
+      const instance = controller() as FileDropzoneController;
+      instance.disconnect();
+      original.remove();
+      instance.inputTargetDisconnected();
+      instance.inputTargetConnected();
+
+      expect(namesOn(successor)).toEqual([]);
+    });
+
+    it("leaves the files on an input that stops being the target", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const original = input();
+      const successor = inputCopy();
+      original.after(successor);
+      await tick();
+
+      original.removeAttribute("data-stimeo--file-dropzone-target");
+      await tick();
+
+      expect(input()).toBe(successor);
+      expect(namesOn(original)).toEqual(["a.jpg"]);
+      expect(namesOn(successor)).toEqual(["a.jpg"]);
+    });
+
+    it("leaves the files on the input when the widget loses its controller", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const departed = input();
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(namesOn(departed)).toEqual(["a.jpg"]);
+    });
+
+    it("keeps the selection on an input that moves within the widget", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const moving = input();
+
+      root().append(moving);
+      await tick();
+
+      expect(input()).toBe(moving);
+      expect(namesOn(moving)).toEqual(["a.jpg"]);
+    });
+
+    /**
+     * Chooses `files` in `element` the way its native dialog does. Stimulus binds the
+     * action of an appended input unreliably under happy-dom, so the call it would make
+     * with that event is made directly when the binding did not run.
+     */
+    const chooseIn = (element: HTMLInputElement, ...files: File[]) => {
+      const instance = controller() as FileDropzoneController;
+      const onChange = vi.spyOn(instance, "onChange");
+      element.files = fileList(...files);
+      const event = new Event("change", { bubbles: true });
+      element.dispatchEvent(event);
+      if (onChange.mock.calls.length === 0) instance.onChange(event);
+      onChange.mockRestore();
+    };
+
+    it("adds the files chosen in an input that waits behind the one in use", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const original = input();
+      const successor = inputCopy();
+      original.after(successor);
+      await tick();
+      const changes = changesFrom();
+
+      chooseIn(successor, file("b.jpg", "image/jpeg"));
+
+      expect(names()).toEqual(["a.jpg", "b.jpg"]);
+      expect(namesOn(original)).toEqual(["a.jpg", "b.jpg"]);
+      expect(changes).toHaveLength(1);
+      original.remove();
+      await tick();
+      expect(namesOn(successor)).toEqual(["a.jpg", "b.jpg"]);
+    });
+
+    it("reads the input in use for a change no input dispatched, or with no event", async () => {
+      await mount();
+      const instance = controller() as FileDropzoneController;
+      input().files = fileList(file("a.jpg", "image/jpeg"));
+      const elsewhere = new Event("change", { bubbles: true });
+      trigger().dispatchEvent(elsewhere);
+
+      instance.onChange(elsewhere);
+      input().files = fileList(file("b.jpg", "image/jpeg"));
+      instance.onChange();
+
+      expect(names()).toEqual(["a.jpg", "b.jpg"]);
+    });
+  });
+
+  describe("a list that stays after an earlier one leaves", () => {
+    const itemSelector = "[data-stimeo--file-dropzone-target='item']";
+
+    /** Inserts an empty copy of the list after it and lets Stimulus report it. */
+    const insertSuccessor = async (): Promise<[HTMLElement, HTMLElement]> => {
+      const original = list();
+      const successor = original.cloneNode(false) as HTMLElement;
+      original.after(successor);
+      await tick();
+      return [original, successor];
+    };
+
+    it("keeps the previews in the first list while a successor waits behind it", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const original = list();
+
+      const [, successor] = await insertSuccessor();
+
+      expect(list()).toBe(original);
+      expect(original.querySelectorAll(itemSelector)).toHaveLength(1);
+      expect(successor.querySelectorAll(itemSelector)).toHaveLength(0);
+      drop(file("b.jpg", "image/jpeg"));
+      expect(original.querySelectorAll(itemSelector)).toHaveLength(2);
+      expect(successor.querySelectorAll(itemSelector)).toHaveLength(0);
+    });
+
+    it("moves the previews into a list that arrives in front of the current one", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const original = list();
+      const front = original.cloneNode(false) as HTMLElement;
+
+      original.before(front);
+      await tick();
+
+      expect(list()).toBe(front);
+      expect(front.querySelectorAll(itemSelector)).toHaveLength(1);
+      expect(original.querySelectorAll(itemSelector)).toHaveLength(0);
+      removeButtons()[0]?.click();
+      expect(items()).toHaveLength(0);
+      expect(inputNames()).toEqual([]);
+    });
+
+    it("moves every selected preview into the list that stays", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const [original, successor] = await insertSuccessor();
+      drop(file("b.jpg", "image/jpeg")); // rendered into the earlier list
+      original.remove();
+      await tick();
+
+      expect(list()).toBe(successor);
+      expect(successor.querySelectorAll(itemSelector)).toHaveLength(2);
+      expect(names()).toEqual(["a.jpg", "b.jpg"]);
+      removeButtons()[0]?.click();
+      expect(names()).toEqual(["b.jpg"]);
+      expect(inputNames()).toEqual(["b.jpg"]);
+    });
+
+    it("reports nothing while it moves the previews", async () => {
+      await mount(ANNOUNCE_ATTRS);
+      drop(file("a.jpg", "image/jpeg"));
+      const [original] = await insertSuccessor();
+      drop(file("b.jpg", "image/jpeg"));
+      const reports = reportsFrom();
+      const commits: Event[] = [];
+      root().addEventListener("change", (event) => commits.push(event));
+      announcements.length = 0;
+      original.remove();
+      await tick();
+
+      expect(reports).toEqual([]);
+      expect(commits).toEqual([]);
+      expect(announcements).toEqual([]);
+    });
+
+    it("tolerates the removal of the only list", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const only = list();
+      only.remove();
+
+      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      expect(() =>
+        (controller() as FileDropzoneController).listTargetDisconnected(only),
+      ).not.toThrow();
+      expect(items()).toHaveLength(0);
+      expect(inputNames()).toEqual(["a.jpg"]);
+    });
+
+    it("moves nothing into the list that stays once it has disconnected", async () => {
+      await mount();
+      drop(file("a.jpg", "image/jpeg"));
+      const [original, successor] = await insertSuccessor();
+      drop(file("b.jpg", "image/jpeg"));
+      const instance = controller() as FileDropzoneController;
+      instance.disconnect();
+      original.remove();
+      instance.listTargetDisconnected(original);
+
+      expect(successor.querySelectorAll(itemSelector)).toHaveLength(0);
+    });
   });
 
   it("reports what a batch took before what it turned away", async () => {
@@ -622,51 +1165,246 @@ describe("FileDropzoneController", () => {
     expect(reports[1]?.detail.reason).toBe("count");
   });
 
-  it("reports the selection the cache rewind discards", async () => {
+  /** Puts a restored copy of the page in place, as Turbo renders one from its cache. */
+  const restore = async () => {
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--file-dropzone", FileDropzoneController),
+    );
+  };
+
+  /** Every `reconcile` that reaches the document, which outlives a restored body. */
+  const reconcilesOnDocument = (): unknown[] => {
+    const seen: unknown[] = [];
+    document.addEventListener("stimeo--file-dropzone:reconcile", (e) =>
+      seen.push((e as CustomEvent).detail),
+    );
+    return seen;
+  };
+
+  it("marks every item it renders as its own", async () => {
     await mount();
-    drop(file("a.jpg", "image/jpeg"));
-    const reports = reportsFrom();
-
-    document.dispatchEvent(new Event("turbo:before-cache"));
-
-    // The rewind is the controller deciding the selection is gone, so consumers
-    // that painted from `change` can drop it before the snapshot is taken.
-    expect(reports).toEqual([{ event: "reconcile", detail: { files: [] } }]);
+    drop(file("a.jpg", "image/jpeg"), file("b.jpg", "image/jpeg"));
+    expect(
+      items().map((item) => item.hasAttribute("data-stimeo--file-dropzone-generated")),
+    ).toEqual([true, true]);
   });
 
-  it("stays silent when the cache rewind has nothing to discard", async () => {
+  it("keeps the selection, the input and the zone hooks through turbo:before-cache", async () => {
     await mount();
+    drop(file("a.jpg", "image/jpeg"), file("notes.txt", "text/plain"));
+    dragOver();
     const reports = reportsFrom();
 
+    // Turbo dispatches it on pages that stay as well, where this is the selection the
+    // form is about to submit.
     document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(names()).toEqual(["a.jpg"]);
+    expect(inputNames()).toEqual(["a.jpg"]);
+    expect(revokedUrls).toEqual([]);
+    expect(zone().hasAttribute("data-dragover")).toBe(true);
+    expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(true);
+    expect(reports).toEqual([]);
+  });
+
+  it("removes the previews and the hooks a restored page carries, and reports it", async () => {
+    await mount();
+    drop(file("a.jpg", "image/jpeg"), file("notes.txt", "text/plain"));
+    dragOver();
+    const reports = reconcilesOnDocument();
+
+    await restore();
+
+    expect(items()).toHaveLength(0);
+    expect(inputNames()).toEqual([]);
+    expect(zone().hasAttribute("data-dragover")).toBe(false);
+    expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(false);
+    expect(reports).toEqual([{ files: [] }]);
+  });
+
+  it("takes files on a restored page as a fresh selection", async () => {
+    await mount('data-stimeo--file-dropzone-max-files-value="1"');
+    drop(file("a.jpg", "image/jpeg"));
+
+    await restore();
+    const changes = changesFrom();
+    drop(file("b.jpg", "image/jpeg"));
+
+    // The discarded row counts towards nothing, and the new one can be removed.
+    expect(names()).toEqual(["b.jpg"]);
+    expect(changes).toHaveLength(1);
+    removeButtons()[0]?.click();
+    expect(items()).toHaveLength(0);
+  });
+
+  it("stays silent on a restored page that carries no selection", async () => {
+    await mount();
+    const reports = reconcilesOnDocument();
+
+    await restore();
 
     expect(reports).toEqual([]);
   });
 
-  it("rewinds previews and state attributes before Turbo caches the page", async () => {
+  it("keeps what the author put in the list on a restored page", async () => {
     await mount();
-    dragOver();
-    drop(file("a.jpg", "image/jpeg"), file("notes.txt", "text/plain"));
-    expect(items()).toHaveLength(1);
+    list().insertAdjacentHTML("afterbegin", '<li id="authored">Already uploaded</li>');
+    drop(file("a.jpg", "image/jpeg"));
 
-    document.dispatchEvent(new Event("turbo:before-cache"));
+    await restore();
+
+    expect(document.getElementById("authored")).not.toBeNull();
+    expect(items()).toHaveLength(0);
+  });
+
+  it("keeps an authored zone hook on a page with no previews to discard", async () => {
+    document.body.innerHTML = markup().replace(
+      'data-stimeo--file-dropzone-target="zone"',
+      'data-stimeo--file-dropzone-target="zone" data-stimeo--file-dropzone-invalid=""',
+    );
+    application = Application.start();
+    application.register("stimeo--file-dropzone", FileDropzoneController);
+    await tick();
+
+    expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(true);
+  });
+
+  it("gives back the zone hooks of a restored page that carries them without any preview, silently", async () => {
+    await mount();
+    drop(file("notes.txt", "text/plain"));
+    dragOver();
+    expect(items()).toHaveLength(0);
+    expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(true);
+    expect(zone().hasAttribute("data-dragover")).toBe(true);
+    const reports = reconcilesOnDocument();
+
+    await restore();
+
+    expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(false);
+    expect(zone().hasAttribute("data-dragover")).toBe(false);
+    expect(
+      zone()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-lease")),
+    ).toEqual([]);
+    expect(reports).toEqual([]);
+  });
+
+  it("gives a restored zone the hook its author wrote when it discards the previews", async () => {
+    document.body.innerHTML = markup().replace(
+      'data-stimeo--file-dropzone-target="zone"',
+      'data-stimeo--file-dropzone-target="zone" data-stimeo--file-dropzone-invalid=""',
+    );
+    application = Application.start();
+    application.register("stimeo--file-dropzone", FileDropzoneController);
+    await tick();
+    drop(file("a.jpg", "image/jpeg"));
+    expect(items()).toHaveLength(1);
+    expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(false);
+
+    await restore();
 
     expect(items()).toHaveLength(0);
-    expect(revokedUrls).toEqual(createdUrls);
-    expect(inputNames()).toEqual([]);
-    expect(zone().hasAttribute("data-dragover")).toBe(false);
+    expect(zone().getAttribute("data-stimeo--file-dropzone-invalid")).toBe("");
+  });
+
+  it("keeps the rejection hook of a selection-less zone across an in-page move", async () => {
+    await mount();
+    drop(file("notes.txt", "text/plain"));
+    const controller = application.getControllerForElementAndIdentifier(
+      document.querySelector("[data-controller='stimeo--file-dropzone']") as HTMLElement,
+      "stimeo--file-dropzone",
+    ) as FileDropzoneController;
+
+    controller.disconnect();
+    controller.connect();
+
+    expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(true);
+  });
+
+  it("discards a restored selection when the input target is gone", async () => {
+    await mount();
+    drop(file("a.jpg", "image/jpeg"), file("notes.txt", "text/plain"));
+    input().removeAttribute("data-stimeo--file-dropzone-target");
+    await tick();
+
+    await restore();
+
+    expect(items()).toHaveLength(0);
     expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(false);
   });
 
-  it("stops rewinding once the controller is gone", async () => {
+  it("puts the previews and the zone hooks back after a morph empties them in place", async () => {
     await mount();
-    drop(file("a.jpg", "image/jpeg"));
-    controller()?.disconnect();
-    await tick();
-    revokedUrls.length = 0;
+    drop(file("a.jpg", "image/jpeg"), file("notes.txt", "text/plain"));
+    const reports = reportsFrom();
+    const [item] = items();
 
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(revokedUrls).toEqual([]);
+    // A morph keeps only what the server rendered: no item, no hook.
+    list().replaceChildren();
+    zone().removeAttribute("data-stimeo--file-dropzone-invalid");
+    await tick();
+
+    expect(items()).toEqual([item]);
+    expect(inputNames()).toEqual(["a.jpg"]);
+    expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(true);
+    expect(reports).toEqual([]);
+  });
+
+  it("leaves the zone hooks alone on a list change that takes no preview out", async () => {
+    await mount();
+    drop(file("a.jpg", "image/jpeg"), file("notes.txt", "text/plain"));
+    // The page takes the rejection hook over, then adds a node of its own to the list.
+    zone().removeAttribute("data-stimeo--file-dropzone-invalid");
+    list().insertAdjacentHTML("beforeend", "<li>Uploaded earlier</li>");
+    await tick();
+
+    expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(false);
+  });
+
+  it("keeps its previews, its hooks and its silence when the same instance connects again", async () => {
+    await mount();
+    drop(file("a.jpg", "image/jpeg"), file("notes.txt", "text/plain"));
+    const reports = reportsFrom();
+    const instance = controller() as FileDropzoneController;
+
+    instance.disconnect();
+    instance.connect();
+    await tick();
+
+    expect(names()).toEqual(["a.jpg"]);
+    expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(true);
+    expect(reports).toEqual([]);
+  });
+
+  it("leaves the list alone when its own removal takes a preview out", async () => {
+    await mount();
+    drop(file("a.jpg", "image/jpeg"), file("b.jpg", "image/jpeg"));
+
+    removeButtons()[0]?.click();
+    await tick();
+
+    expect(names()).toEqual(["b.jpg"]);
+  });
+
+  it("stops watching its lists on disconnect", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe");
+    const release = vi.spyOn(MutationObserver.prototype, "disconnect");
+    try {
+      await mount();
+      const watch = observe.mock.calls.findIndex(
+        ([target, options]) =>
+          target === list() && JSON.stringify(options) === JSON.stringify({ childList: true }),
+      );
+      expect(watch).not.toBe(-1);
+      const watcher = observe.mock.contexts[watch];
+
+      controller()?.disconnect();
+      expect(release.mock.contexts).toContain(watcher);
+    } finally {
+      observe.mockRestore();
+      release.mockRestore();
+    }
   });
 
   it("revokes every preview URL once the disconnect proves a real detach", async () => {
@@ -678,6 +1416,43 @@ describe("FileDropzoneController", () => {
     await tick();
 
     expect(revokedUrls).toEqual(createdUrls);
+  });
+
+  it("clears selected files and zone state from a retained subtree on real detach", async () => {
+    await mount(ANNOUNCE_ATTRS);
+    drop(file("a.jpg", "image/jpeg"), file("b.jpg", "image/jpeg"), file("notes.txt", "text/plain"));
+    dragOver();
+    const element = root();
+    const retainedList = list();
+    const retainedInput = input();
+    const retainedZone = zone();
+    const instance = controller() as FileDropzoneController;
+    const authored = document.createElement("li");
+    retainedList.prepend(authored);
+    const reports = reportsFrom();
+    const messages = [...announcements];
+
+    expect(retainedList.children).toHaveLength(3);
+    expect(Array.from(retainedInput.files ?? []).map((selected) => selected.name)).toEqual([
+      "a.jpg",
+      "b.jpg",
+    ]);
+    expect(retainedZone.hasAttribute("data-dragover")).toBe(true);
+    expect(retainedZone.hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(true);
+    expect(createdUrls).toHaveLength(2);
+    expect(revokedUrls).toEqual([]);
+
+    element.remove();
+    instance.disconnect();
+
+    expect(element.isConnected).toBe(false);
+    expect(Array.from(retainedList.children)).toEqual([authored]);
+    expect(Array.from(retainedInput.files ?? [])).toEqual([]);
+    expect(retainedZone.hasAttribute("data-dragover")).toBe(false);
+    expect(retainedZone.hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(false);
+    expect(revokedUrls).toEqual(createdUrls);
+    expect(reports).toEqual([]);
+    expect(announcements).toEqual(messages);
   });
 
   it("keeps the selection when the element only moves within the page", async () => {
@@ -721,6 +1496,22 @@ describe("FileDropzoneController", () => {
     warn.mockRestore();
   });
 
+  it("reports an unusable template again on the next connection", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await mount("", undefined, without("name"));
+    drop(file("a.jpg", "image/jpeg"));
+    expect(warn).toHaveBeenCalledOnce();
+
+    const instance = controller() as FileDropzoneController;
+    instance.disconnect();
+    instance.connect();
+    drop(file("b.jpg", "image/jpeg"));
+
+    expect(items()).toHaveLength(0);
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+  });
+
   it.each([
     ["item", without("item"), '"item" root'],
     ["name", without("name"), '"name" target'],
@@ -761,20 +1552,6 @@ describe("FileDropzoneController", () => {
 
     expect(names()).toEqual(["a.jpg"]);
     expect(changes).toHaveLength(1);
-  });
-
-  it("still rewinds when a morph takes the input target away", async () => {
-    await mount();
-    dragOver();
-    drop(file("a.jpg", "image/jpeg"), file("notes.txt", "text/plain"));
-    input().removeAttribute("data-stimeo--file-dropzone-target");
-    await tick();
-
-    document.dispatchEvent(new Event("turbo:before-cache"));
-
-    expect(items()).toHaveLength(0);
-    expect(zone().hasAttribute("data-dragover")).toBe(false);
-    expect(zone().hasAttribute("data-stimeo--file-dropzone-invalid")).toBe(false);
   });
 
   it("leaves a drop an inner dropzone already handled alone", async () => {
@@ -823,5 +1600,32 @@ describe("FileDropzoneController", () => {
     await mount();
     const phrases = await captureSpeech({ container: root(), steps: 1 });
     expect(phrases).toEqual(["button, Choose files", "Upload files"]);
+  });
+
+  it("publishes a pending native file selection when its change is delivered", async () => {
+    await mount();
+    const chosen = file("first.png", "image/png");
+    const changes: unknown[] = [];
+    root().addEventListener("stimeo--file-dropzone:change", (event) =>
+      changes.push((event as CustomEvent).detail),
+    );
+    input().files = fileList(chosen);
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(changes).toEqual([{ files: [chosen] }]);
+    expect(names()).toEqual(["first.png"]);
+  });
+
+  it("does not report a duplicate native selection as another confirmed set", async () => {
+    await mount();
+    const chosen = file("first.png", "image/png");
+    chooseFiles(chosen);
+    const changes: unknown[] = [];
+    root().addEventListener("stimeo--file-dropzone:change", (event) =>
+      changes.push((event as CustomEvent).detail),
+    );
+    input().files = fileList(chosen);
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(changes).toEqual([]);
+    expect(names()).toEqual(["first.png"]);
   });
 });

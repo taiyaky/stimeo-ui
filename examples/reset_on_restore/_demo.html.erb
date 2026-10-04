@@ -1,0 +1,38 @@
+<%# Markup for the restore reset demo.
+    When Turbo restores a page from its cache (the Back button), the controller returns the
+    transient UI it covers to the way the page was written. A page still on screen is never
+    reset. "Simulate a restore" stands in for the Back button: demo.js puts a copy of the
+    covered region in its place, as Turbo does with a cached page, and the copy is reset as
+    it connects. Open the details, type in the field, and show the toast first. %>
+<div class="reset-demo">
+  <p class="reset-demo__note"><%= t("components.reset_on_restore.demo.note") %></p>
+
+  <div class="reset-demo__page" data-reset-demo="page" data-controller="stimeo--reset-on-restore">
+    <details class="reset-demo__details" data-reset-attr="open">
+      <summary><%= t("components.reset_on_restore.demo.details_summary") %></summary>
+      <p><%= t("components.reset_on_restore.demo.details_body") %></p>
+    </details>
+
+    <label class="reset-demo__field">
+      <span><%= t("components.reset_on_restore.demo.input_label") %></span>
+      <input type="text" class="demo-input" data-reset-value
+             placeholder="<%= t("components.reset_on_restore.demo.input_placeholder") %>">
+    </label>
+
+    <div class="reset-demo__toast" data-reset-demo="toast" data-reset-hidden hidden role="status">
+      <%= t("components.reset_on_restore.demo.toast_text") %>
+    </div>
+  </div>
+
+  <div class="reset-demo__controls">
+    <button type="button" class="demo-trigger" data-reset-demo="show-toast">
+      <%= t("components.reset_on_restore.demo.show_toast") %>
+    </button>
+    <button type="button" class="demo-trigger" data-reset-demo="simulate">
+      <%= t("components.reset_on_restore.demo.simulate") %>
+    </button>
+  </div>
+
+  <p class="reset-demo__status" data-reset-demo="status" aria-live="polite"
+     data-done-text="<%= t("components.reset_on_restore.demo.done") %>"></p>
+</div>

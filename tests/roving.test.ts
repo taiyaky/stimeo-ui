@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RovingController } from "../src/controllers/roving_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
@@ -258,6 +258,32 @@ describe("RovingController", () => {
     b.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
     expect(a.tabIndex).toBe(0);
     expect(b.tabIndex).toBe(-1);
+  });
+
+  it("releases the item-state observer on disconnect", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe");
+    const release = vi.spyOn(MutationObserver.prototype, "disconnect");
+    try {
+      await mount();
+      const watchers = observe.mock.calls.flatMap(([target, options], i) =>
+        target === group() && options?.attributeFilter?.includes("disabled")
+          ? [observe.mock.contexts[i]]
+          : [],
+      );
+      expect(watchers.length).toBeGreaterThan(0);
+      const controller = application.getControllerForElementAndIdentifier(
+        group(),
+        "stimeo--roving",
+      ) as RovingController;
+      const before = release.mock.calls.length;
+
+      controller.disconnect();
+      const released = release.mock.contexts.slice(before);
+      expect(released.some((observer) => watchers.includes(observer))).toBe(true);
+    } finally {
+      observe.mockRestore();
+      release.mockRestore();
+    }
   });
 
   it("skips a native-disabled item when moving", async () => {
@@ -519,6 +545,23 @@ describe("RovingController", () => {
     );
     arrow("#c", "ArrowRight"); // unreachable origin with nothing reachable past it
     expect(tabindexes()).toEqual([0, -1, -1]);
+  });
+
+  it("hands the Tab stop on when a fieldset around the group disables its holder", async () => {
+    document.body.innerHTML = `
+      <fieldset id="outer">
+        <div id="group" data-controller="stimeo--roving">
+          <button id="a" type="button" data-stimeo--roving-target="item" tabindex="0">A</button>
+          <span id="b" data-stimeo--roving-target="item" tabindex="-1">B</span>
+        </div>
+      </fieldset>`;
+    application = Application.start();
+    application.register("stimeo--roving", RovingController);
+    await tick();
+
+    query<HTMLFieldSetElement>("#outer").disabled = true;
+    await tick();
+    expect(["#a", "#b"].map((id) => query(id).tabIndex)).toEqual([-1, 0]);
   });
 
   it("keeps a non-form item reachable inside a disabled fieldset", async () => {

@@ -117,4 +117,20 @@ describe("getPrompt — rejection paths", () => {
   it("rejects non-object arguments", () => {
     expect(() => getPrompt("stimeo_build_ui", ["request"])).toThrow(InvalidPromptRequestError);
   });
+
+  it("names a non-object argument value as such", () => {
+    for (const args of ["request", ["request"], [], 7, true]) {
+      expect(() => getPrompt("stimeo_build_ui", args)).toThrow(
+        new InvalidPromptRequestError("Prompt arguments must be an object."),
+      );
+    }
+  });
+
+  it("treats absent or null arguments as no arguments, so the required one is reported", () => {
+    for (const args of [undefined, null]) {
+      expect(() => getPrompt("stimeo_build_ui", args)).toThrow(
+        new InvalidPromptRequestError('Argument "request" is required.'),
+      );
+    }
+  });
 });

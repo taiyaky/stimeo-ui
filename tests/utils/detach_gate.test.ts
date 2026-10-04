@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DetachGate, type DetachGateHost } from "../../src/utils/detach_gate";
-import { flushMicrotasks } from "../helpers/timing";
+import { flushMicrotasks, tick } from "../helpers/timing";
 
 /**
  * Unit tests for {@link DetachGate}: the synchronous fast path (element left
@@ -132,6 +132,71 @@ describe("DetachGate", () => {
       gate.disconnected(h, teardown);
       gate.disconnected(h, teardown);
       await flushMicrotasks();
+      expect(teardown).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("an element Turbo carries to the next page", () => {
+    /**
+     * An element inside a `data-turbo-permanent` element, out of the document: where Turbo
+     * holds it between taking it out of the old body and putting it into the new one.
+     */
+    const carriedHost = (token = IDENTIFIER): DetachGateHost => {
+      const permanent = document.createElement("div");
+      permanent.id = "perm";
+      permanent.setAttribute("data-turbo-permanent", "");
+      const el = document.createElement("div");
+      el.setAttribute("data-controller", token);
+      permanent.appendChild(el);
+      return host(el);
+    };
+
+    it("waits for the next task rather than the next microtask before tearing down", async () => {
+      const gate = new DetachGate();
+      const teardown = vi.fn();
+      gate.disconnected(carriedHost(), teardown);
+      await flushMicrotasks();
+      await flushMicrotasks();
+      expect(teardown).not.toHaveBeenCalled();
+      expect(gate.pending).toBe(true);
+      await tick();
+      expect(teardown).toHaveBeenCalledTimes(1);
+      expect(gate.pending).toBe(false);
+    });
+
+    it("keeps the state when the reconnection comes within the task", async () => {
+      const gate = new DetachGate();
+      const teardown = vi.fn();
+      gate.disconnected(carriedHost(), teardown);
+      await flushMicrotasks();
+      gate.cancel();
+      await tick();
+      expect(teardown).not.toHaveBeenCalled();
+    });
+
+    it("treats a permanent controller element itself as carried", async () => {
+      const el = document.createElement("div");
+      el.setAttribute("data-controller", IDENTIFIER);
+      el.setAttribute("data-turbo-permanent", "");
+      const teardown = vi.fn();
+      new DetachGate().disconnected(host(el), teardown);
+      expect(teardown).not.toHaveBeenCalled();
+      await tick();
+      expect(teardown).toHaveBeenCalledTimes(1);
+    });
+
+    it("still tears down at once when the identifier left the element", () => {
+      const teardown = vi.fn();
+      new DetachGate().disconnected(carriedHost("stimeo--other"), teardown);
+      expect(teardown).toHaveBeenCalledTimes(1);
+    });
+
+    it("tears down at once a permanent element that is back in the document without its identifier", () => {
+      const h = carriedHost();
+      document.body.appendChild(h.element.parentElement as HTMLElement);
+      h.element.setAttribute("data-controller", "");
+      const teardown = vi.fn();
+      new DetachGate().disconnected(h, teardown);
       expect(teardown).toHaveBeenCalledTimes(1);
     });
   });

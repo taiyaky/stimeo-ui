@@ -1,6 +1,7 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RelativeTimeController } from "../src/controllers/relative_time_controller";
+import { MAX_TIMER_DELAY_MS, SafeTimeout } from "../src/utils/safe_timeout";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
@@ -10,7 +11,8 @@ import { tick } from "./helpers/timing";
 /**
  * Behavioral tests for {@link RelativeTimeController}, driven by a mocked clock:
  * relative formatting (past/future), locale selection, adaptive updates, the
- * threshold fallback to absolute text, and timer teardown on disconnect.
+ * threshold fallback to absolute text, timer teardown on disconnect, and the fallback
+ * across Turbo's cache.
  */
 
 /** Fixed "now" so the relative arithmetic is deterministic. */
@@ -179,18 +181,94 @@ describe("RelativeTimeController", () => {
     expect(el().textContent).toBe("in 60 minutes");
   });
 
-  it("puts the authored absolute text back for the Turbo snapshot", async () => {
+  it.each([
+    ["integer boundary", NOW.getTime(), 3_600_000, 3600],
+    ["fractional boundary", NOW.getTime(), 258_795, 258.795],
+    ["distant boundary", -337_437_817_115_933, 8_977_437_817_115_933, 8_977_437_817_115.934],
+  ] as const)(
+    "requests a positive derived timeout at the %s",
+    async (_name, now, delta, threshold) => {
+      vi.setSystemTime(now);
+      const original = SafeTimeout.prototype.set;
+      /** Keeps an invalid zero request from spinning the fake clock; the spy records it unchanged. */
+      const schedule = vi.spyOn(SafeTimeout.prototype, "set").mockImplementation(function (
+        this: SafeTimeout,
+        callback: () => void,
+        delay: number,
+      ) {
+        return original.call(this, callback, Math.max(1, delay));
+      });
+      try {
+        await start(
+          new Date(now + delta).toISOString(),
+          `data-stimeo--relative-time-threshold-value="${threshold}"`,
+        );
+        expect(el().getAttribute("data-state")).toBe("absolute");
+        expect(schedule.mock.calls.length).toBeGreaterThan(0);
+        for (const [, delay] of schedule.mock.calls) expect(delay).toBe(1);
+
+        vi.advanceTimersByTime(2);
+        expect(el().getAttribute("data-state")).toBe("relative");
+        for (const [, delay] of schedule.mock.calls) {
+          expect(delay).toBeGreaterThanOrEqual(1);
+          expect(delay).toBeLessThanOrEqual(MAX_TIMER_DELAY_MS);
+        }
+        instance().disconnect();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        schedule.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ["huge threshold", Number.MAX_VALUE, "relative"],
+    ["distant future", 3600, "absolute"],
+  ] as const)("keeps the derived poll bounded for a %s", async (_name, threshold, state) => {
+    const schedule = vi.spyOn(SafeTimeout.prototype, "set");
+    try {
+      await start(
+        "+275760-09-13T00:00:00.000Z",
+        `data-stimeo--relative-time-threshold-value="${threshold}" data-stimeo--relative-time-tick-interval-value="${MAX_TIMER_DELAY_MS}"`,
+      );
+      expect(el().getAttribute("data-state")).toBe(state);
+      expect(schedule.mock.calls.length).toBeGreaterThan(0);
+      for (const [, delay] of schedule.mock.calls) expect(delay).toBe(MAX_TIMER_DELAY_MS);
+      vi.advanceTimersByTime(MAX_TIMER_DELAY_MS);
+      expect(el().getAttribute("data-state")).toBe(state);
+      for (const [, delay] of schedule.mock.calls) expect(delay).toBe(MAX_TIMER_DELAY_MS);
+      instance().disconnect();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      schedule.mockRestore();
+    }
+  });
+
+  it("keeps the relative reading through turbo:before-cache", async () => {
     await start(
       "2026-06-06T11:57:00Z", // 3 minutes ago
       'data-stimeo--relative-time-threshold-value="600"', // 10 minutes
       "2026-06-06 11:57",
     );
-    expect(el().textContent).toBe("3 minutes ago");
-    // Turbo takes its snapshot from this event, so this is the last moment a write
-    // reaches the DOM the Back button restores.
+    // Turbo dispatches it on pages that stay as well, where the reading must stay current.
     document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(el().textContent).toBe("2026-06-06 11:57");
-    expect(el().hasAttribute("data-state")).toBe(false);
+    expect(el().textContent).toBe("3 minutes ago");
+    expect(el().getAttribute("data-state")).toBe("relative");
+    vi.advanceTimersByTime(60_000);
+    expect(el().textContent).toBe("4 minutes ago");
+  });
+
+  it("records the authored text while it shows the relative form", async () => {
+    await start(
+      "2026-06-06T11:57:00Z",
+      'data-stimeo--relative-time-threshold-value="600"',
+      "2026-06-06 11:57",
+    );
+    expect(el().getAttribute("data-stimeo--relative-time-text")).toBe('"2026-06-06 11:57"');
+
+    vi.advanceTimersByTime(8 * 60_000); // past the threshold: the authored text is on display
+    expect(el().getAttribute("data-state")).toBe("absolute");
+    expect(el().hasAttribute("data-stimeo--relative-time-text")).toBe(false);
   });
 
   it("keeps the threshold contract after a cached page is restored", async () => {
@@ -199,56 +277,49 @@ describe("RelativeTimeController", () => {
       'data-stimeo--relative-time-threshold-value="600"',
       "2026-06-06 11:57",
     );
-    document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(el().textContent).toBe("3 minutes ago");
     const snapshot = document.body.innerHTML;
     document.body.innerHTML = "";
     await vi.advanceTimersByTimeAsync(0);
     vi.advanceTimersByTime(8 * 60_000); // away long enough to age past the threshold
     document.body.innerHTML = snapshot;
     await vi.advanceTimersByTimeAsync(0);
-    // The restored element carries the authored text, so the reconnected controller
-    // has a fallback to switch to — the stamp is 11 minutes old against a 10 minute
-    // threshold and the element is the only place that text could come from.
+    // The restored element shows the relative form and records the authored text, so the
+    // reconnected controller has a fallback to switch to — the stamp is 11 minutes old
+    // against a 10 minute threshold.
     expect(el().getAttribute("data-state")).toBe("absolute");
     expect(el().textContent).toBe("2026-06-06 11:57");
   });
 
-  it("keeps the live page polling after the snapshot rewind", async () => {
-    await start(
-      "2026-06-06T11:57:00Z",
-      'data-stimeo--relative-time-threshold-value="600"',
-      "2026-06-06 11:57",
-    );
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    vi.advanceTimersByTime(60_000);
-    // A page being cached is not a torn-down one: a navigation that never completes
-    // has to find the reading advancing again.
-    expect(el().textContent).toBe("4 minutes ago");
-    expect(el().getAttribute("data-state")).toBe("relative");
+  it("takes no fallback from a record that is not a JSON string", async () => {
+    for (const record of ["{", "5"]) {
+      document.body.innerHTML = `
+        <time data-controller="stimeo--relative-time" datetime="2026-06-06T11:49:00Z"
+              data-stimeo--relative-time-threshold-value="600" data-state="relative"
+              data-stimeo--relative-time-text='${record}'>3 minutes ago</time>`;
+      application = Application.start();
+      application.register("stimeo--relative-time", RelativeTimeController);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // 11 minutes old against a 10 minute threshold, and no authored text to fall back to.
+      expect(el().textContent).toBe("11 minutes ago");
+      disconnectAndStopApplication(application);
+    }
   });
 
-  it("leaves the relative marker in place when no authored text was captured", async () => {
+  it("keeps rendering relatively on a restored page with no authored text to fall back to", async () => {
     await start("2026-06-06T11:57:00Z", 'data-stimeo--relative-time-threshold-value="600"', "   ");
     expect(el().textContent).toBe("3 minutes ago");
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    // There is nothing to restore, and the rendered text must not be cached as an
-    // absolute fallback: the marker is what a reconnect reads to tell the two apart.
-    expect(el().textContent).toBe("3 minutes ago");
+    const snapshot = document.body.innerHTML;
+    document.body.innerHTML = "";
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(8 * 60_000);
+    document.body.innerHTML = snapshot;
+    await vi.advanceTimersByTimeAsync(0);
+    // The rendered text is never taken for the fallback: with none recorded, the
+    // element keeps the relative form instead of blanking or freezing.
+    expect(el().textContent).toBe("11 minutes ago");
     expect(el().getAttribute("data-state")).toBe("relative");
-  });
-
-  it("stops rewinding once disconnected", async () => {
-    await start(
-      "2026-06-06T11:57:00Z",
-      'data-stimeo--relative-time-threshold-value="600"',
-      "2026-06-06 11:57",
-    );
-    const node = el();
-    instance().disconnect();
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    // The subscription is symmetric with `connect()`, so a torn-down controller no
-    // longer writes into a tree it does not own.
-    expect(node.textContent).toBe("3 minutes ago");
   });
 
   it("follows a locale swapped in place by a morph", async () => {
@@ -285,6 +356,18 @@ describe("RelativeTimeController", () => {
     // The new cadence is armed from the swap, not from the pending ten-minute poll.
     vi.advanceTimersByTime(60_000);
     expect(el().textContent).toBe("1 minute ago");
+  });
+
+  it("drops the pending poll when a Value swap re-arms it", async () => {
+    await start("2026-06-06T11:57:00Z"); // 3 minutes ago, polled every minute
+    vi.advanceTimersByTime(30_000);
+    el().setAttribute("data-stimeo--relative-time-threshold-value", "3600");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(el().textContent).toBe("3 minutes ago");
+    // The swap re-armed the poll a minute from now; the one it replaced would have
+    // re-rendered thirty seconds from now.
+    vi.advanceTimersByTime(40_000);
+    expect(el().textContent).toBe("3 minutes ago");
   });
 
   it("repaints once when a morph swaps two render inputs together", async () => {

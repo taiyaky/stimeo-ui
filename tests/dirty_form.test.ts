@@ -358,6 +358,40 @@ describe("DirtyFormController", () => {
     expect(rearmed.defaultPrevented).toBe(true);
   });
 
+  it("re-arms the guard a task after a submit that neither navigates nor reaches Turbo", async () => {
+    const confirmMock = setConfirm(false);
+    await mount('<input name="title" value="a">');
+    edit("b");
+    submit();
+
+    const suppressed = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(suppressed);
+    expect(suppressed.defaultPrevented).toBe(false);
+
+    await tick();
+    const rearmed = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(rearmed);
+    expect(rearmed.defaultPrevented).toBe(true);
+    expect(beforeVisit().defaultPrevented).toBe(true);
+    expect(confirmMock).toHaveBeenCalledOnce();
+  });
+
+  it("clears the pending submit fallback on disconnect", async () => {
+    await mount('<input name="title" value="a">');
+    edit("b");
+    vi.useFakeTimers();
+    try {
+      submit();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      for (const controller of application.controllers) controller.disconnect();
+
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("confirms a Turbo visit while dirty and blocks it when declined", async () => {
     const confirmMock = setConfirm(false);
     await mount('<input name="title" value="a">');
@@ -453,6 +487,21 @@ describe("DirtyFormController", () => {
     const dirty = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(dirty);
     expect(dirty.defaultPrevented).toBe(true);
+  });
+
+  it("unwires beforeunload once the form is clean again", async () => {
+    await mount('<input name="title" value="a">');
+    const additions = vi.spyOn(window, "addEventListener");
+    const removals = vi.spyOn(window, "removeEventListener");
+    edit("b");
+    const guards = additions.mock.calls
+      .filter(([type]) => type === "beforeunload")
+      .map(([, listener]) => listener);
+    expect(guards.length).toBeGreaterThan(0);
+
+    edit("a");
+
+    for (const guard of guards) expect(removals).toHaveBeenCalledWith("beforeunload", guard);
   });
 
   it("clears dirty on a successful turbo:submit-end", async () => {
@@ -757,6 +806,20 @@ describe("DirtyFormController", () => {
       await tick();
       beforeVisit();
       expect(confirmMock).toHaveBeenCalledOnce();
+    });
+
+    it("drops the document visit listener once the last form disconnects", async () => {
+      const additions = vi.spyOn(document, "addEventListener");
+      const removals = vi.spyOn(document, "removeEventListener");
+      await mountSeveral(markup());
+      const visitListeners = additions.mock.calls
+        .filter(([type]) => type === "turbo:before-visit")
+        .map(([, listener]) => listener);
+      expect(visitListeners).toHaveLength(1);
+
+      application.unload("stimeo--dirty-form");
+
+      expect(removals).toHaveBeenCalledWith("turbo:before-visit", visitListeners[0]);
     });
 
     it("skips a later form removed by an earlier guard consumer", async () => {

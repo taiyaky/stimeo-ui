@@ -53,6 +53,38 @@ describe("SliderController", () => {
     thumb().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
   const fraction = () => root().style.getPropertyValue("--stimeo--slider-fraction");
 
+  it.each(["replace", "read", "repeat"])(
+    "keeps only current pending reports after a field listener: %s",
+    async (mode) => {
+      const field = document.createElement("input");
+      field.type = "hidden";
+      field.setAttribute("data-stimeo--slider-target", "field");
+      root().append(field);
+      await tick();
+      const changes: number[] = [];
+      root().addEventListener("stimeo--slider:change", (event) =>
+        changes.push((event as CustomEvent).detail.value),
+      );
+      const snapshots: Array<string | null> = [];
+      let handled = false;
+      field.addEventListener(
+        "change",
+        () => {
+          if (handled) return;
+          handled = true;
+          snapshots.push(thumb().getAttribute("aria-valuenow"));
+          if (mode === "replace") press("Home");
+          if (mode === "repeat") press("End");
+        },
+        { once: true },
+      );
+      press("End");
+      expect(snapshots).toEqual(["100"]);
+      expect(changes).toEqual(mode === "replace" ? [0] : [100]);
+      expect(field.value).toBe(mode === "replace" ? "0" : "100");
+    },
+  );
+
   it("reflects the initial value and fraction", () => {
     expect(thumb().getAttribute("aria-valuenow")).toBe("40");
     expect(thumb().getAttribute("aria-valuemin")).toBe("0");
@@ -106,6 +138,60 @@ describe("SliderController", () => {
     events.stop();
   });
 
+  it("repaints a minimum changed on its own", async () => {
+    const events = captureStateEvents("stimeo--slider", ["change", "reconcile"]);
+    root().setAttribute("data-stimeo--slider-min-value", "20");
+    controller().minValueChanged();
+    await flushMicrotasks();
+
+    expect(thumb().getAttribute("aria-valuemin")).toBe("20");
+    expect(fraction()).toBe("0.25");
+    expect(events.names()).toEqual([]);
+    events.stop();
+  });
+
+  it("repaints a step changed on its own", async () => {
+    const events = captureStateEvents("stimeo--slider", ["change", "reconcile"]);
+    root().setAttribute("data-stimeo--slider-step-value", "25");
+    controller().stepValueChanged();
+    await flushMicrotasks();
+
+    // 40 is off the new grid and snaps to its nearest point.
+    expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+    expect(fraction()).toBe("0.5");
+    expect(events.seen.map(({ name, detail }) => ({ name, detail }))).toEqual([
+      { name: "reconcile", detail: { value: 50 } },
+    ]);
+    events.stop();
+  });
+
+  it("hydrates a replacement thumb before a live drag moves focus onto it", () => {
+    track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    track().dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 120, pointerId: 14, bubbles: true }),
+    );
+    const previous = thumb();
+    const replacement = document.createElement("div");
+    replacement.setAttribute("data-stimeo--slider-target", "thumb");
+    replacement.setAttribute("role", "slider");
+    replacement.setAttribute("tabindex", "0");
+    replacement.setAttribute("aria-label", "Volume");
+    const announced: Array<string | null> = [];
+    replacement.addEventListener("focus", () =>
+      announced.push(replacement.getAttribute("aria-valuenow")),
+    );
+    previous.replaceWith(replacement);
+
+    controller().thumbTargetDisconnected(previous);
+    controller().thumbTargetConnected(replacement);
+
+    expect(document.activeElement).toBe(replacement);
+    expect(announced).toEqual(["60"]);
+    expect(replacement.getAttribute("aria-valuemin")).toBe("0");
+    expect(replacement.getAttribute("aria-valuemax")).toBe("100");
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 14, bubbles: true }));
+  });
+
   it("hydrates a replacement thumb with current ARIA without dispatching change", async () => {
     const changes = vi.fn();
     root().addEventListener("stimeo--slider:change", changes);
@@ -123,6 +209,43 @@ describe("SliderController", () => {
     expect(replacement.getAttribute("aria-valuemax")).toBe("100");
     expect(replacement.getAttribute("aria-valuenow")).toBe("40");
     expect(changes).not.toHaveBeenCalled();
+  });
+
+  it("brings a thumb that stays to a value moved while an earlier one was first", async () => {
+    const original = thumb();
+    const successor = original.cloneNode(true) as HTMLElement;
+    original.after(successor);
+    await tick();
+    press("ArrowRight");
+    await tick();
+    const events = captureStateEvents("stimeo--slider", ["change", "reconcile"]);
+    original.remove();
+    await tick();
+
+    expect(thumb()).toBe(successor);
+    expect(successor.getAttribute("aria-valuenow")).toBe("50");
+    // The thumb that stays is brought to the value silently.
+    expect(events.seen).toEqual([]);
+    events.stop();
+  });
+
+  it("keeps publishing the value when the sole thumb leaves", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const leaving = thumb();
+      leaving.remove();
+      await tick();
+      expect(() => controller().thumbTargetDisconnected(leaving)).not.toThrow();
+      await tick();
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+
+    root().setAttribute("data-stimeo--slider-value-value", "70");
+    controller().valueValueChanged();
+    await flushMicrotasks();
+    expect(fraction()).toBe("0.7");
   });
 
   it("transfers focus to a replacement thumb during an active drag", () => {
@@ -224,6 +347,14 @@ describe("SliderController", () => {
     expect(fraction()).toBe("0.4");
   });
 
+  it("consumes a key it handles so the page does not scroll", () => {
+    for (const key of ["ArrowRight", "ArrowDown", "PageUp", "Home"]) {
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      thumb().dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    }
+  });
+
   it("ignores unrelated keys without preventing default", () => {
     const event = new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true });
     thumb().dispatchEvent(event);
@@ -246,6 +377,21 @@ describe("SliderController", () => {
     track.getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
     track.dispatchEvent(new PointerEvent("pointerdown", { clientX: 150, bubbles: true }));
     expect(thumb().getAttribute("aria-valuenow")).toBe("80");
+  });
+
+  it("consumes the primary press it turns into a value", () => {
+    track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    const press = new PointerEvent("pointerdown", {
+      clientX: 150,
+      pointerId: 3,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    track().dispatchEvent(press);
+
+    expect(press.defaultPrevented).toBe(true);
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 3, bubbles: true }));
   });
 
   it("moves focus to the thumb when a primary pointer interaction starts", () => {
@@ -292,6 +438,31 @@ describe("SliderController", () => {
       new PointerEvent("pointermove", { clientX: 100, pointerId: 7, bubbles: true }),
     );
     expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+  });
+
+  it("maps each move of a live drag onto the range current at that move", async () => {
+    track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    track().dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 100, pointerId: 5, bubbles: true }),
+    );
+    expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+
+    root().setAttribute("data-stimeo--slider-max-value", "200");
+    await tick();
+    document.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 100, pointerId: 5, bubbles: true }),
+    );
+    expect(thumb().getAttribute("aria-valuenow")).toBe("100");
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 5, bubbles: true }));
+
+    // The next press reads the range as it stands then.
+    root().setAttribute("data-stimeo--slider-min-value", "100");
+    await tick();
+    track().dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 100, pointerId: 6, bubbles: true }),
+    );
+    expect(thumb().getAttribute("aria-valuenow")).toBe("150");
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 6, bubbles: true }));
   });
 
   it("keeps the drag alive when the track loses pointer capture", () => {
@@ -360,6 +531,28 @@ describe("SliderController", () => {
       ),
     ).not.toThrow();
     expect(activeThumb.getAttribute("aria-valuenow")).toBe("80");
+  });
+
+  it("ends the drag at the first move after its track left the document, so the next press starts anew", () => {
+    const activeTrack = track();
+    activeTrack.getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+    activeTrack.dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 160, pointerId: 15, bubbles: true }),
+    );
+    const parent = activeTrack.parentElement as HTMLElement;
+
+    // No target callback reports the removal here; the move finds the track detached.
+    activeTrack.remove();
+    document.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 0, pointerId: 15, bubbles: true }),
+    );
+    parent.append(activeTrack);
+    activeTrack.dispatchEvent(
+      new PointerEvent("pointerdown", { clientX: 40, pointerId: 16, bubbles: true }),
+    );
+
+    expect(thumb().getAttribute("aria-valuenow")).toBe("20");
+    document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 16, bubbles: true }));
   });
 
   it("ends when the live track remains connected but ceases to be a target", () => {
@@ -516,6 +709,27 @@ describe("SliderController", () => {
       expect(thumb().getAttribute("aria-valuenow")).toBe("100");
     });
 
+    it("keeps the direction a drag started with when logicalTrack changes, and reads it anew at the next press", async () => {
+      root().style.direction = "rtl";
+      track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+      track().dispatchEvent(
+        new PointerEvent("pointerdown", { clientX: 40, pointerId: 2, bubbles: true }),
+      );
+      expect(thumb().getAttribute("aria-valuenow")).toBe("20");
+
+      root().setAttribute("data-stimeo--slider-logical-track-value", "true");
+      await tick();
+      // The live drag keeps the physical mapping it resolved at its press.
+      document.dispatchEvent(
+        new PointerEvent("pointermove", { clientX: 160, pointerId: 2, bubbles: true }),
+      );
+      expect(thumb().getAttribute("aria-valuenow")).toBe("80");
+      document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 2, bubbles: true }));
+
+      pressTrack(160);
+      expect(thumb().getAttribute("aria-valuenow")).toBe("20");
+    });
+
     it("trades the horizontal arrows on a logical track under RTL", () => {
       root().setAttribute("data-stimeo--slider-logical-track-value", "true");
       root().style.direction = "rtl";
@@ -578,6 +792,43 @@ describe("SliderController", () => {
       commits.stop();
     });
 
+    it.each([false, true])(
+      "canonicalizes an invalid Value at its fractional fallback before reports (published: %s)",
+      async (published) => {
+        await mount();
+        root().setAttribute("data-stimeo--slider-min-value", "-100.25");
+        root().setAttribute("data-stimeo--slider-step-value", "0.25");
+        controller().minValueChanged();
+        controller().stepValueChanged();
+        await flushMicrotasks();
+        root().setAttribute("data-stimeo--slider-value-value", "NaN");
+        if (published) {
+          controller().valueValueChanged();
+          await flushMicrotasks();
+        }
+        const readings: Array<[string, number, string]> = [];
+        const read = (event: string) =>
+          readings.push([event, controller().valueValue, field().value]);
+        field().addEventListener("change", () => read("native"));
+        root().addEventListener("stimeo--slider:change", () => read("change"));
+        expect(root().getAttribute("data-stimeo--slider-value-value")).toBe("NaN");
+
+        press("Home");
+
+        expect(root().getAttribute("data-stimeo--slider-value-value")).toBe("-100.25");
+        expect(field().value).toBe("-100.25");
+        expect(thumb().getAttribute("aria-valuenow")).toBe("-100.25");
+        expect(readings).toEqual(
+          published
+            ? []
+            : [
+                ["native", -100.25, "-100.25"],
+                ["change", -100.25, "-100.25"],
+              ],
+        );
+      },
+    );
+
     it("seeds the field from the value without reporting a commit", async () => {
       await mount();
 
@@ -636,6 +887,43 @@ describe("SliderController", () => {
 
       expect(late.value).toBe("40");
       expect(commits.seen).toEqual([]);
+    });
+
+    it("reflects the value into a field that stays after an earlier one leaves", async () => {
+      await mount();
+      commits.clear();
+      const events = captureStateEvents("stimeo--slider", ["change", "reconcile"]);
+      const original = field();
+      const successor = original.cloneNode() as HTMLInputElement;
+      successor.value = "";
+      original.after(successor);
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(field()).toBe(successor);
+      expect(successor.value).toBe("40");
+      // The field that stays is brought to the value silently.
+      expect(commits.seen).toEqual([]);
+      expect(events.seen).toEqual([]);
+      events.stop();
+    });
+
+    it("keeps stepping when the sole field leaves", async () => {
+      await mount();
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        field().remove();
+        await tick();
+        expect(() => controller().fieldTargetDisconnected()).not.toThrow();
+        await tick();
+        expect(errors).not.toHaveBeenCalled();
+      } finally {
+        errors.mockRestore();
+      }
+
+      press("ArrowRight");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("50");
     });
   });
 

@@ -4,6 +4,7 @@ import { CompositionTracker } from "../utils/composition_tracker";
 import { ownerIndex } from "../utils/event_owner";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { isRtl } from "../utils/logical_scroll";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { RovingTabindex, type RovingWrap, rovingMove } from "../utils/roving_tabindex";
 
 /**
@@ -98,13 +99,16 @@ export class ToolbarController extends Controller<HTMLElement> {
    */
   #connected = false;
 
+  readonly #morph = new MorphRenderWatcher(() => this.#ensureTabStop());
+
   override connect(): void {
+    this.#morph.observe(this.element);
     this.#ensureTabStop();
     this.element.addEventListener("keydown", this.#onKeydown);
     this.element.addEventListener("focusin", this.#onFocusin);
     this.#composition.observe(this.element);
     if (typeof MutationObserver !== "undefined") {
-      const observer = new MutationObserver(() => this.#ensureTabStop());
+      const observer = new MutationObserver(() => this.#morph.schedule());
       observer.observe(this.element, {
         subtree: true,
         childList: true,
@@ -128,6 +132,7 @@ export class ToolbarController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
+    this.#morph.disconnect();
     this.#connected = false;
     this.element.removeEventListener("keydown", this.#onKeydown);
     this.element.removeEventListener("focusin", this.#onFocusin);

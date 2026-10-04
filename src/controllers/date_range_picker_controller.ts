@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { AttributeLease } from "../utils/attribute_lease";
 import {
   monthLabelFormatter,
   parseISODateString,
@@ -10,8 +11,9 @@ import {
 } from "../utils/dates";
 import { commitField, writeField } from "../utils/field_mirror";
 import { resolveLocale } from "../utils/locale";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { SafeTimeout } from "../utils/safe_timeout";
+import type { StateReason } from "../utils/state_reason";
 import { parseStringList } from "../utils/string_list";
 import { targetSelector } from "../utils/target_selector";
 
@@ -45,6 +47,10 @@ const GRID_SIZE = 42;
  *     <input type="hidden" data-stimeo--date-range-picker-target="startField" />
  *     <input type="hidden" data-stimeo--date-range-picker-target="endField" />
  *   </div>
+ *
+ * Confirming the range already published reports no `change`. Pending page
+ * availability is applied by the confirmation and compared with the range last
+ * published, so the resulting state is reported once.
  *
  * @remarks
  * Behavior only — the consumer styles the grid and renders the range using the
@@ -93,6 +99,8 @@ const GRID_SIZE = 42;
  * dropped, as Escape would drop it, and the next pick starts a new one.
  */
 export class DateRangePickerController extends Controller<HTMLElement> {
+  readonly #fieldWrites = new WeakMap<HTMLInputElement, number>();
+
   static override targets = ["grid", "monthLabel", "cell", "status", "startField", "endField"];
   static override values = {
     min: { type: String, default: "" },
@@ -107,6 +115,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   static events = ["change", "monthchange", "reconcile"] as const;
 
   declare readonly gridTarget: HTMLElement;
+  declare readonly gridTargets: HTMLElement[];
   declare readonly hasGridTarget: boolean;
   declare readonly monthLabelTarget: HTMLElement;
   declare readonly cellTargets: HTMLElement[];
@@ -149,17 +158,20 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   /** The declared unavailable dates, indexed for the per-cell paint lookup. */
   #disabledDates = new Set<string>();
 
-  /** Rewinds an unfinished selection before Turbo snapshots the page. */
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
-
   /** Last painted month, or `null` until the initial paint has settled. */
   #announcedMonth: string | null = null;
+
+  /** Borrows `aria-multiselectable` on the grid, to give back once an element stops being it. */
+  readonly #multiselectable = new AttributeLease<HTMLElement>(
+    "aria-multiselectable",
+    this.identifier,
+  );
 
   /**
    * Collapses a morph that swaps render inputs into one repaint, and refuses the
    * pass Stimulus delivers before `connect()`.
    */
-  readonly #repaint = new MicrotaskCoalescer(() => {
+  readonly #repaint = new MorphRenderWatcher(() => {
     this.#render();
   });
 
@@ -169,8 +181,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
    * to the fields silently.
    */
   override connect(): void {
-    this.#repaint.activate();
-    this.#beforeCache.activate();
+    this.#repaint.observe(this.element);
     const authoredStart = this.hasStartFieldTarget ? normalizeISO(this.startFieldTarget.value) : "";
     const authoredEnd = this.hasEndFieldTarget ? normalizeISO(this.endFieldTarget.value) : "";
     [this.#startDate, this.#endDate] = this.#selectableRange(
@@ -184,17 +195,12 @@ export class DateRangePickerController extends Controller<HTMLElement> {
       parseISODateString(this.#startDate) ?? this.#clampToBounds(new Date()) ?? new Date();
     this.#focusedDate = anchor;
     this.#viewMonth = toISOMonthString(anchor);
-    // A confirmed range can carry `aria-selected="true"` on two cells, so the
-    // grid has to say that more than one is selectable — otherwise a single-select
-    // grid is claiming two selections.
-    if (this.hasGridTarget) this.gridTarget.setAttribute("aria-multiselectable", "true");
     this.#render();
   }
 
   /** Cancels any pending deferred focus so it never fires on a detached element. */
   override disconnect(): void {
-    this.#repaint.cancel();
-    this.#beforeCache.deactivate();
+    this.#repaint.disconnect();
     this.#focusTimer.clearAll();
   }
 
@@ -219,6 +225,51 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
+  /** Repaints so a grid inserted or replaced at runtime is painted and marked multiselectable. */
+  gridTargetConnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /**
+   * Gives a grid that no longer resolves as one its own `aria-multiselectable` back — after
+   * `disconnect()` too, since dropping the identifier leaves the element on the page — and
+   * repaints so the grid that stays is painted.
+   */
+  gridTargetDisconnected(grid: HTMLElement): void {
+    if (!this.gridTargets.includes(grid)) this.#multiselectable.return(grid);
+    this.#repaint.schedule();
+  }
+
+  /** Repaints so a month label inserted or replaced at runtime names the month on screen. */
+  monthLabelTargetConnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints so the month label that stays when an earlier one leaves names the month. */
+  monthLabelTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints so a start field inserted or replaced at runtime holds the confirmed start. */
+  startFieldTargetConnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints so the start field that stays when an earlier one leaves holds the start. */
+  startFieldTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints so an end field inserted or replaced at runtime holds the confirmed end. */
+  endFieldTargetConnected(): void {
+    this.#repaint.schedule();
+  }
+
+  /** Repaints so the end field that stays when an earlier one leaves holds the end. */
+  endFieldTargetDisconnected(): void {
+    this.#repaint.schedule();
+  }
+
   /** Navigates to the previous month. */
   prev(event?: Event): void {
     event?.preventDefault();
@@ -231,24 +282,30 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     this.#shiftMonth(1);
   }
 
-  /** Confirms a range endpoint from a clicked cell. */
-  selectDate(event: Event): void {
-    const cell = this.#cellFrom(event.target);
+  /** Confirms a range endpoint from an action event, an owned cell, or its descendant. */
+  selectDate(source: Event | HTMLElement): void {
+    const { origin, reason } = actionSource(source);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const cell = this.#cellFrom(origin);
     if (!cell) return;
     const date = cell.getAttribute("data-date");
     if (!date || !this.#isSelectable(date)) return;
-    this.#choose(date);
+    this.#choose(date, reason);
   }
 
-  /** Previews the range up to a hovered/focused cell while selecting. */
-  previewTo(event: Event): void {
-    const cell = this.#cellFrom(event.target);
+  /** Previews an owned cell while selecting; element calls preserve the focused date. */
+  previewTo(source: Event | HTMLElement): void {
+    const { event, origin } = actionSource(source);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const cell = this.#cellFrom(origin);
     if (!cell) return;
     const date = cell.getAttribute("data-date");
     if (!date) return;
     let shouldRender = false;
     // Focus moves the roving tabindex; hover does not.
-    if (event.type.startsWith("focus")) {
+    if (event?.type.startsWith("focus")) {
       const parsed = parseISODateString(date);
       if (parsed) this.#focusedDate = parsed;
       shouldRender = cell.getAttribute("tabindex") !== "0";
@@ -263,8 +320,11 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   }
 
   /** Applies a named preset (`today` / `last7` / `last30` / `thisMonth`). */
-  applyPreset(event: Event): void {
-    const button = (event.target as HTMLElement | null)?.closest("[data-range]");
+  applyPreset(source: Event | HTMLElement): void {
+    const { event, origin, reason } = actionSource(source);
+    const button = origin?.closest("[data-range]");
+    if (!button || !this.element.contains(button)) return;
+    const focus = event !== null || this.element.contains(document.activeElement);
     const range = computePreset(button?.getAttribute("data-range") ?? "");
     if (!range) return;
 
@@ -281,8 +341,13 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     const move = this.#setConfirmed(start, end);
     const endDate = parseISODateString(end);
     if (endDate) this.#focusedDate = endDate;
-    this.#transitionTo(toISOMonthString(parseISODateString(end) ?? new Date()), end, true);
-    this.#reportConfirmed(move);
+    this.#transitionTo(
+      toISOMonthString(parseISODateString(end) ?? new Date()),
+      end,
+      true,
+      () => focus && (event !== null || this.element.contains(document.activeElement)),
+    );
+    this.#reportConfirmed(move, reason);
   }
 
   /** Grid keyboard navigation, selection (Enter/Space), and Escape-to-cancel. */
@@ -352,7 +417,7 @@ export class DateRangePickerController extends Controller<HTMLElement> {
   }
 
   /** Records a chosen date as either the pending start or the confirmed end. */
-  #choose(date: string): void {
+  #choose(date: string, reason: StateReason = "user"): void {
     // A pending start the availability has taken away cannot become an
     // endpoint — the next paint drops it — so this pick starts a new selection.
     if (!this.#pendingStart || !this.#isSelectable(this.#pendingStart)) {
@@ -368,20 +433,22 @@ export class DateRangePickerController extends Controller<HTMLElement> {
       date < this.#pendingStart ? [date, this.#pendingStart] : [this.#pendingStart, date];
     const move = this.#setConfirmed(start, end);
     this.#render(true);
-    this.#reportConfirmed(move);
+    this.#reportConfirmed(move, reason);
   }
 
   /**
    * Makes `start`–`end` the confirmed range, ending any selection in progress,
    * ahead of the paint that shows it.
    *
-   * @returns The move count the range is now at, which its `change` checks.
+   * @returns The move token, or null when the confirmed range did not move.
    */
-  #setConfirmed(start: string, end: string): number {
+  #setConfirmed(start: string, end: string): number | null {
+    const changed = start !== this.#startDate || end !== this.#endDate;
     this.#startDate = start;
     this.#endDate = end;
     this.#pendingStart = "";
     this.#previewDate = "";
+    if (!changed) return null;
     this.#rangeMoves += 1;
     return this.#rangeMoves;
   }
@@ -391,9 +458,9 @@ export class DateRangePickerController extends Controller<HTMLElement> {
    * reported it through the fields. A listener of those reports that moved the
    * range on has had the range it moved to reported instead.
    */
-  #reportConfirmed(move: number): void {
-    if (move !== this.#rangeMoves) return;
-    this.dispatch("change", { detail: { start: this.#startDate, end: this.#endDate } });
+  #reportConfirmed(move: number | null, reason: StateReason): void {
+    if (move === null || move !== this.#rangeMoves) return;
+    this.dispatch("change", { detail: { start: this.#startDate, end: this.#endDate, reason } });
   }
 
   /** Moves roving focus to `date`, transitioning the month when needed. */
@@ -413,15 +480,16 @@ export class DateRangePickerController extends Controller<HTMLElement> {
    *
    * @param confirmed - Whether the paint shows a range the user has just confirmed.
    */
-  #transitionTo(month: string, dateStr: string, confirmed = false): void {
+  #transitionTo(month: string, dateStr: string, confirmed = false, canFocus = () => true): void {
     const isTransition = month !== this.#viewMonth;
     this.#focusTimer.clearAll();
     this.#viewMonth = month;
     this.#transitions += 1;
     const transition = this.#transitions;
     this.#render(confirmed);
-    if (transition !== this.#transitions) return;
+    if (transition !== this.#transitions || !canFocus()) return;
     const focusCell = (): void => {
+      if (!canFocus()) return;
       this.cellTargets.find((c) => c.getAttribute("data-date") === dateStr)?.focus();
     };
     if (isTransition) {
@@ -456,6 +524,10 @@ export class DateRangePickerController extends Controller<HTMLElement> {
    * @stimeoRenderRoot
    */
   #render(confirmed = false): void {
+    // A confirmed range can carry `aria-selected="true"` on two cells, so the
+    // grid has to say that more than one is selectable — otherwise a single-select
+    // grid is claiming two selections.
+    if (this.hasGridTarget) this.#multiselectable.write(this.gridTarget, "true");
     const info = parseISOMonthString(this.#viewMonth);
     if (!info) return;
     const { year, month } = info;
@@ -532,13 +604,13 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     // range, so a listener of any of them reads what it is told about. A
     // listener of one may replace the range before the next goes out; the
     // replacing range then reports itself, so a field only reports while it
-    // holds the value this paint wrote to it.
+    // holds the value this paint wrote to it and no later paint rewrote it.
     const move = this.#rangeMoves;
     const moved = this.#mirrorFields();
     if (confirmed) {
       this.#announce();
-      for (const [field, value] of moved) {
-        if (field.value === value) commitField(field);
+      for (const [field, value, write] of moved) {
+        if (field.value === value && this.#fieldWrites.get(field) === write) commitField(field);
       }
     }
 
@@ -608,18 +680,33 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     return [this.#startDate, this.#endDate];
   }
 
+  /** Records each field write so a later write back to the same value supersedes it. */
+  #writeField(field: HTMLInputElement, value: string): boolean {
+    if (!writeField(field, value)) return false;
+    this.#fieldWrites.set(field, (this.#fieldWrites.get(field) ?? 0) + 1);
+    return true;
+  }
+
   /**
    * Writes the confirmed range to the hidden fields.
    *
    * @returns Each field whose value moved, with the value written to it.
    */
-  #mirrorFields(): [HTMLInputElement, string][] {
-    const moved: [HTMLInputElement, string][] = [];
-    if (this.hasStartFieldTarget && writeField(this.startFieldTarget, this.#startDate)) {
-      moved.push([this.startFieldTarget, this.#startDate]);
+  #mirrorFields(): [HTMLInputElement, string, number][] {
+    const moved: [HTMLInputElement, string, number][] = [];
+    if (this.hasStartFieldTarget && this.#writeField(this.startFieldTarget, this.#startDate)) {
+      moved.push([
+        this.startFieldTarget,
+        this.#startDate,
+        this.#fieldWrites.get(this.startFieldTarget) ?? 0,
+      ]);
     }
-    if (this.hasEndFieldTarget && writeField(this.endFieldTarget, this.#endDate)) {
-      moved.push([this.endFieldTarget, this.#endDate]);
+    if (this.hasEndFieldTarget && this.#writeField(this.endFieldTarget, this.#endDate)) {
+      moved.push([
+        this.endFieldTarget,
+        this.#endDate,
+        this.#fieldWrites.get(this.endFieldTarget) ?? 0,
+      ]);
     }
     return moved;
   }
@@ -677,22 +764,13 @@ export class DateRangePickerController extends Controller<HTMLElement> {
     return start <= end ? { start, end } : null;
   }
 
-  /** Removes provisional range state before Turbo freezes a cached snapshot. */
-  #rewindForCache(): void {
-    this.#focusTimer.clearAll();
-    if (!this.#pendingStart && !this.#previewDate) return;
-    this.#pendingStart = "";
-    this.#previewDate = "";
-    this.#render();
-  }
-
-  /** Resolves the cell element from an event target, or null. */
+  /** Resolves a currently owned cell from an event target or supplied element. */
   #cellFrom(target: EventTarget | null): HTMLElement | null {
-    return (
-      (target as HTMLElement | null)?.closest<HTMLElement>(
-        targetSelector(this.identifier, "cell"),
-      ) ?? null
-    );
+    const cell =
+      target instanceof Element
+        ? target.closest<HTMLElement>(targetSelector(this.identifier, "cell"))
+        : null;
+    return cell && this.cellTargets.includes(cell) ? cell : null;
   }
 }
 

@@ -89,6 +89,140 @@ describe("TagsInputController", () => {
     input().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
   };
 
+  it.each([false, true])(
+    "keeps the outer tag change when a field listener only reads or repeats (%s)",
+    async (repeat) => {
+      await mount('data-stimeo--tags-input-name-value="tags[]"');
+      const seen: string[][] = [];
+      root().addEventListener("stimeo--tags-input:change", (event) =>
+        seen.push((event as CustomEvent).detail.tags),
+      );
+      root()
+        .querySelector('[data-stimeo--tags-input-target="fields"]')
+        ?.addEventListener(
+          "change",
+          () => {
+            expect(fields().map((field) => field.value)).toEqual(["Rails"]);
+            if (repeat) type("Rails", "Enter");
+          },
+          { once: true },
+        );
+      type("Rails", "Enter");
+      expect(seen).toEqual([["Rails"]]);
+    },
+  );
+
+  it("stops pending reports after a replacement from a field listener", async () => {
+    await mount('data-stimeo--tags-input-announce-text-value="{value} added"');
+    const seen: string[][] = [];
+    root().addEventListener("stimeo--tags-input:change", (event) =>
+      seen.push((event as CustomEvent).detail.tags),
+    );
+    let replaced = false;
+    const replace = () => {
+      if (replaced) return;
+      replaced = true;
+      type("second", "Enter");
+    };
+    root()
+      .querySelector(`[data-stimeo--tags-input-target="fields"]`)
+      ?.addEventListener("change", replace);
+    try {
+      type("first", "Enter");
+      expect(seen).toEqual([["first", "second"]]);
+      expect(announcements.map((item) => item.message)).toEqual(["second added"]);
+    } finally {
+      root()
+        .querySelector(`[data-stimeo--tags-input-target="fields"]`)
+        ?.removeEventListener("change", replace);
+    }
+  });
+
+  it("stops pending reports after a replacement from a announcement listener", async () => {
+    await mount('data-stimeo--tags-input-announce-text-value="{value} added"');
+    const seen: string[][] = [];
+    root().addEventListener("stimeo--tags-input:change", (event) =>
+      seen.push((event as CustomEvent).detail.tags),
+    );
+    let replaced = false;
+    const replace = () => {
+      if (replaced) return;
+      replaced = true;
+      type("second", "Enter");
+    };
+    window?.addEventListener("stimeo--announcer:announce", replace);
+    try {
+      type("first", "Enter");
+      expect(seen).toEqual([["first", "second"]]);
+      expect(announcements.map((item) => item.message)).toEqual(["first added", "second added"]);
+    } finally {
+      window?.removeEventListener("stimeo--announcer:announce", replace);
+    }
+  });
+
+  it("reports only the replacement tags and publishes the full flag before listeners", async () => {
+    await mount(
+      'data-stimeo--tags-input-name-value="tags[]" data-stimeo--tags-input-max-value="1"',
+    );
+    const seen: string[][] = [];
+    const reconciles: Event[] = [];
+    const full: boolean[] = [];
+    let replaced = false;
+    root().addEventListener("stimeo--tags-input:change", (event) =>
+      seen.push((event as CustomEvent).detail.tags),
+    );
+    root().addEventListener("stimeo--tags-input:reconcile", (event) => reconciles.push(event));
+    const container = root().querySelector(
+      '[data-stimeo--tags-input-target="fields"]',
+    ) as HTMLElement;
+    container.addEventListener(
+      "change",
+      () => {
+        if (replaced) return;
+        replaced = true;
+        full.push(root().hasAttribute("data-stimeo--tags-input-full"));
+        buttons()[0]?.click();
+      },
+      { once: true },
+    );
+    type("Rails", "Enter");
+    expect(seen).toEqual([[]]);
+    expect(full).toEqual([true]);
+    expect(root().hasAttribute("data-stimeo--tags-input-full")).toBe(false);
+    await tick();
+    expect(reconciles).toEqual([]);
+  });
+
+  it("includes page-added tags in the next user commit", async () => {
+    await mount();
+    const seen: string[][] = [];
+    root().addEventListener("stimeo--tags-input:change", (event) =>
+      seen.push((event as CustomEvent).detail.tags),
+    );
+    const tag = document.createElement("li");
+    tag.dataset.value = "Page";
+    tag.setAttribute("data-stimeo--tags-input-target", "tag");
+    tag.innerHTML =
+      '<button data-stimeo--tags-input-target="remove" aria-label="Remove Page"></button>';
+    root().querySelector('[data-stimeo--tags-input-target="tags"]')?.append(tag);
+    type("User", "Enter");
+    expect(seen).toEqual([["Page", "User"]]);
+  });
+
+  it("does not report removal of a page-added tag that restores the published tags", async () => {
+    await mount();
+    const seen: Event[] = [];
+    root().addEventListener("stimeo--tags-input:change", (event) => seen.push(event));
+    const tag = document.createElement("li");
+    tag.dataset.value = "Page";
+    tag.setAttribute("data-stimeo--tags-input-target", "tag");
+    tag.innerHTML =
+      '<button data-stimeo--tags-input-target="remove" aria-label="Remove Page"></button>';
+    root().querySelector('[data-stimeo--tags-input-target="tags"]')?.append(tag);
+    type("", "Backspace");
+    expect(seen).toEqual([]);
+  });
+
   it("reverses the horizontal arrows under RTL, in the input and across the chips", async () => {
     // Logical direction: the chips are an ordered row, and the input
     // sits at its logical end, so the key that reaches back into the chips
@@ -265,6 +399,19 @@ describe("TagsInputController", () => {
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["Vue"]);
   });
 
+  // An unconsumed Enter would submit the enclosing form, and an unconsumed
+  // delimiter would be typed into the input that was just cleared.
+  it.each(["Enter", ","])("consumes the %j that commits a tag", async (key) => {
+    await mount();
+    input().value = "Vue";
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+
+    input().dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["Vue"]);
+  });
+
   it("does not commit on the Enter that confirms an IME composition", async () => {
     await mount();
     input().value = "ぎじゅつ";
@@ -319,6 +466,40 @@ describe("TagsInputController", () => {
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["日本語"]);
   });
 
+  it("tracks the composition on an input that replaces the original", async () => {
+    await mount();
+    const original = input();
+    const replacement = original.cloneNode() as HTMLInputElement;
+    original.replaceWith(replacement);
+    controller().inputTargetDisconnected(original);
+    controller().inputTargetConnected(replacement);
+    replacement.value = "日本語";
+    replacement.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+
+    controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(tags()).toHaveLength(0);
+
+    replacement.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["日本語"]);
+  });
+
+  it("forgets a composition left open on an input that was replaced", async () => {
+    await mount();
+    const original = input();
+    original.value = "にほ";
+    original.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    const replacement = original.cloneNode() as HTMLInputElement;
+    original.replaceWith(replacement);
+    controller().inputTargetDisconnected(original);
+    controller().inputTargetConnected(replacement);
+    replacement.value = "React";
+
+    controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["React"]);
+  });
+
   it("mirrors tags into hidden fields with the configured name", async () => {
     await mount('data-stimeo--tags-input-name-value="frameworks[]"');
     type("React", "Enter");
@@ -347,6 +528,71 @@ describe("TagsInputController", () => {
     replacement.setAttribute("data-stimeo--tags-input-target", "fields");
     root().append(replacement);
     await tick();
+
+    expect(fields().map((field) => [field.name, field.value])).toEqual([["frameworks[]", "React"]]);
+  });
+
+  it("fills a fields container that arrives after connect", async () => {
+    await mount();
+    type("React", "Enter");
+    root().querySelector("[data-stimeo--tags-input-target='fields']")?.remove();
+    const replacement = document.createElement("div");
+    replacement.setAttribute("data-stimeo--tags-input-target", "fields");
+    root().append(replacement);
+
+    controller().fieldsTargetConnected();
+    await flushMicrotasks();
+
+    expect(fields().map((field) => [field.name, field.value])).toEqual([["tags[]", "React"]]);
+  });
+
+  it("mirrors the tags into a fields container that stays after an earlier one leaves", async () => {
+    await mount();
+    type("React", "Enter");
+    await tick();
+    const heard: string[] = [];
+    for (const name of ["stimeo--tags-input:change", "stimeo--tags-input:reconcile", "change"]) {
+      root().addEventListener(name, () => heard.push(name));
+    }
+    const original = root().querySelector(
+      "[data-stimeo--tags-input-target='fields']",
+    ) as HTMLElement;
+    const successor = original.cloneNode() as HTMLElement;
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(fields().map((field) => [field.name, field.value])).toEqual([["tags[]", "React"]]);
+    expect(successor.querySelector("input")?.value).toBe("React");
+    // The container that stays is brought to the tags silently.
+    expect(heard).toEqual([]);
+  });
+
+  it("keeps adding tags when the sole fields container leaves", async () => {
+    await mount();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      root().querySelector("[data-stimeo--tags-input-target='fields']")?.remove();
+      await tick();
+      expect(() => controller().fieldsTargetDisconnected()).not.toThrow();
+      await tick();
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+
+    type("Vue", "Enter");
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["Vue"]);
+  });
+
+  it("renames the submitted fields when the name Value changes", async () => {
+    await mount();
+    type("React", "Enter");
+
+    root().setAttribute("data-stimeo--tags-input-name-value", "frameworks[]");
+    controller().nameValueChanged();
+    await flushMicrotasks();
 
     expect(fields().map((field) => [field.name, field.value])).toEqual([["frameworks[]", "React"]]);
   });
@@ -392,6 +638,36 @@ describe("TagsInputController", () => {
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["React", "Svelte"]);
   });
 
+  it("ends an empty-input Backspace removal in the input after its change listeners", async () => {
+    await mount();
+    type("React", "Enter");
+    type("Vue", "Enter");
+    root().addEventListener("stimeo--tags-input:change", () => input().blur());
+    input().value = "";
+    input().focus();
+
+    input().dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["React"]);
+    expect(document.activeElement).toBe(input());
+  });
+
+  it("consumes the empty-input Backspace that removes the last tag", async () => {
+    await mount();
+    type("React", "Enter");
+    input().value = "";
+    const event = new KeyboardEvent("keydown", {
+      key: "Backspace",
+      bubbles: true,
+      cancelable: true,
+    });
+
+    input().dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(tags()).toEqual([]);
+  });
+
   it("removes the full hook when the tag count drops below max", async () => {
     await mount('data-stimeo--tags-input-max-value="2"');
     type("React", "Enter");
@@ -400,6 +676,18 @@ describe("TagsInputController", () => {
 
     input().focus();
     input().dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+
+    expect(root().hasAttribute("data-stimeo--tags-input-full")).toBe(false);
+  });
+
+  it("recomputes the full hook when the max Value changes", async () => {
+    await mount('data-stimeo--tags-input-max-value="1"');
+    type("React", "Enter");
+    expect(root().hasAttribute("data-stimeo--tags-input-full")).toBe(true);
+
+    root().setAttribute("data-stimeo--tags-input-max-value", "2");
+    controller().maxValueChanged();
+    await flushMicrotasks();
 
     expect(root().hasAttribute("data-stimeo--tags-input-full")).toBe(false);
   });
@@ -427,6 +715,22 @@ describe("TagsInputController", () => {
     expect(document.activeElement).toBe(buttons()[1]);
     buttons()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
     expect(document.activeElement).toBe(input()); // past the end -> input
+  });
+
+  it("consumes the empty-input ArrowLeft that reaches into the chips", async () => {
+    await mount();
+    type("React", "Enter");
+    input().value = "";
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowLeft",
+      bubbles: true,
+      cancelable: true,
+    });
+
+    input().dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(buttons()[0]);
   });
 
   it("leaves a modified arrow to the browser (Alt+Left/Right is history navigation)", async () => {
@@ -604,6 +908,66 @@ describe("TagsInputController", () => {
     buttons()[0]?.click();
 
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["React"]);
+  });
+
+  it("binds chip removal to a tags row that becomes the target after connect", async () => {
+    document.body.innerHTML = markup().replace('data-stimeo--tags-input-target="tags"', "");
+    application = Application.start();
+    application.register("stimeo--tags-input", TagsInputController);
+    await tick();
+    const row = root().querySelector<HTMLElement>("ul") as HTMLElement;
+
+    row.setAttribute("data-stimeo--tags-input-target", "tags");
+    controller().tagsTargetConnected(row);
+    await flushMicrotasks();
+    type("React", "Enter");
+    buttons()[0]?.click();
+
+    expect(tags()).toEqual([]);
+  });
+
+  it("releases a tags row as soon as it stops being the target", async () => {
+    await mount();
+    type("React", "Enter");
+    const row = root().querySelector<HTMLElement>(
+      "[data-stimeo--tags-input-target='tags']",
+    ) as HTMLElement;
+    const remove = row.querySelector<HTMLButtonElement>("button") as HTMLButtonElement;
+
+    row.removeAttribute("data-stimeo--tags-input-target");
+    controller().tagsTargetDisconnected(row);
+    remove.click();
+    remove.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+
+    expect(tags().map((tag) => tag.dataset.value)).toEqual(["React"]);
+  });
+
+  it("binds the remaining tags row when the row in use leaves", async () => {
+    await mount();
+    const first = root().querySelector<HTMLElement>(
+      "[data-stimeo--tags-input-target='tags']",
+    ) as HTMLElement;
+    const second = document.createElement("ul");
+    second.setAttribute("role", "list");
+    second.setAttribute("aria-label", "Tags");
+    second.setAttribute("data-stimeo--tags-input-target", "tags");
+    second.innerHTML = `
+      <li role="listitem" data-value="React" data-stimeo--tags-input-target="tag">
+        <span data-stimeo--tags-input-target="label">React</span>
+        <button type="button" tabindex="0" aria-label="Remove React"
+                data-stimeo--tags-input-target="remove">×</button>
+      </li>`;
+    first.after(second);
+    controller().tagsTargetConnected(second);
+    controller().tagTargetConnected(second.querySelector("li") as HTMLElement);
+    await tick();
+
+    first.remove();
+    controller().tagsTargetDisconnected(first);
+    await flushMicrotasks();
+    second.querySelector<HTMLButtonElement>("button")?.click();
+
+    expect(tags()).toEqual([]);
   });
 
   it("reconciles externally-added and removed tags without emitting change", async () => {
@@ -786,6 +1150,21 @@ describe("TagsInputController", () => {
         fields().map(() => "filters"),
       );
       expect(commits.seen).toEqual([container()]);
+    });
+
+    it("repoints the generated inputs silently when the form Value changes", async () => {
+      await mount();
+      type("alpha", "Enter");
+      commits.clear();
+
+      root().setAttribute("data-stimeo--tags-input-form-value", "filters");
+      controller().formValueChanged();
+      await flushMicrotasks();
+
+      expect(fields().map((input) => [input.value, input.getAttribute("form")])).toEqual([
+        ["alpha", "filters"],
+      ]);
+      expect(commits.seen).toEqual([]);
     });
   });
 

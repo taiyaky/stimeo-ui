@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { AttributeLease } from "../utils/attribute_lease";
 import {
   canTakeFocus,
   isRenderedForFocus,
@@ -32,6 +33,13 @@ import {
  * `role="alert"`. Focus retreats to, in order: the `fallback` target → the next
  * focusable element after the root → the previous one → `document.body` as a
  * last resort (weak focus; prefer providing a `fallback`).
+ *
+ * A dismissal acts once, on the root present then. A root that arrives later — in
+ * one task, or after an earlier one leaves in a later task — is open: it gets
+ * `data-state="open"` when it carries no `data-state`, silently. A root that stops
+ * resolving as the target gets that default back; what a dismissal wrote stays, and so
+ * does it on a root of a page Turbo restores, which carries the default an earlier
+ * connection wrote, the first root or not.
  */
 export class DismissibleController extends Controller<HTMLElement> {
   static override targets = ["root", "fallback"];
@@ -43,6 +51,7 @@ export class DismissibleController extends Controller<HTMLElement> {
   static events = ["dismiss"] as const;
 
   declare readonly rootTarget: HTMLElement;
+  declare readonly rootTargets: HTMLElement[];
   declare readonly fallbackTarget: HTMLElement;
   declare readonly hasRootTarget: boolean;
   declare readonly hasFallbackTarget: boolean;
@@ -50,16 +59,40 @@ export class DismissibleController extends Controller<HTMLElement> {
   declare modeValue: string;
   declare closeOnEscapeValue: boolean;
 
+  /** Owns the `open` default written on a root, so one that departs gets its own value back. */
+  readonly #openDefault = new AttributeLease<HTMLElement>("data-state", this.identifier);
+  /** Whether `connect()` has run for this connection; target callbacks arrive outside it too. */
+  #connected = false;
+
   override connect(): void {
-    const root = this.#root;
-    if (!root.hasAttribute("data-state")) {
-      root.setAttribute("data-state", "open");
-    }
+    this.#establishOpen(this.#root);
     this.#syncEscapeListener();
+    this.#connected = true;
   }
 
   override disconnect(): void {
+    this.#connected = false;
     this.element.removeEventListener("keydown", this.#onKeydown);
+  }
+
+  /**
+   * Writes the `open` default onto a root that arrives after connect, and gives the
+   * controller element, the root while there was none, its own `data-state` back.
+   */
+  rootTargetConnected(root: HTMLElement): void {
+    if (!this.#connected) return;
+    if (!this.rootTargets.includes(this.element)) this.#openDefault.return(this.element);
+    this.#establishOpen(root);
+  }
+
+  /**
+   * Gives a root that no longer resolves as the target its own `data-state` back — after
+   * `disconnect()` too, since dropping the identifier leaves the element on the page — and,
+   * while connected, writes the `open` default onto the root left.
+   */
+  rootTargetDisconnected(root: HTMLElement): void {
+    if (!this.rootTargets.includes(root)) this.#openDefault.return(root);
+    if (this.#connected && this.hasRootTarget) this.#establishOpen(this.rootTarget);
   }
 
   /** Keeps the Escape listener aligned with a live `closeOnEscape` Value. */
@@ -90,6 +123,11 @@ export class DismissibleController extends Controller<HTMLElement> {
     if (this.closeOnEscapeValue) {
       this.element.addEventListener("keydown", this.#onKeydown);
     }
+  }
+
+  /** Writes `data-state="open"` onto `root` when it carries no `data-state`. */
+  #establishOpen(root: HTMLElement): void {
+    if (!root.hasAttribute("data-state")) this.#openDefault.write(root, "open");
   }
 
   /** The element to dismiss: the explicit `root` target, or the host element. */

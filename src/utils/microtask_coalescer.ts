@@ -36,10 +36,6 @@
  * chips or hidden fields — stays in the controller, because no two consumers
  * answer it the same way.
  *
- * This file's own doc block is dropped from `dist`, but every member comment is
- * inlined into each consumer entry (`tsup` builds with `splitting: false`), so
- * rationale belongs here and only the contract belongs on the members.
- *
  * @example
  * ```ts
  * readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileOptions());

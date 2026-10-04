@@ -1,9 +1,12 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { AttributeLease } from "../utils/attribute_lease";
 import { DetachGate } from "../utils/detach_gate";
 import { matchingPart, writeLabel } from "../utils/element_part";
+import { ownerOf } from "../utils/event_owner";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { TemplateRow } from "../utils/template_row";
 
 /** Why one file was turned away, in the order the checks run. */
@@ -17,6 +20,9 @@ const DRAGOVER_ATTRIBUTE = "data-dragover";
  * the next batch.
  */
 const INVALID_ATTRIBUTE = "invalid";
+
+/** Suffix of the mark on every item this controller renders; see the class remarks. */
+const GENERATED_ATTRIBUTE = "generated";
 
 /** One selected file paired with its rendered item and any preview objectURL. */
 interface Entry {
@@ -85,7 +91,10 @@ interface RejectBatch {
  * - The accepted set is mirrored onto the native input, so a plain form submit
  *   carries the dropped files with no JavaScript from the consumer. Where
  *   `DataTransfer` cannot be constructed the previews and events still work and the
- *   input keeps whatever the native dialog last put there.
+ *   input keeps whatever the native dialog last put there. An input that takes
+ *   over — in one task, or after an earlier one leaves in a later task — gets the
+ *   accepted set too, silently; the files on one that departs are its own form value
+ *   and stay.
  * - Removing a file revokes its `objectURL` and moves focus to the next (else
  *   previous) remove button, falling back to the trigger.
  * - Additions, rejections, removals, and the drag affordance are handed to the
@@ -98,20 +107,34 @@ interface RejectBatch {
  *   disabled `fieldset` the zone never becomes a drop target, matching what the
  *   native click and keyboard paths already do.
  * - Replacing the `list` target rebinds delegated removal and moves the
- *   client-only previews into the replacement; a morph that empties the list in
- *   place moves them back on the next interaction.
+ *   client-only previews into the replacement; a list inserted behind the current
+ *   one receives them only once the current one leaves. A morph that empties the
+ *   list in place — a Turbo morph does, as the server never rendered them — moves
+ *   them back at once, and the drag and rejection hooks the morph took off with them.
+ *   A preview taken out any other way comes back the same way: the remove button is
+ *   what drops a file.
  * `reject` dispatches `{ file: File, reason: "type" | "size" | "duplicate" | "count" }`.
  * `change` and `reconcile` dispatch `{ files: File[] }`.
  *
  * @remarks
  * Previews are client-only state that no restored snapshot can revive — the `File`
- * objects and their `blob:` URLs die with the page. Just before Turbo caches the
- * page the generated items are removed, every `objectURL` revoked, and both state
- * attributes withdrawn, so a restored snapshot starts pristine instead of showing
- * rows that cannot be removed and do not count towards `maxFiles`. A `disconnect()`
- * that turns out to be an in-page move keeps the selection intact.
+ * objects and their `blob:` URLs die with the page. Every item this controller renders
+ * carries `data-<identifier>-generated`, so a page Turbo restores from its cache, which
+ * still shows the items of the page it copied, is recognised when it connects: a
+ * connection that holds no selection of its own removes the marked items it finds in
+ * its lists, empties the native input, withdraws both state attributes, and reports the
+ * empty selection as `reconcile`. Rows that cannot be removed and do not count towards
+ * `maxFiles` therefore never stay on a restored page. Nothing is undone on
+ * `turbo:before-cache`, which Turbo also dispatches on pages that stay — a promoted
+ * frame navigation, a state-less `popstate`, a refresh of a cached URL, a
+ * `data-turbo-permanent` element carried to the next page — where the selection is the
+ * one the form is about to submit. A `disconnect()` that turns out to be an in-page move
+ * keeps the selection intact, and so does a permanent element's reconnection.
  */
 export class FileDropzoneController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   /** The hook above, in the namespace this controller is registered under. */
   get #invalidAttribute(): string {
     return `data-${this.identifier}-${INVALID_ATTRIBUTE}`;
@@ -140,10 +163,16 @@ export class FileDropzoneController extends Controller<HTMLElement> {
     announceRejectedDuplicateText: { type: String, default: "" },
     announceRejectedCountText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    maxSize: NUMBER_BOUNDS.nonNegative,
+    maxFiles: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof FileDropzoneController.values>;
   static actions = ["onChange", "onDragLeave", "onDragOver", "onDrop", "openDialog"] as const;
   static events = ["change", "reject", "reconcile"] as const;
 
   declare readonly inputTarget: HTMLInputElement;
+  declare readonly inputTargets: HTMLInputElement[];
   declare readonly listTarget: HTMLElement;
   declare readonly listTargets: HTMLElement[];
   declare readonly triggerTarget: HTMLElement;
@@ -154,6 +183,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
   declare readonly hasItemTemplateTarget: boolean;
   declare readonly hasZoneTarget: boolean;
   declare readonly zoneTarget: HTMLElement;
+  declare readonly zoneTargets: HTMLElement[];
 
   declare maxSizeValue: number;
   declare maxFilesValue: number;
@@ -170,6 +200,12 @@ export class FileDropzoneController extends Controller<HTMLElement> {
   readonly #entries: Entry[] = [];
   /** Whether a drag is currently over the zone; the source for `data-dragover`. */
   #dragging = false;
+  /** Whether the last batch turned a file away; the source for the invalid hook. */
+  #invalid = false;
+  /** Borrows `data-dragover` on the zone, to give back when an element stops being the zone. */
+  readonly #dragoverHook = new AttributeLease<HTMLElement>(DRAGOVER_ATTRIBUTE, this.identifier);
+  /** Borrows the invalid hook on the zone, for the same return. */
+  readonly #invalidHook = new AttributeLease<HTMLElement>(this.#invalidAttribute, this.identifier);
   /** Builds one preview item from the authored template and owns its diagnostic. */
   readonly #rows = new TemplateRow({
     identifier: this.identifier,
@@ -181,13 +217,35 @@ export class FileDropzoneController extends Controller<HTMLElement> {
     noun: "item template",
   });
   readonly #gate = new DetachGate();
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
+  /**
+   * Watches every list this controller renders into, so previews a morph empties out
+   * of the list in place come back at once, with the zone hooks the same morph took off.
+   */
+  readonly #listWatch = new MutationObserver((records) => {
+    const lost = records.some((record) =>
+      Array.from(record.removedNodes).some((node) =>
+        this.#entries.some((entry) => entry.item === node),
+      ),
+    );
+    if (!lost) return;
+    this.#rehome();
+    this.#paintZone();
+  });
+  /** Whether the controller is between `connect()` and `disconnect()`. */
+  #connected = false;
 
-  /** Subscribes to the Turbo cache rewind and re-arms the template diagnostic. */
+  /** The item mark above, in the namespace this controller is registered under. */
+  get #generatedAttribute(): string {
+    return `data-${this.identifier}-${GENERATED_ATTRIBUTE}`;
+  }
+
+  /** Re-arms the template diagnostic and discards the items a restored page carries. */
   override connect(): void {
+    const moved = this.#gate.pending;
     this.#gate.cancel();
+    this.#connected = true;
     this.#rows.connect();
-    this.#beforeCache.activate();
+    if (!moved) this.#discardInherited();
   }
 
   /**
@@ -196,32 +254,85 @@ export class FileDropzoneController extends Controller<HTMLElement> {
    * preview URL on a move would leave a live item pointing at a dead `blob:`.
    */
   override disconnect(): void {
+    this.#connected = false;
     for (const list of this.listTargets) list.removeEventListener("click", this.#onItemClick);
-    this.#beforeCache.deactivate();
+    this.#listWatch.disconnect();
     this.#gate.disconnected(this, () => this.#teardown());
   }
 
   /**
-   * Binds removal and restores client-only previews for every list this controller
-   * renders into — the one present at connect and any Turbo puts in its place.
-   * This is the only place the listener is attached, so the pair with
-   * {@link listTargetDisconnected} keeps it from outliving the element it is on.
+   * Removes the marked items a connection that is not the other half of a move finds in
+   * its lists: the copy of an earlier selection on a page restored from Turbo's cache,
+   * whose files did not survive, and gives the zone hooks such a copy carries back to the
+   * author. A discarded selection empties the native input and the zone and is reported
+   * once as `reconcile`; hooks alone are given back silently. The reconnection that
+   * completes an in-page move or a permanent carry keeps its selection and its hooks.
+   */
+  #discardInherited(): void {
+    let discarded = false;
+    for (const list of this.listTargets) {
+      for (const item of Array.from(list.children)) {
+        if (!item.hasAttribute(this.#generatedAttribute)) continue;
+        item.remove();
+        discarded = true;
+      }
+    }
+    for (const zone of this.zoneTargets) {
+      this.#dragoverHook.return(zone);
+      this.#invalidHook.return(zone);
+    }
+    if (!discarded) return;
+    this.#dragging = false;
+    this.#invalid = false;
+    this.#syncInput();
+    this.dispatch("reconcile", { detail: { files: this.#files } });
+  }
+
+  /**
+   * Binds removal on every list this controller renders into — the one present at
+   * connect and any Turbo puts in its place — watches it for previews taken out of it,
+   * and restores client-only previews into the list that is first, so a list waiting
+   * behind the current one stays empty. This is the only place the listener is
+   * attached, so the pair with {@link listTargetDisconnected} keeps it from outliving
+   * the element it is on; the watch ends with the connection.
    */
   listTargetConnected(list: HTMLElement): void {
-    this.#bindList(list);
+    list.addEventListener("click", this.#onItemClick);
+    this.#listWatch.observe(list, { childList: true });
+    this.#rehome();
   }
 
-  /** Releases only the list target that actually disconnected. */
+  /** Releases the list that disconnected and moves the previews into the list that stays. */
   listTargetDisconnected(list: HTMLElement): void {
     list.removeEventListener("click", this.#onItemClick);
+    if (this.#connected) this.#rehome();
   }
 
-  /** Binds delegated removal once and moves live preview items into the current list. */
-  #bindList(list: HTMLElement): void {
-    list.addEventListener("click", this.#onItemClick);
-    for (const entry of this.#entries) {
-      if (!list.contains(entry.item)) list.appendChild(entry.item);
-    }
+  /** Mirrors the accepted set onto an input that arrives after connect. */
+  inputTargetConnected(): void {
+    if (this.#connected) this.#syncInput();
+  }
+
+  /** Mirrors the accepted set onto the input left once an earlier one departs. */
+  inputTargetDisconnected(): void {
+    if (this.#connected) this.#syncInput();
+  }
+
+  /** Writes the drag and rejection hooks onto a zone that arrives after connect. */
+  zoneTargetConnected(): void {
+    if (this.#connected) this.#paintZone();
+  }
+
+  /**
+   * Gives a zone that no longer resolves as the target its own hooks back — after
+   * `disconnect()` too, since dropping the identifier leaves the element on the page —
+   * and, while connected, writes them onto the zone left.
+   */
+  zoneTargetDisconnected(zone: HTMLElement): void {
+    if (this.zoneTargets.includes(zone)) return;
+    this.#dragoverHook.return(zone);
+    this.#invalidHook.return(zone);
+    if (this.#connected) this.#paintZone();
   }
 
   /** Opens the native file dialog. Bound via `data-action` (trigger click). */
@@ -231,14 +342,15 @@ export class FileDropzoneController extends Controller<HTMLElement> {
   }
 
   /**
-   * Adds the files chosen through the native dialog. The input holds only what
-   * the dialog just returned, so the accepted set is written back over it once
-   * the batch is validated.
+   * Adds the files chosen through the native dialog, read from the input the `change`
+   * came from — an input waiting behind the one in use included — or from the input in
+   * use for an event no input dispatched and for a call with no event. The dialog
+   * leaves only its own answer on that input, so the accepted set is written back over
+   * the input in use once the batch is validated.
    */
-  onChange(): void {
-    const files = this.inputTarget.files;
+  onChange(event?: Event): void {
+    const files = (ownerOf(this.inputTargets, event?.target) ?? this.inputTarget).files;
     if (files) this.#addFiles(files);
-    else this.#syncInput();
   }
 
   /**
@@ -252,7 +364,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
     event.preventDefault();
     if (this.#dragging) return;
     this.#dragging = true;
-    if (this.hasZoneTarget) this.zoneTarget.setAttribute(DRAGOVER_ATTRIBUTE, "");
+    this.#paintZone();
     // No file is involved yet, so only `{total}` resolves; the rest stay as authored.
     announce(fillTemplate(this.announceDragTextValue, { total: this.#entries.length }));
   }
@@ -303,7 +415,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
    */
   #addFiles(files: FileList): void {
     this.#rehome();
-    if (this.hasZoneTarget) this.zoneTarget.removeAttribute(this.#invalidAttribute);
+    this.#invalid = false;
     const rejected = new Map<RejectReason, RejectBatch>();
     const turnedAway: Array<{ file: File; reason: RejectReason }> = [];
     let addedName = "";
@@ -311,7 +423,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
     for (const file of Array.from(files)) {
       const reason = this.#validate(file);
       if (reason !== null) {
-        if (this.hasZoneTarget) this.zoneTarget.setAttribute(this.#invalidAttribute, "");
+        this.#invalid = true;
         const batch = rejected.get(reason);
         if (batch) batch.count += 1;
         else rejected.set(reason, { name: file.name, count: 1 });
@@ -324,6 +436,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
       if (added === 0) addedName = file.name;
       added += 1;
     }
+    this.#paintZone();
     this.#syncInput();
     // The batch reports what it took before what it turned away — the same order
     // the announcements use. A consumer that clears its rejection notice when a
@@ -347,7 +460,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
    */
   #validate(file: File): RejectReason | null {
     if (!this.#matchesAccept(file)) return "type";
-    if (this.maxSizeValue > 0 && file.size > this.maxSizeValue) return "size";
+    if (this.#safeMaxSize > 0 && file.size > this.#safeMaxSize) return "size";
     if (
       !this.allowDuplicatesValue &&
       this.#entries.some((entry) => this.#isSame(entry.file, file))
@@ -387,6 +500,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
     const row = this.#rows.instantiate(this.itemTemplateTarget, { name: file.name });
     if (!row) return false;
     const item = row.root;
+    item.setAttribute(this.#generatedAttribute, "");
     writeLabel(row.slots.name, file.name);
     // A declared thumbnail is the authored `<img>`; nothing else can take a `src`.
     const thumb = row.slots.thumb as HTMLImageElement | null;
@@ -469,9 +583,9 @@ export class FileDropzoneController extends Controller<HTMLElement> {
    * widget keeps working and the consumer still receives every `File` on `change`.
    */
   #syncInput(): void {
-    // The rewind runs from the shared before-cache pass, where a throw would rob
-    // every later subscriber of its own rewind — and a morph can take the input
-    // target away before that point.
+    // A morph can take the input target away before a teardown or a restored
+    // page's discard reaches here, and the departure of the only input reaches
+    // here with no input left as well.
     if (!this.hasInputTarget) return;
     const transfer = this.#newTransfer();
     if (!transfer) return;
@@ -505,25 +619,23 @@ export class FileDropzoneController extends Controller<HTMLElement> {
   /** Drops the drag-over state, whether the drag ended in a drop or left the zone. */
   #endDrag(): void {
     this.#dragging = false;
-    if (this.hasZoneTarget) this.zoneTarget.removeAttribute(DRAGOVER_ATTRIBUTE);
+    this.#paintZone();
+  }
+
+  /** Writes the drag and rejection hooks onto the zone from the controller's state. */
+  #paintZone(): void {
+    if (!this.hasZoneTarget) return;
+    this.#dragoverHook.write(this.zoneTarget, this.#dragging ? "" : null);
+    this.#invalidHook.write(this.zoneTarget, this.#invalid ? "" : null);
   }
 
   /**
-   * Discards the selection and every state attribute this controller wrote, so
-   * neither a cached snapshot nor a stranded subtree keeps items whose files are
-   * gone. Silent: `change` means a selection the user changed, and the cache
-   * rewind reports itself as `reconcile` instead.
+   * Discards the selection and every state attribute this controller wrote, so a
+   * stranded subtree keeps no items whose files are gone. Silent: `change` means a
+   * selection the user changed, and nobody reads a subtree left behind.
    */
-  #rewindForCache(): void {
-    const had = this.#entries.length > 0;
-    this.#reset();
-    // The rewind decides the selection is gone, so consumers that painted from
-    // `change` (or from `reject`) can drop what they drew before the snapshot is
-    // taken. Nothing to report when there was nothing to discard.
-    if (had) this.dispatch("reconcile", { detail: { files: this.#files } });
-  }
-
   #reset(): void {
+    this.#invalid = false;
     for (const entry of this.#entries) {
       if (entry.url) URL.revokeObjectURL(entry.url);
       entry.item.remove();
@@ -531,12 +643,10 @@ export class FileDropzoneController extends Controller<HTMLElement> {
     this.#entries.length = 0;
     this.#syncInput();
     this.#endDrag();
-    if (this.hasZoneTarget) this.zoneTarget.removeAttribute(this.#invalidAttribute);
   }
 
   /** Releases the selection once the disconnect is known to be a real detach. */
   #teardown(): void {
-    this.#gate.cancel();
     this.#reset();
   }
 
@@ -547,7 +657,7 @@ export class FileDropzoneController extends Controller<HTMLElement> {
 
   /** Effective file cap: `maxFiles`, or 1 when the input is single-select. */
   get #effectiveMaxFiles(): number {
-    if (this.maxFilesValue > 0) return this.maxFilesValue;
+    if (this.#safeMaxFiles > 0) return this.#safeMaxFiles;
     return this.inputTarget.multiple ? 0 : 1;
   }
 
@@ -567,5 +677,26 @@ export class FileDropzoneController extends Controller<HTMLElement> {
   /** The accepted files in selection order. */
   get #files(): File[] {
     return this.#entries.map((entry) => entry.file);
+  }
+  /** Current `maxSize` declaration resolved against its numeric contract. */
+  get #safeMaxSize(): number {
+    return this.#numbers.read(
+      this,
+      "maxSize",
+      this.maxSizeValue,
+      FileDropzoneController.values.maxSize.default,
+      FileDropzoneController.valueConstraints.maxSize,
+    );
+  }
+
+  /** Current `maxFiles` declaration resolved against its numeric contract. */
+  get #safeMaxFiles(): number {
+    return this.#numbers.read(
+      this,
+      "maxFiles",
+      this.maxFilesValue,
+      FileDropzoneController.values.maxFiles.default,
+      FileDropzoneController.valueConstraints.maxFiles,
+    );
   }
 }

@@ -3,7 +3,7 @@ import { ownerIndex } from "../utils/event_owner";
 import { canTakeFocus } from "../utils/focus_candidate";
 import { FormResetWatcher } from "../utils/form_reset_watcher";
 import { ListenerSet } from "../utils/listener_set";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { TabindexLoan } from "../utils/tabindex_loan";
 
 /** Trigger controls whose live state drives region visibility. */
@@ -15,6 +15,9 @@ type RegionTransition = { region: HTMLElement; visible: boolean };
 
 /** Marker on controls this component disabled, so authored disabled state remains untouched. */
 const DISABLED_MARKER = "data-conditional-disabled";
+
+/** Descendant controls whose `disabled` state a region manages. */
+const CONTROLS = "input, textarea, select, button";
 
 /** Retained-DOM inputs and controller outputs that can require reconciliation. */
 const OBSERVED_ATTRIBUTES = [
@@ -61,6 +64,11 @@ type ExpectedAttribute = string | null;
  * another region being hidden in the same pass — the controller root temporarily
  * receives `tabindex="-1"` and focus.
  *
+ * An element that stops being a region gets back what this controller wrote on
+ * it: `aria-hidden`, `data-visible`, the `hidden` a declared condition set, and
+ * the marked `disabled` of each control no hidden region still covers. The
+ * `hidden` of a region without a condition and every authored `disabled` stay.
+ *
  * `change` and `reconcile` dispatch `{ region, visible }`.
  *
  * @remarks
@@ -95,16 +103,20 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
   /** Controller writes awaiting an observer callback, separated from authored morphs. */
   #internalWrites = new WeakMap<Element, Map<string, ExpectedAttribute>>();
   #observing = false;
+  /** Elements that left the region set, held until a pass gives back what was written on them. */
+  readonly #departed = new Set<HTMLElement>();
+  /** Regions whose `hidden` this controller set because their declared condition is false. */
+  readonly #concealed = new WeakSet<HTMLElement>();
 
   /** Coalesces one target/morph/mutation batch into one full DOM reconciliation. */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileDom());
+  readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileDom());
   readonly #listeners = new ListenerSet();
   readonly #formReset = new FormResetWatcher(
     (form) => this.#hasTriggerOwnedBy(form),
     () => this.#reconcile.schedule(),
   );
   /** Provides the last-resort focus landmark without claiming an authored tabindex. */
-  readonly #rootTabindex = new TabindexLoan<HTMLElement>();
+  readonly #rootTabindex = new TabindexLoan<HTMLElement>("-1", this.identifier);
   /** Watches retained targets and controls whose declarative or reflected state changed. */
   readonly #observer = new MutationObserver((records) => this.#onMutations(records));
 
@@ -117,17 +129,13 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
     }
   };
 
-  /** Reconciles property-only retained-element changes after Turbo morphs. */
-  readonly #onMorph = (): void => {
-    this.#reconcile.schedule();
-  };
-
   /** Reflects initial live state and opens every retained-DOM reconciliation path. */
   override connect(): void {
+    this.#rootTabindex.reclaim(this.element);
     this.#lastVisible = new WeakMap();
     this.#internalWrites = new WeakMap();
-    this.#reconcile.activate();
     this.#settle();
+    this.#reconcile.observe(this.element);
     this.#observer.observe(this.element, {
       attributes: true,
       attributeFilter: OBSERVED_ATTRIBUTES,
@@ -137,13 +145,12 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
     this.#observing = true;
     this.#listeners.add(this.element, "change", this.#onTriggerInput);
     this.#listeners.add(this.element, "input", this.#onTriggerInput);
-    this.#listeners.add(this.element, "turbo:morph-element", this.#onMorph);
     this.#formReset.observe();
   }
 
   /** Releases all external resources and returns the temporary focus landmark loan. */
   override disconnect(): void {
-    this.#reconcile.cancel();
+    this.#reconcile.disconnect();
     this.#observing = false;
     this.#observer.disconnect();
     this.#listeners.dispose();
@@ -166,8 +173,17 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
     this.#reconcile.schedule();
   }
 
-  /** Reconciles the remaining region set after a target leaves. */
-  regionTargetDisconnected(): void {
+  /**
+   * Queues a departed region for the return of its written state and reconciles the rest.
+   *
+   * The return is queued rather than immediate because teardown reports every
+   * region as disconnected, and a disconnected controller leaves its derived state
+   * in the DOM. The pass that drains the queue skips an element that is still a
+   * region, which drops what teardown queued, and keeps a departure queued before
+   * a disconnect for the pass after the reconnect.
+   */
+  regionTargetDisconnected(region: HTMLElement): void {
+    this.#departed.add(region);
     this.#reconcile.schedule();
   }
 
@@ -187,8 +203,9 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
   }
 
   /**
-   * Computes one settled plan, shows destinations before hiding sources, and then
-   * returns logical transitions in DOM order after every region is internally coherent.
+   * Computes one settled plan, gives back what departed regions carry, shows
+   * destinations before hiding sources, and then returns logical transitions in
+   * DOM order after every region is internally coherent.
    *
    * @stimeoRenderRoot
    */
@@ -196,6 +213,10 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
     const regions = this.regionTargets;
     const plan = new Map<HTMLElement, boolean>();
     for (const region of regions) plan.set(region, this.#isVisible(region, triggers));
+    for (const departed of this.#departed) {
+      if (!plan.has(departed)) this.#release(departed, plan);
+    }
+    this.#departed.clear();
 
     const changed = new Set<HTMLElement>();
     const applicationOrder = [
@@ -244,8 +265,13 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
     return changed;
   }
 
-  /** Reflects visibility idempotently, recording writes so the observer ignores its own work. */
+  /**
+   * Reflects visibility idempotently, recording writes so the observer ignores its
+   * own work, and notes whether the `hidden` comes from a declared condition.
+   */
   #syncRegionState(region: HTMLElement, visible: boolean): void {
+    if (!visible && this.#predicateFor(region) !== null) this.#concealed.add(region);
+    else this.#concealed.delete(region);
     this.#writeAttribute(region, "hidden", visible ? null : "");
     this.#writeAttribute(region, "aria-hidden", visible ? null : "true");
     this.#writeAttribute(region, "data-visible", visible ? "true" : null);
@@ -254,8 +280,7 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
   /** Enables/disables descendant controls, touching only state carrying our marker. */
   #syncRegionControls(region: HTMLElement, visible: boolean): void {
     const shouldDisable = !visible && this.disableHiddenValue;
-    const controls = region.querySelectorAll<Disableable>("input, textarea, select, button");
-    for (const control of controls) {
+    for (const control of region.querySelectorAll<Disableable>(CONTROLS)) {
       const marked = control.hasAttribute(DISABLED_MARKER);
       if (shouldDisable) {
         if (!control.disabled) {
@@ -265,8 +290,29 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
           this.#writeAttribute(control, DISABLED_MARKER, "true");
         }
       } else if (marked) {
-        this.#writeAttribute(control, "disabled", null);
-        this.#writeAttribute(control, DISABLED_MARKER, null);
+        this.#enable(control);
+      }
+    }
+  }
+
+  /** Removes a `disabled` this controller owns together with its marker. */
+  #enable(control: Disableable): void {
+    this.#writeAttribute(control, "disabled", null);
+    this.#writeAttribute(control, DISABLED_MARKER, null);
+  }
+
+  /**
+   * Gives back what this controller wrote on an element that left the region set.
+   * A marked control inside a region this pass hides stays disabled for that region.
+   */
+  #release(element: HTMLElement, plan: ReadonlyMap<HTMLElement, boolean>): void {
+    this.#lastVisible.delete(element);
+    if (this.#concealed.delete(element)) this.#writeAttribute(element, "hidden", null);
+    this.#writeAttribute(element, "aria-hidden", null);
+    this.#writeAttribute(element, "data-visible", null);
+    for (const control of element.querySelectorAll<Disableable>(CONTROLS)) {
+      if (control.hasAttribute(DISABLED_MARKER) && this.#survivesPlan(control, plan)) {
+        this.#enable(control);
       }
     }
   }
@@ -332,7 +378,7 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
     this.element.focus();
   }
 
-  /** Whether a focus candidate sits outside every region this pass will hide. */
+  /** Whether a focus candidate or a control sits outside every region this pass will hide. */
   #survivesPlan(candidate: HTMLElement, plan: ReadonlyMap<HTMLElement, boolean>): boolean {
     return [...plan].every(([region, visible]) => visible || !region.contains(candidate));
   }

@@ -4,7 +4,7 @@ import { FlashController } from "../src/controllers/flash_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -12,7 +12,8 @@ import { tick } from "./helpers/timing";
  * mapping, the Announcer bridge for initial flashes (but not dynamic inserts),
  * auto-dismiss with pause-on-hover, the `max` stacking cap and the messages hover or
  * focus keeps out of its reach, manual dismiss, dynamic detection via the
- * MutationObserver, and observer / timer teardown.
+ * MutationObserver, observer / timer teardown, and the messages a page restored from
+ * Turbo's cache carries.
  */
 
 describe("FlashController", () => {
@@ -54,6 +55,177 @@ describe("FlashController", () => {
   const root = () => query("[data-controller='stimeo--flash']");
   const regionEl = () => query("[data-stimeo--flash-target='region']");
   const flush = () => vi.advanceTimersByTimeAsync(0);
+
+  for (const origin of ["root", "message"] as const) {
+    it.each([
+      ["notice", "status"],
+      ["error", "alert"],
+    ])(`restores retained morph output for %s from ${origin} silently`, async (type, role) => {
+      await mount(region(message(type), 'data-stimeo--flash-duration-value="0"'));
+      const el = regionEl().firstElementChild as HTMLElement;
+      expect(el.getAttribute("role")).toBe(role);
+      expect(el.getAttribute("data-flash-state")).toBe("visible");
+      const instance = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--flash",
+      ) as FlashController;
+      const dispatch = vi.spyOn(instance, "dispatch");
+      const initialAnnounces = announces.length;
+      el.removeAttribute("role");
+      el.removeAttribute("data-flash-state");
+      (origin === "root" ? root() : el).dispatchEvent(
+        new CustomEvent("turbo:morph-element", { bubbles: true }),
+      );
+      await flush();
+      expect(el.getAttribute("role")).toBe(role);
+      expect(el.getAttribute("data-flash-state")).toBe("visible");
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(announces).toHaveLength(initialAnnounces);
+    });
+
+    it(`restores retained morph leaving output from ${origin} without extending removal`, async () => {
+      const real = window.getComputedStyle.bind(window);
+      vi.spyOn(window, "getComputedStyle").mockImplementation(
+        (el) =>
+          ({
+            ...real(el),
+            transitionProperty: "opacity",
+            transitionDuration: "1s",
+            transitionDelay: "0s",
+          }) as CSSStyleDeclaration,
+      );
+      await mount(
+        region(
+          message("notice", '<button data-action="stimeo--flash#dismiss">Close</button>'),
+          'data-stimeo--flash-duration-value="0"',
+        ),
+      );
+      const el = regionEl().firstElementChild as HTMLElement;
+      (query("button") as HTMLButtonElement).click();
+      expect(el.getAttribute("data-flash-state")).toBe("leaving");
+      await vi.advanceTimersByTimeAsync(400);
+      const instance = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--flash",
+      ) as FlashController;
+      const dispatch = vi.spyOn(instance, "dispatch");
+      const initialAnnounces = announces.length;
+      el.removeAttribute("role");
+      el.removeAttribute("data-flash-state");
+      (origin === "root" ? root() : el).dispatchEvent(
+        new CustomEvent("turbo:morph-element", { bubbles: true }),
+      );
+      await flush();
+      expect(el.getAttribute("data-flash-state")).toBe("leaving");
+      expect(el.getAttribute("role")).toBe("status");
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(announces).toHaveLength(initialAnnounces);
+      await vi.advanceTimersByTimeAsync(599);
+      expect(el.isConnected).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(el.isConnected).toBe(false);
+      expect(dispatch).toHaveBeenCalledExactlyOnceWith("dismiss", {
+        detail: { element: el, reason: "user" },
+      });
+    });
+  }
+
+  it("protects foreign messages while repairing owned retained morph output", async () => {
+    await mount(
+      region(
+        message("notice", "owned") + message("error", "foreign"),
+        'data-stimeo--flash-duration-value="0"',
+      ),
+    );
+    const owned = regionEl().children[0] as HTMLElement;
+    const foreign = regionEl().children[1] as HTMLElement;
+    expect(owned.getAttribute("role")).toBe("status");
+    expect(foreign.getAttribute("role")).toBe("alert");
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    root().append(foreign);
+    foreign.setAttribute("data-flash-state", "consumer");
+    foreign.removeAttribute("role");
+    owned.removeAttribute("role");
+    await Promise.resolve();
+    expect(owned.getAttribute("role")).toBe("status");
+    expect(foreign.getAttribute("role")).toBeNull();
+    expect(foreign.getAttribute("data-flash-state")).toBe("consumer");
+    await flush();
+  });
+
+  it("treats a message removed from the connected region as a new arrival when reinserted", async () => {
+    await mount(
+      region(
+        message("notice", "first") + message("notice", "second"),
+        'data-stimeo--flash-duration-value="0" data-stimeo--flash-max-value="0"',
+      ),
+    );
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--flash",
+    ) as FlashController;
+    const first = regionEl().children[0] as HTMLElement;
+    const second = regionEl().children[1] as HTMLElement;
+    first.remove();
+    await flush();
+    regionEl().append(first);
+    await flush();
+    instance.maxValue = 1;
+    instance.maxValueChanged();
+    expect(second.isConnected).toBe(false);
+    expect(first.isConnected).toBe(true);
+  });
+
+  it("assigns a fresh arrival after a message is absent at reconnect", async () => {
+    await mount(
+      region(
+        message("notice", "first") + message("notice", "second"),
+        'data-stimeo--flash-duration-value="0" data-stimeo--flash-max-value="0"',
+      ),
+    );
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--flash",
+    ) as FlashController;
+    const first = regionEl().children[0] as HTMLElement;
+    const second = regionEl().children[1] as HTMLElement;
+    instance.disconnect();
+    first.remove();
+    await flush();
+    instance.connect();
+    regionEl().append(first);
+    await flush();
+    instance.maxValue = 1;
+    instance.maxValueChanged();
+    expect(second.isConnected).toBe(false);
+    expect(first.isConnected).toBe(true);
+  });
+
+  it("retains arrival order across a same-instance reconnect", async () => {
+    await mount(
+      region(
+        message("notice", "First") + message("notice", "Second"),
+        'data-stimeo--flash-duration-value="0" data-stimeo--flash-max-value="0"',
+      ),
+    );
+    const first = regionEl().firstElementChild as HTMLElement;
+    const second = regionEl().lastElementChild as HTMLElement;
+    regionEl().prepend(second);
+    await flush();
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--flash",
+    ) as FlashController;
+    instance.disconnect();
+    first.remove();
+    instance.messageTargetDisconnected(first);
+    regionEl().append(first);
+    instance.connect();
+    instance.maxValue = 1;
+    instance.maxValueChanged();
+    expect(first.isConnected).toBe(false);
+    expect(second.isConnected).toBe(true);
+  });
 
   it("maps a notice to role=status and bridges it to the Announcer (polite)", async () => {
     await mount(region(message("notice", "Saved")));
@@ -274,62 +446,166 @@ describe("FlashController", () => {
     expect(detachedRegion.lastElementChild?.hasAttribute("data-flash-state")).toBe(false);
   });
 
-  it("takes the managed flashes out of the page before Turbo caches it", async () => {
+  /** Puts a restored copy of the page in place, as Turbo renders one from its cache. */
+  const restore = async () => {
+    application = await restoreFromCache(
+      application,
+      (restored) => restored.register("stimeo--flash", FlashController),
+      flush,
+    );
+  };
+
+  /** Every `reconcile` that reaches the document, which outlives a restored body. */
+  const removalsOnDocument = (): number[] => {
+    const seen: number[] = [];
+    document.addEventListener("stimeo--flash:reconcile", (e) =>
+      seen.push((e as CustomEvent<{ removed: number }>).detail.removed),
+    );
+    return seen;
+  };
+
+  it("marks every message it takes on", async () => {
+    await mount(region(message("notice", "Saved")));
+    regionEl().insertAdjacentHTML("beforeend", message("alert", "Failed"));
+    await flush();
+    expect(
+      Array.from(regionEl().children).map((m) => m.hasAttribute("data-stimeo--flash-shown")),
+    ).toEqual([true, true]);
+  });
+
+  it("keeps the messages on screen through turbo:before-cache", async () => {
     await mount(
       region(
         message("notice", "Saved") + message("alert", "Failed"),
         'data-stimeo--flash-duration-value="0"',
       ),
     );
+    const reports = removalsOnDocument();
+
+    // Turbo dispatches it on pages that stay as well, where the message is still read.
+    document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(regionEl().children).toHaveLength(2);
+    expect(reports).toEqual([]);
+  });
+
+  it("takes the messages a restored page carries out instead of announcing them again", async () => {
+    await mount(
+      region(
+        message("notice", "Saved") + message("alert", "Failed"),
+        'data-stimeo--flash-duration-value="0"',
+      ),
+    );
+    expect(announces).toHaveLength(2);
     const dismissed: string[] = [];
-    root().addEventListener("stimeo--flash:dismiss", (e) =>
+    document.addEventListener("stimeo--flash:dismiss", (e) =>
       dismissed.push((e as CustomEvent).detail.reason),
     );
 
-    // A flash the visitor has already read must not ride the snapshot back: the fresh
-    // connect() on restore would take it for a new one and announce it again. Never
-    // auto-dismissing does not make it any less of a one-shot notification.
-    document.dispatchEvent(new Event("turbo:before-cache"));
+    // A message the visitor has already read must not come back with the page: taking
+    // it on would announce it a second time. Never auto-dismissing does not make it any
+    // less of a one-shot notification.
+    await restore();
+
     expect(regionEl().children).toHaveLength(0);
-    expect(dismissed).toEqual([]); // caching a page is not a dismissal
+    expect(announces).toHaveLength(2);
+    expect(dismissed).toEqual([]); // nobody dismissed them
   });
 
-  it("reports the messages the cache rewind took out", async () => {
+  it("reports how many messages the restored page carried", async () => {
+    await mount(region(message("notice", "Saved") + message("notice", "Again")));
+    const reports = removalsOnDocument();
+
+    await restore();
+
+    expect(reports).toEqual([2]);
+  });
+
+  it("stays silent when a restored page carries no message", async () => {
+    await mount(region(""));
+    const reports = removalsOnDocument();
+
+    await restore();
+
+    expect(reports).toEqual([]);
+  });
+
+  it("takes on a restored page's server-rendered message that was never shown", async () => {
     await mount(region(message("notice", "Saved")));
-    const reports: unknown[] = [];
-    root().addEventListener("stimeo--flash:reconcile", (e) =>
-      reports.push((e as CustomEvent).detail),
-    );
+    // A message the server rendered that no connection took on yet.
+    flashController().disconnect();
+    regionEl().insertAdjacentHTML("beforeend", message("alert", "Fresh"));
 
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    // Nobody dismissed them, so `dismiss` would misreport; the rewind says how
-    // many it removed so a consumer counting messages can follow.
-    expect(reports).toEqual([{ removed: 1 }]);
+    await restore();
 
-    // The region is empty now, so a second snapshot has nothing to report.
-    document.dispatchEvent(new Event("turbo:before-cache"));
-    expect(reports).toEqual([{ removed: 1 }]);
+    expect(shownTexts()).toEqual(["Fresh"]);
+    expect(announces.at(-1)).toEqual({ message: "Fresh", assertive: true });
   });
 
-  it("takes a message mid-dismissal out of the page before Turbo caches it", async () => {
-    const real = window.getComputedStyle;
-    window.getComputedStyle = (() =>
-      ({
-        transitionProperty: "opacity",
-        transitionDuration: "0.2s",
-        transitionDelay: "0s",
-      }) as unknown as CSSStyleDeclaration) as typeof getComputedStyle;
-    try {
-      await mount(region(message("notice", "Saved"), 'data-stimeo--flash-duration-value="1000"'));
-      const el = regionEl().firstElementChild as HTMLElement;
-      vi.advanceTimersByTime(1000);
-      expect(el.getAttribute("data-flash-state")).toBe("leaving");
+  it("leaves a marked message the page moved out of the region on a restored page", async () => {
+    await mount(region(message("notice", "Saved"), 'data-stimeo--flash-duration-value="0"'));
+    // Taken on, then moved by the page out of the region: it is the page's now.
+    const moved = regionEl().firstElementChild as HTMLElement;
+    root().append(moved);
+    await flush();
+    const reports = removalsOnDocument();
 
-      document.dispatchEvent(new Event("turbo:before-cache"));
-      expect(el.isConnected).toBe(false);
+    await restore();
+
+    expect(root().lastElementChild?.textContent).toBe("Saved");
+    expect(reports).toEqual([]);
+  });
+
+  it("takes out a message a restored page copied mid-dismissal", async () => {
+    const restoreStyle = stubTransition();
+    try {
+      await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+      const reports = removalsOnDocument();
+      const dismissed: string[] = [];
+      document.addEventListener("stimeo--flash:dismiss", (e) =>
+        dismissed.push((e as CustomEvent).detail.reason),
+      );
+      vi.advanceTimersByTime(1000);
+      expect(messageNamed("A").getAttribute("data-flash-state")).toBe("leaving");
+
+      await restore();
+      vi.advanceTimersByTime(5000);
+
+      expect(regionEl().children).toHaveLength(0);
+      expect(reports).toEqual([1]);
+      expect(dismissed).toEqual([]);
     } finally {
-      window.getComputedStyle = real;
+      restoreStyle();
     }
+  });
+
+  it("neither shows nor announces a message again when the same instance reconnects", async () => {
+    await mount(region(message("notice", "Saved"), 'data-stimeo--flash-duration-value="1000"'));
+    const shows: string[] = [];
+    document.addEventListener("stimeo--flash:show", (e) =>
+      shows.push((e as CustomEvent).detail.message),
+    );
+    expect(announces).toHaveLength(1);
+
+    // An in-page move, or a permanent region carried to the next page.
+    flashController().disconnect();
+    flashController().connect();
+    await flush();
+
+    expect(shows).toEqual([]);
+    expect(announces).toHaveLength(1);
+    expect(regionEl().children).toHaveLength(1);
+  });
+
+  it("marks a message again after a morph takes the mark off", async () => {
+    await mount(region(message("notice", "Saved"), 'data-stimeo--flash-duration-value="0"'));
+    const el = regionEl().firstElementChild as HTMLElement;
+    el.removeAttribute("data-stimeo--flash-shown");
+
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await flush();
+
+    expect(el.hasAttribute("data-stimeo--flash-shown")).toBe(true);
   });
 
   it("cancels a pending finalize when the controller disconnects mid-transition", async () => {
@@ -926,7 +1202,7 @@ describe("FlashController", () => {
     expect(first.isConnected).toBe(false);
   });
 
-  it("restores a leaving message brought back by a snapshot", async () => {
+  it("takes on a server-rendered message that arrives marked as leaving", async () => {
     await mount(
       region(
         `<div data-stimeo--flash-target="message" data-flash-type="notice" data-flash-state="leaving">Restored</div>`,
@@ -1802,6 +2078,24 @@ describe("FlashController", () => {
     expect(a.isConnected).toBe(false);
   });
 
+  it("lets no pausable timer from before a reconnect dismiss a message taken on again", async () => {
+    await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+    const controller = application.getControllerForElementAndIdentifier(root(), "stimeo--flash");
+    if (!(controller instanceof FlashController)) throw new Error("Flash controller not connected");
+    const a = messageNamed("A");
+
+    await vi.advanceTimersByTimeAsync(500);
+    controller.disconnect();
+    root().setAttribute("data-stimeo--flash-pause-on-hover-value", "false");
+    controller.connect();
+
+    // The message is taken on again at 500ms and gets the full duration from there.
+    await vi.advanceTimersByTimeAsync(999);
+    expect(a.isConnected).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(a.isConnected).toBe(false);
+  });
+
   it("gives a message put back after its dismissal the deadline of its new life", async () => {
     await mount(
       region(
@@ -2148,6 +2442,248 @@ describe("FlashController", () => {
     expect([first?.isConnected, second?.isConnected]).toEqual([true, false]);
   });
 
+  it("keeps the deadline a message was taken on with when duration shortens", async () => {
+    await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="3000"'));
+    const first = regionEl().firstElementChild as HTMLElement;
+    await vi.advanceTimersByTimeAsync(1000);
+    root().setAttribute("data-stimeo--flash-duration-value", "500");
+    await flush();
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "B"));
+    await flush();
+    const second = regionEl().lastElementChild as HTMLElement;
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect([first.isConnected, second.isConnected]).toEqual([true, false]);
+    await vi.advanceTimersByTimeAsync(1499);
+    expect(first.isConnected).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(first.isConnected).toBe(false);
+  });
+
+  it("keeps the deadline a message was taken on with when duration becomes 0", async () => {
+    await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+    const first = regionEl().firstElementChild as HTMLElement;
+    root().setAttribute("data-stimeo--flash-duration-value", "0");
+    await flush();
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "B"));
+    await flush();
+    const second = regionEl().lastElementChild as HTMLElement;
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(first.isConnected).toBe(false);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(second.isConnected).toBe(true);
+  });
+
+  it("keeps both holds and the banked time of a message across a runtime change", async () => {
+    await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+    const el = regionEl().firstElementChild as HTMLElement;
+    await vi.advanceTimersByTimeAsync(600);
+    el.dispatchEvent(new Event("mouseenter")); // 400ms banked
+    el.dispatchEvent(new Event("focusin"));
+    root().setAttribute("data-stimeo--flash-duration-value", "5000");
+    root().setAttribute("data-stimeo--flash-pause-on-hover-value", "false");
+    await flush();
+
+    el.dispatchEvent(new Event("focusout")); // the pointer still holds it
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(el.isConnected).toBe(true);
+
+    el.dispatchEvent(new Event("mouseleave")); // the last hold: the 400ms banked resume
+    await vi.advanceTimersByTimeAsync(399);
+    expect(el.isConnected).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(el.isConnected).toBe(false);
+  });
+
+  it("keeps a message taken on without pausing unpaused when pauseOnHover turns on", async () => {
+    await mount(
+      region(
+        message("notice", "A"),
+        'data-stimeo--flash-duration-value="1000" data-stimeo--flash-pause-on-hover-value="false"',
+      ),
+    );
+    const el = regionEl().firstElementChild as HTMLElement;
+    root().setAttribute("data-stimeo--flash-pause-on-hover-value", "true");
+    await flush();
+
+    el.dispatchEvent(new Event("mouseenter"));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(el.isConnected).toBe(false);
+  });
+
+  // --- what a release leaves behind -----------------------------------------
+
+  /** Makes every element report a 200 ms transition until the returned restore runs. */
+  const stubTransition = (): (() => void) => {
+    const real = window.getComputedStyle;
+    window.getComputedStyle = (() =>
+      ({
+        transitionProperty: "opacity",
+        transitionDuration: "0.2s",
+        transitionDelay: "0s",
+      }) as unknown as CSSStyleDeclaration) as typeof getComputedStyle;
+    return () => {
+      window.getComputedStyle = real;
+    };
+  };
+
+  /** Reports the types of the listeners registered on `element` from here on and still live. */
+  const trackListeners = (element: HTMLElement) => {
+    const live: Array<[string, unknown]> = [];
+    const add = element.addEventListener.bind(element);
+    const remove = element.removeEventListener.bind(element);
+    vi.spyOn(element, "addEventListener").mockImplementation((type, listener, options) => {
+      if (!live.some(([t, l]) => t === type && l === listener)) live.push([type, listener]);
+      add(type, listener, options);
+    });
+    vi.spyOn(element, "removeEventListener").mockImplementation((type, listener, options) => {
+      const index = live.findIndex(([t, l]) => t === type && l === listener);
+      if (index !== -1) live.splice(index, 1);
+      remove(type, listener, options);
+    });
+    return { types: () => live.map(([type]) => type) };
+  };
+
+  /** Inserts a notice named `text` into the region with its listeners tracked. */
+  const insertTracked = async (text: string) => {
+    const incoming = document.createElement("div");
+    incoming.setAttribute("data-stimeo--flash-target", "message");
+    incoming.setAttribute("data-flash-type", "notice");
+    incoming.textContent = text;
+    const listeners = trackListeners(incoming);
+    regionEl().append(incoming);
+    await flush();
+    expect(listeners.types()).toEqual(["mouseenter", "mouseleave", "focusin", "focusout"]);
+    return { element: incoming, listeners };
+  };
+
+  it("releases every message's hover and focus listeners when it disconnects", async () => {
+    await mount(region("", 'data-stimeo--flash-duration-value="1000"'));
+    const { listeners } = await insertTracked("A");
+
+    flashController().disconnect();
+
+    expect(listeners.types()).toEqual([]);
+  });
+
+  it("releases a message's hover and focus listeners once it is dismissed", async () => {
+    await mount(region("", 'data-stimeo--flash-duration-value="1000"'));
+    const { element, listeners } = await insertTracked("A");
+
+    flashController().dismiss(element);
+
+    expect(element.isConnected).toBe(false);
+    expect(listeners.types()).toEqual([]);
+  });
+
+  it("applies no cap when hover leaves a message that has left the controller", async () => {
+    await mount(
+      region(
+        message("notice", "A") + message("notice", "X"),
+        'data-stimeo--flash-max-value="2" data-stimeo--flash-duration-value="60000"',
+      ),
+    );
+    const controller = flashController();
+    const x = messageNamed("X");
+    document.body.append(x);
+    controller.messageTargetDisconnected(x);
+    controller.maxValue = 1;
+    controller.maxValueChanged();
+    await flush();
+    const dismissed = recordDismissals();
+
+    // A holds and B has just arrived, so the stack stays over the cap until A lets go.
+    focusIn(messageNamed("A"));
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "B"));
+    await flush();
+    x.dispatchEvent(new MouseEvent("mouseenter"));
+    x.dispatchEvent(new MouseEvent("mouseleave"));
+    await flush();
+
+    expect(dismissed).toEqual([]);
+    expect(shownTexts()).toEqual(["A", "B"]);
+  });
+
+  it("takes on a message put back after it was closed under the pointer without that hover", async () => {
+    await mount(region(closableMessage("A"), 'data-stimeo--flash-duration-value="1000"'));
+    const a = messageNamed("A");
+    a.dispatchEvent(new Event("mouseenter"));
+    closeButtonOf(a).click();
+    expect(a.isConnected).toBe(false);
+
+    regionEl().appendChild(a);
+    await flush();
+    expect(a.getAttribute("data-flash-state")).toBe("visible");
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(a.isConnected).toBe(false);
+  });
+
+  it("lets no removal pending from before a reconnect end a later dismissal early", async () => {
+    const restore = stubTransition();
+    try {
+      await mount(region(message("notice", "A"), 'data-stimeo--flash-duration-value="1000"'));
+      const dismissed = recordDismissals();
+      const a = messageNamed("A");
+      const controller = flashController();
+      vi.advanceTimersByTime(1000); // leaving: its removal is due 200 ms from now
+      controller.disconnect();
+      controller.connect();
+      expect(a.getAttribute("data-flash-state")).toBe("visible");
+
+      vi.advanceTimersByTime(100);
+      controller.dismiss(a); // leaving again: this removal is due 200 ms from now
+      vi.advanceTimersByTime(150);
+      expect(a.isConnected).toBe(true);
+      expect(dismissed).toEqual([]);
+
+      vi.advanceTimersByTime(50);
+      expect(a.isConnected).toBe(false);
+      expect(dismissed).toEqual(["api A"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("hands the stack to a region that arrived before the old one left", async () => {
+    await mount(region(message("notice", "A")));
+    const controller = flashController();
+    const old = regionEl();
+    const fresh = document.createElement("div");
+    fresh.setAttribute("data-stimeo--flash-target", "region");
+    fresh.innerHTML = message("alert", "B");
+    old.after(fresh); // e.g. <turbo-stream action="after">
+    controller.regionTargetConnected();
+    old.remove(); // e.g. <turbo-stream action="remove">
+    controller.regionTargetDisconnected();
+
+    const carried = fresh.firstElementChild as HTMLElement;
+    expect(carried.getAttribute("data-flash-state")).toBe("visible");
+    fresh.insertAdjacentHTML("beforeend", message("notice", "C"));
+    await flush();
+    expect((fresh.lastElementChild as HTMLElement).getAttribute("data-flash-state")).toBe(
+      "visible",
+    );
+  });
+
+  it("leaves no earlier observation running once it re-syncs and disconnects", async () => {
+    await mount(region(""));
+    const controller = flashController();
+    const fresh = document.createElement("div");
+    fresh.setAttribute("data-stimeo--flash-target", "region");
+    regionEl().after(fresh);
+    controller.regionTargetConnected();
+    controller.disconnect();
+
+    regionEl().insertAdjacentHTML("beforeend", message("notice", "Late"));
+    await flush();
+
+    expect((regionEl().firstElementChild as HTMLElement).hasAttribute("data-flash-state")).toBe(
+      false,
+    );
+  });
+
   // --- values and type mapping ----------------------------------------------
 
   it("auto-dismisses after the default duration", async () => {
@@ -2213,5 +2749,70 @@ describe("FlashController", () => {
     await tick();
     const live = regionEl().firstElementChild as HTMLElement;
     expect(await captureSpeech({ container: live, steps: 1 })).toEqual(["status", "Saved"]);
+  });
+
+  describe("element action source", () => {
+    it("dismisses an owned descendant as api beside a working DOM action", async () => {
+      await mount(
+        region(
+          message("notice", '<button data-action="click->stimeo--flash#dismiss">DOM</button>') +
+            message("notice", '<span id="api-child">API</span>'),
+          'data-stimeo--flash-duration-value="0"',
+        ),
+      );
+      const seen: string[] = [];
+      root().addEventListener("stimeo--flash:dismiss", (event) =>
+        seen.push((event as CustomEvent).detail.reason),
+      );
+      query("[data-action]").click();
+      expect(seen).toEqual(["user"]);
+      const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--flash");
+      if (!(instance instanceof FlashController)) throw new Error("Flash not connected");
+      instance.dismiss(query("#api-child"));
+      expect(seen).toEqual(["user", "api"]);
+      expect(regionEl().children).toHaveLength(0);
+    });
+
+    it("rejects foreign and nested-instance messages", async () => {
+      await mount(
+        region(message("notice", "Owned"), 'data-stimeo--flash-duration-value="0"') +
+          region(
+            message("notice", '<span id="foreign">Foreign</span>'),
+            'id="foreign-root" data-stimeo--flash-duration-value="0"',
+          ),
+      );
+      const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--flash");
+      if (!(instance instanceof FlashController)) throw new Error("Flash not connected");
+      instance.dismiss(query("#foreign"));
+      const nested = document.createElement("div");
+      nested.setAttribute("data-controller", "stimeo--flash");
+      nested.innerHTML = message("notice", '<span id="nested">Nested</span>');
+      root().append(nested);
+      await flush();
+      instance.dismiss(query("#nested"));
+      expect(query("#foreign").isConnected).toBe(true);
+      expect(query("#nested").isConnected).toBe(true);
+      expect(instance.messageTargets).toHaveLength(1);
+    });
+  });
+
+  it("does not dismiss an outer message from a nested controller's unmarked descendant", async () => {
+    await mount(
+      region(
+        message(
+          "notice",
+          '<div data-controller="stimeo--flash"><div data-stimeo--flash-target="region"><button id="nested-unmarked">Nested</button></div></div>',
+        ),
+        'data-stimeo--flash-duration-value="0"',
+      ),
+    );
+    const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--flash");
+    if (!(instance instanceof FlashController)) throw new Error("Flash not connected");
+    const outer = instance.messageTargets[0];
+    const child = query("#nested-unmarked");
+    child.addEventListener("click", (event) => instance.dismiss(event));
+    child.click();
+    instance.dismiss(child);
+    expect(outer?.isConnected).toBe(true);
   });
 });

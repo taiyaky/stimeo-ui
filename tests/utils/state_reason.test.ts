@@ -41,6 +41,12 @@ describe("stateReasonFor", () => {
     expect(stateReasonFor(new MouseEvent("click"))).toBe("user");
   });
 
+  it("includes timer, capacity and environment reasons in the public state vocabulary", () => {
+    expectTypeOf<Extract<StateReason, "timeout" | "limit" | "media">>().toEqualTypeOf<
+      "timeout" | "limit" | "media"
+    >();
+  });
+
   it("is the reason type the package entry point exports", () => {
     expectTypeOf<PublicStateReason>().toEqualTypeOf<StateReason>();
   });

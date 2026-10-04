@@ -85,6 +85,15 @@ const key = (id: string, k: string): KeyboardEvent => typeKey(byId(id), k);
  */
 const pressOn = (id: string, k: string): KeyboardEvent => press(byId(id), k);
 
+/** The controller instance on the page's first menubar. */
+const menubarOf = (application: Application): MenubarController => {
+  const root = document.querySelector("[data-controller='stimeo--menubar']");
+  const instance =
+    root && application.getControllerForElementAndIdentifier(root, "stimeo--menubar");
+  if (!(instance instanceof MenubarController)) throw new Error("Expected menubar controller");
+  return instance;
+};
+
 describe("MenubarController", () => {
   let application: Application;
 
@@ -95,6 +104,167 @@ describe("MenubarController", () => {
   afterEach(() => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
+  });
+
+  it("sets the tab stop to a menu opened without first focusing its top item", () => {
+    expect(tabStops()).toEqual([byId("file")]);
+    byId("edit").click();
+    expect(expanded("edit")).toBe("true");
+    expect(document.activeElement).toBe(byId("cut"));
+    expect(tabStops()).toEqual([byId("edit")]);
+  });
+
+  it("keeps focus that moved outside after the focused top was removed", async () => {
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    byId("file").focus();
+    byId("file").remove();
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+    await tick();
+    expect(document.activeElement).toBe(outside);
+    expect(tabStops()).toEqual([byId("edit")]);
+    byId("edit").click();
+    expect(document.activeElement).toBe(byId("cut"));
+    byId("m-edit").remove();
+    await tick();
+    expect(document.activeElement).toBe(byId("edit"));
+  });
+
+  it("does not recover an old focus after the user leaves and blurs outside", async () => {
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    byId("file").focus();
+    outside.focus();
+    outside.blur();
+    expect(document.activeElement).toBe(document.body);
+    byId("file").remove();
+    await tick();
+    expect(document.activeElement).toBe(document.body);
+    byId("edit").click();
+    expect(document.activeElement).toBe(byId("cut"));
+    byId("m-edit").remove();
+    await tick();
+    expect(document.activeElement).toBe(byId("edit"));
+  });
+
+  it("does not reconcile arriving menus after disconnect until reconnect", () => {
+    const root = byId("file").parentElement;
+    if (!root) throw new Error("Expected menubar");
+    const instance = application.getControllerForElementAndIdentifier(root, "stimeo--menubar");
+    if (!(instance instanceof MenubarController)) throw new Error("Expected menubar controller");
+    instance.disconnect();
+    byId("file").setAttribute("aria-expanded", "true");
+    expect(menuHidden("m-file")).toBe(true);
+    instance.menuTargetConnected();
+    expect(expanded("file")).toBe("true");
+    instance.connect();
+    expect(expanded("file")).toBe("false");
+  });
+
+  it("does not navigate horizontally from a popup whose owner disappeared", () => {
+    byId("file").click();
+    byId("file").removeAttribute("aria-controls");
+    const errors = vi.spyOn(application, "handleError").mockImplementation(() => {});
+    key("new", "ArrowRight");
+    expect(errors.mock.calls.length).toBe(0);
+    expect(document.activeElement).toBe(byId("new"));
+    expect(expanded("edit")).toBe("false");
+    byId("file").setAttribute("aria-controls", "m-file");
+    key("new", "ArrowRight");
+    expect(expanded("edit")).toBe("true");
+    expect(document.activeElement).toBe(byId("cut"));
+  });
+
+  it("leaves keys on a newly hidden top unclaimed without moving focus", () => {
+    byId("file").focus();
+    byId("file").hidden = true;
+    const event = key("file", "ArrowRight");
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(byId("file"));
+    byId("file").hidden = false;
+    expect(key("file", "ArrowRight").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(byId("edit"));
+  });
+
+  it("reserves a deferred Tab close only while a menu is open", () => {
+    vi.useFakeTimers();
+    try {
+      expect(vi.getTimerCount()).toBe(0);
+      pressOn("file", "Tab");
+      expect(vi.getTimerCount()).toBe(0);
+      byId("file").click();
+      expect(expanded("file")).toBe("true");
+      key("new", "Tab");
+      expect(vi.getTimerCount()).toBe(1);
+      expect(expanded("file")).toBe("true");
+      vi.runOnlyPendingTimers();
+      expect(expanded("file")).toBe("false");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not switch menus from a newly hidden owner", () => {
+    byId("file").click();
+    byId("file").hidden = true;
+    key("new", "ArrowRight");
+    expect(expanded("edit")).toBe("false");
+    expect(document.activeElement).toBe(byId("new"));
+    byId("file").hidden = false;
+    key("new", "ArrowRight");
+    expect(expanded("edit")).toBe("true");
+    expect(document.activeElement).toBe(byId("cut"));
+  });
+
+  it("keeps the tab stop when activating a command whose popup owner disappeared", () => {
+    byId("file").click();
+    byId("file").removeAttribute("aria-controls");
+    byId("new").click();
+    expect(tabStops()).toEqual([byId("file")]);
+    expect(document.activeElement).toBe(byId("new"));
+  });
+
+  it("activates a command moved outside a popup without a missing-menu error", () => {
+    const errors = vi.spyOn(application, "handleError").mockImplementation(() => {});
+    byId("file").parentElement?.appendChild(byId("new"));
+    byId("new").focus();
+    const event = key("new", "ArrowDown");
+    expect(event.defaultPrevented).toBe(false);
+    expect(errors.mock.calls.length).toBe(0);
+    byId("new").click();
+    expect(errors.mock.calls.length).toBe(0);
+    expect(tabStops()).toEqual([byId("file")]);
+    expect(document.activeElement).toBe(byId("new"));
+  });
+
+  it("ignores an empty controls declaration even when a menu has no id", () => {
+    byId("file").setAttribute("aria-controls", "");
+    const popup = byId("m-file");
+    popup.removeAttribute("id");
+    byId("file").click();
+    expect(popup.hidden).toBe(true);
+    expect(expanded("file")).toBe("false");
+  });
+
+  it("handles Escape while a focused popup temporarily has no owner", () => {
+    byId("file").click();
+    byId("file").removeAttribute("aria-controls");
+    const errors: unknown[] = [];
+    const listener = (event: ErrorEvent) => {
+      errors.push(event.error);
+      event.preventDefault();
+    };
+    window.addEventListener("error", listener);
+    try {
+      key("new", "Escape");
+      expect(errors).toEqual([]);
+      expect(document.activeElement).toBe(byId("new"));
+      expect(tabStops()).toEqual([byId("file")]);
+    } finally {
+      window.removeEventListener("error", listener);
+    }
   });
 
   it("reverses the horizontal arrows under RTL, on the bar and inside a menu", async () => {
@@ -127,6 +297,9 @@ describe("MenubarController", () => {
     byId("file").click();
     pressOn("new", "ArrowLeft");
     expect(expanded("edit")).toBe("true");
+    pressOn("cut", "ArrowRight");
+    expect(expanded("file")).toBe("true");
+    expect(document.activeElement).toBe(byId("new"));
   });
 
   it("starts with one tab stop, menus closed", () => {
@@ -353,6 +526,22 @@ describe("MenubarController", () => {
     expect(document.activeElement).toBe(byId("cut"));
   });
 
+  it("keeps a single pending Tab close when Tab is pressed again", () => {
+    vi.useFakeTimers();
+    try {
+      byId("file").click();
+      key("new", "Tab");
+      key("new", "Tab");
+      expect(vi.getTimerCount()).toBe(1);
+
+      vi.runOnlyPendingTimers();
+      expect(expanded("file")).toBe("false");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("closes on an outside click without taking focus from the clicked element", () => {
     document.body.insertAdjacentHTML("beforeend", '<button id="outside">Outside</button>');
     byId("file").click();
@@ -413,6 +602,12 @@ describe("MenubarController", () => {
     expect(event.defaultPrevented).toBe(false);
   });
 
+  it("consumes a printable typeahead key inside a menu", () => {
+    byId("file").click(); // open File, focus New
+    expect(key("new", "o").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(byId("open"));
+  });
+
   it("resumes narrowing after a repeated key instead of stalling on a dead query", () => {
     vi.useFakeTimers();
     try {
@@ -470,6 +665,20 @@ describe("MenubarController", () => {
     }
   });
 
+  it("starts a fresh typeahead query in each menu it opens", () => {
+    vi.useFakeTimers();
+    try {
+      byId("file").click(); // focus New
+      key("new", "s"); // -> Save
+      expect(document.activeElement).toBe(byId("save"));
+      key("save", "ArrowRight"); // opens Edit inside the idle window, focus Cut
+      key("cut", "c"); // "c" -> Copy, not the dead "sc"
+      expect(document.activeElement).toBe(byId("copy"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("follows items added to and removed from an open menu", async () => {
     byId("file").click();
     byId("m-file").insertAdjacentHTML("beforeend", item("archive", "Archive"));
@@ -509,6 +718,76 @@ describe("MenubarController", () => {
       expect(menuHidden("m-file")).toBe(false);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("drops a pending Tab close on disconnect", () => {
+    vi.useFakeTimers();
+    try {
+      byId("file").click();
+      key("new", "Tab");
+      expect(vi.getTimerCount()).toBe(1);
+
+      menubarOf(application).disconnect();
+
+      expect(vi.getTimerCount()).toBe(0);
+      vi.runOnlyPendingTimers();
+      expect(menuHidden("m-file")).toBe(false);
+      expect(expanded("file")).toBe("true");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("removes every listener it adds to its own element on disconnect", () => {
+    const instance = menubarOf(application);
+    instance.disconnect();
+    const added = vi.spyOn(instance.element, "addEventListener");
+    const removed = vi.spyOn(instance.element, "removeEventListener");
+
+    instance.connect();
+    const own = added.mock.calls.filter(([type]) =>
+      ["click", "focusin", "focusout"].includes(type),
+    );
+    expect(own.map(([type]) => type).sort()).toEqual(["click", "focusin", "focusout"]);
+
+    instance.disconnect();
+    for (const call of own) expect(removed).toHaveBeenCalledWith(...call);
+  });
+
+  it("stops observing its subtree on disconnect", async () => {
+    const instance = menubarOf(application);
+    const Native = globalThis.MutationObserver;
+    let observer: MutationObserver | null = null;
+    let deliveries = 0;
+    class RecordingObserver extends Native {
+      constructor(callback: MutationCallback) {
+        super((records, self) => {
+          if (self === observer) deliveries += 1;
+          callback(records, self);
+        });
+      }
+      override observe(target: Node, options?: MutationObserverInit): void {
+        if (target === instance.element) observer = this;
+        super.observe(target, options);
+      }
+    }
+    vi.stubGlobal("MutationObserver", RecordingObserver);
+    try {
+      instance.disconnect();
+      instance.connect();
+      byId("edit").hidden = true;
+      await tick();
+      const seen = deliveries;
+      expect(seen).toBeGreaterThan(0);
+
+      instance.disconnect();
+      byId("edit").hidden = false;
+      await tick();
+
+      expect(deliveries).toBe(seen);
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 
@@ -791,6 +1070,20 @@ describe("MenubarController with disabled and hidden entries", () => {
     expect(consumerActivations).toBe(0);
     expect(menuHidden("dis-m-help")).toBe(true);
     expect(expanded("dis-help")).toBe("false");
+  });
+
+  it("cancels the default action of a click on an aria-disabled entry only", () => {
+    // The default action is what a link or a submit button would go on to perform.
+    byId("dis-file").click();
+    const clickOn = (id: string): MouseEvent => {
+      const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+      byId(id).dispatchEvent(click);
+      return click;
+    };
+
+    expect(clickOn("dis-open").defaultPrevented).toBe(true);
+    expect(clickOn("dis-help").defaultPrevented).toBe(true);
+    expect(clickOn("dis-new").defaultPrevented).toBe(false);
   });
 
   it("never opens the menu of an aria-disabled top item with the keyboard", () => {
@@ -1105,6 +1398,24 @@ describe("MenubarController under runtime DOM changes", () => {
     expect(tabStops()).toEqual([byId("rt-edit")]);
   });
 
+  it("reconciles a runtime state change without writing to menus that are already closed", async () => {
+    const menus = ["rt-m-file", "rt-m-edit", "rt-m-view"].map(byId);
+    const records: MutationRecord[] = [];
+    const watcher = new MutationObserver((batch) => records.push(...batch));
+    for (const element of menus) {
+      watcher.observe(element, { attributes: true, attributeFilter: ["hidden"] });
+    }
+
+    (byId("rt-view") as HTMLButtonElement).disabled = true;
+    await tick();
+    watcher.disconnect();
+
+    // The controller observes `hidden` under the menubar, so even an identical write
+    // onto a closed menu would schedule another reconcile pass.
+    expect(records).toEqual([]);
+    expect(menus.map((element) => element.hidden)).toEqual([true, true, true]);
+  });
+
   it("hands the tab stop on when the top item holding it is hidden at runtime", async () => {
     byId("rt-file").setAttribute("hidden", "");
     await tick();
@@ -1121,6 +1432,23 @@ describe("MenubarController under runtime DOM changes", () => {
     (byId("rt-edit") as HTMLButtonElement).disabled = false;
     await tick();
     expect(tabStops()).toEqual([byId("rt-edit")]);
+  });
+
+  it("gives the tab stop to a top item that joins by its target token while the others are inert", async () => {
+    for (const id of ["rt-file", "rt-edit", "rt-view"]) {
+      (byId(id) as HTMLButtonElement).disabled = true;
+    }
+    byId("rt-view").insertAdjacentHTML(
+      "afterend",
+      '<button id="rt-late" role="menuitem">Late</button>',
+    );
+    await tick();
+    expect(tabStops()).toEqual([]);
+
+    byId("rt-late").setAttribute("data-stimeo--menubar-target", "top");
+    await tick();
+
+    expect(tabStops()).toEqual([byId("rt-late")]);
   });
 
   it("keeps exactly one tab stop when a top item is added at runtime", async () => {
@@ -1213,6 +1541,50 @@ describe("MenubarController under runtime DOM changes", () => {
     expect(menuHidden("rt-m-file")).toBe(true);
     expect(expanded("rt-file")).toBe("false");
     expect(escapeConsumed()).toBe(false);
+  });
+
+  it("cleans up a top item that loses only its target token once its open menu has settled", async () => {
+    // Opening writes the menu's `hidden`, which the menubar observes; letting that
+    // pass run first leaves the lost token as the only change.
+    byId("rt-file").focus();
+    byId("rt-file").click();
+    await tick();
+
+    byId("rt-file").removeAttribute("data-stimeo--menubar-target");
+    await tick();
+
+    expect(menuHidden("rt-m-file")).toBe(true);
+    expect(tabStops()).toEqual([byId("rt-edit")]);
+    expect(escapeConsumed()).toBe(false);
+  });
+
+  it("collapses the owner and releases Escape before a departing open menu's callback returns", () => {
+    byId("rt-file").focus();
+    byId("rt-file").click();
+    const popup = byId("rt-m-file");
+    popup.removeAttribute("data-stimeo--menubar-target");
+
+    // The callback Stimulus delivers for the token just lost.
+    menubarOf(application).menuTargetDisconnected(popup);
+
+    expect(popup.hidden).toBe(true);
+    expect(expanded("rt-file")).toBe("false");
+    expect(escapeConsumed()).toBe(false);
+  });
+
+  it("hides a visible menu that joins by its target token without an expanded owner", async () => {
+    const popup = byId("rt-m-file");
+    popup.removeAttribute("data-stimeo--menubar-target");
+    await tick();
+    popup.hidden = false;
+    await tick();
+    expect(expanded("rt-file")).toBe("false");
+
+    popup.setAttribute("data-stimeo--menubar-target", "menu");
+    await tick();
+
+    // A popup no expanded top owns is one nothing can dismiss again.
+    expect(popup.hidden).toBe(true);
   });
 
   it.each([
@@ -1520,5 +1892,284 @@ describe("Multiple menubars on one page", () => {
     key("b-new", "Escape");
     expect(menuHidden("b-m-file")).toBe(true);
     expect(document.activeElement).toBe(byId("b-file"));
+  });
+});
+
+/** Explicit target calls share the DOM action while retaining their own provenance. */
+describe("MenubarController target API", () => {
+  let application: Application;
+  const element = (id: string): HTMLElement => {
+    const found = document.getElementById(id);
+    if (!found) throw new Error(`Missing API fixture ${id}`);
+    return found;
+  };
+  const instance = (): MenubarController =>
+    application.getControllerForElementAndIdentifier(
+      element("api-root"),
+      "stimeo--menubar",
+    ) as MenubarController;
+  beforeEach(async () => {
+    document.body.innerHTML = `<button id="api-outside">Outside</button><div id="api-root" data-controller="stimeo--menubar" role="menubar"><button id="api-a" data-stimeo--menubar-target="top" aria-controls="api-panel-a" aria-expanded="false" data-action="click->stimeo--menubar#toggle"><span>a</span></button><div id="api-panel-a" role="menu" data-stimeo--menubar-target="menu" hidden><button role="menuitem" data-stimeo--menubar-target="item">Run</button></div><button id="api-b" data-stimeo--menubar-target="top" aria-controls="api-panel-b" aria-expanded="false" data-action="click->stimeo--menubar#toggle"><span>b</span></button><div id="api-panel-b" role="menu" data-stimeo--menubar-target="menu" hidden><button role="menuitem" data-stimeo--menubar-target="item">Run</button></div></div>`;
+    application = Application.start();
+    application.register("stimeo--menubar", MenubarController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it("retains the existing DOM Event success as a positive control", () => {
+    const reports: Array<{ reason?: string }> = [];
+    element("api-root").addEventListener("stimeo--menubar:open", (event) => {
+      reports.push((event as CustomEvent<{ reason?: string }>).detail);
+    });
+    element("api-b").click();
+    expect(element("api-b").getAttribute("aria-expanded")).toBe("true");
+    expect(reports).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    "accepts an owned target or its descendant (%s) after an Event positive control",
+    (descendant) => {
+      const reports: Array<{ reason?: string }> = [];
+      element("api-root").addEventListener("stimeo--menubar:open", (event) => {
+        reports.push((event as CustomEvent<{ reason?: string }>).detail);
+      });
+      element("api-b").click();
+      expect(element("api-b").getAttribute("aria-expanded")).toBe("true");
+      expect(reports).toHaveLength(1);
+      element("api-outside").focus();
+      const target = descendant ? element("api-a").querySelector("span") : element("api-a");
+      if (!(target instanceof HTMLElement)) throw new Error("Missing API descendant");
+      instance().toggle(target);
+      expect(element("api-a").getAttribute("aria-expanded")).toBe("true");
+      expect(document.activeElement).toBe(element("api-outside"));
+      expect(reports.at(-1)?.reason).toBe("api");
+      expect(reports[0]?.reason).toBe("user");
+    },
+  );
+  it.each(["foreign", "undeclared", "detached", "nested"])(
+    "rejects %s targets through element and Event entry points before accepting an owned target",
+    (kind) => {
+      const reports: unknown[] = [];
+      element("api-root").addEventListener("stimeo--menubar:open", (event) => {
+        reports.push((event as CustomEvent<unknown>).detail);
+      });
+      const invalid = element("api-b").cloneNode(true);
+      if (!(invalid instanceof HTMLElement)) throw new Error("Missing cloned target");
+      invalid.id = "api-invalid";
+      invalid.removeAttribute("data-action");
+      if (kind === "foreign") document.body.append(invalid);
+      if (kind === "undeclared") {
+        invalid.removeAttribute("data-stimeo--menubar-target");
+        element("api-root").append(invalid);
+      }
+      if (kind === "nested") {
+        const nested = document.createElement("div");
+        nested.setAttribute("data-controller", "stimeo--menubar");
+        nested.append(invalid);
+        element("api-a").append(nested);
+      }
+      element("api-outside").focus();
+      const before = element("api-root").innerHTML;
+      instance().toggle(invalid);
+      invalid.addEventListener("probe", (event) => instance().toggle(event));
+      invalid.dispatchEvent(new Event("probe"));
+      expect(element("api-root").innerHTML).toBe(before);
+      expect(reports).toEqual([]);
+      expect(document.activeElement).toBe(element("api-outside"));
+      instance().toggle(element("api-b"));
+      expect(element("api-b").getAttribute("aria-expanded")).toBe("true");
+      expect(reports).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+    ["click", "user"],
+  ])("retains %s Event provenance for an action bound on a target descendant", (type, reason) => {
+    const reports: Array<{ reason: string }> = [];
+    element("api-root").addEventListener("stimeo--menubar:open", (event) => {
+      reports.push((event as CustomEvent<{ reason: string }>).detail);
+    });
+    const child = element("api-b").querySelector("span");
+    if (!(child instanceof HTMLElement)) throw new Error("Missing action descendant");
+    child.addEventListener(type, (event) => instance().toggle(event));
+    child.dispatchEvent(new Event(type));
+    expect(element("api-b").getAttribute("aria-expanded")).toBe("true");
+    expect(reports.map((detail) => detail.reason)).toEqual([reason]);
+  });
+
+  it.each([false, true])("opens through API with internal focus movement only (%s)", (inside) => {
+    (inside ? element("api-a") : element("api-outside")).focus();
+    instance().toggle(element("api-b"));
+    const item = element("api-panel-b").querySelector("button");
+    expect(document.activeElement).toBe(inside ? item : element("api-outside"));
+    expect(element("api-b").tabIndex).toBe(0);
+    expect(element("api-a").tabIndex).toBe(-1);
+  });
+
+  it.each([false, true])(
+    "activates an item descendant with select reason and conditional focus (%s)",
+    (inside) => {
+      instance().toggle(element("api-b"));
+      const item = element("api-panel-b").querySelector("button");
+      if (!(item instanceof HTMLElement)) throw new Error("Missing menu item");
+      const child = document.createElement("span");
+      item.append(child);
+      (inside ? item : element("api-outside")).focus();
+      const reports: Array<{ reason: string }> = [];
+      element("api-root").addEventListener("stimeo--menubar:close", (event) => {
+        reports.push((event as CustomEvent<{ reason: string }>).detail);
+      });
+      instance().activate(child);
+      expect(element("api-panel-b").hidden).toBe(true);
+      expect(reports.map((detail) => detail.reason)).toEqual(["select"]);
+      expect(document.activeElement).toBe(inside ? element("api-b") : element("api-outside"));
+      expect(element("api-b").tabIndex).toBe(0);
+    },
+  );
+
+  it("ignores activation from an unowned item without closing an owned menu", () => {
+    instance().toggle(element("api-b"));
+    const foreign = document.createElement("button");
+    foreign.setAttribute("data-stimeo--menubar-target", "item");
+    document.body.append(foreign);
+    instance().activate(foreign);
+    foreign.addEventListener("probe", (event) => instance().activate(event));
+    foreign.dispatchEvent(new Event("probe"));
+    expect(element("api-panel-b").hidden).toBe(false);
+    expect(element("api-b").getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("rejects a nested origin even when the Event handler belongs to an owned outer target", () => {
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--menubar");
+    const child = document.createElement("span");
+    child.setAttribute("data-stimeo--menubar-target", "top");
+    nested.append(child);
+    element("api-b").append(nested);
+    const reports = vi.fn();
+    element("api-root").addEventListener("stimeo--menubar:open", reports);
+    const before = element("api-root").innerHTML;
+    element("api-b").addEventListener("probe", (event) => instance().toggle(event));
+    child.dispatchEvent(new Event("probe", { bubbles: true }));
+    expect(element("api-root").innerHTML).toBe(before);
+    expect(reports).not.toHaveBeenCalled();
+    instance().toggle(element("api-b"));
+    expect(reports).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ["api", "inside", "unchanged"],
+    ["api", "inside", "outside"],
+    ["event", "inside", "outside"],
+    ["api", "outside", "inside"],
+  ] as const)(
+    "rechecks synchronous open subscriber focus for %s from %s to %s",
+    (source, initial, destination) => {
+      const outside = element("api-outside");
+      const first = element("api-a");
+      const opener = element("api-b");
+      (initial === "inside" ? first : outside).focus();
+      element("api-root").addEventListener("stimeo--menubar:open", () => {
+        if (destination === "outside") outside.focus();
+        if (destination === "inside") first.focus();
+      });
+      if (source === "api") instance().toggle(opener);
+      else opener.click();
+      const menuItem = element("api-panel-b").querySelector("button");
+      const expected =
+        source === "event" || destination === "unchanged"
+          ? menuItem
+          : destination === "outside"
+            ? outside
+            : first;
+      expect(document.activeElement).toBe(expected);
+      expect(element("api-panel-b").hidden).toBe(false);
+      expect(opener.tabIndex).toBe(0);
+      expect(first.tabIndex).toBe(-1);
+    },
+  );
+
+  it.each(["api", "event"] as const)(
+    "rechecks synchronous close subscriber focus during %s item activation",
+    (source) => {
+      element("api-a").focus();
+      instance().toggle(element("api-b"));
+      const item = element("api-panel-b").querySelector("button");
+      if (!(item instanceof HTMLElement)) throw new Error("Missing menu item");
+      item.focus();
+      const reasons: string[] = [];
+      element("api-root").addEventListener("stimeo--menubar:close", (event) => {
+        reasons.push((event as CustomEvent<{ reason: string }>).detail.reason);
+        element("api-outside").focus();
+      });
+      if (source === "api") instance().activate(item);
+      else {
+        item.addEventListener("probe", (event) => instance().activate(event));
+        item.dispatchEvent(new Event("probe"));
+      }
+      expect(document.activeElement).toBe(
+        source === "api" ? element("api-outside") : element("api-b"),
+      );
+      expect(element("api-panel-b").hidden).toBe(true);
+      expect(element("api-b").tabIndex).toBe(0);
+      expect(reasons).toEqual(["select"]);
+    },
+  );
+
+  it.each(["api", "event"] as const)(
+    "rechecks synchronous close subscriber focus when a %s plain command replaces a menu",
+    (source) => {
+      element("api-a").focus();
+      instance().toggle(element("api-a"));
+      const command = element("api-b");
+      command.removeAttribute("aria-controls");
+      element("api-root").addEventListener("stimeo--menubar:close", () =>
+        element("api-outside").focus(),
+      );
+      if (source === "api") instance().toggle(command);
+      else command.click();
+      expect(document.activeElement).toBe(source === "api" ? element("api-outside") : command);
+      expect(element("api-panel-a").hidden).toBe(true);
+      expect(command.tabIndex).toBe(0);
+      expect(element("api-a").tabIndex).toBe(-1);
+    },
+  );
+  it("ignores activation of an undeclared host inside the root before accepting a menu item", () => {
+    instance().toggle(element("api-b"));
+    const invalid = document.createElement("span");
+    element("api-root").append(invalid);
+    const reports = vi.fn();
+    element("api-root").addEventListener("stimeo--menubar:close", reports);
+    expect(() => instance().activate(invalid)).not.toThrow();
+    expect(element("api-panel-b").hidden).toBe(false);
+    expect(reports).not.toHaveBeenCalled();
+    const owned = element("api-panel-b").querySelector("button");
+    if (!(owned instanceof HTMLElement)) throw new Error("Missing owned item");
+    instance().activate(owned);
+    expect(element("api-panel-b").hidden).toBe(true);
+    expect(reports).toHaveBeenCalledOnce();
+  });
+
+  it("rejects unmarked activation inside a nested scope even when its nearest menu item is owned", () => {
+    instance().toggle(element("api-b"));
+    const owned = element("api-panel-b").querySelector("button");
+    if (!(owned instanceof HTMLElement)) throw new Error("Missing owned item");
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--menubar");
+    const child = document.createElement("span");
+    nested.append(child);
+    owned.append(nested);
+    const reports = vi.fn();
+    element("api-root").addEventListener("stimeo--menubar:close", reports);
+    instance().activate(child);
+    expect(element("api-panel-b").hidden).toBe(false);
+    expect(reports).not.toHaveBeenCalled();
+    instance().activate(owned);
+    expect(element("api-panel-b").hidden).toBe(true);
+    expect(reports).toHaveBeenCalledOnce();
   });
 });

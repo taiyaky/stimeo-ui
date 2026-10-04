@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { isReservedArrowChord } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { ownerOf } from "../utils/event_owner";
 import { SafeTimeout } from "../utils/safe_timeout";
@@ -58,11 +59,17 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *   dismissed first.
  * - A click outside the controller closes the menu without moving focus away
  *   from the clicked element.
+ * - A trigger or a menu that takes over — in one task, or after an earlier one
+ *   leaves in a later task — carries the open state; focus stays where the swap
+ *   left it. With no menu left the menu button reads closed and leaves the Escape
+ *   stack. One that stops resolving as the target gets back what it carried before
+ *   this controller wrote on it.
  * - Each move of the open state is reported: `stimeo--menu:open` and
  *   `stimeo--menu:close` dispatch `{ reason: StateReason }`, after the state
  *   attributes are written. Both are informational, so neither is cancelable. A
  *   call that leaves the state where it already was, the normalization in
- *   {@link connect}, and {@link disconnect} are all silent.
+ *   {@link connect}, a trigger or a menu that takes over, and {@link disconnect}
+ *   are all silent.
  *
  * Roving focus skips `hidden` and natively `disabled` items. An
  * `aria-disabled="true"` item remains discoverable by arrow-key focus, while its
@@ -81,7 +88,9 @@ export class MenuController extends Controller<HTMLElement> {
   static events = ["close", "open"] as const;
 
   declare readonly triggerTarget: HTMLButtonElement;
+  declare readonly triggerTargets: HTMLButtonElement[];
   declare readonly menuTarget: HTMLElement;
+  declare readonly menuTargets: HTMLElement[];
   declare readonly itemTargets: HTMLButtonElement[];
   declare readonly hasTriggerTarget: boolean;
   declare readonly hasMenuTarget: boolean;
@@ -90,6 +99,12 @@ export class MenuController extends Controller<HTMLElement> {
 
   /** Escape-stack membership while open; the shared resolver dismisses via it. */
   readonly #escapeLayer = new EscapeLayer();
+  /** Borrows `hidden` on the menu, to give back when an element stops being the menu. */
+  readonly #menuHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Borrows `aria-expanded` on the trigger, for the same return. */
+  readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
+  /** The menu the open state was last applied to. */
+  #menu: HTMLElement | null = null;
 
   /**
    * The item a click started on, recorded in the capture pass. Read once by the
@@ -101,6 +116,9 @@ export class MenuController extends Controller<HTMLElement> {
   /** Clicks already turned into an activation, so the two paths run it once. */
   readonly #activated = new WeakSet<Event>();
 
+  /** Whether `connect()` has run for this connection; target callbacks arrive outside it too. */
+  #connected = false;
+
   /** Whether state moves are reported: set once `connect()` settled the baseline. */
   #reporting = false;
 
@@ -111,11 +129,13 @@ export class MenuController extends Controller<HTMLElement> {
     this.element.addEventListener("click", this.#onDelegatedItemClick);
     this.element.addEventListener("keydown", this.#onDelegatedItemKeydown);
     document.addEventListener("click", this.#onOutsideClick, true);
+    this.#connected = true;
     this.#reporting = true;
   }
 
   /** Releases the listeners, stack membership, and any pending Tab-close task. */
   override disconnect(): void {
+    this.#connected = false;
     this.#reporting = false;
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
@@ -123,6 +143,37 @@ export class MenuController extends Controller<HTMLElement> {
     this.element.removeEventListener("click", this.#onDelegatedItemClick);
     this.element.removeEventListener("keydown", this.#onDelegatedItemKeydown);
     document.removeEventListener("click", this.#onOutsideClick, true);
+  }
+
+  /** Brings a trigger that arrives after connect to the open state. */
+  triggerTargetConnected(): void {
+    if (this.#connected) this.#reflectTrigger();
+  }
+
+  /**
+   * Gives a trigger that no longer resolves as one its own `aria-expanded` back — after
+   * `disconnect()` too, since dropping the identifier leaves the element on the page — and
+   * brings the trigger that stays to the open state.
+   */
+  triggerTargetDisconnected(trigger: HTMLButtonElement): void {
+    if (!this.triggerTargets.includes(trigger)) this.#expanded.return(trigger);
+    if (this.#connected) this.#reflectTrigger();
+  }
+
+  /** Applies the open state to a menu that arrives after connect in front of the others. */
+  menuTargetConnected(): void {
+    this.#adoptMenu();
+  }
+
+  /**
+   * Applies the open state to the menu left, then gives a menu that no longer resolves as the
+   * target its own `hidden` back — after `disconnect()` too, since dropping the identifier
+   * leaves the element on the page. The open state is read off the departing menu first,
+   * while it still carries it.
+   */
+  menuTargetDisconnected(menu: HTMLElement): void {
+    this.#adoptMenu();
+    if (!this.menuTargets.includes(menu)) this.#menuHidden.return(menu);
   }
 
   /** Toggles the menu open/closed. Bound via `data-action` (click). */
@@ -151,13 +202,15 @@ export class MenuController extends Controller<HTMLElement> {
     // the freshly opened menu shut on the next tick.
     this.#timers.clearAll();
     if (!this.hasMenuTarget) return;
+    const menu = this.menuTarget;
     const was = this.#isOpen;
     this.#escapeLayer.activate(document, {
       onDismiss: () => this.#closeAndRestore("escape"),
       claims: claimsWhileFocusWithin(this.element),
     });
-    this.menuTarget.hidden = false;
-    if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "true");
+    this.#menuHidden.write(menu, null);
+    this.#menu = menu;
+    if (this.hasTriggerTarget) this.#expanded.write(this.triggerTarget, "true");
     if (!was && this.#reporting) this.dispatch("open", { detail: { reason }, cancelable: false });
   }
 
@@ -165,11 +218,38 @@ export class MenuController extends Controller<HTMLElement> {
   #close(reason: StateReason): void {
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
-    if (!this.hasMenuTarget) return;
+    const menu = this.hasMenuTarget ? this.menuTarget : null;
+    this.#menu = menu;
+    if (!menu) return;
     const was = this.#isOpen;
-    this.menuTarget.hidden = true;
-    if (this.hasTriggerTarget) this.triggerTarget.setAttribute("aria-expanded", "false");
+    this.#menuHidden.write(menu, "");
+    if (this.hasTriggerTarget) this.#expanded.write(this.triggerTarget, "false");
     if (was && this.#reporting) this.dispatch("close", { detail: { reason }, cancelable: false });
+  }
+
+  /**
+   * Moves the open state onto the menu that is now first, when that menu changed: one that took
+   * over carries the state of the menu before it, and one that arrives with none before it
+   * arrives closed. With none left, the menu button leaves the Escape stack. The trigger then
+   * reads the menu, changed or not. Focus stays where the swap left it, and nothing is
+   * dispatched.
+   */
+  #adoptMenu(): void {
+    if (!this.#connected) return;
+    const menu = this.hasMenuTarget ? this.menuTarget : null;
+    const previous = this.#menu;
+    this.#menu = menu;
+    if (!menu) {
+      this.#escapeLayer.deactivate();
+    } else if (menu !== previous) {
+      this.#menuHidden.write(menu, (previous?.hidden ?? true) ? "" : null);
+    }
+    this.#reflectTrigger();
+  }
+
+  /** Writes the open state onto the trigger that is first. */
+  #reflectTrigger(): void {
+    if (this.hasTriggerTarget) this.#expanded.write(this.triggerTarget, String(this.#isOpen));
   }
 
   /**
@@ -252,12 +332,12 @@ export class MenuController extends Controller<HTMLElement> {
    * also reached from the delegated listener.
    *
    * Markup that carries the per-element action *and* gets the delegate would run
-   * this twice for one gesture. `close()` writes the state hooks (`hidden`,
-   * `aria-expanded`), and an identical reassign still queues a MutationRecord,
-   * so a second pass is observable to anyone watching them. The event is
-   * therefore claimed: the path that gets there first does the work, the other
-   * one finds it claimed and returns. A programmatic call with no event always
-   * runs.
+   * this twice for one gesture. The state hooks (`hidden`, `aria-expanded`) are
+   * written only when they change, so a second pass writes nothing on its own, but
+   * a page handler between the two paths — on an ancestor of the item — that opens
+   * the menu again would see the second pass close it. The event is therefore
+   * claimed: the path that gets there first does the work, the other one finds it
+   * claimed and returns. A programmatic call with no event always runs.
    */
   activate(event?: Event): void {
     if (event !== undefined) {

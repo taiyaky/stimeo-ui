@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeController } from "../src/controllers/theme_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
@@ -110,6 +110,69 @@ describe("ThemeController", () => {
     Array.from(document.querySelectorAll<HTMLElement>("[data-stimeo--theme-target='option']"));
   const optionByMode = (mode: string) => query<HTMLElement>(`[data-value='${mode}']`);
 
+  it("toggles from the stored theme when a declaration changes in the same task", async () => {
+    window.localStorage.setItem("stimeo-theme", "dark");
+    await start(RADIOGROUP());
+    const seen = changeLog();
+    host().setAttribute("data-stimeo--theme-mode-value", "light");
+    controller().toggle();
+    expect(root().getAttribute("data-theme")).toBe("light");
+    expect(seen).toEqual([{ mode: "light", resolved: "light", reason: "api" }]);
+  });
+
+  it("includes an unreconciled declaration in the user's change", async () => {
+    await start(RADIOGROUP('data-stimeo--theme-mode-value="light"'));
+    const seen = changeLog();
+    host().setAttribute("data-stimeo--theme-mode-value", "dark");
+    optionByMode("dark").click();
+    expect(seen).toEqual([{ mode: "dark", resolved: "dark", reason: "user" }]);
+  });
+
+  it("does not report an operation that returns to the last published theme", async () => {
+    await start(RADIOGROUP('data-stimeo--theme-mode-value="light"'));
+    const seen = changeLog();
+    host().setAttribute("data-stimeo--theme-mode-value", "dark");
+    controller().toggle();
+    expect(seen).toEqual([]);
+  });
+
+  it.each(["root", "descendant"])(
+    "restores the resolved theme after a %s morph without reporting a change",
+    async (origin) => {
+      await start(RADIOGROUP('data-stimeo--theme-mode-value="dark"'));
+      expect(root().getAttribute("data-theme")).toBe("dark");
+      expect(root().style.getPropertyValue("color-scheme")).toBe("dark");
+      const reports = reportLog();
+      optionByMode("dark").focus();
+      root().removeAttribute("data-theme");
+      root().style.removeProperty("color-scheme");
+      const source = origin === "root" ? host() : optionByMode("dark");
+      source.dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await tick();
+      expect(root().getAttribute("data-theme")).toBe("dark");
+      expect(root().style.getPropertyValue("color-scheme")).toBe("dark");
+      expect(document.activeElement).toBe(optionByMode("dark"));
+      expect(reports).toEqual([]);
+    },
+  );
+
+  it("applies the current theme to a changed target declaration without a mode change", async () => {
+    await start(`${RADIOGROUP('data-stimeo--theme-mode-value="dark" data-stimeo--theme-target-value="#first"')}
+      <section id="first"></section><section id="second"></section>`);
+    const first = query<HTMLElement>("#first");
+    const second = query<HTMLElement>("#second");
+    expect(first.getAttribute("data-theme")).toBe("dark");
+    expect(first.style.getPropertyValue("color-scheme")).toBe("dark");
+    expect(second.hasAttribute("data-theme")).toBe(false);
+    const reports = reportLog();
+    host().setAttribute("data-stimeo--theme-target-value", "#second");
+    controller().targetValueChanged();
+    await tick();
+    expect(second.getAttribute("data-theme")).toBe("dark");
+    expect(second.style.getPropertyValue("color-scheme")).toBe("dark");
+    expect(reports).toEqual([]);
+  });
+
   it("applies the resolved theme to the root on connect (system → light)", async () => {
     await start(RADIOGROUP());
     expect(root().getAttribute("data-theme")).toBe("light");
@@ -182,6 +245,21 @@ describe("ThemeController", () => {
     expect(document.activeElement).toBe(optionByMode("dark"));
     expect(optionByMode("dark").getAttribute("aria-checked")).toBe("true");
     expect(root().getAttribute("data-theme")).toBe("dark");
+  });
+
+  it("keeps the page from scrolling on an arrow key that moves the selection", async () => {
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
+    const light = optionByMode("light");
+    light.focus();
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    light.dispatchEvent(event);
+
+    expect(document.activeElement).toBe(optionByMode("dark"));
+    expect(event.defaultPrevented).toBe(true);
   });
 
   it("reverses the horizontal arrows under RTL, leaving Down/Up alone", async () => {
@@ -303,7 +381,7 @@ describe("ThemeController", () => {
       log.push((e as CustomEvent<{ mode: string; resolved: string }>).detail);
     });
     optionByMode("dark").click();
-    expect(log).toEqual([{ mode: "dark", resolved: "dark" }]);
+    expect(log).toEqual([{ mode: "dark", resolved: "dark", reason: "user" }]);
   });
 
   it("follows the OS preference live while in system mode", async () => {
@@ -362,6 +440,28 @@ describe("ThemeController", () => {
     controller.disconnect();
     setSystemDark(true);
     expect(root().getAttribute("data-theme")).toBe("light");
+  });
+
+  it("stops answering the arrow keys after disconnect", async () => {
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
+    const controller = application.getControllerForElementAndIdentifier(
+      query("[data-controller='stimeo--theme']"),
+      "stimeo--theme",
+    ) as ThemeController;
+    const light = optionByMode("light");
+    light.focus();
+    controller.disconnect();
+
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    light.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(light);
+    expect(optionByMode("dark").getAttribute("aria-checked")).toBe("false");
   });
 
   // --- Firing condition ---------------------------------------------------------
@@ -427,8 +527,8 @@ describe("ThemeController", () => {
     setSystemDark(false);
 
     expect(seen).toEqual([
-      { mode: "system", resolved: "dark" },
-      { mode: "system", resolved: "light" },
+      { mode: "system", resolved: "dark", reason: "media" },
+      { mode: "system", resolved: "light", reason: "media" },
     ]);
   });
 
@@ -731,7 +831,7 @@ describe("ThemeController", () => {
     optionByMode("light").click();
     optionByMode("light").click();
 
-    expect(seen).toEqual([{ mode: "light", resolved: "light" }]);
+    expect(seen).toEqual([{ mode: "light", resolved: "light", reason: "user" }]);
   });
 
   it("does not react to an OS change once an explicit mode is chosen", async () => {
@@ -803,7 +903,7 @@ describe("ThemeController", () => {
     expect(seen).toEqual([{ type: "reconcile", mode: "dark", resolved: "dark" }]);
   });
 
-  it("reports a declaration that moves only the effective theme as reconcile", async () => {
+  it("reports a declaration that moves only the selected mode as reconcile", async () => {
     mediaMatches = true;
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="dark"`));
     const seen = reportLog();
@@ -843,7 +943,7 @@ describe("ThemeController", () => {
     controller().modeValueChanged();
     await tick();
 
-    expect(seen).toEqual([{ type: "change", mode: "dark", resolved: "dark" }]);
+    expect(seen).toEqual([{ type: "change", mode: "dark", resolved: "dark", reason: "user" }]);
   });
 
   it("keeps reporting a move of the OS preference as change", async () => {
@@ -852,7 +952,7 @@ describe("ThemeController", () => {
 
     setSystemDark(true);
 
-    expect(seen).toEqual([{ type: "change", mode: "system", resolved: "dark" }]);
+    expect(seen).toEqual([{ type: "change", mode: "system", resolved: "dark", reason: "media" }]);
   });
 
   it("measures a selection a reconcile listener makes from the reported theme", async () => {
@@ -875,7 +975,7 @@ describe("ThemeController", () => {
     expect(root().getAttribute("data-theme")).toBe("light");
     expect(seen).toEqual([
       { type: "reconcile", mode: "dark", resolved: "dark" },
-      { type: "change", mode: "light", resolved: "light" },
+      { type: "change", mode: "light", resolved: "light", reason: "user" },
     ]);
   });
 
@@ -1017,7 +1117,7 @@ describe("ThemeController", () => {
     controller().modeValueChanged();
     await tick();
 
-    expect(seen).toEqual([{ mode: "system", resolved: "light" }]);
+    expect(seen).toEqual([{ mode: "system", resolved: "light", reason: "user" }]);
     expect(root().getAttribute("data-theme")).toBe("light");
   });
 
@@ -1041,6 +1141,125 @@ describe("ThemeController", () => {
     expect(host().getAttribute("data-stimeo--theme-mode-value")).toBe("dark");
   });
 
+  // --- Runtime changes to the storage-key declaration ----------------------------
+
+  /**
+   * Rewrites the storage-key declaration on the live element — `null` drops it — then
+   * runs the callback Stimulus delivers for that write.
+   */
+  const declareStorageKey = (key: string | null) => {
+    if (key === null) host().removeAttribute("data-stimeo--theme-storage-key-value");
+    else host().setAttribute("data-stimeo--theme-storage-key-value", key);
+    controller().storageKeyValueChanged();
+  };
+
+  it("applies the choice saved under a storage key rewritten after connect, as reconcile", async () => {
+    window.localStorage.setItem("stimeo-theme", "light");
+    window.localStorage.setItem("account-theme", "dark");
+    await start(RADIOGROUP());
+    expect(root().getAttribute("data-theme")).toBe("light");
+    const seen = reportLog();
+    const setItem = vi.spyOn(window.localStorage, "setItem");
+
+    declareStorageKey("account-theme");
+
+    expect(root().getAttribute("data-theme")).toBe("dark");
+    expect(root().style.getPropertyValue("color-scheme")).toBe("dark");
+    expect(options().map((option) => option.getAttribute("aria-checked"))).toEqual([
+      "false",
+      "true",
+      "false",
+    ]);
+    expect(options().map((option) => option.tabIndex)).toEqual([-1, 0, -1]);
+    expect(host().getAttribute("data-stimeo--theme-mode-value")).toBe("dark");
+    expect(seen).toEqual([{ type: "reconcile", mode: "dark", resolved: "dark" }]);
+    // Switching the namespace moves nothing between keys and saves nothing.
+    expect(setItem).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem("stimeo-theme")).toBe("light");
+    setItem.mockRestore();
+  });
+
+  it("keeps the current mode when the rewritten storage key holds no valid choice", async () => {
+    window.localStorage.setItem("stimeo-theme", "dark");
+    window.localStorage.setItem("corrupt-theme", "{}<script>");
+    await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
+    expect(root().getAttribute("data-theme")).toBe("dark");
+    const seen = reportLog();
+    const setItem = vi.spyOn(window.localStorage, "setItem");
+
+    declareStorageKey("empty-theme");
+    declareStorageKey("corrupt-theme");
+
+    expect(root().getAttribute("data-theme")).toBe("dark");
+    expect(optionByMode("dark").getAttribute("aria-checked")).toBe("true");
+    expect(host().getAttribute("data-stimeo--theme-mode-value")).toBe("dark");
+    expect(seen).toEqual([]);
+    expect(setItem).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem("empty-theme")).toBeNull();
+    setItem.mockRestore();
+  });
+
+  it("stays silent when the choice under the rewritten storage key is already on screen", async () => {
+    window.localStorage.setItem("account-theme", "system");
+    await start(RADIOGROUP());
+    const seen = reportLog();
+
+    declareStorageKey("account-theme");
+
+    expect(root().getAttribute("data-theme")).toBe("light");
+    expect(seen).toEqual([]);
+  });
+
+  it("saves the next selection under the rewritten storage key only", async () => {
+    await start(RADIOGROUP());
+
+    declareStorageKey("account-theme");
+    optionByMode("dark").click();
+
+    expect(window.localStorage.getItem("account-theme")).toBe("dark");
+    expect(window.localStorage.getItem("stimeo-theme")).toBeNull();
+  });
+
+  it("follows a storage key rewritten after connect on the 2-value toggle", async () => {
+    window.localStorage.setItem("account-theme", "dark");
+    await start(TOGGLE);
+    expect(host().getAttribute("aria-pressed")).toBe("false");
+
+    declareStorageKey("account-theme");
+
+    expect(root().getAttribute("data-theme")).toBe("dark");
+    expect(host().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("reads storage again only when the storage key itself changes", async () => {
+    await start(RADIOGROUP(`data-stimeo--theme-storage-key-value="stimeo-theme"`));
+    // Another tab saves a choice under the key this instance already reads.
+    window.localStorage.setItem("stimeo-theme", "dark");
+    const seen = reportLog();
+
+    // Dropping the attribute leaves the default, which names the same key.
+    declareStorageKey(null);
+
+    expect(root().getAttribute("data-theme")).toBe("light");
+    expect(seen).toEqual([]);
+  });
+
+  it("follows the storage key the page wrote while the controller was away", async () => {
+    window.localStorage.setItem("account-theme", "dark");
+    await start(RADIOGROUP());
+    const instance = controller();
+    instance.disconnect();
+    host().setAttribute("data-stimeo--theme-storage-key-value", "account-theme");
+    instance.storageKeyValueChanged();
+    expect(root().getAttribute("data-theme")).toBe("light");
+    const seen = reportLog();
+
+    instance.connect();
+
+    expect(root().getAttribute("data-theme")).toBe("dark");
+    expect(seen).toEqual([]);
+  });
+
   it("has no machine-detectable a11y violations", async () => {
     await start(`<main>${RADIOGROUP()}</main>`);
     await expectNoA11yViolations(document.body);
@@ -1060,5 +1279,152 @@ describe("ThemeController", () => {
       "radio, System, not checked, position 3, set size 3",
       "end of radiogroup, Theme",
     ]);
+  });
+});
+
+/** Explicit target calls share the DOM action while retaining their own provenance. */
+describe("ThemeController target API", () => {
+  let application: Application;
+  const element = (id: string): HTMLElement => {
+    const found = document.getElementById(id);
+    if (!found) throw new Error(`Missing API fixture ${id}`);
+    return found;
+  };
+  const instance = (): ThemeController =>
+    application.getControllerForElementAndIdentifier(
+      element("api-root"),
+      "stimeo--theme",
+    ) as ThemeController;
+  beforeEach(async () => {
+    installMatchMedia();
+    localStorage.clear();
+    document.body.innerHTML = `<button id="api-outside">Outside</button><div id="api-root" data-controller="stimeo--theme" role="radiogroup" data-stimeo--theme-mode-value="light"><button id="api-a" data-stimeo--theme-target="option" role="radio" tabindex="-1" aria-checked="false" data-value="light" data-action="click->stimeo--theme#set"><span>a</span></button><button id="api-b" data-stimeo--theme-target="option" role="radio" tabindex="-1" aria-checked="false" data-value="dark" data-action="click->stimeo--theme#set"><span>b</span></button></div>`;
+    application = Application.start();
+    application.register("stimeo--theme", ThemeController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it("retains the existing DOM Event success as a positive control", () => {
+    const reports: Array<{ reason?: string }> = [];
+    element("api-root").addEventListener("stimeo--theme:change", (event) => {
+      reports.push((event as CustomEvent<{ reason?: string }>).detail);
+    });
+    element("api-b").click();
+    expect(element("api-b").getAttribute("aria-checked")).toBe("true");
+    expect(reports).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    "accepts an owned target or its descendant (%s) after an Event positive control",
+    (descendant) => {
+      const reports: Array<{ reason?: string }> = [];
+      element("api-root").addEventListener("stimeo--theme:change", (event) => {
+        reports.push((event as CustomEvent<{ reason?: string }>).detail);
+      });
+      element("api-b").click();
+      expect(element("api-b").getAttribute("aria-checked")).toBe("true");
+      expect(reports).toHaveLength(1);
+      element("api-outside").focus();
+      const target = descendant ? element("api-a").querySelector("span") : element("api-a");
+      if (!(target instanceof HTMLElement)) throw new Error("Missing API descendant");
+      instance().set(target);
+      expect(element("api-a").getAttribute("aria-checked")).toBe("true");
+      expect(document.activeElement).toBe(element("api-outside"));
+      expect(reports.at(-1)?.reason).toBe("api");
+      expect(reports[0]?.reason).toBe("user");
+    },
+  );
+  it.each(["foreign", "undeclared", "detached", "nested"])(
+    "rejects %s targets through element and Event entry points before accepting an owned target",
+    (kind) => {
+      const reports: unknown[] = [];
+      element("api-root").addEventListener("stimeo--theme:change", (event) => {
+        reports.push((event as CustomEvent<unknown>).detail);
+      });
+      const invalid = element("api-b").cloneNode(true);
+      if (!(invalid instanceof HTMLElement)) throw new Error("Missing cloned target");
+      invalid.id = "api-invalid";
+      invalid.removeAttribute("data-action");
+      if (kind === "foreign") document.body.append(invalid);
+      if (kind === "undeclared") {
+        invalid.removeAttribute("data-stimeo--theme-target");
+        element("api-root").append(invalid);
+      }
+      if (kind === "nested") {
+        const nested = document.createElement("div");
+        nested.setAttribute("data-controller", "stimeo--theme");
+        nested.append(invalid);
+        element("api-a").append(nested);
+      }
+      element("api-outside").focus();
+      const before = element("api-root").innerHTML;
+      instance().set(invalid);
+      invalid.addEventListener("probe", (event) => instance().set(event));
+      invalid.dispatchEvent(new Event("probe"));
+      expect(element("api-root").innerHTML).toBe(before);
+      expect(reports).toEqual([]);
+      expect(document.activeElement).toBe(element("api-outside"));
+      instance().set(element("api-b"));
+      expect(element("api-b").getAttribute("aria-checked")).toBe("true");
+      expect(reports).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+    ["click", "user"],
+  ])("retains %s Event provenance for an action bound on a target descendant", (type, reason) => {
+    const reports: Array<{ reason: string }> = [];
+    element("api-root").addEventListener("stimeo--theme:change", (event) => {
+      reports.push((event as CustomEvent<{ reason: string }>).detail);
+    });
+    const child = element("api-b").querySelector("span");
+    if (!(child instanceof HTMLElement)) throw new Error("Missing action descendant");
+    child.addEventListener(type, (event) => instance().set(event));
+    child.dispatchEvent(new Event(type));
+    expect(element("api-b").getAttribute("aria-checked")).toBe("true");
+    expect(reports.map((detail) => detail.reason)).toEqual([reason]);
+  });
+
+  it("separates API, Event, and operating-system reasons", () => {
+    const reports: Array<{ mode: string; resolved: string; reason: string }> = [];
+    element("api-root").addEventListener("stimeo--theme:change", (event) => {
+      reports.push(
+        (event as CustomEvent<{ mode: string; resolved: string; reason: string }>).detail,
+      );
+    });
+    instance().toggle();
+    instance().toggle(new Event("click"));
+    instance().toggle(new Event("focusin"));
+    instance().toggle(new Event("pointerenter"));
+    expect(reports).toEqual([
+      { mode: "dark", resolved: "dark", reason: "api" },
+      { mode: "light", resolved: "light", reason: "user" },
+      { mode: "dark", resolved: "dark", reason: "focus" },
+      { mode: "light", resolved: "light", reason: "pointer" },
+    ]);
+  });
+
+  it("rejects a nested origin even when the Event handler belongs to an owned outer target", () => {
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--theme");
+    const child = document.createElement("span");
+    child.setAttribute("data-stimeo--theme-target", "option");
+    nested.append(child);
+    element("api-b").append(nested);
+    const reports = vi.fn();
+    element("api-root").addEventListener("stimeo--theme:change", reports);
+    const before = element("api-root").innerHTML;
+    element("api-b").addEventListener("probe", (event) => instance().set(event));
+    child.dispatchEvent(new Event("probe", { bubbles: true }));
+    expect(element("api-root").innerHTML).toBe(before);
+    expect(reports).not.toHaveBeenCalled();
+    instance().set(element("api-b"));
+    expect(reports).toHaveBeenCalledOnce();
   });
 });

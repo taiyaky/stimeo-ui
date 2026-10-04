@@ -1,25 +1,26 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, describe, expect, it } from "vitest";
-import { ResetBeforeCacheController } from "../src/controllers/reset_before_cache_controller";
+import { ResetOnRestoreController } from "../src/controllers/reset_on_restore_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
- * Behavioral tests for {@link ResetBeforeCacheController}: the turbo:before-cache
- * sweep (attribute removal, form reset, restoring a field to its authored state,
- * re-hiding, node removal), the reset/request events, the dispatchReset toggle,
- * scope narrowing, idempotency, the manual reset action, and listener teardown.
+ * Behavioral tests for {@link ResetOnRestoreController}: the sweep (attribute removal,
+ * class removal, form reset, restoring a field to its authored state, re-hiding, node
+ * removal) run on a copy of the page Turbo restores and by the manual reset action, the
+ * mark that tells such a copy from server markup, the reset event, scope narrowing and
+ * idempotency, and a live page that a reconnect, turbo:before-cache or a morph leaves alone.
  */
 
-describe("ResetBeforeCacheController", () => {
+describe("ResetOnRestoreController", () => {
   let application: Application;
 
   const start = async (markup: string, attrs = "") => {
-    document.body.innerHTML = `<div data-controller="stimeo--reset-before-cache" ${attrs}>${markup}</div>`;
+    document.body.innerHTML = `<div data-controller="stimeo--reset-on-restore" ${attrs}>${markup}</div>`;
     application = Application.start();
-    application.register("stimeo--reset-before-cache", ResetBeforeCacheController);
+    application.register("stimeo--reset-on-restore", ResetOnRestoreController);
     await tick();
   };
 
@@ -28,23 +29,136 @@ describe("ResetBeforeCacheController", () => {
     document.body.innerHTML = "";
   });
 
-  const root = () => query("[data-controller='stimeo--reset-before-cache']");
-  const fireBeforeCache = () => document.dispatchEvent(new Event("turbo:before-cache"));
+  const root = () => query("[data-controller='stimeo--reset-on-restore']");
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--reset-on-restore",
+    ) as ResetOnRestoreController;
+  const sweep = () => controller().reset();
+  const restore = async (): Promise<void> => {
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--reset-on-restore", ResetOnRestoreController),
+    );
+  };
+  const countResets = (): { count: number } => {
+    const seen = { count: 0 };
+    document.addEventListener("stimeo--reset-on-restore:reset", () => {
+      seen.count += 1;
+    });
+    return seen;
+  };
 
-  it("removes the listed attributes on before-cache", async () => {
+  describe("a copy of the page Turbo restores", () => {
+    it("is reset once, with the reset reported where document listeners hear it", async () => {
+      await start(`
+        <details id="d" data-reset-attr="open"><summary>More</summary></details>
+        <div id="overlay" data-reset-hidden hidden>Overlay</div>
+        <div id="flash" data-reset-remove>Flash</div>`);
+      query("details").setAttribute("open", "");
+      query("#overlay").hidden = false;
+      const seen = countResets();
+
+      await restore();
+
+      expect(query("#d").hasAttribute("open")).toBe(false);
+      expect(query("#overlay").hidden).toBe(true);
+      expect(document.getElementById("flash")).toBeNull();
+      expect(seen.count).toBe(1);
+    });
+
+    it("is reset when the copy was taken after the controller disconnected", async () => {
+      await start(`<details id="d" data-reset-attr="open"><summary>More</summary></details>`);
+      query("details").setAttribute("open", "");
+      disconnectAndStopApplication(application);
+
+      await restore();
+
+      expect(query("#d").hasAttribute("open")).toBe(false);
+    });
+
+    it("is reset again once the morph that refreshed the live page dropped the mark", async () => {
+      await start(`<details id="d" data-reset-attr="open"><summary>More</summary></details>`);
+      const mark = root()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-lived"));
+      expect(mark).toEqual(["data-stimeo--reset-on-restore-lived"]);
+      // A Turbo morph keeps only the attributes the server sent.
+      root().removeAttribute("data-stimeo--reset-on-restore-lived");
+      root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+      await flushMicrotasks();
+      query("details").setAttribute("open", "");
+
+      await restore();
+
+      expect(query("#d").hasAttribute("open")).toBe(false);
+    });
+  });
+
+  describe("a live page", () => {
+    it("is not reset on a fresh render, an authored open state included", async () => {
+      const seen = countResets();
+      await start(`<details id="d" data-reset-attr="open" open><summary>More</summary></details>`);
+      expect(query("#d").hasAttribute("open")).toBe(true);
+      expect(seen.count).toBe(0);
+    });
+
+    it("is not reset by turbo:before-cache, which Turbo also dispatches on pages that stay", async () => {
+      await start(`<input id="i" data-reset-value value="seed">`);
+      const input = query<HTMLInputElement>("#i");
+      input.value = "typed";
+      const seen = countResets();
+
+      document.dispatchEvent(new Event("turbo:before-cache"));
+
+      expect(input.value).toBe("typed");
+      expect(seen.count).toBe(0);
+    });
+
+    it("is not reset when its element moves within the page or is carried to the next one", async () => {
+      await start(`<input id="i" data-reset-value value="seed">`);
+      const input = query<HTMLInputElement>("#i");
+      input.value = "typed";
+      const seen = countResets();
+      const instance = controller();
+
+      instance.disconnect();
+      instance.connect();
+
+      expect(input.value).toBe("typed");
+      expect(seen.count).toBe(0);
+    });
+
+    it("stops writing the mark back after a morph once disconnected", async () => {
+      await start(`<div></div>`);
+      controller().disconnect();
+      root().removeAttribute("data-stimeo--reset-on-restore-lived");
+      root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+      await flushMicrotasks();
+      expect(root().hasAttribute("data-stimeo--reset-on-restore-lived")).toBe(false);
+    });
+
+    it("keeps the mark after the controller disconnects", async () => {
+      await start(`<div></div>`);
+      controller().disconnect();
+      expect(root().hasAttribute("data-stimeo--reset-on-restore-lived")).toBe(true);
+    });
+  });
+
+  it("removes the listed attributes", async () => {
     await start(`
       <details data-reset-attr="open"><summary>More</summary></details>
       <button data-reset-attr="aria-expanded" aria-expanded="true">Menu</button>`);
     query("details").setAttribute("open", "");
-    fireBeforeCache();
+    sweep();
     expect(query("details").hasAttribute("open")).toBe(false);
     expect(query("button").hasAttribute("aria-expanded")).toBe(false);
   });
 
-  it("removes the listed classes on before-cache, keeping the others", async () => {
+  it("removes the listed classes, keeping the others", async () => {
     await start(`
       <div data-reset-class="is-open is-loading" class="card is-open is-loading"></div>`);
-    fireBeforeCache();
+    sweep();
     const el = query("div[data-reset-class]");
     expect(el.classList.contains("is-open")).toBe(false);
     expect(el.classList.contains("is-loading")).toBe(false);
@@ -54,7 +168,7 @@ describe("ResetBeforeCacheController", () => {
 
   it("is a no-op for a reset class that is not present", async () => {
     await start(`<div data-reset-class="is-open" class="card"></div>`);
-    fireBeforeCache();
+    sweep();
     expect(query("div[data-reset-class]").getAttribute("class")).toBe("card");
   });
 
@@ -62,7 +176,7 @@ describe("ResetBeforeCacheController", () => {
     await start(`<form data-reset-form><input id="i" name="q" value=""></form>`);
     const input = query<HTMLInputElement>("#i");
     input.value = "typed";
-    fireBeforeCache();
+    sweep();
     expect(input.value).toBe("");
   });
 
@@ -72,7 +186,7 @@ describe("ResetBeforeCacheController", () => {
     await start(`<input id="i" data-reset-value value="seed">`);
     const input = query<HTMLInputElement>("#i");
     input.value = "changed";
-    fireBeforeCache();
+    sweep();
     expect(input.value).toBe("seed");
   });
 
@@ -82,7 +196,7 @@ describe("ResetBeforeCacheController", () => {
     await start(`<input id="c" type="checkbox" data-reset-value value="agree" checked>`);
     const box = query<HTMLInputElement>("#c");
     box.checked = false;
-    fireBeforeCache();
+    sweep();
     expect(box.checked).toBe(true);
     expect(box.getAttribute("value")).toBe("agree");
   });
@@ -92,7 +206,7 @@ describe("ResetBeforeCacheController", () => {
       <input id="r1" type="radio" name="g" data-reset-value value="a" checked>
       <input id="r2" type="radio" name="g" data-reset-value value="b">`);
     query<HTMLInputElement>("#r2").checked = true;
-    fireBeforeCache();
+    sweep();
     expect(query<HTMLInputElement>("#r1").checked).toBe(true);
     expect(query<HTMLInputElement>("#r2").checked).toBe(false);
   });
@@ -106,7 +220,7 @@ describe("ResetBeforeCacheController", () => {
       </select>`);
     const select = query<HTMLSelectElement>("#s");
     select.value = "a";
-    fireBeforeCache();
+    sweep();
     expect(select.value).toBe("b");
   });
 
@@ -118,7 +232,7 @@ describe("ResetBeforeCacheController", () => {
       </select>`);
     const select = query<HTMLSelectElement>("#m");
     for (const option of Array.from(select.options)) option.selected = option.value === "c";
-    fireBeforeCache();
+    sweep();
     expect(Array.from(select.selectedOptions).map((option) => option.value)).toEqual(["a", "b"]);
   });
 
@@ -129,7 +243,7 @@ describe("ResetBeforeCacheController", () => {
     await start(`
       <input id="h" type="hidden" data-reset-value value="token-1">
       <input id="n" type="hidden" data-reset-value>`);
-    fireBeforeCache();
+    sweep();
     expect(query<HTMLInputElement>("#h").getAttribute("value")).toBe("token-1");
     expect(query<HTMLInputElement>("#n").hasAttribute("value")).toBe(false);
   });
@@ -144,7 +258,7 @@ describe("ResetBeforeCacheController", () => {
     const select = query<HTMLSelectElement>("#sel");
     textarea.value = "typed";
     select.value = "a";
-    fireBeforeCache();
+    sweep();
     expect(textarea.value).toBe("");
     expect(select.value).toBe("");
   });
@@ -153,84 +267,36 @@ describe("ResetBeforeCacheController", () => {
     await start(`<div id="overlay" data-reset-hidden>overlay</div>`);
     const overlay = query("#overlay");
     overlay.hidden = false;
-    fireBeforeCache();
+    sweep();
     expect(overlay.hidden).toBe(true);
   });
 
   it("removes elements marked data-reset-remove", async () => {
     await start(`<div id="flash" data-reset-remove>flash</div>`);
-    fireBeforeCache();
+    sweep();
     expect(document.getElementById("flash")).toBeNull();
   });
 
-  it("dispatches request then reset events", async () => {
-    await start(`<div data-reset-attr="open"></div>`);
-    const events: string[] = [];
-    root().addEventListener("stimeo--reset-before-cache:request", () => events.push("request"));
-    root().addEventListener("stimeo--reset-before-cache:reset", () => events.push("reset"));
-    fireBeforeCache();
-    expect(events).toEqual(["request", "reset"]);
-  });
-
-  it("suppresses the request event when dispatchReset is false", async () => {
-    await start(
-      `<div data-reset-attr="open"></div>`,
-      `data-stimeo--reset-before-cache-dispatch-reset-value="false"`,
-    );
-    let requests = 0;
-    root().addEventListener("stimeo--reset-before-cache:request", () => {
-      requests += 1;
-    });
-    fireBeforeCache();
-    expect(requests).toBe(0);
-  });
-
-  it("still sweeps and still reports when the request event is switched off", async () => {
-    // The switch decides whether other controllers are asked to close, not
-    // whether the sweep happens — reading it as a master switch would silently
-    // disable the part.
-    await start(
-      `<button id="a" data-reset-attr="aria-expanded" aria-expanded="true"></button>`,
-      `data-stimeo--reset-before-cache-dispatch-reset-value="false"`,
-    );
-    let resets = 0;
-    root().addEventListener("stimeo--reset-before-cache:reset", () => {
-      resets += 1;
-    });
-
-    fireBeforeCache();
-
-    expect(query("#a").hasAttribute("aria-expanded")).toBe(false);
-    expect(resets).toBe(1);
-  });
-
-  it("asks controllers to close before it sweeps", async () => {
-    // The order is the contract: the declarative sweep is the last word, so a
-    // controller that closes itself late still gets tidied up after.
+  it("reports reset once the sweep is done", async () => {
     await start(`<button id="a" data-reset-attr="aria-expanded" aria-expanded="true"></button>`);
-    let attributeWhenAsked: string | null = "unset";
-    root().addEventListener("stimeo--reset-before-cache:request", () => {
-      attributeWhenAsked = query("#a").getAttribute("aria-expanded");
+    const seen: (string | null)[] = [];
+    root().addEventListener("stimeo--reset-on-restore:reset", () => {
+      seen.push(query("#a").getAttribute("aria-expanded"));
     });
-
-    fireBeforeCache();
-
-    expect(attributeWhenAsked).toBe("true");
-    expect(query("#a").hasAttribute("aria-expanded")).toBe(false);
+    sweep();
+    expect(seen).toEqual([null]);
   });
 
-  it("carries an empty detail on both events", async () => {
+  it("carries an empty detail on the reset event", async () => {
     await start(`<div data-reset-attr="open"></div>`);
     const details: unknown[] = [];
-    for (const name of ["request", "reset"]) {
-      root().addEventListener(`stimeo--reset-before-cache:${name}`, (event) => {
-        details.push((event as CustomEvent).detail);
-      });
-    }
+    root().addEventListener("stimeo--reset-on-restore:reset", (event) => {
+      details.push((event as CustomEvent).detail);
+    });
 
-    fireBeforeCache();
+    sweep();
 
-    expect(details).toEqual([{}, {}]);
+    expect(details).toEqual([{}]);
   });
 
   it("only resets within the configured scope", async () => {
@@ -238,9 +304,9 @@ describe("ResetBeforeCacheController", () => {
       `
       <div class="inside"><button id="a" data-reset-attr="aria-expanded" aria-expanded="true"></button></div>
       <div class="outside"><button id="b" data-reset-attr="aria-expanded" aria-expanded="true"></button></div>`,
-      `data-stimeo--reset-before-cache-scope-value=".inside"`,
+      `data-stimeo--reset-on-restore-scope-value=".inside"`,
     );
-    fireBeforeCache();
+    sweep();
     expect(query("#a").hasAttribute("aria-expanded")).toBe(false);
     // Outside the scope, the attribute is left untouched.
     expect(query("#b").getAttribute("aria-expanded")).toBe("true");
@@ -252,51 +318,35 @@ describe("ResetBeforeCacheController", () => {
     // unreadable declaration does.
     await start(
       `<button id="a" data-reset-attr="aria-expanded" aria-expanded="true"></button>`,
-      `data-stimeo--reset-before-cache-scope-value=".does-not-exist"`,
+      `data-stimeo--reset-on-restore-scope-value=".does-not-exist"`,
     );
-    fireBeforeCache();
+    sweep();
     expect(query("#a").hasAttribute("aria-expanded")).toBe(false);
   });
 
   it("keeps sweeping when the scope declaration cannot be parsed", async () => {
     // A declaration the engine cannot read must not take the sweep down with it:
-    // this part exists to keep a cached page from freezing mid-interaction, and a
+    // this part exists to keep a restored page from showing a stale interaction, and a
     // typo in one attribute would otherwise disable that for the whole document.
     await start(
       `<button id="a" data-reset-attr="aria-expanded" aria-expanded="true"></button>`,
-      `data-stimeo--reset-before-cache-scope-value="#panel["`,
+      `data-stimeo--reset-on-restore-scope-value="#panel["`,
     );
-    fireBeforeCache();
+    sweep();
     expect(query("#a").hasAttribute("aria-expanded")).toBe(false);
   });
 
   it("is idempotent across repeated runs", async () => {
     await start(`<details data-reset-attr="open" open><summary>x</summary></details>`);
-    fireBeforeCache();
-    fireBeforeCache();
+    sweep();
+    sweep();
     expect(query("details").hasAttribute("open")).toBe(false);
   });
 
   it("can be triggered manually via the reset action", async () => {
     await start(`<button id="m" data-reset-attr="aria-expanded" aria-expanded="true"></button>`);
-    const controller = application.getControllerForElementAndIdentifier(
-      root(),
-      "stimeo--reset-before-cache",
-    ) as ResetBeforeCacheController;
-    controller.reset();
+    controller().reset();
     expect(query("#m").hasAttribute("aria-expanded")).toBe(false);
-  });
-
-  it("stops resetting after disconnect", async () => {
-    await start(`<button id="d" data-reset-attr="aria-expanded" aria-expanded="true"></button>`);
-    const controller = application.getControllerForElementAndIdentifier(
-      root(),
-      "stimeo--reset-before-cache",
-    ) as ResetBeforeCacheController;
-    controller.disconnect();
-    fireBeforeCache();
-    // The listener was removed: the attribute is left untouched.
-    expect(query("#d").getAttribute("aria-expanded")).toBe("true");
   });
 
   it("has no machine-detectable a11y violations", async () => {

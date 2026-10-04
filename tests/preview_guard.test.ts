@@ -3,14 +3,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PreviewGuardController } from "../src/controllers/preview_guard_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link PreviewGuardController}: hide/show driven by the
  * `html[data-turbo-preview]` attribute (watched with a MutationObserver), the two guard
- * forms `placeholder` selects, the leased inline `visibility`, the snapshot rewind, and
- * the focus hand-back bookkeeping.
+ * forms `placeholder` selects, the leased inline `visibility`, the guard across Turbo's
+ * cache, and the focus hand-back bookkeeping.
  *
  * happy-dom has no CSS cascade, so it neither drops focus out of a `visibility: hidden`
  * subtree nor models `!important`. Those halves need a real engine; what is asserted here
@@ -221,18 +221,88 @@ describe("PreviewGuardController", () => {
     expect(el().hasAttribute("data-preview-hidden")).toBe(false);
   });
 
-  it("rewinds before the page is cached", async () => {
+  it("keeps the guard up through turbo:before-cache while the preview is on screen", async () => {
     await mount(PLACEHOLDER);
     startPreview();
     await tick();
+    const shows = record("show");
     expect(el().textContent).toBe("—");
 
+    // Turbo dispatches it on pages that stay as well, where the stale value must not flash.
     document.dispatchEvent(new Event("turbo:before-cache"));
+    expect(el().textContent).toBe("—");
+    expect(el().getAttribute("data-preview-hidden")).toBe("true");
+    expect(shows).toEqual([]);
+
+    endPreview();
+    await tick();
     expect(el().textContent).toBe("¥123,456");
-    expect(el().hasAttribute("data-preview-hidden")).toBe(false);
+    expect(shows).toEqual([{}]);
   });
 
-  it("does not touch an element it never guarded when the page is cached", async () => {
+  it("records the content a placeholder displaces until the guard comes down", async () => {
+    await mount(PLACEHOLDER, "<strong>¥</strong>123,456");
+    startPreview();
+    await tick();
+    expect(el().getAttribute("data-stimeo--preview-guard-content")).toBe(
+      JSON.stringify("<strong>¥</strong>123,456"),
+    );
+
+    endPreview();
+    await tick();
+    expect(el().hasAttribute("data-stimeo--preview-guard-content")).toBe(false);
+  });
+
+  it("puts back the content a page restored while guarded had displaced", async () => {
+    await mount(PLACEHOLDER, "<strong>¥</strong>123,456");
+    startPreview();
+    await tick();
+
+    // The copy is taken while guarded; the restored page is rendered with no preview on
+    // screen, before its controllers connect.
+    const restoring = restoreFromCache(application, (restored) =>
+      restored.register("stimeo--preview-guard", PreviewGuardController),
+    );
+    endPreview();
+    application = await restoring;
+
+    expect(el().innerHTML).toBe("<strong>¥</strong>123,456");
+    expect(el().hasAttribute("data-preview-hidden")).toBe(false);
+    expect(el().hasAttribute("data-stimeo--preview-guard-content")).toBe(false);
+  });
+
+  it("drops the hook and leaves the content for a record that is not JSON", async () => {
+    await mount(
+      `${PLACEHOLDER} data-preview-hidden="true" data-stimeo--preview-guard-content="{"`,
+      "—",
+    );
+    expect(el().textContent).toBe("—");
+    expect(el().hasAttribute("data-preview-hidden")).toBe(false);
+    expect(el().hasAttribute("data-stimeo--preview-guard-content")).toBe(false);
+  });
+
+  it("gives a page restored while guarded in the visibility form its authored visibility back", async () => {
+    await mount('style="visibility: collapse"');
+    startPreview();
+    await tick();
+    expect(el().style.visibility).toBe("hidden");
+
+    const restoring = restoreFromCache(application, (restored) =>
+      restored.register("stimeo--preview-guard", PreviewGuardController),
+    );
+    endPreview();
+    application = await restoring;
+
+    expect(el().style.visibility).toBe("collapse");
+    expect(el().hasAttribute("data-preview-hidden")).toBe(false);
+    expect(
+      el()
+        .getAttributeNames()
+        .filter((name) => name.endsWith("-lease")),
+    ).toEqual([]);
+  });
+
+  it("does not touch an element it never guarded on turbo:before-cache", async () => {
     await mount('style="visibility: collapse"');
 
     document.dispatchEvent(new Event("turbo:before-cache"));
@@ -245,7 +315,7 @@ describe("PreviewGuardController", () => {
     await tick();
     const node = el();
 
-    node.remove(); // Stimulus disconnects; the rewind is the snapshot's job, not teardown's
+    node.remove(); // Stimulus disconnects; teardown leaves the guard as it is
     await tick();
     expect(node.textContent).toBe("—");
   });

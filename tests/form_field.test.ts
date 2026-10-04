@@ -1,9 +1,9 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FormFieldController } from "../src/controllers/form_field_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 /**
@@ -55,8 +55,8 @@ describe("FormFieldController", () => {
 
   it("announces the control name, description, and invalid state in order", async () => {
     // The description is wired via aria-describedby and the error via
-    // aria-errormessage + aria-invalid; capturing the control's announcement pins
-    // that both the composed description text and the invalid state reach the SR.
+    // aria-errormessage + aria-invalid; the simulated announcement captures both
+    // the composed description text and the invalid state in the virtual reader.
     const before = await captureSpeech({ container: control(), steps: 0 });
     expect(before).toEqual(["textbox, Email, We'll send a confirmation., not invalid"]);
 
@@ -127,6 +127,44 @@ describe("FormFieldController", () => {
       description().id,
       "second-description",
     ]);
+  });
+
+  it("assigns an id to a description inserted without one and links it", async () => {
+    const late = document.createElement("p");
+    late.textContent = "A late hint.";
+    late.setAttribute("data-stimeo--form-field-target", "description");
+    description().after(late);
+
+    controller().descriptionTargetConnected();
+    await tick();
+
+    expect(late.id).not.toBe("");
+    expect(control().getAttribute("aria-describedby")?.split(" ")).toEqual([
+      description().id,
+      late.id,
+    ]);
+  });
+
+  it("unlinks a description removed at runtime", async () => {
+    description().remove();
+
+    controller().descriptionTargetDisconnected();
+    await tick();
+
+    expect(control().hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("reflects a shown error inserted at runtime", async () => {
+    const late = document.createElement("p");
+    late.textContent = "Server error";
+    late.setAttribute("data-stimeo--form-field-target", "error");
+    root().append(late);
+
+    controller().errorTargetConnected();
+    await tick();
+
+    expect(control().getAttribute("aria-invalid")).toBe("true");
+    expect(control().getAttribute("aria-errormessage")).toBe(late.id);
   });
 
   it("announces each explicit non-empty error exactly once and keeps other passes silent", async () => {
@@ -399,6 +437,35 @@ describe("FormFieldController dynamic reconciliation", () => {
     expect(root().hasAttribute("data-stimeo--form-field-invalid")).toBe(false);
   });
 
+  it("keeps the invalid request but not the message when the error target is exchanged", async () => {
+    // Error targets are displays the page owns: an exchanged one shows its own content,
+    // and the explicit request survives only as the invalid state.
+    const events: string[] = [];
+    root().addEventListener("stimeo--form-field:validate", () => events.push("validate"));
+    const onAnnounce = () => events.push("announce");
+    window.addEventListener("stimeo--announcer:announce", onAnnounce);
+    try {
+      controller().setError("Required.");
+      events.length = 0;
+      const exchanged = document.createElement("p");
+      exchanged.hidden = true;
+      exchanged.setAttribute("data-stimeo--form-field-target", "error");
+
+      error().replaceWith(exchanged);
+      await tick();
+
+      expect(exchanged.hidden).toBe(true);
+      expect(exchanged.textContent).toBe("");
+      expect(control()?.getAttribute("aria-invalid")).toBe("true");
+      expect(control()?.hasAttribute("aria-errormessage")).toBe(false);
+      expect(control()?.getAttribute("aria-describedby")?.split(" ")).not.toContain(exchanged.id);
+      expect(root().hasAttribute("data-stimeo--form-field-invalid")).toBe(true);
+      expect(events).toEqual([]);
+    } finally {
+      window.removeEventListener("stimeo--announcer:announce", onAnnounce);
+    }
+  });
+
   it("returns borrowed control ARIA when the controller disconnects", async () => {
     const input = control() as HTMLInputElement;
     root().removeAttribute("data-controller");
@@ -409,14 +476,67 @@ describe("FormFieldController dynamic reconciliation", () => {
     expect(input.getAttribute("aria-errormessage")).toBe("legacy-error");
   });
 
-  it("returns borrowed control ARIA before Turbo caches the page", () => {
+  it("keeps the control's error ARIA through turbo:before-cache, which also fires on a page that stays", () => {
+    controller().setError("Required.");
     const input = control() as HTMLInputElement;
+    const written = ["aria-describedby", "aria-invalid", "aria-errormessage"].map((name) =>
+      input.getAttribute(name),
+    );
 
     document.dispatchEvent(new Event("turbo:before-cache"));
+
+    expect(written[1]).toBe("true");
+    expect(
+      ["aria-describedby", "aria-invalid", "aria-errormessage"].map((name) =>
+        input.getAttribute(name),
+      ),
+    ).toEqual(written);
+  });
+
+  it("gives the author's control ARIA back on a page restored from the cache", async () => {
+    controller().setError("Required.");
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--form-field", FormFieldController),
+    );
+    const input = control() as HTMLInputElement;
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+
+    controller().disconnect();
 
     expect(input.getAttribute("aria-describedby")).toBe("external-hint external-hint");
     expect(input.getAttribute("aria-invalid")).toBe("spelling");
     expect(input.getAttribute("aria-errormessage")).toBe("legacy-error");
+    expect(input.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
+
+  it("drops a queued reconciliation when it disconnects", async () => {
+    const input = control() as HTMLInputElement;
+
+    controller().errorTargetConnected();
+    controller().disconnect();
+    await tick();
+
+    expect(input.getAttribute("aria-describedby")).toBe("external-hint external-hint");
+    expect(input.getAttribute("aria-invalid")).toBe("spelling");
+    expect(input.getAttribute("aria-errormessage")).toBe("legacy-error");
+  });
+
+  it("stops observing its subtree when it disconnects", () => {
+    const instance = controller();
+    instance.disconnect();
+    const observe = vi.spyOn(MutationObserver.prototype, "observe");
+    instance.connect();
+    const index = observe.mock.calls.findIndex(
+      ([target, options]) => target === root() && options?.attributeFilter?.includes("id") === true,
+    );
+    const observer = observe.mock.contexts[index];
+    observe.mockRestore();
+    if (!(observer instanceof MutationObserver)) throw new Error("expected the field observer");
+
+    instance.disconnect();
+    error().hidden = false;
+
+    expect(observer.takeRecords()).toEqual([]);
   });
 });
 
@@ -456,6 +576,24 @@ describe("FormFieldController with a server-rendered error", () => {
     const describedBy = control().getAttribute("aria-describedby")?.split(" ") ?? [];
     expect(describedBy).toContain("hint"); // consumer token preserved
     expect(describedBy).toContain(error().id);
+  });
+
+  it("clears the invalid state when its shown error is removed", async () => {
+    const field = document.querySelector<HTMLElement>(
+      "[data-controller='stimeo--form-field']",
+    ) as HTMLElement;
+    const controller = application.getControllerForElementAndIdentifier(
+      field,
+      "stimeo--form-field",
+    ) as FormFieldController;
+
+    error().remove();
+    controller.errorTargetDisconnected();
+    await tick();
+
+    expect(control().getAttribute("aria-invalid")).toBe("false");
+    expect(control().hasAttribute("aria-errormessage")).toBe(false);
+    expect(control().getAttribute("aria-describedby")).toBe("hint");
   });
 });
 
@@ -552,5 +690,46 @@ describe("FormFieldController without an error region", () => {
     expect(control().hasAttribute("aria-describedby")).toBe(false);
     expect(root().hasAttribute("data-stimeo--form-field-invalid")).toBe(false);
     expect(events.at(-1)?.valid).toBe(true);
+  });
+});
+
+/** A field whose control arrives after connect adopts it on the control's own arrival. */
+describe("FormFieldController with a control inserted after connect", () => {
+  let application: Application;
+
+  beforeEach(async () => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--form-field">
+        <label for="late-control">Late</label>
+        <p id="late-hint" data-stimeo--form-field-target="description">Hint.</p>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--form-field", FormFieldController);
+    await tick();
+  });
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it("wires a control target inserted after connect", async () => {
+    const root = document.querySelector<HTMLElement>(
+      "[data-controller='stimeo--form-field']",
+    ) as HTMLElement;
+    const controller = application.getControllerForElementAndIdentifier(
+      root,
+      "stimeo--form-field",
+    ) as FormFieldController;
+    const control = document.createElement("input");
+    control.id = "late-control";
+    control.setAttribute("data-stimeo--form-field-target", "control");
+    root.append(control);
+
+    controller.controlTargetConnected();
+    await tick();
+
+    expect(control.getAttribute("aria-describedby")).toBe("late-hint");
+    expect(control.getAttribute("aria-invalid")).toBe("false");
   });
 });

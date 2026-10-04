@@ -1,8 +1,13 @@
 import { Controller } from "@hotwired/stimulus";
+import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord } from "../utils/arrow_step";
+import { AttributeLease } from "../utils/attribute_lease";
 import { commitField, writeField } from "../utils/field_mirror";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { MoveCounter } from "../utils/move_counter";
 import { scrollOptionIntoView } from "../utils/option_scroll";
+import type { StateReason } from "../utils/state_reason";
+import { targetSelector } from "../utils/target_selector";
 import { findTypeaheadMatch, isTypeaheadKey, Typeahead } from "../utils/typeahead";
 
 /** Option attributes a page can rewrite in place that move the published selection. */
@@ -58,6 +63,15 @@ interface Selection {
  * — the shape of `change`, with `option: null` and `value: ""` once nothing is
  * selected — when the page moves the selection instead.
  *
+ * User `change` reports compare the resulting state with the last published
+ * state. A pending page write handled in the same script joins that confirmation;
+ * a browser-delivered listener may settle it first as `reconcile`. Confirming
+ * the last published state reports nothing.
+ *
+ * A synchronous subscriber that confirms another state replaces reports still
+ * pending for the outer confirmation. Reading state or confirming it unchanged
+ * does not replace them. An event already being dispatched cannot be recalled.
+ *
  * @remarks
  * Behavior only. Static placement is the consumer's CSS; dynamic placement is
  * delegated to the opt-in `stimeo-ui/positioning` module. The look is keyed off
@@ -94,6 +108,7 @@ interface Selection {
  *   closing via select/Escape returns focus to the trigger.
  */
 export class ListboxController extends Controller<HTMLElement> {
+  readonly #moves = new MoveCounter();
   static override targets = ["trigger", "value", "list", "option", "field"];
   static override values = {
     placeholder: { type: String, default: "" },
@@ -102,8 +117,10 @@ export class ListboxController extends Controller<HTMLElement> {
   static events = ["change", "reconcile"] as const;
 
   declare readonly triggerTarget: HTMLElement;
+  declare readonly triggerTargets: HTMLElement[];
   declare readonly valueTarget: HTMLElement;
   declare readonly listTarget: HTMLElement;
+  declare readonly listTargets: HTMLElement[];
   declare readonly optionTargets: HTMLElement[];
   declare readonly fieldTarget: HTMLInputElement;
   declare readonly hasTriggerTarget: boolean;
@@ -121,11 +138,22 @@ export class ListboxController extends Controller<HTMLElement> {
    * one DOM mutation into a single pass; refused before `connect()` and after
    * `disconnect()`.
    */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileOptions());
+  readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileOptions());
   /** Watches the option attributes a page can rewrite in place; set while connected. */
   #observer: MutationObserver | null = null;
   /** The selection last settled: on connect, by the user, or by a reported pass. */
   #settled: Selection = { option: null, value: "" };
+  /** The list this listbox opened, while it is open; `null` once closed. */
+  #shownList: HTMLElement | null = null;
+  /** Borrows `hidden` on the list, to give back when an element stops being the list. */
+  readonly #listHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Borrows `aria-expanded` on the trigger, to give back when an element stops being the trigger. */
+  readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
+  /** Borrows `aria-activedescendant` on the trigger, for the same return. */
+  readonly #activeDescendant = new AttributeLease<HTMLElement>(
+    "aria-activedescendant",
+    this.identifier,
+  );
   /** Accumulated typeahead query and its idle-reset timer. */
   readonly #typeahead = new Typeahead();
 
@@ -138,7 +166,7 @@ export class ListboxController extends Controller<HTMLElement> {
     this.close();
     document.addEventListener("click", this.#onOutsideClick, true);
     this.#settled = this.#selection();
-    this.#reconcile.activate();
+    this.#reconcile.observe(this.element);
     this.#observeOptions();
   }
 
@@ -160,13 +188,60 @@ export class ListboxController extends Controller<HTMLElement> {
     this.#reconcile.schedule();
   }
 
+  /** Brings a trigger inserted or replaced at runtime to the open state. */
+  triggerTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /**
+   * Gives a trigger that is no longer a target back the `aria-expanded` and
+   * `aria-activedescendant` its markup carried, unless the page rewrote them after this
+   * listbox did, and brings the trigger that stays to the open state.
+   */
+  triggerTargetDisconnected(trigger: HTMLElement): void {
+    if (!this.triggerTargets.includes(trigger)) {
+      this.#expanded.return(trigger);
+      this.#activeDescendant.return(trigger);
+    }
+    this.#reconcile.schedule();
+  }
+
+  /** Brings a list inserted or replaced at runtime to the open state. */
+  listTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /**
+   * Gives a list that is no longer a target back the `hidden` its markup carried, unless
+   * the page rewrote it after this listbox did, and brings the list that stays to the
+   * open state. A departing list this listbox opened, found hidden, was closed by the
+   * page; that is read before its own `hidden` comes back.
+   */
+  listTargetDisconnected(list: HTMLElement): void {
+    if (!this.listTargets.includes(list)) {
+      if (list === this.#shownList) this.#adoptPageClose();
+      this.#listHidden.return(list);
+    }
+    this.#reconcile.schedule();
+  }
+
   /** Fills a form field inserted or replaced at runtime with the current selection. */
   fieldTargetConnected(): void {
     this.#reconcile.schedule();
   }
 
+  /** Brings the field that stays to the current selection when an earlier one leaves. */
+  fieldTargetDisconnected(): void {
+    this.#reconcile.schedule();
+  }
+
   /** Writes the current selection into a trigger value inserted or replaced at runtime. */
   valueTargetConnected(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Brings the trigger value that stays to the current selection when an earlier one leaves. */
+  valueTargetDisconnected(): void {
     this.#reconcile.schedule();
   }
 
@@ -216,8 +291,37 @@ export class ListboxController extends Controller<HTMLElement> {
    */
   #reconcileOptions(): void {
     this.#normalizeSelection();
+    this.#reconcileOpenState();
     this.#reconcileActive();
     this.#reportMove();
+  }
+
+  /**
+   * Brings the list and the trigger that stay first to one open state. A list that
+   * took over from the one this listbox opened is shown; the list this listbox
+   * opened, found hidden while it is still a target, was closed by the page. The
+   * trigger's `aria-expanded` then follows the list. With no list left, nothing is
+   * written.
+   */
+  #reconcileOpenState(): void {
+    if (!this.hasListTarget) {
+      this.#shownList = null;
+      return;
+    }
+    if (this.#shownList && this.listTargets.includes(this.#shownList)) this.#adoptPageClose();
+    const list = this.listTarget;
+    if (this.#shownList !== null && list !== this.#shownList) {
+      this.#listHidden.write(list, null);
+      this.#shownList = list;
+    }
+    if (this.hasTriggerTarget) {
+      this.#expanded.write(this.triggerTarget, list.hidden ? "false" : "true");
+    }
+  }
+
+  /** Treats the listbox as closed when the list it opened is hidden. */
+  #adoptPageClose(): void {
+    if (this.#shownList?.hidden) this.#shownList = null;
   }
 
   /**
@@ -245,7 +349,7 @@ export class ListboxController extends Controller<HTMLElement> {
    * pass, and clears the typeahead timer.
    */
   override disconnect(): void {
-    this.#reconcile.cancel();
+    this.#reconcile.disconnect();
     this.#observer?.disconnect();
     this.#observer = null;
     document.removeEventListener("click", this.#onOutsideClick, true);
@@ -301,7 +405,7 @@ export class ListboxController extends Controller<HTMLElement> {
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
-        this.#setActive(activeIndex < 0 ? 0 : (activeIndex + 1) % length);
+        this.#setActive((activeIndex + 1) % length);
         break;
       case "ArrowUp":
         event.preventDefault();
@@ -342,20 +446,27 @@ export class ListboxController extends Controller<HTMLElement> {
     }
   }
 
-  /** Selects the clicked option and closes, returning focus to the trigger. */
-  select(event: Event): void {
-    const option = (event.currentTarget as HTMLElement).closest<HTMLElement>('[role="option"]');
+  /** Selects an owned option and closes; element calls return focus only from inside. */
+  select(source: Event | HTMLElement): void {
+    const { event, host, origin, reason } = actionSource(source);
+    if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
+      return;
+    const option = host?.closest<HTMLElement>(targetSelector(this.identifier, "option"));
     if (!option || !this.optionTargets.includes(option)) return;
-    this.#selectOption(option);
+    const focus = event !== null || this.element.contains(document.activeElement);
+    if (!this.#selectOption(option, reason)) return;
     this.close();
-    this.triggerTarget.focus();
+    if (focus && (event !== null || this.element.contains(document.activeElement))) {
+      this.triggerTarget.focus();
+    }
   }
 
   /** Opens the list and activates the selected option (else the first). */
   open(): void {
     if (!this.hasListTarget) return;
-    this.listTarget.hidden = false;
-    this.triggerTarget.setAttribute("aria-expanded", "true");
+    this.#listHidden.write(this.listTarget, null);
+    this.#shownList = this.listTarget;
+    this.#expanded.write(this.triggerTarget, "true");
     if (this.optionTargets.length === 0) {
       // An empty listbox has nothing to activate; leave activedescendant cleared.
       this.#setActive(-1);
@@ -370,34 +481,39 @@ export class ListboxController extends Controller<HTMLElement> {
   /** Closes the list, clears the active option, and resets the typeahead buffer. */
   close(): void {
     if (!this.hasListTarget) return;
-    this.listTarget.hidden = true;
-    this.triggerTarget.setAttribute("aria-expanded", "false");
+    this.#listHidden.write(this.listTarget, "");
+    this.#shownList = null;
+    this.#expanded.write(this.triggerTarget, "false");
     this.#setActive(-1);
     this.#typeahead.reset();
   }
 
   /** Commits the active option (keyboard) and closes, returning focus. */
   #commitActive(): void {
-    this.#reconcileActive();
     const options = this.optionTargets;
     const activeIndex = this.#findActiveIndex(options);
-    const option = activeIndex < 0 ? undefined : options[activeIndex];
+    const option = options[activeIndex];
     if (option) this.#selectOption(option);
     this.close();
     this.triggerTarget.focus();
   }
 
   /** Applies selection: `aria-selected`, trigger label, hidden field, `change`. */
-  #selectOption(option: HTMLElement): void {
+  #selectOption(option: HTMLElement, reason: StateReason = "user"): boolean {
     const { value, fieldChanged } = this.#applySelection(option);
     // Settled before anything is reported, so a listener that moves the selection
     // again is measured against this one.
+    const changed = option !== this.#settled.option || value !== this.#settled.value;
     this.#settled = { option, value };
+    if (!changed) return true;
+    const token = this.#moves.record();
     // Matching <select> semantics: only on an actual value change, so
     // form-level behaviors — validation re-checks, auto-submit — hear the
     // commit without knowing this widget.
     if (fieldChanged) commitField(this.fieldTarget);
-    this.dispatch("change", { detail: { value, option } });
+    if (!this.#moves.isLatest(token)) return false;
+    this.dispatch("change", { detail: { value, option, reason } });
+    return this.#moves.isLatest(token);
   }
 
   /**
@@ -519,7 +635,7 @@ export class ListboxController extends Controller<HTMLElement> {
    */
   #setActive(index: number): void {
     const options = this.optionTargets;
-    const active = index < 0 ? null : (options[index] ?? null);
+    const active = options[index] ?? null;
     // Only the options whose marker actually changes are written, so a held arrow
     // key costs two attribute writes rather than one per option. The whole set is
     // still read: that is what makes a stray marker — one a morph left behind on
@@ -534,10 +650,10 @@ export class ListboxController extends Controller<HTMLElement> {
     }
     if (active?.id) {
       this.#activeId = active.id;
-      this.triggerTarget.setAttribute("aria-activedescendant", active.id);
+      this.#activeDescendant.write(this.triggerTarget, active.id);
     } else {
       this.#activeId = null;
-      this.triggerTarget.removeAttribute("aria-activedescendant");
+      this.#activeDescendant.write(this.triggerTarget, null);
     }
     this.#activeOrder = active ? options.map((option) => option.id).filter(Boolean) : [];
     // Virtual focus never triggers the browser's native focus-scrolling, so a
@@ -574,7 +690,7 @@ export class ListboxController extends Controller<HTMLElement> {
     }
 
     const activeId = this.triggerTarget.getAttribute("aria-activedescendant") ?? this.#activeId;
-    this.#setActive(activeId ? this.#findFallbackIndex(options, activeId) : -1);
+    this.#setActive(this.#findFallbackIndex(options, activeId));
   }
 
   /** Finds the live target carrying the stable ID, or the active marker for an ID-less option. */
@@ -587,8 +703,8 @@ export class ListboxController extends Controller<HTMLElement> {
   }
 
   /** Chooses a surviving former successor, then a former predecessor. */
-  #findFallbackIndex(options: readonly HTMLElement[], activeId: string): number {
-    const oldIndex = this.#activeOrder.indexOf(activeId);
+  #findFallbackIndex(options: readonly HTMLElement[], activeId: string | null): number {
+    const oldIndex = this.#activeOrder.indexOf(activeId ?? "");
     if (oldIndex < 0) return -1;
     const indexesById = new Map(options.map((option, index) => [option.id, index]));
     for (let index = oldIndex + 1; index < this.#activeOrder.length; index += 1) {

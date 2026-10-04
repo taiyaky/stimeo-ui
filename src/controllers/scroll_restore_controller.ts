@@ -153,8 +153,8 @@ export class ScrollRestoreController extends Controller<HTMLElement> {
   /** Rebuilds the persistence state around the Values as they now read. */
   #resync(): void {
     if (!this.#connected) return;
-    // The pending frame holds an offset belonging to the previous namespace and
-    // axis, so it is dropped rather than written under the new ones.
+    // A frame a scroll queued before the swap belongs to the previous namespace and
+    // axis, so it is dropped rather than run against the new ones.
     this.#frames.cancel();
     this.#storageKey = this.#resolveKey();
     this.#echoTop = null;

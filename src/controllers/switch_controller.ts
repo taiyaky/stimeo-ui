@@ -4,6 +4,7 @@ import { commitField, writeField } from "../utils/field_mirror";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { isInteractiveHost } from "../utils/interactive_host";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { MoveCounter } from "../utils/move_counter";
 
 /** Attributes whose in-place changes can alter the host or its required defaults. */
 const OBSERVED_ATTRIBUTES = [
@@ -34,6 +35,15 @@ const OBSERVED_ANCESTOR_ATTRIBUTES = ["contenteditable"];
  *
  * `change` and `reconcile` dispatch `{ checked: boolean }`.
  *
+ * User `change` reports compare the resulting state with the last published
+ * state. A pending page write handled in the same script joins that confirmation;
+ * a browser-delivered listener may settle it first as `reconcile`. Confirming
+ * the last published state reports nothing.
+ *
+ * A synchronous subscriber that confirms another state replaces reports still
+ * pending for the outer confirmation. Reading state or confirming it unchanged
+ * does not replace them. An event already being dispatched cannot be recalled.
+ *
  * @remarks
  * Behavior only — the consumer owns all styling (typically keyed off the
  * `[aria-checked="true"]` attribute). On a native `<button>` host, the browser
@@ -45,7 +55,7 @@ const OBSERVED_ANCESTOR_ATTRIBUTES = ["contenteditable"];
  *
  * Behavior provided:
  * - Click (or Space/Enter) toggles `aria-checked` between `"true"` and `"false"`.
- * - `stimeo--switch:change` is dispatched for every toggle the user makes; its
+ * - `stimeo--switch:change` reports a toggle that moves the published state; its
  *   `detail.checked` carries the new boolean state.
  * - `stimeo--switch:reconcile` reports a checked state the page moved instead —
  *   a retained-element morph that writes `aria-checked` or strips it (the state
@@ -61,6 +71,7 @@ const OBSERVED_ANCESTOR_ATTRIBUTES = ["contenteditable"];
  *   interactive content, so it is valid inside the `<button>` host.
  */
 export class SwitchController extends Controller<HTMLElement> {
+  readonly #moves = new MoveCounter();
   static override targets = ["field"];
   static actions = ["onKeydown", "toggle"] as const;
   static events = ["change", "reconcile"] as const;
@@ -68,8 +79,8 @@ export class SwitchController extends Controller<HTMLElement> {
   declare readonly fieldTarget: HTMLInputElement;
   declare readonly hasFieldTarget: boolean;
 
-  /** Defaults this instance introduced and may therefore remove safely. */
-  readonly #ownedDefaults = new Set<string>();
+  /** Defaults this instance introduced, with the value it last wrote, so it may remove them. */
+  readonly #ownedDefaults = new Map<string, string>();
   /** Controller writes that must not be mistaken for authored morph changes. */
   readonly #internalAttributeValues = new Map<string, string>();
   /** One pass per batch of retained-element changes and field arrivals. */
@@ -94,6 +105,7 @@ export class SwitchController extends Controller<HTMLElement> {
    * state it finds as the one a later move is measured from, reporting nothing.
    */
   override connect(): void {
+    this.#releaseDefaultsRewrittenWhileAway();
     this.#reconcileDefaults();
     this.#mirrorField(false);
     this.#committedChecked = this.#checked;
@@ -104,6 +116,11 @@ export class SwitchController extends Controller<HTMLElement> {
 
   /** Fills a form field inserted or replaced at runtime with the current state. */
   fieldTargetConnected(): void {
+    this.#pass.schedule();
+  }
+
+  /** Brings the field that stays to the current state when an earlier one leaves. */
+  fieldTargetDisconnected(): void {
     this.#pass.schedule();
   }
 
@@ -195,7 +212,19 @@ export class SwitchController extends Controller<HTMLElement> {
 
   /** Records a newly introduced default without claiming authored markup. */
   #setOwnedDefault(name: string, value: string): void {
-    if (setDefaultAttribute(this.element, name, value)) this.#ownedDefaults.add(name);
+    if (setDefaultAttribute(this.element, name, value)) this.#ownedDefaults.set(name, value);
+  }
+
+  /**
+   * Gives ownership back for a default the page rewrote while no observer was
+   * watching. A value that still reads as the one this instance wrote stays owned,
+   * and a missing one stays owned so reconciliation can restore it.
+   */
+  #releaseDefaultsRewrittenWhileAway(): void {
+    for (const [name, written] of this.#ownedDefaults) {
+      const value = this.element.getAttribute(name);
+      if (value !== null && value !== written) this.#ownedDefaults.delete(name);
+    }
   }
 
   /**
@@ -219,9 +248,8 @@ export class SwitchController extends Controller<HTMLElement> {
 
   /** Removes only defaults introduced by this instance when a host becomes invalid. */
   #removeOwnedDefaults(): void {
-    for (const name of this.#ownedDefaults) this.element.removeAttribute(name);
+    for (const name of this.#ownedDefaults.keys()) this.element.removeAttribute(name);
     this.#ownedDefaults.clear();
-    this.#internalAttributeValues.clear();
   }
 
   /** Watches retained host attributes that Turbo can morph without reconnecting. */
@@ -270,9 +298,17 @@ export class SwitchController extends Controller<HTMLElement> {
   #commit(value: boolean): void {
     const reflected = value ? "true" : "false";
     this.#internalAttributeValues.set("aria-checked", reflected);
+    if (this.#ownedDefaults.has("aria-checked")) this.#ownedDefaults.set("aria-checked", reflected);
     this.element.setAttribute("aria-checked", reflected);
+    const changed = value !== this.#committedChecked;
     this.#committedChecked = value;
+    if (!changed) {
+      this.#mirrorField(false);
+      return;
+    }
+    const token = this.#moves.record();
     this.#mirrorField(true);
+    if (!this.#moves.isLatest(token)) return;
     this.dispatch("change", { detail: { checked: value } });
   }
 }

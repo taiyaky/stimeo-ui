@@ -1,7 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { KeyedTimers } from "../utils/keyed_timers";
-import { MAX_TIMER_DELAY_MS, SafeInterval, SafeTimeout } from "../utils/safe_timeout";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
+import { SafeInterval, SafeTimeout } from "../utils/safe_timeout";
+import { sharedRegistry } from "../utils/shared_registry";
 import { cloneTemplateRoot } from "../utils/template_row";
 import { TransientHooks } from "../utils/transient_hooks";
 import {
@@ -46,7 +50,7 @@ const DEFAULT_TIMEOUT_MS = 40_000;
  * for this peer would either drop a peer that is still here or keep a departed
  * one in every roster until it expires.
  */
-const speakers = new Map<string, number>();
+const speakers = sharedRegistry("stimeo-ui.presence.registry.v1", () => new Map<string, number>());
 
 /**
  * Headless **presence** — a *server-bound* behavior: online dots / a
@@ -121,8 +125,27 @@ const speakers = new Map<string, number>();
  * Stream or a morph arrives empty and is drawn from the roster as it connects; the subscription, heartbeat interval,
  * per-peer expiry timers, and the `pagehide` listener are all released on
  * `disconnect()` (Turbo navigation included).
+ *
+ * The live resources follow the declaration; Values changed together move them
+ * once, after the batch, and nothing moves before `connect()` or after
+ * `disconnect()`. A `channel` or `params` change moves the subscription: the room
+ * being left gets the leaving notice under the same rules as `disconnect()`
+ * (confirmed, an own `id`, the last voice for it), and its roster, expiry timers,
+ * pending beacon and announcement, throttle window and rejected hook are dropped
+ * without an event, as a fresh connection would, since none of them is a fact of
+ * the new room. An `id` change keeps the subscription and its roster: the old id's
+ * voice is released once (the last voice leaves), the new id beacons at once —
+ * which also stands in for a convergence answer still queued — and a peer already
+ * listed under the new id is this client now, so it stops being counted without a
+ * `leave`: it went nowhere. A `heartbeat` change re-arms the running interval,
+ * counted from the change. `timeout` arms each peer's expiry when its beacon
+ * arrives, so a change applies from that peer's next beacon and never moves a
+ * deadline already set.
  */
 export class PresenceController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["count", "list", "template"];
   static override values = {
     channel: { type: String, default: "" },
@@ -134,6 +157,11 @@ export class PresenceController extends Controller<HTMLElement> {
     announceJoinText: { type: String, default: "" },
     announceLeaveText: { type: String, default: "" },
   };
+
+  static valueConstraints = {
+    heartbeat: NUMBER_BOUNDS.positiveTimer,
+    timeout: NUMBER_BOUNDS.positiveTimer,
+  } satisfies NumberValueConstraints<typeof PresenceController.values>;
   static events = ["join", "leave", "change"] as const;
 
   declare readonly hasCountTarget: boolean;
@@ -154,10 +182,12 @@ export class PresenceController extends Controller<HTMLElement> {
   /** Delay (ms) before one roster change is sent to the shared announcer. */
   static readonly #announceDelay = 200;
 
-  /** Identifier parameters parsed once from their declaration, never in the hot path. */
-  #params: Record<string, unknown> = {};
-
   #subscription: ConfirmedCableSubscription | null = null;
+  readonly #follow = new MicrotaskCoalescer(() => this.#followDeclaration());
+  /** The identifier the resources were last built for. */
+  #identifier = "";
+  /** The period the running heartbeat was armed with. */
+  #period = 0;
   /** Present peers keyed by id (insertion order = join order). */
   readonly #peers = new Map<string, Peer>();
   /** Each peer's auto-expiry timer, restarted by every beacon from that peer. */
@@ -170,42 +200,59 @@ export class PresenceController extends Controller<HTMLElement> {
   #pendingBeacon: number | null = null;
   /** The one outstanding announcement, so a newer roster change supersedes it. */
   #announceId: number | null = null;
-  /** The `speakers` key this element holds, recomputed on every `connect()`. */
-  #speakerKey = "";
-
   /**
-   * Re-parses the identifier parameters when the declaration changes.
-   *
-   * A malformed declaration falls back to no parameters, so the identifier keeps
-   * naming the channel instead of the subscription never being created at all.
+   * Whether this controller is between `connect()` and `disconnect()`. Stimulus
+   * delivers every target's departure after `disconnect()` has blanked the count
+   * and emptied the list, and drawing from there would overwrite what teardown left.
    */
+  #connected = false;
+  /** The `speakers` key this element holds, recomputed on every claim. */
+  #speakerKey = "";
+  /** The id that key was claimed for, which the leaving notice names. */
+  #speakerId = "";
+
+  /** Moves the subscription to the declared channel. */
+  channelValueChanged(): void {
+    this.#follow.schedule();
+  }
+
+  /** Moves the subscription to the identifier the parameters name. */
   paramsValueChanged(): void {
-    this.#params = parseSubscriptionParams(this.paramsValue);
+    this.#follow.schedule();
+  }
+
+  /** Moves this element's voice to the declared id. */
+  idValueChanged(): void {
+    this.#follow.schedule();
+  }
+
+  /** Re-arms a running heartbeat on the declared period. */
+  heartbeatValueChanged(): void {
+    this.#follow.schedule();
   }
 
   /**
-   * The identifier this declaration names. `params` *adds* to the identifier, so a
-   * `channel` key inside it names an extra parameter and never replaces the channel
-   * the element declares.
+   * The identifier this declaration names. `params` adds identifier parameters;
+   * its `channel` key is ignored, so the element's declared channel is preserved.
+   * A malformed `params` declaration falls back to no
+   * parameters, so the identifier keeps naming the channel instead of the
+   * subscription never being created at all.
    */
   get #descriptor(): Record<string, unknown> {
-    const { channel: _declared, ...rest } = this.#params;
+    const { channel: _declared, ...rest } = parseSubscriptionParams(this.paramsValue);
     return { channel: this.channelValue, ...rest };
   }
 
   /**
    * The beacon period, in ms: a finite, positive number a timer can hold. Anything
    * else names no interval — `setInterval` reads `NaN`, a negative value, `Infinity`
-   * and a value past {@link MAX_TIMER_DELAY_MS} alike as "as often as possible", so
+   * and a value past the maximum platform timer delay alike as "as often as possible", so
    * the declaration would flood the channel rather than heartbeat on it. Zero is out
    * for the same reason, which is why this bound is tighter than the non-negative one
    * a throttle or a plain delay can use. Such a declaration falls back to the default.
    */
   get #heartbeat(): number {
-    const declared = this.heartbeatValue;
-    return Number.isFinite(declared) && declared > 0 && declared <= MAX_TIMER_DELAY_MS
-      ? declared
-      : DEFAULT_HEARTBEAT_MS;
+    return this.#safeHeartbeat;
   }
 
   /**
@@ -215,10 +262,7 @@ export class PresenceController extends Controller<HTMLElement> {
    * back to the default.
    */
   get #timeout(): number {
-    const declared = this.timeoutValue;
-    return Number.isFinite(declared) && declared > 0 && declared <= MAX_TIMER_DELAY_MS
-      ? declared
-      : DEFAULT_TIMEOUT_MS;
+    return this.#safeTimeout;
   }
 
   /**
@@ -228,18 +272,39 @@ export class PresenceController extends Controller<HTMLElement> {
    * preserved is what `connect()` goes on to do anyway.
    */
   listTargetConnected(): void {
-    for (const child of this.listTarget.querySelectorAll("[data-presence-id]")) {
-      child.remove();
-    }
-    for (const [id, peer] of this.#peers) this.#appendClone(id, peer.name);
+    this.#drawList();
+  }
+
+  /** Draws the roster into the list target that stays when an earlier one leaves. */
+  listTargetDisconnected(): void {
+    if (this.#connected) this.#drawList();
   }
 
   /** Paints the roster size into a count target that arrives blank, for the same reason. */
   countTargetConnected(): void {
-    this.countTarget.textContent = this.#countMessage(this.#peers.size);
+    this.#drawCount();
+  }
+
+  /** Paints the roster size into the count target that stays when an earlier one leaves. */
+  countTargetDisconnected(): void {
+    if (this.#connected) this.#drawCount();
   }
 
   override connect(): void {
+    this.#connected = true;
+    this.#follow.activate();
+    this.#start();
+  }
+
+  override disconnect(): void {
+    this.#connected = false;
+    this.#follow.cancel();
+    this.#close();
+    this.#reset();
+  }
+
+  /** Starts a cycle from the declaration on a known-empty roster. */
+  #start(): void {
     // Presence is transient: drop whatever a Turbo cache snapshot preserved
     // (hooks + rendered clones); the live stream re-populates the roster.
     // Rejection is transient server state too — the fresh subscription below
@@ -249,10 +314,21 @@ export class PresenceController extends Controller<HTMLElement> {
     // away instead of sitting blank until the first roster change. The
     // data-present* hooks intentionally stay absent until the first beacon.
     if (this.hasCountTarget) this.countTarget.textContent = this.#countMessage(0);
+    this.#open();
+  }
 
+  /**
+   * Opens the subscription, voice, heartbeat and `pagehide` listener; none without a channel.
+   *
+   * @stimeoRuntimeOnly `channel`, `params`, `id` and `heartbeat` name what this call opens;
+   *   `name` is read by the handlers it wires.
+   */
+  #open(): void {
+    const descriptor = this.#descriptor;
+    this.#identifier = identifierOf(descriptor);
     if (!this.channelValue) return;
     this.#claimSpeaker();
-    this.#subscription = createConfirmedSubscription(this.#descriptor, {
+    this.#subscription = createConfirmedSubscription(descriptor, {
       // The first beacon must wait for the confirmed subscription — a
       // perform() before that is silently dropped by Action Cable. Fires
       // again on every reconnect, so the roster self-heals after an outage.
@@ -264,19 +340,57 @@ export class PresenceController extends Controller<HTMLElement> {
       },
       received: (data: unknown) => this.#onReceived(data),
     });
-    this.#intervals.set(() => this.#beacon(true), this.#heartbeat);
+    this.#armHeartbeat();
     window.addEventListener("pagehide", this.#onPageHide);
   }
 
-  override disconnect(): void {
+  /** Releases what {@link #open} acquired. */
+  #close(): void {
     window.removeEventListener("pagehide", this.#onPageHide);
     // Best-effort graceful leave, and only from the last element speaking for
     // this peer; a lost notice is caught by peers' expiry timers instead.
-    if (this.#releaseSpeaker()) this.#sendLeaveNotice();
+    this.#sendLeaveNotice(this.#releaseSpeaker());
     this.#subscription?.unsubscribe();
     this.#subscription = null;
     this.#intervals.clearAll();
-    this.#reset();
+  }
+
+  /** Arms the heartbeat on the declared period, counted from now. */
+  #armHeartbeat(): void {
+    this.#intervals.clearAll();
+    this.#period = this.#heartbeat;
+    this.#intervals.set(() => this.#beacon(true), this.#period);
+  }
+
+  /**
+   * Rebuilds what the declaration changed: a new identifier restarts the cycle,
+   * otherwise only the voice or the heartbeat moves.
+   *
+   * @stimeoRuntimeOnly `channel`, `params`, `id` and `heartbeat` are compared with what the
+   *   resources were built from.
+   */
+  #followDeclaration(): void {
+    if (identifierOf(this.#descriptor) !== this.#identifier) {
+      this.#close();
+      this.#start();
+    } else if (this.#subscription) {
+      if (this.idValue !== this.#speakerId) this.#moveVoice();
+      if (this.#heartbeat !== this.#period) this.#armHeartbeat();
+    }
+  }
+
+  /**
+   * Leaves as the old id and beacons as the new one, on the same subscription.
+   *
+   * @stimeoRuntimeOnly `id` names the voice this call moves and `name` the beacon it sends.
+   */
+  #moveVoice(): void {
+    this.#sendLeaveNotice(this.#releaseSpeaker());
+    this.#claimSpeaker();
+    this.#forget(this.#speakerId);
+    this.#timers.clear(this.#pendingBeacon ?? -1);
+    this.#pendingBeacon = null;
+    this.#beacon(true);
   }
 
   /**
@@ -287,31 +401,34 @@ export class PresenceController extends Controller<HTMLElement> {
    * simply never heard.
    */
   #claimSpeaker(): void {
-    this.#speakerKey = `${identifierOf(this.#descriptor)}\n${this.idValue}`;
+    this.#speakerId = this.idValue;
+    this.#speakerKey = `${this.#identifier}\n${this.#speakerId}`;
     speakers.set(this.#speakerKey, (speakers.get(this.#speakerKey) ?? 0) + 1);
   }
 
   /**
-   * Gives up the claim, reporting whether this element was the last voice for the
-   * peer. The key is spent here: an element that goes on to connect without a
+   * Gives up the claim, returning the id this element was the last voice for, else
+   * `""`. The key is spent here: an element that goes on to connect without a
    * channel claims nothing, and a stale key would spend a voice its siblings own.
    */
-  #releaseSpeaker(): boolean {
+  #releaseSpeaker(): string {
     const key = this.#speakerKey;
+    const id = this.#speakerId;
     this.#speakerKey = "";
+    this.#speakerId = "";
     const remaining = (speakers.get(key) ?? 1) - 1;
     if (remaining > 0) speakers.set(key, remaining);
     else speakers.delete(key);
-    return remaining <= 0;
+    return remaining > 0 ? "" : id;
   }
 
   /**
-   * Sends the best-effort leaving notice (skipped without an own `id`, and
+   * Sends the best-effort leaving notice for `id` (skipped for an empty one, and
    * outside the confirmed window, where Action Cable would discard it anyway).
    */
-  #sendLeaveNotice(): void {
-    if (!this.#subscription?.confirmed || !this.idValue) return;
-    this.#subscription.perform("appear", { id: this.idValue, leaving: true });
+  #sendLeaveNotice(id: string): void {
+    if (!this.#subscription?.confirmed || !id) return;
+    this.#subscription.perform("appear", { id, leaving: true });
   }
 
   /**
@@ -324,7 +441,7 @@ export class PresenceController extends Controller<HTMLElement> {
    * leave self-heals.
    */
   readonly #onPageHide = (): void => {
-    this.#sendLeaveNotice();
+    this.#sendLeaveNotice(this.#speakerId);
   };
 
   /**
@@ -408,15 +525,28 @@ export class PresenceController extends Controller<HTMLElement> {
     this.dispatch("leave", { detail: { id } });
   }
 
+  /** Drops a peer that stopped being another client, reporting no departure. */
+  #forget(id: string): void {
+    if (!this.#peers.delete(id)) return;
+    this.#expiry.clear(id);
+    this.#removeClone(id);
+    this.#paint();
+  }
+
   /**
    * Reflects the roster onto the hooks + count target and emits `change`.
    */
   #render(): void {
+    this.dispatch("change", { detail: { users: this.#paint() } });
+  }
+
+  /** Writes the roster onto the hooks + count target. */
+  #paint(): Array<{ id: string; name: string }> {
     const users = [...this.#peers.entries()].map(([id, peer]) => ({ id, name: peer.name }));
     this.element.setAttribute("data-present", users.length > 0 ? "true" : "false");
     this.element.setAttribute("data-present-count", String(users.length));
     if (this.hasCountTarget) this.countTarget.textContent = this.#countMessage(users.length);
-    this.dispatch("change", { detail: { users } });
+    return users;
   }
 
   /**
@@ -449,6 +579,20 @@ export class PresenceController extends Controller<HTMLElement> {
       (count === 0 ? templates.zero : count === 1 ? templates.one : templates.other) ??
       templates.other;
     return template ? template.replace("%{count}", String(count)) : String(count);
+  }
+
+  /** Replaces the clones in the list target with one per present peer. */
+  #drawList(): void {
+    if (!this.hasListTarget) return;
+    for (const child of this.listTarget.querySelectorAll("[data-presence-id]")) {
+      child.remove();
+    }
+    for (const [id, peer] of this.#peers) this.#appendClone(id, peer.name);
+  }
+
+  /** Writes the roster size into the count target. */
+  #drawCount(): void {
+    if (this.hasCountTarget) this.countTarget.textContent = this.#countMessage(this.#peers.size);
   }
 
   /** Appends one template clone for a newly present peer (list + template only). */
@@ -488,7 +632,7 @@ export class PresenceController extends Controller<HTMLElement> {
     }
   }
 
-  /** Clears the transient roster state (connect reset + disconnect teardown). */
+  /** Clears the transient roster state (every cycle's start + disconnect teardown). */
   #reset(): void {
     this.#timers.clearAll();
     this.#expiry.clearAll();
@@ -503,5 +647,26 @@ export class PresenceController extends Controller<HTMLElement> {
         child.remove();
       }
     }
+  }
+  /** Current `heartbeat` declaration resolved against its numeric contract. */
+  get #safeHeartbeat(): number {
+    return this.#numbers.read(
+      this,
+      "heartbeat",
+      this.heartbeatValue,
+      PresenceController.values.heartbeat.default,
+      PresenceController.valueConstraints.heartbeat,
+    );
+  }
+
+  /** Current `timeout` declaration resolved against its numeric contract. */
+  get #safeTimeout(): number {
+    return this.#numbers.read(
+      this,
+      "timeout",
+      this.timeoutValue,
+      PresenceController.values.timeout.default,
+      PresenceController.valueConstraints.timeout,
+    );
   }
 }

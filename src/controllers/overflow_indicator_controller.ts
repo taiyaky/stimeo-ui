@@ -4,6 +4,9 @@ import { FrameCoalescer } from "../utils/frame_coalescer";
 import { LayoutObserver } from "../utils/layout_observer";
 import { ListenerSet } from "../utils/listener_set";
 import { logicalScrollMetrics, physicalScrollDelta } from "../utils/logical_scroll";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { prefersReducedMotion } from "../utils/reduced_motion";
 
 const DIRECTION_PARAM = "direction-param";
@@ -46,6 +49,9 @@ const DIRECTION_PARAM = "direction-param";
  * of the consumer's CSS `scroll-behavior`.
  */
 export class OverflowIndicatorController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   /** The direction param above, in the namespace this controller is registered under. */
   get #directionParam(): string {
     return `data-${this.identifier}-${DIRECTION_PARAM}`;
@@ -61,6 +67,10 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
     orientation: { type: String, default: "horizontal" },
     threshold: { type: Number, default: 1 },
   };
+
+  static valueConstraints = {
+    threshold: NUMBER_BOUNDS.finite,
+  } satisfies NumberValueConstraints<typeof OverflowIndicatorController.values>;
   static actions = ["scrollByPage"] as const;
   static events = ["change"] as const;
 
@@ -96,12 +106,16 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
   /** Last reported room, so `change` fires only on transitions. */
   #state: { start: boolean; end: boolean } | null = null;
 
+  readonly #morphRender = new MorphRenderWatcher(() => this.#refresh());
+
   override connect(): void {
+    this.#morphRender.observe(this.element);
     this.#connected = true;
     this.#syncViewport();
   }
 
   override disconnect(): void {
+    this.#morphRender.disconnect();
     this.#connected = false;
     this.#stopObservingViewport();
     this.#layout.disconnect();
@@ -344,13 +358,23 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
   }
 
   get #threshold(): number {
-    const value = this.thresholdValue;
-    return Number.isFinite(value) ? Math.max(0, value) : 1;
+    const value = this.#safeThreshold;
+    return Math.max(0, value);
   }
 
   #directionFromEvent(event: Event): "start" | "end" | null {
     const params = (event as Event & { params?: { direction?: unknown } }).params;
     const direction = params?.direction;
     return direction === "start" || direction === "end" ? direction : null;
+  }
+  /** Current `threshold` declaration resolved against its numeric contract. */
+  get #safeThreshold(): number {
+    return this.#numbers.read(
+      this,
+      "threshold",
+      this.thresholdValue,
+      OverflowIndicatorController.values.threshold.default,
+      OverflowIndicatorController.valueConstraints.threshold,
+    );
   }
 }

@@ -2,7 +2,6 @@ import { Controller } from "@hotwired/stimulus";
 import { announce } from "../utils/announce";
 import { ensureId } from "../utils/aria_ids";
 import { AttributeLease } from "../utils/attribute_lease";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { ownerIndex } from "../utils/event_owner";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 
@@ -93,11 +92,21 @@ export class FormFieldController extends Controller<HTMLElement> {
 
   /** Collapses one target/morph batch into one silent ARIA reconciliation. */
   readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileDom());
-  /** Returns borrowed control ARIA before Turbo snapshots the page. */
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
-  readonly #ariaDescribedBy = new AttributeLease<HTMLElement>("aria-describedby");
-  readonly #ariaErrorMessage = new AttributeLease<HTMLElement>("aria-errormessage");
-  readonly #ariaInvalid = new AttributeLease<HTMLElement>("aria-invalid");
+  /**
+   * The control's ARIA is the field's own state, so each lease is a base lease: a value another
+   * owner leases on the control (a character counter's `aria-invalid`) stays on top of it.
+   */
+  readonly #ariaDescribedBy = new AttributeLease<HTMLElement>("aria-describedby", this.identifier, {
+    base: true,
+  });
+  readonly #ariaErrorMessage = new AttributeLease<HTMLElement>(
+    "aria-errormessage",
+    this.identifier,
+    { base: true },
+  );
+  readonly #ariaInvalid = new AttributeLease<HTMLElement>("aria-invalid", this.identifier, {
+    base: true,
+  });
   /** Watches retained target ids, error visibility, and error content. */
   readonly #observer = new MutationObserver((records) => {
     if (records.some((record) => this.#isRelevantMutation(record))) {
@@ -113,8 +122,6 @@ export class FormFieldController extends Controller<HTMLElement> {
   /** Wires the initial graph and starts retained-target reconciliation. */
   override connect(): void {
     this.#reconcile.activate();
-    this.#ensureAssociationIds();
-    this.#beforeCache.activate();
 
     // A restored DOM can contain the invalid hook with no surviving visual
     // message. Treat that one shape as the persisted explicit setError state;
@@ -139,7 +146,6 @@ export class FormFieldController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#reconcile.cancel();
     this.#observer.disconnect();
-    this.#beforeCache.deactivate();
     this.#activeControl && this.#releaseControl(this.#activeControl);
   }
 
@@ -346,11 +352,5 @@ export class FormFieldController extends Controller<HTMLElement> {
     }
 
     return ownerIndex(this.errorTargets, target) !== -1;
-  }
-  /** Returns borrowed control ARIA before Turbo snapshots the page. */
-  #rewindForCache(): void {
-    this.#ariaDescribedBy.returnAll();
-    this.#ariaErrorMessage.returnAll();
-    this.#ariaInvalid.returnAll();
   }
 }

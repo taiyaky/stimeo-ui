@@ -398,6 +398,37 @@ describe("TransitionCompletion", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("cancel releases the fallback timer and both element listeners at once", () => {
+    vi.spyOn(window, "getComputedStyle").mockReturnValue(style("height", "200ms"));
+    const added = vi.spyOn(element, "addEventListener");
+    const removed = vi.spyOn(element, "removeEventListener");
+    const transition = new TransitionCompletion();
+    transition.wait(element, vi.fn());
+
+    transition.cancel();
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(added.mock.calls).toHaveLength(2);
+    expect(removed.mock.calls).toEqual(added.mock.calls);
+  });
+
+  it("a replacement that completes synchronously still cancels the prior wait", () => {
+    const computed = vi.spyOn(window, "getComputedStyle").mockReturnValue(style("height", "200ms"));
+    const transition = new TransitionCompletion();
+    const stale = vi.fn();
+    transition.wait(element, stale);
+
+    computed.mockReturnValue(style("height", "0s"));
+    const current = vi.fn();
+    transition.wait(element, current);
+    expect(current).toHaveBeenCalledOnce();
+
+    dispatchTerminal(element, "transitionend", "height");
+    vi.advanceTimersByTime(250);
+    expect(stale).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("replacing a wait cancels the prior callback and completes the new one exactly once", () => {
     vi.spyOn(window, "getComputedStyle").mockReturnValue(style("height", "200ms"));
     const transition = new TransitionCompletion();

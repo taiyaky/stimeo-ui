@@ -93,6 +93,13 @@ describe("CountUpController", () => {
     expect(el().getAttribute("data-count-up-done")).toBe("true");
   });
 
+  it("keeps the authored text showing inside the wrapper until the first frame", async () => {
+    await mount();
+    controller()?.start();
+    expect(el().querySelector("[role='img']")?.textContent).toBe("1,200 users");
+    expect(el().textContent).toBe("1,200 users");
+  });
+
   it("dispatches end with the parsed value", async () => {
     await mount();
     const values: number[] = [];
@@ -160,6 +167,30 @@ describe("CountUpController", () => {
     flush(1200);
     controller()?.start();
     expect(frames).toHaveLength(1);
+  });
+
+  it("reads once at each start and leaves a running animation alone when it changes", async () => {
+    await mount();
+    controller()?.start();
+    flush(0);
+    el().setAttribute("data-stimeo--count-up-once-value", "false");
+    await tick();
+    // The run neither restarts nor stops: it keeps its one frame chain to the end.
+    expect(frames).toHaveLength(1);
+    flush(1200);
+    expect(frames).toHaveLength(0);
+    expect(el().textContent).toBe("1,200 users");
+
+    // The next start reads the new declaration, so a finished run starts again…
+    controller()?.start();
+    expect(frames).toHaveLength(1);
+    flush(0);
+    flush(1200);
+    // …and a declaration turned back on refuses the start after it.
+    el().setAttribute("data-stimeo--count-up-once-value", "true");
+    await tick();
+    controller()?.start();
+    expect(frames).toHaveLength(0);
   });
 
   it("skips the animation entirely under prefers-reduced-motion", async () => {
@@ -279,6 +310,97 @@ describe("CountUpController", () => {
     controller()?.start();
     flush(0);
     expect(el().textContent).toBe("1000");
+  });
+
+  // --- When `from` and `duration` are read ------------------------------------
+
+  /**
+   * Rewrites a Value and delivers its callback directly when the controller defines
+   * one, since happy-dom does not reliably run it for an attribute write.
+   */
+  const declare = (name: "from" | "duration", value: number) => {
+    el().setAttribute(`data-stimeo--count-up-${name}-value`, String(value));
+    const owner = controller();
+    const callback: unknown = Reflect.get(owner ?? {}, `${name}ValueChanged`);
+    if (typeof callback === "function") callback.call(owner);
+  };
+
+  it("keeps the from a running animation started with, and counts the next run from the new one", async () => {
+    await mount('data-stimeo--count-up-once-value="false" data-stimeo--count-up-from-value="200"');
+    controller()?.start();
+    flush(0);
+    expect(el().textContent).toBe("200");
+
+    declare("from", 1000);
+    flush(600); // 200 + (1200 - 200) × 0.875, counted from this run's own starting value
+    expect(el().textContent).toBe("1075");
+    flush(1200);
+    expect(el().textContent).toBe("1,200 users");
+
+    controller()?.start();
+    flush(0);
+    expect(el().textContent).toBe("1000");
+  });
+
+  it("keeps the duration a running animation started with when it shrinks, and times the next run anew", async () => {
+    await mount(
+      'data-stimeo--count-up-once-value="false" data-stimeo--count-up-duration-value="1000"',
+    );
+    const ends: number[] = [];
+    el().addEventListener("stimeo--count-up:end", (event) => {
+      ends.push((event as CustomEvent<{ value: number }>).detail.value);
+    });
+    controller()?.start();
+    flush(0);
+    flush(250);
+    expect(el().textContent).toBe("694"); // 1200 × (1 − 0.75³)
+
+    declare("duration", 500);
+    flush(400); // still 400 / 1000 of the way: 1200 × (1 − 0.6³)
+    expect(el().textContent).toBe("941");
+    expect(ends).toEqual([]);
+    flush(999);
+    expect(ends).toEqual([]);
+    flush(1000);
+    expect(el().textContent).toBe("1,200 users");
+    expect(ends).toEqual([1200]);
+
+    controller()?.start();
+    flush(0);
+    flush(250); // halfway through the 500 ms the next run reads
+    expect(el().textContent).toBe("1050");
+    flush(500);
+    expect(el().textContent).toBe("1,200 users");
+    expect(ends).toEqual([1200, 1200]);
+  });
+
+  it("does not stretch a running animation when duration grows", async () => {
+    await mount('data-stimeo--count-up-duration-value="1000"');
+    const ends: number[] = [];
+    el().addEventListener("stimeo--count-up:end", () => ends.push(1));
+    controller()?.start();
+    flush(0);
+    flush(250);
+
+    declare("duration", 2000);
+    flush(500); // halfway through the 1000 ms the run began with
+    expect(el().textContent).toBe("1050");
+    flush(1000);
+    expect(el().textContent).toBe("1,200 users");
+    expect(ends).toEqual([1]);
+  });
+
+  it("starts and reports nothing from a from or duration change alone", async () => {
+    await mount('data-stimeo--count-up-once-value="false"');
+    const ends: number[] = [];
+    el().addEventListener("stimeo--count-up:end", () => ends.push(1));
+    declare("from", 500);
+    declare("duration", 300);
+    await tick();
+    expect(frames).toHaveLength(0);
+    expect(el().textContent).toBe("1,200 users");
+    expect(el().hasAttribute("data-count-up-done")).toBe(false);
+    expect(ends).toEqual([]);
   });
 
   // --- Reading the authored number ------------------------------------------

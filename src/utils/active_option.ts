@@ -31,10 +31,6 @@
  * uses `data-active` at all). Folding them in would mean a helper with three
  * optional behaviours — more surface than the duplication it removes.
  *
- * This file's own doc block is dropped from `dist`, but every member comment is
- * inlined into each consumer entry (`tsup` builds with `splitting: false`), so
- * rationale belongs here and only the contract belongs on the members.
- *
  * @example
  * ```ts
  * #setActive(option: HTMLElement | null): void {

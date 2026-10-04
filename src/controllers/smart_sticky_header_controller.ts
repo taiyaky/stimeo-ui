@@ -1,7 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { validSelector } from "../utils/declared_value";
 import { FrameCoalescer } from "../utils/frame_coalescer";
-import { resolveScrollSource, scrollOffset } from "../utils/scroll_source";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
+import { resolveScrollSource, type ScrollSource, scrollOffset } from "../utils/scroll_source";
 
 /** The depth that never hides, used when `offset` is not a finite number. */
 const DEFAULT_OFFSET = 80;
@@ -40,25 +43,41 @@ const DEFAULT_OFFSET = 80;
  * should disable the transition, not the behavior). Scroll work is
  * rAF-throttled; listeners and any pending frame are released on
  * `disconnect()`, and `connect()` resets the transient hook (a Turbo cache
- * snapshot must not restore a hidden header at scroll top).
+ * snapshot must not restore a hidden header at scroll top). The scroll source
+ * follows a runtime change: a `containerSelector` that names another container,
+ * or a morph that reaches the header after replacing the container its selector
+ * names, moves the listener to the container resolved now, and the position
+ * found there is a baseline rather than a scroll in either direction.
+ * `containerSelector` and `offset` changed in one batch are applied in a single
+ * pass after it.
  */
 export class SmartStickyHeaderController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override values = {
     containerSelector: { type: String, default: "" },
     offset: { type: Number, default: DEFAULT_OFFSET },
     tolerance: { type: Number, default: 4 },
   };
+
+  static valueConstraints = {
+    offset: NUMBER_BOUNDS.finite,
+    tolerance: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof SmartStickyHeaderController.values>;
   static events = ["change"] as const;
 
   declare containerSelectorValue: string;
   declare offsetValue: number;
   declare toleranceValue: number;
 
-  #connected = false;
   /** Coalesces scroll bursts into one measurement per frame. */
   readonly #frames = new FrameCoalescer();
-  /** The scroll source resolved at connect — disconnect must unbind the SAME node. */
-  #scrollerEl: HTMLElement | Window = window;
+  /**
+   * The scroll source the listener is on — disconnect and a move to another
+   * source must unbind the SAME node.
+   */
+  #scrollerEl: ScrollSource = window;
   /** The validated `containerSelector`, or `""` when the declaration cannot be parsed. */
   #containerSelector = "";
   #lastY = 0;
@@ -72,7 +91,7 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
    * zone the value exists to protect.
    */
   get #offset(): number {
-    return Number.isFinite(this.offsetValue) ? this.offsetValue : DEFAULT_OFFSET;
+    return this.#safeOffset;
   }
 
   readonly #onScroll = (): void => this.#frames.schedule(() => this.#measure());
@@ -83,33 +102,67 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
    */
   readonly #onFocusin = (): void => this.#apply(false);
 
-  /** Validates `containerSelector` once so connect never parses a selector that throws. */
+  /**
+   * Validates `containerSelector` once, so no resolve parses a selector that
+   * throws, then asks for a pass that follows the container it names.
+   */
   containerSelectorValueChanged(): void {
     this.#containerSelector = validSelector(this.element, this.containerSelectorValue, "");
+    this.#morphRender.schedule();
   }
 
-  /** Re-decides when application code (or a Turbo morph) changes `offset` at runtime. */
+  /** Asks for a pass when application code (or a Turbo morph) changes `offset`. */
   offsetValueChanged(): void {
-    if (this.#connected) this.#measure();
+    this.#morphRender.schedule();
   }
+
+  /**
+   * One pass for a retained-element morph and for the Values a batch changes:
+   * follow the scroll source the declaration names now, then decide again.
+   */
+  readonly #morphRender = new MorphRenderWatcher(() => {
+    this.#followSource();
+    this.#measure();
+  });
 
   override connect(): void {
+    this.#morphRender.observe(this.element);
     // The hook is scroll-derived: recompute from the live scroll position
     // instead of trusting a cached snapshot (which may say hidden at y=0).
     this.#hidden = null;
-    this.#scrollerEl = resolveScrollSource(this.#containerSelector);
-    this.#lastY = scrollOffset(this.#scrollerEl);
-    this.#scrollerEl.addEventListener("scroll", this.#onScroll, { passive: true });
+    this.#listenTo(resolveScrollSource(this.#containerSelector));
     this.element.addEventListener("focusin", this.#onFocusin);
     this.#apply(false, false);
-    this.#connected = true;
   }
 
   override disconnect(): void {
-    this.#connected = false;
+    this.#morphRender.disconnect();
     this.#scrollerEl.removeEventListener("scroll", this.#onScroll);
     this.element.removeEventListener("focusin", this.#onFocusin);
     this.#frames.cancel();
+  }
+
+  /**
+   * Moves the listener to the scroll source the declaration resolves to now,
+   * when that is another node: released from the old one first, then added once
+   * to the new one. A pass that resolves to the source already held keeps it,
+   * and with it the position a pending scroll is measured from.
+   */
+  #followSource(): void {
+    const source = resolveScrollSource(this.#containerSelector);
+    if (source === this.#scrollerEl) return;
+    this.#scrollerEl.removeEventListener("scroll", this.#onScroll);
+    this.#listenTo(source);
+  }
+
+  /**
+   * Listens to `source`, taking its current position as the baseline: a
+   * position on a source not listened to before is where it is, not a scroll.
+   */
+  #listenTo(source: ScrollSource): void {
+    this.#scrollerEl = source;
+    this.#lastY = scrollOffset(source);
+    source.addEventListener("scroll", this.#onScroll, { passive: true });
   }
 
   /** @stimeoRenderRoot */
@@ -125,7 +178,10 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
     }
 
     const delta = y - this.#lastY;
-    if (this.#isJitter(delta)) return;
+    if (this.#isJitter(delta)) {
+      this.#apply(this.#hidden ?? false);
+      return;
+    }
     this.#lastY = y;
     this.#apply(delta > 0);
   }
@@ -137,7 +193,7 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
    *   header's state at rest does not depend on it.
    */
   #isJitter(delta: number): boolean {
-    return Math.abs(delta) < this.toleranceValue;
+    return Math.abs(delta) < this.#safeTolerance;
   }
 
   /**
@@ -153,9 +209,30 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
     // point (not in each caller), so any future hide path — a timer, an
     // action — cannot bypass it. Reveals are never vetoed.
     if (hidden && this.element.contains(document.activeElement)) return;
-    if (hidden === this.#hidden) return;
+    const changed = hidden !== this.#hidden;
     this.#hidden = hidden;
     this.element.setAttribute("data-header-hidden", hidden ? "true" : "false");
-    if (notify) this.dispatch("change", { detail: { hidden } });
+    if (notify && changed) this.dispatch("change", { detail: { hidden } });
+  }
+  /** Current `offset` declaration resolved against its numeric contract. */
+  get #safeOffset(): number {
+    return this.#numbers.read(
+      this,
+      "offset",
+      this.offsetValue,
+      SmartStickyHeaderController.values.offset.default,
+      SmartStickyHeaderController.valueConstraints.offset,
+    );
+  }
+
+  /** Current `tolerance` declaration resolved against its numeric contract. */
+  get #safeTolerance(): number {
+    return this.#numbers.read(
+      this,
+      "tolerance",
+      this.toleranceValue,
+      SmartStickyHeaderController.values.tolerance.default,
+      SmartStickyHeaderController.valueConstraints.tolerance,
+    );
   }
 }

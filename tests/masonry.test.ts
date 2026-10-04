@@ -1,5 +1,5 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MasonryController } from "../src/controllers/masonry_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
@@ -17,6 +17,34 @@ import { flushMicrotasks, tick } from "./helpers/timing";
 const stubWidth = (element: HTMLElement, width: number) => {
   element.getBoundingClientRect = () => new DOMRect(0, 0, width, 0);
 };
+
+/** A ResizeObserver the test can fire, since happy-dom's never reports a resize. */
+class FakeResizeObserver implements ResizeObserver {
+  static instances: FakeResizeObserver[] = [];
+  readonly observed = new Set<Element>();
+  readonly #callback: ResizeObserverCallback;
+
+  constructor(callback: ResizeObserverCallback) {
+    this.#callback = callback;
+    FakeResizeObserver.instances.push(this);
+  }
+
+  observe(element: Element): void {
+    this.observed.add(element);
+  }
+
+  unobserve(element: Element): void {
+    this.observed.delete(element);
+  }
+
+  disconnect(): void {
+    this.observed.clear();
+  }
+
+  trigger(): void {
+    this.#callback([], this);
+  }
+}
 
 const markup = (count: number, attrs = "") => `
   <div data-controller="stimeo--masonry" ${attrs}>
@@ -36,6 +64,9 @@ describe("MasonryController", () => {
 
   afterEach(() => {
     disconnectAndStopApplication(application);
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    FakeResizeObserver.instances = [];
     document.body.innerHTML = "";
   });
 
@@ -44,6 +75,30 @@ describe("MasonryController", () => {
   const items = () =>
     Array.from(document.querySelectorAll<HTMLElement>("[data-stimeo--masonry-target='item']"));
   const columns = () => root().style.getPropertyValue("--stimeo--masonry-columns");
+  const controllerOf = (element: HTMLElement) =>
+    application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--masonry",
+    ) as MasonryController;
+
+  /**
+   * Collects every MutationObserver that watches the grid's child list without
+   * watching attributes — the controller's own, and none of Stimulus's.
+   */
+  const recordChildListObservers = (): MutationObserver[] => {
+    const watching: MutationObserver[] = [];
+    const Native = globalThis.MutationObserver;
+    class Recording extends Native {
+      override observe(target: Node, options?: MutationObserverInit): void {
+        if (target === root() && options?.childList && options.subtree && !options.attributes) {
+          watching.push(this);
+        }
+        super.observe(target, options);
+      }
+    }
+    vi.stubGlobal("MutationObserver", Recording);
+    return watching;
+  };
 
   it("falls back to a single column when the width is unmeasurable", async () => {
     await start(3);
@@ -88,6 +143,20 @@ describe("MasonryController", () => {
     expect(items().map((item) => item.getAttribute("data-column"))).toEqual(["0", "1", "1"]);
   });
 
+  it("re-packs when content is added inside an item", async () => {
+    await start(3, 600); // 2 columns
+    expect(items().map((item) => item.getAttribute("data-column"))).toEqual(["0", "1", "0"]);
+
+    // The new paragraph is no target and fires no load, so only the child-list
+    // observation can notice that the first card grew.
+    const grown = items()[0] as HTMLElement;
+    grown.getBoundingClientRect = () => new DOMRect(0, 0, 0, 200);
+    grown.append(document.createElement("p"));
+    await tick();
+
+    expect(items().map((item) => item.getAttribute("data-column"))).toEqual(["0", "1", "1"]);
+  });
+
   it("honors a custom minColumnWidth", async () => {
     // floor((800 + 16) / (400 + 16)) = floor(1.96…) = 1 column.
     await start(4, 800, 'data-stimeo--masonry-min-column-width-value="400"');
@@ -111,6 +180,32 @@ describe("MasonryController", () => {
     // A childList mutation would relayout (assign data-column) while connected;
     // after teardown the observer is gone, so the new item is left untouched.
     expect(extra.hasAttribute("data-column")).toBe(false);
+  });
+
+  it("stops recording child-list changes once disconnected", async () => {
+    const observers = recordChildListObservers();
+    await start(3, 800);
+    const [observer] = observers;
+    if (!observer) throw new Error("the grid's child list is not observed");
+
+    controllerOf(root()).disconnect();
+    root().append(document.createElement("div"));
+
+    expect(observer.takeRecords()).toEqual([]);
+  });
+
+  it("releases the resize observer and the viewport listener on disconnect", async () => {
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+    const added = vi.spyOn(window, "addEventListener");
+    const removed = vi.spyOn(window, "removeEventListener");
+    await start(3, 800);
+    const resize = added.mock.calls.find(([type]) => type === "resize")?.[1];
+    expect(FakeResizeObserver.instances[0]?.observed.has(root())).toBe(true);
+
+    controllerOf(root()).disconnect();
+
+    expect(FakeResizeObserver.instances[0]?.observed.size).toBe(0);
+    expect(removed).toHaveBeenCalledWith("resize", resize);
   });
 
   it("emits a layout event with the column count when it changes", async () => {
@@ -221,6 +316,36 @@ describe("MasonryController", () => {
 
       expect(dropped.hasAttribute("data-column")).toBe(false);
     });
+
+    it("leaves a card alone once another grid has adopted it", async () => {
+      document.body.innerHTML = `
+        <div id="from" data-controller="stimeo--masonry">
+          <div data-stimeo--masonry-target="item">A</div>
+          <div data-stimeo--masonry-target="item">B</div>
+        </div>
+        <div id="to" data-controller="stimeo--masonry"></div>`;
+      const from = document.getElementById("from") as HTMLElement;
+      const to = document.getElementById("to") as HTMLElement;
+      stubWidth(from, 800);
+      stubWidth(to, 800);
+      application = Application.start();
+      application.register("stimeo--masonry", MasonryController);
+      await tick();
+      const card = items()[1] as HTMLElement;
+
+      card.remove();
+      await tick();
+      expect(card.hasAttribute("data-column")).toBe(false);
+      to.append(card);
+      await tick();
+      expect(card.getAttribute("data-column")).toBe("0");
+
+      // A later pass of the grid it left has nothing of the card's to take back.
+      from.dispatchEvent(new Event("load"));
+      await tick();
+
+      expect(card.getAttribute("data-column")).toBe("0");
+    });
   });
 
   describe("hot-path work", () => {
@@ -326,6 +451,19 @@ describe("MasonryController", () => {
       expect(columns()).toBe("2");
     });
 
+    it("re-derives the column count when its own box resizes", async () => {
+      // A sidebar collapsing resizes the grid while the viewport stays put.
+      vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+      await start(6, 800);
+      expect(columns()).toBe("3");
+
+      stubWidth(root(), 500);
+      FakeResizeObserver.instances[0]?.trigger();
+      await tick();
+
+      expect(columns()).toBe("2");
+    });
+
     it("ignores a descendant load after disconnect", async () => {
       await start(3, 800);
       const controller = application.getControllerForElementAndIdentifier(
@@ -369,6 +507,19 @@ describe("MasonryController", () => {
       await tick();
 
       expect(items().every((item) => item.hasAttribute("data-column"))).toBe(true);
+    });
+
+    it("takes the hook back from an element that stopped being an item before a reconnect", async () => {
+      await start(3, 800);
+      const controller = controllerOf(root());
+      const dropped = items()[1] as HTMLElement;
+      dropped.removeAttribute("data-stimeo--masonry-target");
+      await Promise.resolve();
+
+      controller.disconnect();
+      controller.connect();
+
+      expect(dropped.hasAttribute("data-column")).toBe(false);
     });
 
     it("keeps one column when the declared width and gap leave nothing to divide by", async () => {

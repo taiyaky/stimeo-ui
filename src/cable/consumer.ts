@@ -1,4 +1,5 @@
 import { createConsumer } from "@rails/actioncable";
+import { sharedRegistry } from "../utils/shared_registry";
 
 /**
  * Minimal structural view of an Action Cable subscription — the two members the
@@ -66,13 +67,16 @@ export function parseSubscriptionParams(raw: string): Record<string, unknown> {
 }
 
 /**
- * The shared consumer. Deliberately module-scoped: an Action Cable consumer is
+ * The shared consumer. An Action Cable consumer is
  * *connection infrastructure* (one websocket per app, the Rails
  * `channels/consumer.js` convention), not UI state — it must survive Turbo
  * navigations, so it is deliberately not rebuilt per `connect()` the way
  * DOM-derived state is.
  */
-let sharedConsumer: CableConsumer | null = null;
+const consumerRegistry = sharedRegistry<{ consumer: CableConsumer | null }>(
+  "stimeo-ui.cable-consumer.registry.v1",
+  () => ({ consumer: null }),
+);
 
 /**
  * Replaces (or clears, with `null`) the shared Action Cable consumer.
@@ -83,7 +87,7 @@ let sharedConsumer: CableConsumer | null = null;
  * double. With `null`, the next {@link getCableConsumer} lazily re-creates one.
  */
 export function setCableConsumer(consumer: CableConsumer | null): void {
-  sharedConsumer = consumer;
+  consumerRegistry.consumer = consumer;
 }
 
 /**
@@ -91,8 +95,8 @@ export function setCableConsumer(consumer: CableConsumer | null): void {
  * `createConsumer()` (which reads the standard `action_cable_meta_tag` URL).
  */
 export function getCableConsumer(): CableConsumer {
-  if (!sharedConsumer) sharedConsumer = createConsumer();
-  return sharedConsumer;
+  if (!consumerRegistry.consumer) consumerRegistry.consumer = createConsumer();
+  return consumerRegistry.consumer;
 }
 
 /**
@@ -132,7 +136,10 @@ interface SharedSubscription {
  * Wire subscriptions by identifier, per consumer. Keyed weakly so a replaced consumer
  * (see {@link setCableConsumer}) takes its bookkeeping with it.
  */
-const sharedSubscriptions = new WeakMap<CableConsumer, Map<string, SharedSubscription>>();
+const sharedSubscriptions = sharedRegistry(
+  "stimeo-ui.cable-subscriptions.registry.v1",
+  () => new WeakMap<CableConsumer, Map<string, SharedSubscription>>(),
+);
 
 /**
  * The identifier Action Cable derives for a channel descriptor: the JSON of the

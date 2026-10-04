@@ -1,6 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
+import { AttributeLease } from "../utils/attribute_lease";
 import { FocusTrap } from "../utils/focus_trap";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { readLocalStorage, writeLocalStorage } from "../utils/safe_storage";
 import { type StateReason, stateReasonFor } from "../utils/state_reason";
 import { TransitionCompletion } from "../utils/transition_completion";
@@ -50,8 +53,15 @@ type Mode = "inline" | "overlay";
  * applied — the sidebar stays an `<aside>`/`<nav>` landmark and only borrows the
  * modal *behavior*, because `role="dialog"` would replace that landmark.
  * The collapsed preference persists across Turbo navigations and full reloads;
- * the transient overlay-open state never persists, so "back/forward" never
- * restores a stuck-open menu.
+ * the transient overlay-open state never persists: a page Turbo restores from its
+ * cache connects with the overlay closed, so "back/forward" never restores a
+ * stuck-open menu, whenever the copy was taken. A page that stays keeps an open overlay
+ * open, through `turbo:before-cache` (which Turbo also dispatches on pages that stay) and
+ * through a reconnect of the same instance (an in-page move, a `data-turbo-permanent`
+ * element carried to the next page), which takes the trap again, and through a Turbo
+ * morph, after which the mode and the state this instance holds are written back over
+ * the server's markup. The `collapsed` Value only seeds a connect that neither a saved
+ * preference nor the panel's `data-state` decides; a later declaration moves nothing.
  *
  * Each move of the panel's expanded state is reported: `stimeo--sidebar:open`
  * and `stimeo--sidebar:close` dispatch
@@ -60,28 +70,40 @@ type Mode = "inline" | "overlay";
  * and `aria-expanded` are written, without waiting for the exit transition. A
  * responsive mode change re-derives the state instead of the user moving it, so
  * it reports `stimeo--sidebar:reconcile` with
- * `{ mode: "inline" | "overlay", open: boolean }` and no reason. All three are
+ * `{ mode: "inline" | "overlay", open: boolean }` and no reason; so does a `key`
+ * rewritten after connect whose saved preference moves the inline rail. All three are
  * informational, so none is cancelable. A call that leaves the state where it
  * already was, the normalization in {@link connect}, the reconciliation that
- * follows panel churn, the `turbo:before-cache` sanitization, and
- * {@link disconnect} are all silent. A close the backdrop asked for reports
+ * follows panel, trigger or backdrop churn, and {@link disconnect} are all silent,
+ * and after {@link disconnect} the actions do nothing until the controller connects
+ * again. A close the backdrop asked for reports
  * `"outside"`: the backdrop carries no action of its own, so
  * {@link SidebarController.close | close} is what the consumer wires onto it and it
  * recognises that target.
  */
 export class SidebarController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["trigger", "panel", "backdrop"];
   static override values = {
     breakpoint: { type: Number, default: 768 },
     key: { type: String, default: "" },
     collapsed: { type: Boolean, default: false },
   };
+
+  static valueConstraints = {
+    breakpoint: NUMBER_BOUNDS.nonNegative,
+  } satisfies NumberValueConstraints<typeof SidebarController.values>;
   static actions = ["close", "open", "toggle"] as const;
   static events = ["close", "open", "reconcile"] as const;
 
   declare readonly triggerTarget: HTMLElement;
+  declare readonly triggerTargets: HTMLElement[];
   declare readonly panelTarget: HTMLElement;
+  declare readonly panelTargets: HTMLElement[];
   declare readonly backdropTarget: HTMLElement;
+  declare readonly backdropTargets: HTMLElement[];
   declare readonly hasTriggerTarget: boolean;
   declare readonly hasPanelTarget: boolean;
   declare readonly hasBackdropTarget: boolean;
@@ -112,55 +134,145 @@ export class SidebarController extends Controller<HTMLElement> {
   /** Distinguishes dynamic target churn from callbacks around controller teardown. */
   #connected = false;
 
-  /** Whether state moves are reported: set once `connect()` settled the baseline. */
-  #reporting = false;
+  /** The storage key last read, so a `key` callback naming it again reads nothing. */
+  #storageKeyRead: string | null = null;
 
+  /** The `aria-expanded` last written, for a trigger that arrives or stays. */
+  #expanded = false;
+  /** The backdrop's `data-state` and `hidden` as last written, for one that arrives or stays. */
+  readonly #backdrop: { state: "open" | "closed"; hidden: boolean } = {
+    state: "closed",
+    hidden: true,
+  };
+  /** Borrows `aria-expanded` on each trigger, to give back when one stops being the target. */
+  readonly #expandedLease = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
+  /** Borrows `data-state` on each panel and backdrop, for the same return. */
+  readonly #stateLease = new AttributeLease<HTMLElement>("data-state", this.identifier);
+  /** Borrows `hidden` on each panel and backdrop, for the same return. */
+  readonly #hiddenLease = new AttributeLease<HTMLElement>("hidden", this.identifier);
+  /** Borrows `data-mode` on each panel, for the same return. */
+  readonly #modeLease = new AttributeLease<HTMLElement>("data-mode", this.identifier);
+  /** Writes the state back after a Turbo morph put the server's markup in its place. */
+  readonly #morphRender = new MorphRenderWatcher(() => this.#repair());
+
+  /**
+   * Whether this instance has connected before. A reconnect is an in-page move or a
+   * `data-turbo-permanent` element carried to the next page; a page Turbo restores from its
+   * cache connects new instances.
+   */
+  #lived = false;
+
+  /**
+   * Restores the inline preference and starts the overlay closed, silently. A reconnect of
+   * this instance that finds its overlay still open in overlay mode keeps it open and takes
+   * the trap again.
+   */
   override connect(): void {
+    this.#trap.connect();
     this.#connected = true;
-    this.#beforeCache.activate();
     this.#activePanel = this.hasPanelTarget ? this.panelTarget : null;
+    this.#storageKeyRead = this.#storageKey;
     this.#collapsed = this.#restoreCollapsed();
     this.#mqlQuery = this.#breakpointQuery;
     this.#mql = this.#matchBreakpoint(this.#mqlQuery);
     this.#mql?.addEventListener("change", this.#onMediaChange);
-    this.#applyMode(this.#computeMode(), false);
-    this.#reporting = true;
+    const mode = this.#computeMode();
+    const resume = this.#lived && mode === "overlay" && this.#isOverlayOpen;
+    this.#lived = true;
+    if (resume) this.#trap.activate();
+    else this.#applyMode(mode, false);
+    this.#morphRender.observe(this.element);
   }
 
   override disconnect(): void {
     this.#connected = false;
-    this.#reporting = false;
-    this.#beforeCache.deactivate();
+    this.#morphRender.disconnect();
     this.#mql?.removeEventListener("change", this.#onMediaChange);
     this.#mql = null;
     this.#mqlQuery = null;
     this.#transition.cancel();
-    this.#trap.deactivate({ restoreFocus: false });
+    this.#trap.disconnect(this);
     this.#activePanel = null;
   }
 
-  /** Adopts a panel target added by a Turbo morph after the controller connected. */
+  /**
+   * Adopts a panel target that arrives while no owned panel is on the page. The owned panel
+   * moving within the element arrives here too, and stays owned as it is.
+   */
   panelTargetConnected(panel: HTMLElement): void {
-    if (!this.#connected || (this.#activePanel?.isConnected && this.#activePanel !== panel)) return;
+    if (!this.#connected || this.#activePanel?.isConnected) return;
     this.#adoptPanel(panel);
   }
 
-  /** Closes and releases overlay side effects when the actively trapped panel disappears. */
+  /**
+   * Gives a panel that no longer resolves as a target its own `data-mode`, `data-state` and
+   * `hidden` back — after `disconnect()` too, since dropping the identifier leaves the element
+   * on the page. When the owned panel leaves, or a move puts another panel in front of it,
+   * the overlay closes and the panel now first is adopted: an open one takes the modal trap
+   * over in place, and otherwise, or with no panel left, the side effects are released. A
+   * move that keeps the owned panel first changes nothing. After {@link disconnect} nothing
+   * is adopted: a panel still owned once a handler disconnected the controller writes the
+   * overlay closed and releases the modal side effects as it leaves.
+   */
   panelTargetDisconnected(panel: HTMLElement): void {
-    if (panel !== this.#activePanel) return;
+    const stays = this.panelTargets.includes(panel);
+    if (!stays) {
+      this.#modeLease.return(panel);
+      this.#stateLease.return(panel);
+      this.#hiddenLease.return(panel);
+    }
+    if (panel !== this.#activePanel || (stays && this.panelTarget === panel)) return;
     this.#transition.cancel();
     this.#activePanel = null;
-    if (!this.#connected) return;
 
-    panel.setAttribute("data-state", "closed");
-    panel.hidden = true;
+    if (stays) {
+      this.#writeState(panel, "closed");
+      this.#writeHidden(panel, true);
+    }
     this.#hideBackdrop();
     this.#setExpandedAttr(false);
-    this.#trap.deactivate();
+    if (!this.#connected) {
+      this.#trap.deactivate({ restoreFocus: false });
+      return;
+    }
 
     // Handles morph implementations that add the replacement before removing
     // the old target (its connected callback was intentionally ignored above).
     if (this.hasPanelTarget) this.#adoptPanel(this.panelTarget);
+    else this.#trap.deactivate();
+  }
+
+  /** Reflects the expanded state onto a trigger that arrives in front of the others. */
+  triggerTargetConnected(): void {
+    if (this.#connected) this.#reflectExpanded();
+  }
+
+  /**
+   * Gives a trigger that no longer resolves as the target its own `aria-expanded` back — after
+   * `disconnect()` too, since dropping the identifier leaves the element on the page — and,
+   * while connected, reflects the expanded state onto the trigger left.
+   */
+  triggerTargetDisconnected(trigger: HTMLElement): void {
+    if (!this.triggerTargets.includes(trigger)) this.#expandedLease.return(trigger);
+    if (this.#connected) this.#reflectExpanded();
+  }
+
+  /** Reflects the overlay state onto a backdrop that arrives in front of the others. */
+  backdropTargetConnected(): void {
+    if (this.#connected) this.#reflectBackdrop();
+  }
+
+  /**
+   * Gives a backdrop that no longer resolves as the target its own `data-state` and `hidden`
+   * back — after `disconnect()` too — and, while connected, reflects the overlay state onto
+   * the backdrop left.
+   */
+  backdropTargetDisconnected(backdrop: HTMLElement): void {
+    if (!this.backdropTargets.includes(backdrop)) {
+      this.#stateLease.return(backdrop);
+      this.#hiddenLease.return(backdrop);
+    }
+    if (this.#connected) this.#reflectBackdrop();
   }
 
   /**
@@ -184,22 +296,27 @@ export class SidebarController extends Controller<HTMLElement> {
   }
 
   /**
-   * Sanitizes overlay markup before Turbo snapshots the page.
-   *
-   * Inline state is durable and remains untouched. Overlay state is transient:
-   * pending transitions are cancelled, controller-owned open attributes are
-   * closed immediately, and modal side effects are released without moving
-   * focus during navigation.
+   * Follows a `key` rewritten after connect. A preference saved under the new key is
+   * applied — rendered and reported as `reconcile` inline, kept for the next inline
+   * render in overlay — and without one the state stays. Nothing is copied or written.
    */
-  readonly #beforeCache = new BeforeCacheReset((): void => {
-    if (!this.#connected || !this.#isOverlay) return;
-    this.#transition.cancel();
-    this.#trap.deactivate({ restoreFocus: false });
-    this.#setOverlayClosedImmediate();
-  });
+  keyValueChanged(): void {
+    // `connect()` reads the initial key itself.
+    if (!this.#connected) return;
+    const key = this.#storageKey;
+    if (key === this.#storageKeyRead) return;
+    this.#storageKeyRead = key;
+    const stored = this.#readStoredCollapsed(key);
+    if (stored === null || stored === this.#collapsed) return;
+    this.#collapsed = stored;
+    if (this.#isOverlay) return;
+    this.#applyInlineState(stored);
+    this.#reportReconcile();
+  }
 
   /** Toggles the panel: inline flips collapsed/expanded, overlay flips open/closed. */
   toggle(event?: Event): void {
+    if (!this.#connected) return;
     const reason = stateReasonFor(event);
     if (this.#isOverlay) {
       this.#isOverlayOpen ? this.#closeOverlay(reason) : this.#openOverlay(reason);
@@ -210,6 +327,7 @@ export class SidebarController extends Controller<HTMLElement> {
 
   /** Shows the panel (inline: expand; overlay: open). */
   open(event?: Event): void {
+    if (!this.#connected) return;
     const reason = stateReasonFor(event);
     if (this.#isOverlay) this.#openOverlay(reason);
     else this.#setCollapsed(false, reason);
@@ -217,6 +335,7 @@ export class SidebarController extends Controller<HTMLElement> {
 
   /** Hides the panel (inline: collapse; overlay: close). */
   close(event?: Event): void {
+    if (!this.#connected) return;
     const reason = this.#closeReason(event);
     if (this.#isOverlay) this.#closeOverlay(reason);
     else this.#setCollapsed(true, reason);
@@ -243,57 +362,79 @@ export class SidebarController extends Controller<HTMLElement> {
    */
   #applyMode(mode: Mode, report: boolean): void {
     this.#mode = mode;
-    if (this.hasPanelTarget) this.panelTarget.setAttribute("data-mode", mode);
+    if (this.hasPanelTarget) this.#modeLease.write(this.panelTarget, mode);
     if (mode === "inline") {
-      // Drop any overlay residue, then render the persisted rail state.
+      // Drop any overlay residue, then render the persisted rail state. The connect-time
+      // baseline releases nothing: the trap is inactive then, and a tabindex it kept on a
+      // panel that held focus is the trap's to keep across an in-page move.
       this.#transition.cancel();
-      this.#trap.deactivate({ restoreFocus: false });
-      if (this.hasPanelTarget) this.panelTarget.hidden = false;
+      if (report) this.#trap.deactivate({ restoreFocus: false });
+      if (this.hasPanelTarget) this.#writeHidden(this.panelTarget, false);
       this.#hideBackdrop();
       this.#applyInlineState(this.#collapsed);
     } else {
       // Overlay always starts closed; never auto-open on a mode switch.
-      this.#transition.cancel();
-      this.#trap.deactivate({ restoreFocus: false });
       this.#setOverlayClosedImmediate();
     }
-    if (report && this.#reporting) {
-      this.dispatch("reconcile", {
-        detail: { mode, open: this.#isExpanded },
-        cancelable: false,
-      });
-    }
+    if (report) this.#reportReconcile();
   }
 
-  /** Reconciles a replacement panel with the current responsive mode and DOM state. */
+  /**
+   * Writes the state this instance holds back over the server's markup a Turbo morph put in
+   * its place, silently: the mode, and the overlay as open, closing or closed — shown while
+   * open or while the trap is still held through the exit — or the inline rail.
+   */
+  #repair(): void {
+    if (!this.hasPanelTarget) return;
+    if (this.#mode === "inline") {
+      this.#applyMode("inline", false);
+      return;
+    }
+    const panel = this.panelTarget;
+    this.#modeLease.write(panel, "overlay");
+    this.#setOverlayState(this.#expanded ? "open" : "closed");
+    const hidden = !this.#expanded && !this.#trap.active;
+    this.#writeHidden(panel, hidden);
+    this.#writeBackdropHidden(hidden);
+    this.#setExpandedAttr(this.#expanded);
+  }
+
+  /** Reports a state the controller re-derived rather than one the user moved. */
+  #reportReconcile(): void {
+    this.dispatch("reconcile", {
+      detail: { mode: this.#mode, open: this.#isExpanded },
+      cancelable: false,
+    });
+  }
+
+  /**
+   * Reconciles a replacement panel with the current responsive mode and DOM state. An open
+   * overlay panel takes the modal trap, moved onto it in place when already active.
+   */
   #adoptPanel(panel: HTMLElement): void {
     this.#transition.cancel();
-    const trapWasActive = this.#trap.active;
     this.#activePanel = panel;
-    panel.setAttribute("data-mode", this.#mode);
+    this.#modeLease.write(panel, this.#mode);
     if (this.#mode === "inline") {
-      panel.hidden = false;
-      panel.setAttribute("data-state", this.#collapsed ? "collapsed" : "expanded");
+      this.#writeHidden(panel, false);
+      this.#writeState(panel, this.#collapsed ? "collapsed" : "expanded");
       this.#hideBackdrop();
       this.#setExpandedAttr(!this.#collapsed);
-      this.#trap.deactivate({ restoreFocus: false });
       return;
     }
 
     if (panel.getAttribute("data-state") === "open") {
-      panel.hidden = false;
-      if (this.hasBackdropTarget) {
-        this.backdropTarget.setAttribute("data-state", "open");
-        this.backdropTarget.hidden = false;
-      }
+      this.#writeHidden(panel, false);
+      this.#writeBackdropState("open");
+      this.#writeBackdropHidden(false);
       this.#setExpandedAttr(true);
-      if (trapWasActive) this.#trap.deactivate({ restoreFocus: false });
-      this.#trap.activate();
+      if (this.#trap.active) this.#trap.refreshContainer();
+      else this.#trap.activate();
       return;
     }
 
-    panel.setAttribute("data-state", "closed");
-    panel.hidden = true;
+    this.#writeState(panel, "closed");
+    this.#writeHidden(panel, true);
     this.#hideBackdrop();
     this.#setExpandedAttr(false);
     this.#trap.deactivate();
@@ -327,7 +468,7 @@ export class SidebarController extends Controller<HTMLElement> {
   /** Reflects the inline rail state onto the panel and trigger. */
   #applyInlineState(collapsed: boolean): void {
     if (this.hasPanelTarget) {
-      this.panelTarget.setAttribute("data-state", collapsed ? "collapsed" : "expanded");
+      this.#writeState(this.panelTarget, collapsed ? "collapsed" : "expanded");
     }
     this.#setExpandedAttr(!collapsed);
   }
@@ -339,8 +480,8 @@ export class SidebarController extends Controller<HTMLElement> {
     if (!this.hasPanelTarget || this.#isOverlayOpen) return;
     this.#transition.cancel();
     this.#activePanel = this.panelTarget;
-    this.panelTarget.hidden = false;
-    if (this.hasBackdropTarget) this.backdropTarget.hidden = false;
+    this.#writeHidden(this.panelTarget, false);
+    this.#writeBackdropHidden(false);
     // Commit the closed (off-canvas) frame before flipping to open so the enter
     // transition has a starting frame to animate.
     void this.panelTarget.offsetWidth;
@@ -370,14 +511,14 @@ export class SidebarController extends Controller<HTMLElement> {
   #setOverlayClosedImmediate(): void {
     this.#setOverlayState("closed");
     this.#setExpandedAttr(false);
-    if (this.hasPanelTarget) this.panelTarget.hidden = true;
+    if (this.hasPanelTarget) this.#writeHidden(this.panelTarget, true);
     this.#hideBackdrop();
   }
 
   /** Syncs `data-state` on the panel and backdrop together (overlay). */
   #setOverlayState(state: "open" | "closed"): void {
-    if (this.hasPanelTarget) this.panelTarget.setAttribute("data-state", state);
-    if (this.hasBackdropTarget) this.backdropTarget.setAttribute("data-state", state);
+    if (this.hasPanelTarget) this.#writeState(this.panelTarget, state);
+    this.#writeBackdropState(state);
   }
 
   /**
@@ -394,28 +535,60 @@ export class SidebarController extends Controller<HTMLElement> {
 
   /** Hides the panel/backdrop and tears down the trap after the exit transition. */
   #applyOverlayHidden(panel: HTMLElement): void {
-    panel.hidden = true;
+    this.#writeHidden(panel, true);
     this.#hideBackdrop();
     this.#trap.deactivate();
   }
 
   #hideBackdrop(): void {
-    if (!this.hasBackdropTarget) return;
-    this.backdropTarget.setAttribute("data-state", "closed");
-    this.backdropTarget.hidden = true;
+    this.#writeBackdropState("closed");
+    this.#writeBackdropHidden(true);
+  }
+
+  /** Writes `data-state` on a panel or backdrop, through the lease that gives it back. */
+  #writeState(element: HTMLElement, state: string): void {
+    this.#stateLease.write(element, state);
+  }
+
+  /** Writes `hidden` on a panel or backdrop, through the lease that gives it back. */
+  #writeHidden(element: HTMLElement, hidden: boolean): void {
+    this.#hiddenLease.write(element, hidden ? "" : null);
+  }
+
+  /** Writes the backdrop's `data-state`, keeping it for a backdrop that arrives or stays. */
+  #writeBackdropState(state: "open" | "closed"): void {
+    this.#backdrop.state = state;
+    if (this.hasBackdropTarget) this.#writeState(this.backdropTarget, state);
+  }
+
+  /** Writes the backdrop's `hidden`, keeping it for a backdrop that arrives or stays. */
+  #writeBackdropHidden(hidden: boolean): void {
+    this.#backdrop.hidden = hidden;
+    if (this.hasBackdropTarget) this.#writeHidden(this.backdropTarget, hidden);
+  }
+
+  /** Writes the kept `data-state` and `hidden` onto the first backdrop. */
+  #reflectBackdrop(): void {
+    this.#writeBackdropState(this.#backdrop.state);
+    this.#writeBackdropHidden(this.#backdrop.hidden);
   }
 
   // --- Shared helpers --------------------------------------------------------
 
   #setExpandedAttr(expanded: boolean): void {
+    this.#expanded = expanded;
+    this.#reflectExpanded();
+  }
+
+  /** Writes the kept `aria-expanded` onto the first trigger, through its lease. */
+  #reflectExpanded(): void {
     if (this.hasTriggerTarget) {
-      this.triggerTarget.setAttribute("aria-expanded", expanded ? "true" : "false");
+      this.#expandedLease.write(this.triggerTarget, this.#expanded ? "true" : "false");
     }
   }
 
   /** Reports a move of the expanded state, naming the mode it happened in. */
   #report(open: boolean, reason: StateReason): void {
-    if (!this.#reporting) return;
     const detail = { reason, mode: this.#mode };
     if (open) this.dispatch("open", { detail, cancelable: false });
     else this.dispatch("close", { detail, cancelable: false });
@@ -435,15 +608,20 @@ export class SidebarController extends Controller<HTMLElement> {
    *   3. the declared `collapsed` value.
    */
   #restoreCollapsed(): boolean {
-    const key = this.#storageKey;
-    if (key) {
-      const result = readLocalStorage(key);
-      if (result.ok && result.value !== null) return result.value === "1";
-    }
+    const stored = this.#readStoredCollapsed(this.#storageKey);
+    if (stored !== null) return stored;
     const domState = this.hasPanelTarget ? this.panelTarget.getAttribute("data-state") : null;
     if (domState === "collapsed") return true;
     if (domState === "expanded") return false;
     return this.collapsedValue;
+  }
+
+  /** The preference saved under `key`, or `null` when there is none to read. */
+  #readStoredCollapsed(key: string): boolean | null {
+    if (!key) return null;
+    const result = readLocalStorage(key);
+    if (!result.ok || result.value === null) return null;
+    return result.value === "1";
   }
 
   /** Persists the collapsed preference when a key is configured. */
@@ -463,8 +641,8 @@ export class SidebarController extends Controller<HTMLElement> {
 
   /** Valid breakpoint CSS query, defaulting malformed or negative values to 768px. */
   get #breakpointQuery(): string {
-    const value = this.breakpointValue;
-    const breakpoint = Number.isFinite(value) && value >= 0 ? value : 768;
+    const value = this.#safeBreakpoint;
+    const breakpoint = value;
     return `(min-width: ${breakpoint}px)`;
   }
 
@@ -477,6 +655,16 @@ export class SidebarController extends Controller<HTMLElement> {
       this.#isOverlay &&
       this.hasPanelTarget &&
       this.panelTarget.getAttribute("data-state") === "open"
+    );
+  }
+  /** Current `breakpoint` declaration resolved against its numeric contract. */
+  get #safeBreakpoint(): number {
+    return this.#numbers.read(
+      this,
+      "breakpoint",
+      this.breakpointValue,
+      SidebarController.values.breakpoint.default,
+      SidebarController.valueConstraints.breakpoint,
     );
   }
 }

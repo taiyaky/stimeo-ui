@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [Unreleased]
+
+## [0.17.0] - 2026-10-04
+
+### Changed
+
+- **Breaking** Replace `reset-before-cache` with `reset-on-restore` (class, export,
+  and subpath).
+  Reset runs on restoration; remove `dispatchReset` and `:request` bindings.
+  Restored drawers and command palettes start closed.
+- **Breaking** Rename calendar, combobox, and command-palette `selectByClick`, and
+  tree-view `onClick`, to `select`; replace calendar `selectDayElement` with
+  `select(element)`.
+  Accordion `toggle`, theme `set`, and scrollspy `scrollTo` require owned targets.
+- **Breaking** State events are silent for unchanged state and superseded pending
+  reports.
+  For child edits within partial checkbox groups, use the children's native `change`.
+  Number Values and action params enforce finite values and their declared domains.
+  Update Inspector integrations to schema v15 and run `stimeo check` before deploying.
+- Target actions accept owned elements; user state reports include `detail.reason`.
+  Toast duration, persist debounce, and count-up duration changes apply to the next
+  operation. Portal destination changes update mounts; Cable params cannot replace
+  the declared channel.
+
+### Fixed
+
+- Preserve live state across Turbo caching, repair derived state after retained
+  morphs, and restore focus reliably across nested layers and Shadow DOM.
+
 ## [0.16.0] - 2026-09-26
 
 Minor release with no new components. Widgets now report their own state
@@ -1278,6 +1307,8 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[Unreleased]: https://github.com/taiyaky/stimeo-ui/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.17.0
 [0.16.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.16.0
 [0.15.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.15.0
 [0.14.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.14.0

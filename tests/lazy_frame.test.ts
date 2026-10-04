@@ -182,7 +182,7 @@ describe("LazyFrameController", () => {
     );
 
     frame().dispatchEvent(new Event("focusin", { bubbles: true }));
-    expect(reload).not.toHaveBeenCalled(); // focus started the load; it has no further job
+    expect(reload).not.toHaveBeenCalled(); // focus has no further job after the load
     expect(loads).toEqual([]);
   });
 
@@ -400,6 +400,107 @@ describe("LazyFrameController", () => {
     frame().setAttribute("data-stimeo--lazy-frame-root-margin-value", "1200px");
     await tick();
     expect(MockIntersectionObserver.last().init?.rootMargin).toBe("1200px");
+  });
+
+  // --- `once` follows a runtime change ------------------------------------------
+
+  it("re-arms a loaded frame when once is turned off", async () => {
+    await mount();
+    const reload = vi.fn();
+    (frame() as HTMLElement & { reload: () => void }).reload = reload;
+    const first = MockIntersectionObserver.last();
+    first.fire(true); // loaded, and the one-shot stops observing
+    expect(first.disconnect).toHaveBeenCalled();
+
+    frame().setAttribute("data-stimeo--lazy-frame-once-value", "false");
+    await tick();
+    expect(MockIntersectionObserver.instances).toHaveLength(2);
+
+    // The re-armed observer reports where the frame is first: in view, the same
+    // visit that loaded it, so nothing is fetched again.
+    MockIntersectionObserver.last().fire(true);
+    expect(reload).not.toHaveBeenCalled();
+    MockIntersectionObserver.last().reenter();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("begins the re-armed visit where the frame is, even out of view", async () => {
+    await mount();
+    const reload = vi.fn();
+    (frame() as HTMLElement & { reload: () => void }).reload = reload;
+    MockIntersectionObserver.last().fire(true); // loaded while in view
+
+    frame().setAttribute("data-stimeo--lazy-frame-once-value", "false");
+    await tick();
+    expect(MockIntersectionObserver.instances).toHaveLength(2);
+    // It left while nothing watched it: found out of view, and then scrolled
+    // back to — the visit starts at the first report, so this is no re-entry.
+    MockIntersectionObserver.last().fire(false);
+    MockIntersectionObserver.last().fire(true);
+    expect(reload).not.toHaveBeenCalled();
+    MockIntersectionObserver.last().reenter();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-arms a restored loaded frame when once is turned off", async () => {
+    await mount('data-stimeo--lazy-frame-url-value="/comments"', 'data-lazy-loaded="true"');
+    expect(MockIntersectionObserver.instances).toHaveLength(0);
+
+    frame().setAttribute("data-stimeo--lazy-frame-once-value", "false");
+    await tick();
+    expect(MockIntersectionObserver.instances).toHaveLength(1);
+    // A loaded frame gets no focus fallback back: focus started nothing then either.
+    frame().dispatchEvent(new Event("focusin", { bubbles: true }));
+    expect(frame().hasAttribute("src")).toBe(false);
+  });
+
+  it("stops observing a loaded frame when once is turned on", async () => {
+    await mount(
+      'data-stimeo--lazy-frame-url-value="/comments" data-stimeo--lazy-frame-once-value="false"',
+    );
+    const reload = vi.fn();
+    (frame() as HTMLElement & { reload: () => void }).reload = reload;
+    const observer = MockIntersectionObserver.last();
+    observer.fire(true); // loaded, and still watching for a re-entry
+
+    frame().setAttribute("data-stimeo--lazy-frame-once-value", "true");
+    await tick();
+    expect(observer.disconnect).toHaveBeenCalled();
+    observer.reenter();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("leaves a frame that has not loaded yet armed when once is turned off", async () => {
+    await mount();
+    frame().setAttribute("data-stimeo--lazy-frame-once-value", "false");
+    await tick();
+    // `once` only decides what the first load leaves behind, which is still ahead.
+    expect(MockIntersectionObserver.instances).toHaveLength(1);
+    frame().dispatchEvent(new Event("focusin", { bubbles: true }));
+    expect(frame().getAttribute("src")).toBe("/comments");
+  });
+
+  it("leaves a frame that has not loaded yet armed when once is turned on", async () => {
+    await mount(
+      'data-stimeo--lazy-frame-url-value="/comments" data-stimeo--lazy-frame-once-value="false"',
+    );
+    const observer = MockIntersectionObserver.last();
+    frame().setAttribute("data-stimeo--lazy-frame-once-value", "true");
+    await tick();
+    expect(observer.disconnect).not.toHaveBeenCalled();
+    observer.fire(true);
+    expect(frame().getAttribute("src")).toBe("/comments");
+    expect(observer.disconnect).toHaveBeenCalled(); // the load itself spends the one shot
+  });
+
+  it("does not re-arm from a once change delivered outside the connected window", async () => {
+    await mount();
+    MockIntersectionObserver.last().fire(true); // loaded
+    controller()?.disconnect();
+
+    frame().setAttribute("data-stimeo--lazy-frame-once-value", "false");
+    controller()?.onceValueChanged();
+    expect(MockIntersectionObserver.instances).toHaveLength(1);
   });
 
   it("releases the focus listener on disconnect", async () => {

@@ -1,9 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce } from "../utils/announce";
 import { AttributeLease } from "../utils/attribute_lease";
-import { BeforeCacheReset } from "../utils/before_cache_reset";
 import { DetachGate } from "../utils/detach_gate";
 import { ListenerSet } from "../utils/listener_set";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /** Native controls that can submit a form. */
@@ -41,6 +42,12 @@ interface SubmissionSession {
 
 /** Per-button override for the controller's default busy label. */
 const BUTTON_BUSY_LABEL = "data-submit-once-busy-label";
+
+/** Suffix of the record of a label swapped through text or value; see the class remarks. */
+const LABEL_RECORD = "label";
+
+/** Suffix of the mark on the control a running submission was sent from. */
+const SUBMITTER_MARK = "submitter";
 
 /**
  * Headless form-scoped double-submit guard (identifier:
@@ -88,9 +95,10 @@ const BUTTON_BUSY_LABEL = "data-submit-once-busy-label";
  *
  * Events:
  * - `stimeo--submit-once:start` — `{ form, submitter }`.
- * - `stimeo--submit-once:reconcile` — `{ forms: HTMLFormElement[] }`, the forms
- *   whose in-flight submission the Turbo cache rewind abandoned. `end` would
- *   claim the submission resolved, so the rewind reports itself instead.
+ * - `stimeo--submit-once:reconcile` — `{ forms: HTMLFormElement[] }`, the forms a
+ *   connection found still marked `data-submitting` with no submission of its own
+ *   behind them: a page restored from the Turbo cache mid-submission, whose request
+ *   can no longer answer. `end` would claim the submission resolved.
  * - `stimeo--submit-once:end` — `{ form, submitter, reason, success? }`, where
  *   `reason` is `"turbo"`, `"timeout"`, `"manual"`, or `"canceled"`. Only
  *   `"canceled"` skips the completion announcement, because no operation ran.
@@ -100,13 +108,23 @@ const BUTTON_BUSY_LABEL = "data-submit-once-busy-label";
  * string. `announceText` / `announceReadyText` are empty by default and speak
  * through the page's shared `stimeo--announcer` only on real state transitions.
  * Attribute writes use `AttributeLease`, so a consumer mutation made
- * while busy wins over restoration. `DetachGate` preserves an in-flight
- * session across an in-page move, while `BeforeCacheReset` rewinds the
- * snapshot before Turbo caches it. Cache/detach rewinds dispatch no `end`,
- * announce nothing and never move focus; a cache rewind that abandons a
- * submission reports it once as `reconcile`.
+ * while busy wins over restoration, and the author's values travel with the elements.
+ * A label swapped through the button's text or an input's value records the authored
+ * and written labels on the control as `data-<identifier>-label`. A connection with no
+ * submission of its own restores the authored label only while the written label remains,
+ * so a restored copy loses busy wording without overwriting a consumer's change.
+ * `DetachGate` preserves an in-flight session across an in-page move. A
+ * submission is never abandoned on `turbo:before-cache`, which Turbo also dispatches on
+ * pages that stay (a promoted frame navigation, a state-less `popstate`, a refresh of a
+ * cached URL, a `data-turbo-permanent` element carried to the next page): the request
+ * is still running there and the guard against a second submit has to hold until its
+ * `turbo:submit-end`. Detach teardowns dispatch no `end`, announce nothing and never
+ * move focus.
  */
 export class SubmitOnceController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override targets = ["submit", "idle", "busy"];
   static override values = {
     announceText: { type: String, default: "" },
@@ -115,6 +133,10 @@ export class SubmitOnceController extends Controller<HTMLElement> {
     timeout: { type: Number, default: 0 },
     restoreFocus: { type: Boolean, default: false },
   };
+
+  static valueConstraints = {
+    timeout: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof SubmitOnceController.values>;
   static actions = ["cancel", "finish", "start"] as const;
   static events = ["start", "end", "reconcile"] as const;
 
@@ -131,15 +153,14 @@ export class SubmitOnceController extends Controller<HTMLElement> {
   readonly #timers = new SafeTimeout();
   readonly #gate = new DetachGate();
   readonly #listeners = new ListenerSet();
-  readonly #beforeCache = new BeforeCacheReset(() => this.#rewindForCache());
   readonly #sessions = new Map<HTMLFormElement, SubmissionSession>();
 
-  readonly #disabled = new AttributeLease<SubmitControl>("disabled");
-  readonly #controlBusy = new AttributeLease<SubmitControl>("aria-busy");
-  readonly #formBusy = new AttributeLease<HTMLFormElement>("aria-busy");
-  readonly #submitting = new AttributeLease<HTMLFormElement>("data-submitting");
-  readonly #ariaLabel = new AttributeLease<HTMLButtonElement>("aria-label");
-  readonly #hidden = new AttributeLease<HTMLElement>("hidden");
+  readonly #disabled = new AttributeLease<SubmitControl>("disabled", this.identifier);
+  readonly #controlBusy = new AttributeLease<SubmitControl>("aria-busy", this.identifier);
+  readonly #formBusy = new AttributeLease<HTMLFormElement>("aria-busy", this.identifier);
+  readonly #submitting = new AttributeLease<HTMLFormElement>("data-submitting", this.identifier);
+  readonly #ariaLabel = new AttributeLease<HTMLButtonElement>("aria-label", this.identifier);
+  readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
 
   readonly #onSubmitStart = (event: Event): void => {
     this.start(event);
@@ -162,16 +183,105 @@ export class SubmitOnceController extends Controller<HTMLElement> {
 
   override connect(): void {
     this.#gate.cancel();
-    this.#beforeCache.activate();
     this.#listeners.add(this.element, "submit", this.#onNativeSubmit, { capture: true });
     this.#listeners.add(this.element, "turbo:submit-start", this.#onSubmitStart);
     this.#listeners.add(this.element, "turbo:submit-end", this.#onSubmitEnd);
+    if (this.#sessions.size === 0) this.#releaseInherited();
   }
 
   override disconnect(): void {
     this.#listeners.dispose();
-    this.#beforeCache.deactivate();
     this.#gate.disconnected(this, () => this.#teardown());
+  }
+
+  /** The record of a label swapped through text or value, in this controller's namespace. */
+  get #labelRecord(): string {
+    return `data-${this.identifier}-${LABEL_RECORD}`;
+  }
+
+  /** The mark on the control a running submission was sent from. */
+  get #submitterMark(): string {
+    return `data-${this.identifier}-${SUBMITTER_MARK}`;
+  }
+
+  /**
+   * Releases what a submission this instance is not running left behind: on a page
+   * restored from Turbo's cache mid-submission, the labels it swapped come back from
+   * their records, every leased attribute goes back to the author's value from its record,
+   * and the forms that were still marked `data-submitting` are reported once as
+   * `reconcile`.
+   */
+  #releaseInherited(): void {
+    const forms = this.#ownedForms();
+    const controls = new Set(
+      this.element.querySelectorAll<SubmitControl>(`[${this.#labelRecord}]`),
+    );
+    for (const form of forms) {
+      for (const control of this.#submitControls(form)) {
+        if (control.hasAttribute(this.#labelRecord)) controls.add(control);
+      }
+    }
+    for (const control of controls) {
+      if (control.form && !this.#ownsForm(control.form)) continue;
+      this.#restoreLabel(control);
+    }
+    const copied = forms.filter((form) => this.#returnCopied(form));
+    if (copied.length > 0) this.dispatch("reconcile", { detail: { forms: copied } });
+  }
+
+  /**
+   * Gives back what a copy of `form` carries from a submission of an earlier instance, and
+   * says whether it carried one. Turbo disables the submitter and marks the form
+   * `aria-busy` before `turbo:submit-start`, and undoes both only when its request
+   * finishes, which never happens on a copy: the control the submission marked as its
+   * submitter is enabled again, in either of Turbo's submitter modes (`disabled`, or
+   * `aria-disabled="true"`), and the form's `aria-busy="true"` goes.
+   */
+  #returnCopied(form: HTMLFormElement): boolean {
+    let copied = this.#submitting.return(form);
+    this.#formBusy.return(form);
+    const parts = [...this.idleTargets, ...this.busyTargets];
+    for (const control of this.#submitControls(form)) {
+      this.#disabled.return(control);
+      this.#controlBusy.return(control);
+      if (control instanceof HTMLButtonElement) this.#ariaLabel.return(control);
+      for (const part of parts) if (control.contains(part)) this.#hidden.return(part);
+      if (!control.hasAttribute(this.#submitterMark)) continue;
+      control.removeAttribute(this.#submitterMark);
+      control.disabled = false;
+      if (control.getAttribute("aria-disabled") === "true")
+        control.removeAttribute("aria-disabled");
+      copied = true;
+    }
+    if (copied && form.getAttribute("aria-busy") === "true") form.removeAttribute("aria-busy");
+    return copied;
+  }
+
+  /** Returns a recorded label while its written value remains, and drops the record. */
+  #restoreLabel(control: SubmitControl): void {
+    const raw = control.getAttribute(this.#labelRecord);
+    control.removeAttribute(this.#labelRecord);
+    let record: unknown;
+    try {
+      record = JSON.parse(raw ?? "");
+    } catch {
+      return;
+    }
+    if (!Array.isArray(record) || record.length !== 2) return;
+    const [original, written]: unknown[] = record;
+    if (typeof original !== "string" || typeof written !== "string") return;
+    if (control instanceof HTMLInputElement) {
+      if (control.value === written) control.value = original;
+    } else if (control.childElementCount === 0 && control.textContent === written) {
+      control.textContent = original;
+    }
+  }
+
+  /** The forms this controller owns: its own element, and the forms inside it. */
+  #ownedForms(): HTMLFormElement[] {
+    const forms = Array.from(this.element.querySelectorAll("form"));
+    if (this.element instanceof HTMLFormElement) forms.unshift(this.element);
+    return forms.filter((form) => this.#ownsForm(form));
   }
 
   /**
@@ -201,16 +311,17 @@ export class SubmitOnceController extends Controller<HTMLElement> {
     };
     this.#sessions.set(form, session);
 
+    submitter?.setAttribute(this.#submitterMark, "");
     this.#formBusy.write(form, "true");
     this.#submitting.write(form, "true");
     this.#syncControls(session, controls);
     this.#enterLabel(session);
     this.dispatch("start", { detail: { form, submitter } });
 
-    if (this.timeoutValue > 0) {
+    if (this.#safeTimeout > 0) {
       session.timeoutId = this.#timers.set(
         () => this.#complete(form, "timeout", false),
-        this.timeoutValue,
+        this.#safeTimeout,
       );
     }
 
@@ -313,6 +424,7 @@ export class SubmitOnceController extends Controller<HTMLElement> {
         original: control.value,
         written: label,
       };
+      control.setAttribute(this.#labelRecord, JSON.stringify([control.value, label]));
       control.value = label;
       return;
     }
@@ -329,11 +441,16 @@ export class SubmitOnceController extends Controller<HTMLElement> {
       original: control.textContent ?? "",
       written: label,
     };
+    control.setAttribute(this.#labelRecord, JSON.stringify([control.textContent ?? "", label]));
     control.textContent = label;
   }
 
-  /** Returns labels, controls, and form hooks, respecting intervening consumer writes. */
-  #returnSessionState(session: SubmissionSession): void {
+  /**
+   * Returns labels, controls, and form hooks, respecting intervening consumer writes. The
+   * submitter keeps its mark when `unfinished`: the submission is still running for Turbo,
+   * which re-enables the submitter only when its request ends.
+   */
+  #returnSessionState(session: SubmissionSession, unfinished = false): void {
     if (session.timeoutId !== null) {
       this.#timers.clear(session.timeoutId);
       session.timeoutId = null;
@@ -341,15 +458,18 @@ export class SubmitOnceController extends Controller<HTMLElement> {
 
     if (session.labelWrite?.channel === "value") {
       const { control, original, written } = session.labelWrite;
+      control.removeAttribute(this.#labelRecord);
       if (control.value === written) control.value = original;
     } else if (session.labelWrite?.channel === "text") {
       const { control, original, written } = session.labelWrite;
+      control.removeAttribute(this.#labelRecord);
       if (control.childElementCount === 0 && control.textContent === written) {
         control.textContent = original;
       }
     }
     session.labelWrite = null;
 
+    if (!unfinished) session.submitter?.removeAttribute(this.#submitterMark);
     if (session.submitter instanceof HTMLButtonElement) {
       this.#ariaLabel.return(session.submitter);
     }
@@ -362,7 +482,6 @@ export class SubmitOnceController extends Controller<HTMLElement> {
       this.#controlBusy.return(control);
       this.#disabled.return(control);
     }
-    session.controls.clear();
     this.#submitting.return(session.form);
     this.#formBusy.return(session.form);
   }
@@ -377,31 +496,24 @@ export class SubmitOnceController extends Controller<HTMLElement> {
     }
   }
 
-  /** Silently abandons every session before caching or on a real detach. */
+  /**
+   * Silently abandons every session on a real detach. An element that left the document
+   * leaves the submitter's mark in place, for the copy of the page Turbo may take after
+   * this: its submission was never finished, and the connection that adopts the copy
+   * enables what Turbo disabled for it.
+   */
   #abandonSessions(): void {
     this.#timers.clearAll();
+    const departed = !this.element.isConnected;
     for (const session of this.#sessions.values()) {
       session.timeoutId = null;
-      this.#returnSessionState(session);
+      this.#returnSessionState(session, departed);
     }
     this.#sessions.clear();
   }
 
-  /**
-   * Keeps Turbo's cached snapshot idle without `end`, announcements, or focus
-   * moves; the abandoned forms are reported once as `reconcile`.
-   */
-  #rewindForCache(): void {
-    const forms = [...this.#sessions.keys()];
-    this.#abandonSessions();
-    // A submission in flight dies with the navigation, so a consumer still
-    // painting "submitting" from `start` would never be released.
-    if (forms.length > 0) this.dispatch("reconcile", { detail: { forms } });
-  }
-
   /** Tears down a true detach; an in-page move is canceled by the next `connect()`. */
   #teardown(): void {
-    this.#gate.cancel();
     this.#abandonSessions();
   }
 
@@ -506,5 +618,15 @@ export class SubmitOnceController extends Controller<HTMLElement> {
   #eventSuccess(event: Event): boolean | undefined {
     const success = (event as CustomEvent<{ success?: unknown }>).detail?.success;
     return typeof success === "boolean" ? success : undefined;
+  }
+  /** Current `timeout` declaration resolved against its numeric contract. */
+  get #safeTimeout(): number {
+    return this.#numbers.read(
+      this,
+      "timeout",
+      this.timeoutValue,
+      SubmitOnceController.values.timeout.default,
+      SubmitOnceController.valueConstraints.timeout,
+    );
   }
 }

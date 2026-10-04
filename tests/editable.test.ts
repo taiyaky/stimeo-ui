@@ -167,6 +167,33 @@ describe("EditableController", () => {
     expect(input().value).toBe("Kept");
   });
 
+  it("consumes the F2 that enters edit mode", async () => {
+    await mount();
+    const event = new KeyboardEvent("keydown", { key: "F2", bubbles: true, cancelable: true });
+    display().dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(root().dataset.mode).toBe("editing");
+  });
+
+  it("consumes the Enter that saves and the Escape that cancels", async () => {
+    await mount();
+    display().click();
+    const saveKey = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    input().dispatchEvent(saveKey);
+    expect(saveKey.defaultPrevented).toBe(true);
+    expect(root().dataset.mode).toBe("display");
+
+    display().click();
+    const cancelKey = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    input().dispatchEvent(cancelKey);
+    expect(cancelKey.defaultPrevented).toBe(true);
+    expect(root().dataset.mode).toBe("display");
+  });
+
   it("keeps editing when Escape cancels an IME conversion", async () => {
     await mount();
     display().click();
@@ -492,6 +519,30 @@ describe("EditableController", () => {
     expect(display().hidden).toBe(true);
   });
 
+  it("moves composition tracking to an input that replaces the live one mid-composition", async () => {
+    await mount(false);
+    display().click();
+    input().dispatchEvent(new CompositionEvent("compositionstart"));
+
+    const fresh = document.createElement("input");
+    fresh.type = "text";
+    fresh.hidden = true;
+    fresh.setAttribute("data-stimeo--editable-target", "input");
+    fresh.setAttribute("data-action", "keydown->stimeo--editable#onKeydown");
+    input().replaceWith(fresh);
+    await tick();
+
+    fresh.dispatchEvent(new CompositionEvent("compositionstart"));
+    key(fresh, { key: "Escape" });
+    expect(root().dataset.mode).toBe("editing");
+
+    // Removing an input drops its composition, so once the fresh input's own
+    // composition ends, Escape cancels.
+    fresh.dispatchEvent(new CompositionEvent("compositionend"));
+    key(fresh, { key: "Escape" });
+    expect(root().dataset.mode).toBe("display");
+  });
+
   it("hides a display element that replaces the live one mid-edit", async () => {
     await mount(false);
     display().click();
@@ -507,6 +558,302 @@ describe("EditableController", () => {
 
     expect(display().hidden).toBe(true);
     expect(input().hidden).toBe(false);
+  });
+
+  it("hides a display element that arrives mid-edit where there was none", async () => {
+    await mount(false);
+    display().click();
+    display().remove();
+    await tick();
+
+    // Nothing departs here, so the arrival is the only callback that can hide it.
+    const late = document.createElement("button");
+    late.type = "button";
+    late.setAttribute("aria-label", "Edit title");
+    late.setAttribute("data-stimeo--editable-target", "display");
+    late.textContent = "Original";
+    root().prepend(late);
+    await tick();
+
+    expect(late.hidden).toBe(true);
+    expect(input().hidden).toBe(false);
+  });
+
+  it("hides a display element that stays mid-edit after an earlier one leaves", async () => {
+    await mount(false);
+    display().click();
+    const original = display();
+    const successor = original.cloneNode(true) as HTMLElement;
+    successor.hidden = false;
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(display()).toBe(successor);
+    expect(successor.hidden).toBe(true);
+    expect(input().hidden).toBe(false);
+  });
+
+  it("says nothing when it re-derives a display element left behind", async () => {
+    await mount(false);
+    display().click();
+    const outcomes: string[] = [];
+    const listening = new AbortController();
+    for (const type of [
+      "stimeo--editable:change",
+      "stimeo--editable:cancel",
+      "stimeo--editable:reconcile",
+      "change",
+    ]) {
+      document.addEventListener(type, () => outcomes.push(type), { signal: listening.signal });
+    }
+    const original = display();
+    const successor = original.cloneNode(true) as HTMLElement;
+    successor.hidden = false;
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+    listening.abort();
+
+    expect(successor.hidden).toBe(true);
+    expect(outcomes).toEqual([]);
+    expect(root().dataset.mode).toBe("editing");
+  });
+
+  it("keeps the editing control shown when its only display element leaves", async () => {
+    await mount(false);
+    display().click();
+    const leaving = display();
+    leaving.remove();
+    await tick();
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--editable",
+    ) as EditableController;
+
+    expect(() => controller.displayTargetDisconnected(leaving)).not.toThrow();
+    expect(input().hidden).toBe(false);
+  });
+
+  it("hides an editing control that stays outside edit mode after an earlier one leaves", async () => {
+    await mount();
+    const original = input();
+    const successor = original.cloneNode(true) as HTMLInputElement;
+    successor.hidden = false;
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(input()).toBe(successor);
+    expect(successor.hidden).toBe(true);
+    expect(display().hidden).toBe(false);
+  });
+
+  it("says nothing when it re-derives an editing control left behind", async () => {
+    await mount();
+    const outcomes: string[] = [];
+    const listening = new AbortController();
+    for (const type of [
+      "stimeo--editable:change",
+      "stimeo--editable:cancel",
+      "stimeo--editable:reconcile",
+      "change",
+    ]) {
+      document.addEventListener(type, () => outcomes.push(type), { signal: listening.signal });
+    }
+    const original = input();
+    const successor = original.cloneNode(true) as HTMLInputElement;
+    successor.hidden = false;
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+    listening.abort();
+
+    expect(successor.hidden).toBe(true);
+    expect(outcomes).toEqual([]);
+    expect(root().dataset.mode).toBe("display");
+  });
+
+  it("keeps the display element shown when its only editing control leaves", async () => {
+    await mount();
+    const leaving = input();
+    leaving.remove();
+    await tick();
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--editable",
+    ) as EditableController;
+
+    expect(() => controller.inputTargetDisconnected(leaving)).not.toThrow();
+    expect(display().hidden).toBe(false);
+  });
+
+  describe("targets that stop resolving", () => {
+    /** Drops only the target token from `element`, which stays where it is. */
+    const dropToken = async (element: HTMLElement) => {
+      element.removeAttribute("data-stimeo--editable-target");
+      await tick();
+    };
+
+    it("removes the hidden it wrote on a display element that stops being one mid-edit", async () => {
+      await mount(false);
+      display().click();
+      const departed = display();
+      expect(departed.hidden).toBe(true);
+      const outcomes: string[] = [];
+      for (const type of ["stimeo--editable:change", "stimeo--editable:cancel", "change"]) {
+        root().addEventListener(type, () => outcomes.push(type));
+      }
+
+      await dropToken(departed);
+
+      expect(departed.hasAttribute("hidden")).toBe(false);
+      expect(root().dataset.mode).toBe("editing");
+      expect(outcomes).toEqual([]);
+    });
+
+    it("gives a display element authored hidden its hidden back once it stops being one", async () => {
+      document.body.innerHTML = markup().replace(
+        'type="button" aria-label',
+        'type="button" hidden aria-label',
+      );
+      application = Application.start();
+      application.register("stimeo--editable", EditableController);
+      await tick();
+      const departed = display();
+      expect(departed.hidden).toBe(false);
+
+      await dropToken(departed);
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("gives the departed display element its own hidden back while the one that stays follows the mode", async () => {
+      await mount(false);
+      const original = display();
+      const successor = original.cloneNode(true) as HTMLElement;
+      original.after(successor);
+      await tick();
+      display().click();
+      expect([original.hidden, successor.hidden]).toEqual([true, false]);
+
+      await dropToken(original);
+
+      expect(display()).toBe(successor);
+      expect(original.hidden).toBe(false);
+      expect(successor.hidden).toBe(true);
+    });
+
+    it("keeps a hidden the page wrote on a display element after the last write", async () => {
+      await mount();
+      const departed = display();
+      departed.hidden = true;
+
+      await dropToken(departed);
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("gives an editing control that stops being one back the hidden it was authored with", async () => {
+      await mount(false);
+      display().click();
+      const departed = input();
+      expect(departed.hidden).toBe(false);
+
+      await dropToken(departed);
+
+      expect(departed.hidden).toBe(true);
+    });
+
+    it("removes the hidden it wrote on an editing control authored without one", async () => {
+      document.body.innerHTML = markup().replace('aria-label="Title" hidden', 'aria-label="Title"');
+      application = Application.start();
+      application.register("stimeo--editable", EditableController);
+      await tick();
+      const departed = input();
+      expect(departed.hidden).toBe(true);
+
+      await dropToken(departed);
+
+      expect(departed.hasAttribute("hidden")).toBe(false);
+    });
+
+    it("gives the departed editing control its own hidden back while the one that stays follows the mode", async () => {
+      await mount(false);
+      const original = input();
+      const successor = original.cloneNode(true) as HTMLInputElement;
+      original.after(successor);
+      await tick();
+      display().click();
+      expect([original.hidden, successor.hidden]).toEqual([false, true]);
+
+      await dropToken(original);
+
+      expect(input()).toBe(successor);
+      expect(original.hidden).toBe(true);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("keeps a hidden the page wrote on an editing control after the last write", async () => {
+      await mount();
+      const departed = input();
+      departed.hidden = false;
+
+      await dropToken(departed);
+
+      expect(departed.hidden).toBe(false);
+    });
+
+    it("keeps the mode on a display element and an editing control that move within the editor", async () => {
+      await mount(false);
+      display().click();
+      const [movingDisplay, movingInput] = [display(), input()];
+
+      root().append(movingDisplay, movingInput);
+      await tick();
+
+      expect([display(), input()]).toEqual([movingDisplay, movingInput]);
+      expect([movingDisplay.hidden, movingInput.hidden]).toEqual([true, false]);
+    });
+
+    it("gives both elements their own hidden back when the editor loses its controller", async () => {
+      await mount(false);
+      display().click();
+      const [departedDisplay, departedInput] = [display(), input()];
+
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(departedDisplay.hasAttribute("hidden")).toBe(false);
+      expect(departedInput.hidden).toBe(true);
+    });
+
+    it("keeps what it wrote on both elements when the whole editor leaves the page", async () => {
+      await mount(false);
+      display().click();
+      const [keptDisplay, keptInput] = [display(), input()];
+
+      root().remove();
+      await tick();
+
+      expect([keptDisplay.hidden, keptInput.hidden]).toEqual([true, false]);
+    });
+
+    it("writes nothing onto either element while Stimulus tears the controller down", async () => {
+      await mount();
+      expect([display().hidden, input().hidden]).toEqual([false, true]);
+      // Values the page wrote after the last write stay where they were left.
+      display().hidden = true;
+      input().hidden = false;
+
+      application.unload("stimeo--editable");
+
+      expect([display().hidden, input().hidden]).toEqual([true, false]);
+    });
   });
 
   it("still reports the outcome when the display element is gone", async () => {
@@ -656,6 +1003,40 @@ describe("EditableController", () => {
     key(input(), { key: "Enter" });
     expect(display().textContent).toBe("Padded");
     expect(changes).toHaveLength(1);
+  });
+
+  // --- Teardown -------------------------------------------------------------------
+
+  const controllerFor = (): EditableController => {
+    const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--editable");
+    if (!(instance instanceof EditableController)) throw new Error("Expected editable controller");
+    return instance;
+  };
+
+  it("stops committing on focus loss once disconnected", async () => {
+    await mount();
+    display().click();
+    input().value = "Unsaved";
+    controllerFor().disconnect();
+
+    input().dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+
+    expect(root().dataset.mode).toBe("editing");
+    expect(display().textContent).toBe("Original");
+  });
+
+  it("starts a reconnect free of a composition the disconnect interrupted", async () => {
+    await mount();
+    display().click();
+    input().dispatchEvent(new CompositionEvent("compositionstart"));
+    const instance = controllerFor();
+    instance.disconnect();
+    instance.connect();
+
+    display().click();
+    key(input(), { key: "Escape" });
+
+    expect(root().dataset.mode).toBe("display");
   });
 
   it("announces the editable trigger by its accessible name", async () => {

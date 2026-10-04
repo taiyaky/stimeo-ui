@@ -1,4 +1,5 @@
 import { defineConfig } from "tsup";
+import { stripCommentsPlugin } from "./scripts/comment_strip";
 import { coreControllerEntries } from "./scripts/controller_entries";
 
 /**
@@ -30,6 +31,10 @@ export default defineConfig({
   sourcemap: true,
   splitting: false,
   treeshake: true,
+  // The emitted JavaScript carries no comments except those a tool reads (bundler
+  // annotations, legal comments, the source-map directive); the `.d.ts` files keep the
+  // TSDoc. Unminified, so the output still reads as code.
+  plugins: [stripCommentsPlugin()],
   // @floating-ui/dom stays external: it is an OPTIONAL peer pulled in only by the
   // opt-in `stimeo-ui/positioning` subpath, never by the core. The audit allows
   // this bare import solely under `positioning/` so the core stays zero-dep.

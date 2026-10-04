@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ListboxController } from "../src/controllers/listbox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { press } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
@@ -72,6 +73,185 @@ describe("ListboxController", () => {
   const active = () => trigger().getAttribute("aria-activedescendant");
   const triggerKey = (key: string) =>
     trigger().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+
+  it("element API reentry reports the newest native-field commit with its own reason", () => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--listbox']");
+    if (!element) throw new Error("Missing root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--listbox",
+    ) as ListboxController;
+    const first = instance.optionTargets[0];
+    const second = instance.optionTargets[1];
+    if (!first || !second) throw new Error("Missing options");
+    let replaced = false;
+    field().addEventListener("change", () => {
+      if (replaced) return;
+      replaced = true;
+      instance.select(second);
+    });
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--listbox:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    instance.select(first);
+    expect(field().value).toBe(second.dataset.value);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail).toMatchObject({ value: second.dataset.value, reason: "api" });
+  });
+
+  it("ignores an unmarked owned element and still accepts an owned option", () => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--listbox']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--listbox",
+    ) as ListboxController;
+    const unmarked = document.createElement("span");
+    element.append(unmarked);
+    const initial = instance.optionTargets[0];
+    if (!initial) throw new Error("Missing initial option");
+    instance.select(initial);
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--listbox:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    instance.open();
+    expect(() => instance.select(unmarked)).not.toThrow();
+    expect(reports).toHaveLength(0);
+    expect(initial.getAttribute("aria-selected")).toBe("true");
+    const target = instance.optionTargets[1];
+    if (!target) throw new Error("Missing option");
+    instance.select(target);
+    expect(reports).toHaveLength(1);
+  });
+
+  it("rejects nested-origin action events while accepting owned descendants", async () => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--listbox']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--listbox",
+    ) as ListboxController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--listbox-target='option']",
+    )[1];
+    if (!target) throw new Error("Missing target");
+
+    const nested = document.createElement("div");
+    nested.setAttribute("data-controller", "stimeo--listbox");
+    const inner = target.cloneNode(true) as HTMLElement;
+    inner.removeAttribute("data-action");
+    nested.append(inner);
+    target.append(nested);
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--listbox:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener("pointerup", (event) => instance.select(event));
+    inner.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(0);
+    nested.remove();
+    const owned = document.createElement("span");
+    target.append(owned);
+    owned.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe("user");
+  });
+
+  it.each([false, true])(
+    "element API focus respects an inside caller and a subscriber's handoff (handoff=%s)",
+    async (handoff) => {
+      const element = document.querySelector<HTMLElement>("[data-controller='stimeo--listbox']");
+      if (!element) throw new Error("Missing controller root");
+      const instance = application.getControllerForElementAndIdentifier(
+        element,
+        "stimeo--listbox",
+      ) as ListboxController;
+      instance.open();
+      const inside = document.createElement("button");
+      element.append(inside);
+      inside.focus();
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      if (handoff)
+        element.addEventListener("stimeo--listbox:change", () => outside.focus(), { once: true });
+      const target = instance.optionTargets[1];
+      if (!target) throw new Error("Missing option");
+      instance.select(target);
+      expect(document.activeElement).toBe(handoff ? outside : trigger());
+    },
+  );
+
+  it.each([
+    ["focusin", "focus"],
+    ["pointerenter", "pointer"],
+  ])("preserves action event modality %s", async (type, reason) => {
+    const element = document.querySelector<HTMLElement>("[data-controller='stimeo--listbox']");
+    if (!element) throw new Error("Missing controller root");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--listbox",
+    ) as ListboxController;
+    const target = element.querySelectorAll<HTMLElement>(
+      "[data-stimeo--listbox-target='option']",
+    )[1];
+    if (!target) throw new Error("Missing action target");
+
+    const reports: CustomEvent[] = [];
+    element.addEventListener("stimeo--listbox:change", (event) =>
+      reports.push(event as CustomEvent),
+    );
+    target.addEventListener(type, (event) => instance.select(event), { once: true });
+    target.dispatchEvent(new Event(type));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.detail.reason).toBe(reason);
+  });
+
+  it.each([false, true])(
+    "accepts an owned element API source (descendant=%s) without stealing outside focus",
+    async (descendant) => {
+      const element = document.querySelector<HTMLElement>("[data-controller='stimeo--listbox']");
+      if (!element) throw new Error("Missing controller root");
+      const instance = application.getControllerForElementAndIdentifier(
+        element,
+        "stimeo--listbox",
+      ) as ListboxController;
+      const target = element.querySelectorAll<HTMLElement>(
+        "[data-stimeo--listbox-target='option']",
+      )[1];
+      if (!target) throw new Error("Missing action target");
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      outside.focus();
+      const reports: CustomEvent[] = [];
+      element.addEventListener("stimeo--listbox:change", (event) =>
+        reports.push(event as CustomEvent),
+      );
+
+      const child = document.createElement("span");
+      target.append(child);
+      const foreign = target.cloneNode(true) as HTMLElement;
+      foreign.removeAttribute("data-action");
+      const nested = document.createElement("div");
+      nested.setAttribute("data-controller", "stimeo--listbox");
+      const nestedTarget = foreign.cloneNode(true) as HTMLElement;
+      nested.append(nestedTarget);
+      element.append(nested);
+      const before = element.innerHTML;
+      instance.select(foreign);
+      document.body.append(foreign);
+      instance.select(foreign);
+      instance.select(nestedTarget);
+      expect(element.innerHTML).toBe(before);
+      expect(reports).toHaveLength(0);
+      instance.select(descendant ? child : target);
+      expect(field().value).toBe("banana");
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.detail.reason).toBe("api");
+      expect(document.activeElement).toBe(outside);
+    },
+  );
 
   it("starts closed", () => {
     expect(listEl().hidden).toBe(true);
@@ -169,6 +349,25 @@ describe("ListboxController", () => {
       expect(chord.defaultPrevented).toBe(false);
       expect(active()).toBe("opt-1");
     }
+  });
+
+  it("claims every open-state key it acts on and leaves Tab to the browser", () => {
+    const open = () => {
+      if (listEl().hidden) {
+        trigger().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+      }
+    };
+    open();
+    for (const key of ["ArrowDown", "ArrowUp", "Home", "End", "b"]) {
+      expect(press(trigger(), key).defaultPrevented, `${key} should be claimed`).toBe(true);
+    }
+    for (const key of ["Enter", " ", "Escape"]) {
+      open();
+      expect(press(trigger(), key).defaultPrevented, `${key} should be claimed`).toBe(true);
+      expect(listEl().hidden, `${key} should close the list`).toBe(true);
+    }
+    open();
+    expect(press(trigger(), "Tab").defaultPrevented).toBe(false);
   });
 
   it("moves the active option with arrows, wrapping, and Home/End", () => {
@@ -275,6 +474,21 @@ describe("ListboxController", () => {
     expect(listEl().hidden).toBe(true);
     expect(active()).toBeNull();
     expect(document.activeElement).toBe(trigger());
+  });
+
+  it("returns focus to the trigger on Escape and on a commit routed from the popup", () => {
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--listbox",
+    ) as ListboxController;
+    listEl().tabIndex = -1;
+    listEl().addEventListener("keydown", (event) => instance.onTriggerKeydown(event));
+    for (const key of ["Escape", "Enter"]) {
+      trigger().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+      press(listEl(), key);
+      expect(listEl().hidden, `${key} should close the list`).toBe(true);
+      expect(document.activeElement, `${key} should return focus`).toBe(trigger());
+    }
   });
 
   it("stays open on an Escape that cancels an IME composition", () => {
@@ -724,6 +938,392 @@ describe("ListboxController", () => {
       expect(field().value).toBe(expected.dataset.value);
     });
   });
+
+  /**
+   * The open state lives on the trigger (`aria-expanded`, `aria-activedescendant`)
+   * and the list (`hidden`). A trigger or a list that takes over — in one task, or
+   * after an earlier one leaves in a later task — carries that state, silently; one
+   * that stops being a target gets back the values its markup carried, unless the
+   * page rewrote them after this listbox did.
+   */
+  describe("a trigger or a list that takes over", () => {
+    const instance = () =>
+      application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--listbox",
+      ) as ListboxController;
+    let heard: string[];
+    const listen = () => {
+      heard = [];
+      for (const name of ["stimeo--listbox:change", "stimeo--listbox:reconcile", "change"]) {
+        root().addEventListener(name, () => heard.push(name));
+      }
+    };
+
+    it("carries the open state onto a trigger replaced while open", async () => {
+      instance().open();
+      listen();
+      const original = trigger();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.setAttribute("aria-expanded", "false");
+      successor.removeAttribute("aria-activedescendant");
+      original.replaceWith(successor);
+      await tick();
+
+      expect(trigger()).toBe(successor);
+      expect(successor.getAttribute("aria-expanded")).toBe("true");
+      expect(successor.getAttribute("aria-activedescendant")).toBe("opt-1");
+      expect(heard).toEqual([]);
+    });
+
+    it("carries the open state onto a trigger that stays after an earlier one leaves", async () => {
+      const original = trigger();
+      const successor = original.cloneNode(true) as HTMLElement;
+      original.after(successor);
+      await tick();
+      instance().open();
+      await tick();
+      listen();
+      original.remove();
+      await tick();
+
+      expect(trigger()).toBe(successor);
+      expect(successor.getAttribute("aria-expanded")).toBe("true");
+      expect(successor.getAttribute("aria-activedescendant")).toBe("opt-1");
+      expect(heard).toEqual([]);
+    });
+
+    it("carries the open state onto a list replaced while open", async () => {
+      instance().open();
+      listen();
+      const original = listEl();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.hidden = true;
+      original.replaceWith(successor);
+      await tick();
+
+      expect(listEl()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(active()).toBe("opt-1");
+      expect(heard).toEqual([]);
+    });
+
+    it("carries the open state onto a list that stays after an earlier one leaves", async () => {
+      const original = listEl();
+      const successor = original.cloneNode(true) as HTMLElement;
+      original.after(successor);
+      await tick();
+      instance().open();
+      await tick();
+      listen();
+      original.remove();
+      await tick();
+
+      expect(listEl()).toBe(successor);
+      expect(successor.hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(active()).toBe("opt-1");
+      expect(heard).toEqual([]);
+    });
+
+    it("carries the open state when the trigger and the list are replaced together", async () => {
+      instance().open();
+      const oldTrigger = trigger();
+      const newTrigger = oldTrigger.cloneNode(true) as HTMLElement;
+      newTrigger.setAttribute("aria-expanded", "false");
+      newTrigger.removeAttribute("aria-activedescendant");
+      const oldList = listEl();
+      const newList = oldList.cloneNode(true) as HTMLElement;
+      newList.hidden = true;
+      oldTrigger.replaceWith(newTrigger);
+      oldList.replaceWith(newList);
+      await tick();
+
+      expect(newList.hidden).toBe(false);
+      expect(newTrigger.getAttribute("aria-expanded")).toBe("true");
+      expect(newTrigger.getAttribute("aria-activedescendant")).toBe("opt-1");
+    });
+
+    it("brings a trigger added on its own after connect to the open state", async () => {
+      instance().open();
+      const original = trigger();
+      original.remove();
+      await tick();
+
+      // Only the trigger arrives, so its own callback alone brings the pass.
+      const late = document.createElement("button");
+      late.type = "button";
+      late.setAttribute("role", "combobox");
+      late.setAttribute("aria-expanded", "false");
+      late.setAttribute("data-stimeo--listbox-target", "trigger");
+      root().prepend(late);
+      await tick();
+
+      expect(late.getAttribute("aria-expanded")).toBe("true");
+      expect(late.getAttribute("aria-activedescendant")).toBe("opt-1");
+    });
+
+    it("brings the trigger to the state of a list added on its own after connect", async () => {
+      instance().open();
+      listEl().remove();
+      await tick();
+
+      // Only an empty list arrives, so its own callback alone brings the pass.
+      const late = document.createElement("ul");
+      late.setAttribute("role", "listbox");
+      late.hidden = true;
+      late.setAttribute("data-stimeo--listbox-target", "list");
+      root().append(late);
+      await tick();
+
+      expect(late.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("shows the list that stays when an earlier one only drops its target token", async () => {
+      const original = listEl();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.id = "lb-list-successor";
+      for (const option of successor.querySelectorAll("[data-stimeo--listbox-target]")) {
+        option.removeAttribute("data-stimeo--listbox-target");
+      }
+      original.after(successor);
+      await tick();
+      instance().open();
+      await tick();
+
+      // Only the list's token goes, so its own callback alone brings the pass.
+      original.removeAttribute("data-stimeo--listbox-target");
+      await tick();
+
+      expect(original.hidden).toBe(true);
+      expect(successor.hidden).toBe(false);
+    });
+
+    it("carries the open state onto the trigger that stays when an earlier one only drops its token", async () => {
+      const original = trigger();
+      const successor = original.cloneNode(true) as HTMLElement;
+      for (const part of successor.querySelectorAll("[data-stimeo--listbox-target]")) {
+        part.removeAttribute("data-stimeo--listbox-target");
+      }
+      original.after(successor);
+      await tick();
+      instance().open();
+      await tick();
+
+      // Only the trigger's token goes, so its own callback alone brings the pass.
+      original.removeAttribute("data-stimeo--listbox-target");
+      await tick();
+
+      expect(original.getAttribute("aria-expanded")).toBe("false");
+      expect(successor.getAttribute("aria-expanded")).toBe("true");
+      expect(successor.getAttribute("aria-activedescendant")).toBe("opt-1");
+    });
+
+    it("keeps closed a list replaced while closed", async () => {
+      const original = listEl();
+      const successor = original.cloneNode(true) as HTMLElement;
+      original.replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps closed a list the page closed, when it is then replaced", async () => {
+      instance().open();
+      listEl().hidden = true;
+      instance().fieldTargetConnected();
+      await tick();
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+
+      const original = listEl();
+      const successor = original.cloneNode(true) as HTMLElement;
+      original.replaceWith(successor);
+      await tick();
+
+      expect(successor.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps closed the list that stays when the page hid the list it opened after that one arrived", async () => {
+      instance().open();
+      const original = listEl();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.id = "lb-list-next";
+      successor.hidden = true;
+      original.after(successor);
+      await tick();
+      original.hidden = true;
+      await tick();
+      original.remove();
+      await tick();
+
+      expect(listEl()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps closed a list that replaces, in a later task, the list it opened and the page hid", async () => {
+      instance().open();
+      const original = listEl();
+      original.hidden = true;
+      await tick();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.id = "lb-list-next";
+      original.replaceWith(successor);
+      await tick();
+
+      expect(listEl()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps closed a list added, as the list it opened and the page hid leaves, in one later task", async () => {
+      instance().open();
+      const original = listEl();
+      original.hidden = true;
+      await tick();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.id = "lb-list-next";
+      // The arrival is reported before the departure.
+      original.after(successor);
+      original.remove();
+      await tick();
+
+      expect(listEl()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps closed a list that arrives in front of the list it opened and the page hid", async () => {
+      instance().open();
+      const original = listEl();
+      original.hidden = true;
+      await tick();
+      const successor = original.cloneNode(true) as HTMLElement;
+      successor.id = "lb-list-next";
+      original.before(successor);
+      await tick();
+
+      expect(listEl()).toBe(successor);
+      expect(successor.hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps closed a list that arrives after the one it showed left", async () => {
+      instance().open();
+      const original = listEl();
+      original.remove();
+      await tick();
+
+      const late = original.cloneNode(true) as HTMLElement;
+      late.hidden = true;
+      trigger().after(late);
+      await tick();
+
+      expect(late.hidden).toBe(true);
+    });
+
+    it("gives a trigger that stops being the target back its authored closed state", async () => {
+      instance().open();
+      const leaving = trigger();
+      leaving.removeAttribute("data-stimeo--listbox-target");
+      await tick();
+
+      expect(leaving.isConnected).toBe(true);
+      expect(leaving.getAttribute("aria-expanded")).toBe("false");
+      expect(leaving.hasAttribute("aria-activedescendant")).toBe(false);
+    });
+
+    it("gives a list that stops being the target back its authored hidden", async () => {
+      instance().open();
+      const leaving = listEl();
+      leaving.removeAttribute("data-stimeo--listbox-target");
+      await tick();
+
+      expect(leaving.isConnected).toBe(true);
+      expect(leaving.hidden).toBe(true);
+    });
+
+    it("gives the authored closed state back when the element stops being a listbox", async () => {
+      instance().open();
+      root().removeAttribute("data-controller");
+      await tick();
+
+      expect(listEl().hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(trigger().hasAttribute("aria-activedescendant")).toBe(false);
+    });
+
+    it("leaves a list the page shows as it stops being the target as the page left it", async () => {
+      const leaving = listEl();
+      expect(leaving.hidden).toBe(true);
+      leaving.removeAttribute("data-stimeo--listbox-target");
+      leaving.hidden = false;
+      await tick();
+
+      expect(leaving.hidden).toBe(false);
+    });
+
+    it("leaves the expanded state the page writes on a trigger as it stops being the target", async () => {
+      const leaving = trigger();
+      expect(leaving.getAttribute("aria-expanded")).toBe("false");
+      leaving.removeAttribute("data-stimeo--listbox-target");
+      leaving.setAttribute("aria-expanded", "true");
+      await tick();
+
+      expect(leaving.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("leaves the active descendant the page writes on a trigger as it stops being the target", async () => {
+      instance().open();
+      const leaving = trigger();
+      expect(leaving.getAttribute("aria-activedescendant")).toBe("opt-1");
+      leaving.removeAttribute("data-stimeo--listbox-target");
+      leaving.setAttribute("aria-activedescendant", "opt-3");
+      await tick();
+
+      expect(leaving.getAttribute("aria-activedescendant")).toBe("opt-3");
+      expect(leaving.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("leaves a list the page shows as the element stops being a listbox as the page left it", async () => {
+      root().removeAttribute("data-controller");
+      listEl().hidden = false;
+      await tick();
+
+      expect(listEl().hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("keeps the open state through a teardown", async () => {
+      instance().open();
+      application.unload("stimeo--listbox");
+      await tick();
+
+      expect(listEl().hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("keeps working when the sole trigger and list leave", async () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const leavingTrigger = trigger();
+        const leavingList = listEl();
+        leavingTrigger.remove();
+        leavingList.remove();
+        await tick();
+        expect(() => instance().triggerTargetDisconnected(leavingTrigger)).not.toThrow();
+        expect(() => instance().listTargetDisconnected(leavingList)).not.toThrow();
+        await tick();
+        expect(errors).not.toHaveBeenCalled();
+      } finally {
+        errors.mockRestore();
+      }
+    });
+  });
 });
 
 /**
@@ -776,6 +1376,13 @@ describe("ListboxController with no options", () => {
 
     key("Escape"); // still closes cleanly
     expect(listEl().hidden).toBe(true);
+  });
+
+  it("opens with no active descendant, even one the page wrote onto the trigger", () => {
+    trigger().setAttribute("aria-activedescendant", "ghost");
+    key("ArrowDown");
+    expect(listEl().hidden).toBe(false);
+    expect(trigger().hasAttribute("aria-activedescendant")).toBe(false);
   });
 
   it("navigates into options appended after an empty open", async () => {
@@ -842,6 +1449,32 @@ describe("ListboxController markup variants", () => {
 
     expect(listEl().hidden).toBe(true);
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("gives a trigger and a list the markup left open their authored state back once they stop being targets", async () => {
+    await start(`
+      <div data-controller="stimeo--listbox">
+        <span id="open-label">Fruit</span>
+        <button type="button" role="combobox" aria-haspopup="listbox" aria-expanded="true"
+                aria-controls="open-list" aria-labelledby="open-label"
+                data-stimeo--listbox-target="trigger"
+                data-action="keydown->stimeo--listbox#onTriggerKeydown">Pick</button>
+        <ul id="open-list" role="listbox" aria-label="Fruit"
+            data-stimeo--listbox-target="list">
+          <li id="open-1" role="option" aria-selected="false" data-value="apple"
+              data-stimeo--listbox-target="option">Apple</li>
+        </ul>
+      </div>`);
+    const leavingTrigger = trigger();
+    const leavingList = listEl();
+    expect(leavingList.hidden).toBe(true);
+
+    leavingTrigger.removeAttribute("data-stimeo--listbox-target");
+    leavingList.removeAttribute("data-stimeo--listbox-target");
+    await tick();
+
+    expect(leavingList.hidden).toBe(false);
+    expect(leavingTrigger.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("selects without a hidden field to mirror into", async () => {
@@ -1328,7 +1961,7 @@ describe("ListboxController a selection the page moves", () => {
     expect(field().value).toBe("apple");
     expect(label()).toBe("Apple");
     expect(seen).toEqual(["reconcile:apple"]);
-    // The detail has the same shape as `change`.
+    // Reconciliation carries the shared value and option fields.
     expect(details).toEqual([{ value: "apple", option: byId("apple") }]);
   });
 
@@ -1358,6 +1991,79 @@ describe("ListboxController a selection the page moves", () => {
     await tick();
 
     expect(label()).toBe("Banana");
+  });
+
+  it("writes the selection into a value added after connect", async () => {
+    await mount(listbox("banana"));
+    const trigger = byId("pm-value").parentElement as HTMLElement;
+    byId("pm-value").remove();
+    await tick();
+
+    // Only the value arrives, so its own callback alone brings the pass.
+    const late = document.createElement("span");
+    late.id = "pm-value";
+    late.textContent = "Choose…";
+    late.setAttribute("data-stimeo--listbox-target", "value");
+    trigger.append(late);
+    await tick();
+
+    expect(label()).toBe("Banana");
+  });
+
+  it("reflects the selection into a field that stays after an earlier one leaves", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+    const original = field();
+    const successor = original.cloneNode() as HTMLInputElement;
+    successor.value = "";
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(field()).toBe(successor);
+    expect(successor.value).toBe("banana");
+    // The field that stays is brought to the selection silently.
+    expect(seen).toEqual([]);
+  });
+
+  it("writes the selection into a value that stays after an earlier one leaves", async () => {
+    await mount(listbox("banana"));
+    const seen = record();
+    const original = byId("pm-value");
+    const successor = original.cloneNode(true) as HTMLElement;
+    successor.textContent = "Choose…";
+    original.after(successor);
+    await tick();
+    original.remove();
+    await tick();
+
+    expect(byId("pm-value")).toBe(successor);
+    expect(label()).toBe("Banana");
+    expect(seen).toEqual([]);
+  });
+
+  it("keeps selecting when the sole field and the sole value leave", async () => {
+    await mount(listbox("banana"));
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--listbox",
+    ) as ListboxController;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      field().remove();
+      byId("pm-value").remove();
+      await tick();
+      expect(() => instance.fieldTargetDisconnected()).not.toThrow();
+      expect(() => instance.valueTargetDisconnected()).not.toThrow();
+      await tick();
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+
+    instance.select(byId("cherry"));
+    expect(selectedIds()).toEqual(["cherry"]);
   });
 
   it("reports the removal of the selected option and restores the authored label", async () => {
@@ -1730,5 +2436,214 @@ describe("ListboxController a selection the page moves", () => {
 
     expect(field().value).toBe("banana");
     expect(seen).toEqual([]);
+  });
+});
+
+/** Verifies settled-state comparisons and synchronous nested commits. */
+describe("ListboxController settled reports", () => {
+  let application: Application;
+  const root = () =>
+    document.querySelector<HTMLElement>('[data-controller="stimeo--listbox"]') as HTMLElement;
+  const items = () =>
+    Array.from(root().querySelectorAll<HTMLElement>('[data-stimeo--listbox-target="option"]'));
+  const act = (index: number) => {
+    items()[index]?.click();
+  };
+  const write = (index: number) => {
+    items().forEach((item, position) => {
+      item.setAttribute("aria-selected", String(position === index));
+    });
+  };
+  const submitted = () =>
+    Array.from(root().querySelectorAll<HTMLInputElement>("input"))
+      .map((field) => field.value)
+      .join(",");
+  const record = () => {
+    const seen: string[] = [];
+    for (const name of ["change", "reconcile"])
+      root().addEventListener(`stimeo--listbox:${name}`, (event) => {
+        const detail = (event as CustomEvent<{ value: string }>).detail;
+        seen.push(`${name}:${detail.value}`);
+      });
+    return seen;
+  };
+  beforeEach(async () => {
+    document.body.innerHTML = `<div data-controller="stimeo--listbox"><button data-stimeo--listbox-target="trigger">Choose</button><span data-stimeo--listbox-target="value"></span><ul data-stimeo--listbox-target="list" role="listbox"><li role="option" aria-selected="true" tabindex="0" data-value="a" data-stimeo--listbox-target="option" data-action="click->stimeo--listbox#select">a</li><li role="option" aria-selected="false" tabindex="-1" data-value="b" data-stimeo--listbox-target="option" data-action="click->stimeo--listbox#select">b</li><li role="option" aria-selected="false" tabindex="-1" data-value="c" data-stimeo--listbox-target="option" data-action="click->stimeo--listbox#select">c</li></ul><input type="hidden" data-stimeo--listbox-target="field"></div>`;
+    application = Application.start();
+    application.register("stimeo--listbox", ListboxController);
+    await tick();
+  });
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+  it("clears virtual focus when a repair finds the list closed by the page", async () => {
+    items().forEach((item, index) => {
+      item.id = `closed-option-${index}`;
+    });
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--listbox",
+    ) as ListboxController;
+    instance.open();
+    const trigger = root().querySelector("button") as HTMLButtonElement;
+    expect(trigger.hasAttribute("aria-activedescendant")).toBe(true);
+    const list = root().querySelector('[data-stimeo--listbox-target="list"]') as HTMLElement;
+    list.hidden = true;
+    instance.fieldTargetConnected();
+    await tick();
+    expect(trigger.hasAttribute("aria-activedescendant")).toBe(false);
+    expect(items().some((item) => item.hasAttribute("data-active"))).toBe(false);
+  });
+  it("does not reuse a closed session's fallback order after an authored reopen", () => {
+    items().forEach((item, index) => {
+      item.id = `reopened-option-${index}`;
+    });
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--listbox",
+    ) as ListboxController;
+    instance.open();
+    instance.close();
+    const first = items()[0] as HTMLElement;
+    first.remove();
+    const list = root().querySelector('[data-stimeo--listbox-target="list"]') as HTMLElement;
+    list.hidden = false;
+    const trigger = root().querySelector("button") as HTMLButtonElement;
+    trigger.setAttribute("aria-activedescendant", first.id);
+    instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "Shift" }));
+    expect(trigger.hasAttribute("aria-activedescendant")).toBe(false);
+    expect(items().some((item) => item.hasAttribute("data-active"))).toBe(false);
+  });
+  it("reads an authored active descendant before moving the virtual cursor", () => {
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--listbox",
+    ) as ListboxController;
+    items().forEach((item, index) => {
+      item.id = `settled-option-${index}`;
+    });
+    instance.open();
+    const trigger = root().querySelector("button") as HTMLButtonElement;
+    trigger.setAttribute("aria-activedescendant", (items()[2] as HTMLElement).id);
+    instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "ArrowUp" }));
+    expect(trigger.getAttribute("aria-activedescendant")).toBe((items()[1] as HTMLElement).id);
+  });
+  it("clears an unknown active descendant without choosing an unrelated fallback", () => {
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--listbox",
+    ) as ListboxController;
+    items().forEach((item, index) => {
+      item.id = `settled-option-${index}`;
+    });
+    instance.open();
+    const trigger = root().querySelector("button") as HTMLButtonElement;
+    trigger.setAttribute("aria-activedescendant", "unknown-option");
+    instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "Shift" }));
+    expect(trigger.hasAttribute("aria-activedescendant")).toBe(false);
+    expect(items().some((item) => item.hasAttribute("data-active"))).toBe(false);
+  });
+  it("keeps an id-less active option when a late option arrives already marked active", async () => {
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--listbox",
+    ) as ListboxController;
+    const marked = () =>
+      items()
+        .filter((item) => item.hasAttribute("data-active"))
+        .map((item) => item.dataset.value);
+    instance.open();
+    instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    expect(marked()).toEqual(["b"]);
+    const late = document.createElement("li");
+    late.setAttribute("role", "option");
+    late.setAttribute("aria-selected", "false");
+    late.setAttribute("data-active", "");
+    late.dataset.value = "z";
+    late.setAttribute("data-stimeo--listbox-target", "option");
+    late.textContent = "z";
+    root().querySelector('[data-stimeo--listbox-target="list"]')?.prepend(late);
+    instance.optionTargetConnected(late);
+    await tick();
+    expect(marked()).toEqual(["b"]);
+    instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(submitted()).toBe("b");
+  });
+  it("ignores a non-opening key while its trigger is absent", () => {
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--listbox",
+    ) as ListboxController;
+    root().querySelector("button")?.removeAttribute("data-stimeo--listbox-target");
+    expect(() =>
+      instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "Shift" })),
+    ).not.toThrow();
+  });
+  it("leaves open and close inert after the optional live list disappears", () => {
+    const list = root().querySelector('[data-stimeo--listbox-target="list"]') as HTMLElement;
+    list.removeAttribute("data-stimeo--listbox-target");
+    const instance = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--listbox",
+    ) as ListboxController;
+    expect(() => instance.open()).not.toThrow();
+    expect(() => instance.close()).not.toThrow();
+  });
+  it("includes an undelivered page write in the user's settled change", async () => {
+    const seen = record();
+    write(1);
+    act(1);
+    await tick();
+    expect(seen).toEqual(["change:b"]);
+    expect(submitted()).toBe("b");
+  });
+  it("publishes nothing when the action returns to the last settled selection", async () => {
+    const seen = record();
+    let native = 0;
+    root().addEventListener("change", () => {
+      native += 1;
+    });
+    write(1);
+    act(0);
+    await tick();
+    expect(seen).toEqual([]);
+    expect(native).toBe(0);
+    expect(submitted()).toBe("a");
+  });
+  it("drops the outer report after a native subscriber commits a newer selection", async () => {
+    const seen = record();
+    let spent = false;
+    root().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      act(2);
+    });
+    act(1);
+    await tick();
+    expect(seen).toEqual(["change:c"]);
+    expect(submitted()).toBe("c");
+  });
+  it("keeps the outer report when a native subscriber only reads the selection", async () => {
+    const seen = record();
+    const reads: string[] = [];
+    root().addEventListener("change", () => reads.push(submitted()));
+    act(1);
+    await tick();
+    expect(reads).toEqual(["b"]);
+    expect(seen).toEqual(["change:b"]);
+  });
+  it("keeps the outer report when a native subscriber confirms the same selection", async () => {
+    const seen = record();
+    let spent = false;
+    root().addEventListener("change", () => {
+      if (spent) return;
+      spent = true;
+      act(1);
+    });
+    act(1);
+    await tick();
+    expect(seen).toEqual(["change:b"]);
+    expect(submitted()).toBe("b");
   });
 });

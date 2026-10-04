@@ -1,10 +1,20 @@
 import { Controller } from "@hotwired/stimulus";
 import { KeyedTimers } from "../utils/keyed_timers";
+import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
+import { NumberValueReader } from "../utils/number_value";
 import { prefersReducedMotion } from "../utils/reduced_motion";
+import { sharedRegistry } from "../utils/shared_registry";
 import { TransientHooks } from "../utils/transient_hooks";
 
 /** The hook a connection may find written by an earlier, now-gone one. */
 const TRANSIENT = new TransientHooks({ attributes: ["data-highlight"] });
+
+/** A hook's owner and the timer operations belonging to that owner's entry copy. */
+interface HighlightOwner {
+  readonly owner: HighlightController;
+  readonly pending: () => boolean;
+  readonly cancel: () => void;
+}
 
 /**
  * The connection whose removal timer currently owns an element's `data-highlight`
@@ -13,10 +23,14 @@ const TRANSIENT = new TransientHooks({ attributes: ["data-highlight"] });
  *
  * Only the keys are weak: an entry keeps its controller — and through it that
  * controller's element — reachable for as long as the row is in the DOM. So an entry
- * is dropped as soon as the timer that owns it is released or fires, and `connect()`
- * drops the claims the connection before it left behind.
+ * is dropped as soon as the timer that owns it fires, is replaced when another
+ * highlight takes the hook over, and `connect()` drops the claims the connection
+ * before it left behind.
  */
-const hookOwners = new WeakMap<Element, HighlightController>();
+const hookOwners = sharedRegistry(
+  "stimeo-ui.highlight.registry.v1",
+  () => new WeakMap<Element, HighlightOwner>(),
+);
 
 /**
  * Headless "highlight on insert" behavior: briefly flags a freshly inserted element
@@ -45,18 +59,32 @@ const hookOwners = new WeakMap<Element, HighlightController>();
  * the emphasis is suppressed entirely (the element simply appears), so no hook or
  * event is emitted. A hook never outlives the connection that set it: the observer and
  * pending timers are torn down on `disconnect()` (Turbo navigation included), and
- * `connect()` clears any hook that arrived with the DOM — a restored `turbo:before-cache`
- * snapshot, an in-page move — because the timer that would have removed it is gone.
+ * `connect()` clears any hook that arrived with the DOM — a page Turbo restores from its
+ * cache, an in-page move — because the timer that would have removed it is gone.
  * An element carries at most one emphasis at a time: highlighting it again — a reorder
  * inside one container, or a move into another watched one — takes the hook over and
  * releases the timer that held it, so `duration` is measured from the latest highlight
  * and `end` fires once per emphasis.
+ *
+ * `observe` follows a runtime change (a Turbo morph, an author script): turned on, the
+ * element starts watching its children and drops any hook a child carries that no
+ * running emphasis owns; turned off, it stops watching. Neither direction is an
+ * insertion, so the element does not highlight itself, and an emphasis already running
+ * — the element's own or a child's — ends on the deadline it started with. `duration`
+ * is read as each emphasis starts: a change applies from the next one.
  */
 export class HighlightController extends Controller<HTMLElement> {
+  /** Numeric read boundaries share one reader for this controller instance. */
+  readonly #numbers = new NumberValueReader();
+
   static override values = {
     duration: { type: Number, default: 1500 },
     observe: { type: Boolean, default: false },
   };
+
+  static valueConstraints = {
+    duration: NUMBER_BOUNDS.timer,
+  } satisfies NumberValueConstraints<typeof HighlightController.values>;
   static events = ["start", "end"] as const;
 
   declare durationValue: number;
@@ -66,8 +94,15 @@ export class HighlightController extends Controller<HTMLElement> {
    * The removal timer this connection has outstanding for each element. Which
    * connection owns an element's hook is answered by the shared owner registry above.
    */
-  readonly #removal = new KeyedTimers<HTMLElement>();
+  readonly #removal = new KeyedTimers<Element>();
   #observer: MutationObserver | null = null;
+  /** Whether this connection watches its children: the mode it last built. */
+  #watching = false;
+  /**
+   * Gates the mode callback to the connected window. Stimulus delivers it ahead of
+   * `connect()`, which builds the mode itself.
+   */
+  #connected = false;
 
   override connect(): void {
     // A hook that arrived with the DOM was written by an earlier connection, whose
@@ -76,23 +111,53 @@ export class HighlightController extends Controller<HTMLElement> {
     // `#highlight()` re-adds it with a fresh timer below, except under reduced
     // motion, where the element must carry no hook at all.
     this.#clearArrivedHook(this.element);
+    this.#connected = true;
     if (this.observeValue) {
-      // A container highlights its children, never itself, so the same reasoning
-      // applies to every child present before the observer starts watching.
-      for (const child of this.element.children) this.#clearArrivedHook(child);
-      if (typeof MutationObserver !== "undefined") {
-        this.#observer = new MutationObserver((mutations) => this.#onMutations(mutations));
-        this.#observer.observe(this.element, { childList: true });
-      }
+      this.#watchChildren();
       return;
     }
     this.#highlight(this.element);
   }
 
   override disconnect(): void {
+    this.#connected = false;
+    this.#stopWatching();
+    this.#removal.clearAll();
+  }
+
+  /**
+   * Follows the mode at runtime, comparing it with the mode this connection built
+   * rather than trusting that a callback means a change: two spellings of the same
+   * Boolean deliver one too.
+   */
+  observeValueChanged(): void {
+    if (!this.#connected || this.observeValue === this.#watching) return;
+    if (this.#watching) this.#stopWatching();
+    else this.#watchChildren();
+  }
+
+  /**
+   * Starts watching for added children. A container highlights its children, never
+   * itself, so a hook a child already carries is dropped first unless a running
+   * emphasis owns it — that emphasis still has a timer to end it.
+   */
+  #watchChildren(): void {
+    this.#watching = true;
+    for (const child of this.element.children) {
+      const owner = hookOwners.get(child);
+      if (owner === undefined || !owner.pending()) this.#clearArrivedHook(child);
+    }
+    if (typeof MutationObserver !== "undefined") {
+      this.#observer = new MutationObserver((mutations) => this.#onMutations(mutations));
+      this.#observer.observe(this.element, { childList: true });
+    }
+  }
+
+  /** Stops watching for added children; emphases already running keep their timers. */
+  #stopWatching(): void {
+    this.#watching = false;
     this.#observer?.disconnect();
     this.#observer = null;
-    this.#removal.clearAll();
   }
 
   /** Drops a hook that arrived with the DOM, along with this connection's claim on it. */
@@ -100,7 +165,7 @@ export class HighlightController extends Controller<HTMLElement> {
     // Another connection may still hold a live timer for this element, and that timer
     // has to stay reachable so the next highlight can release it. Only our own claim,
     // whose timer went down with the previous disconnect, is dropped here.
-    if (hookOwners.get(el) === this) hookOwners.delete(el);
+    if (hookOwners.get(el)?.owner === this) hookOwners.delete(el);
     TRANSIENT.reset(el);
   }
 
@@ -136,9 +201,13 @@ export class HighlightController extends Controller<HTMLElement> {
         el.removeAttribute("data-highlight");
         this.dispatch("end", { target: el, detail: { element: el } });
       },
-      this.durationValue,
+      this.#safeDuration,
     );
-    hookOwners.set(el, this);
+    hookOwners.set(el, {
+      owner: this,
+      pending: () => this.#removal.has(el),
+      cancel: () => this.#cancelPending(el),
+    });
   }
 
   /**
@@ -148,13 +217,21 @@ export class HighlightController extends Controller<HTMLElement> {
    */
   #releasePending(el: HTMLElement): void {
     const owner = hookOwners.get(el);
-    if (owner !== undefined && owner !== this) owner.#cancelPending(el);
-    this.#cancelPending(el);
+    if (owner !== undefined && owner.owner !== this) owner.cancel();
   }
 
-  /** Releases `el`'s pending removal timer, if it has one, and this connection's claim. */
+  /** Releases `el`'s pending removal timer, if this connection has one. */
   #cancelPending(el: HTMLElement): void {
     this.#removal.clear(el);
-    hookOwners.delete(el);
+  }
+  /** Current `duration` declaration resolved against its numeric contract. */
+  get #safeDuration(): number {
+    return this.#numbers.read(
+      this,
+      "duration",
+      this.durationValue,
+      HighlightController.values.duration.default,
+      HighlightController.valueConstraints.duration,
+    );
   }
 }

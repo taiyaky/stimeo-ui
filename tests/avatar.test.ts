@@ -1,9 +1,9 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AvatarController } from "../src/controllers/avatar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
@@ -101,14 +101,52 @@ describe("AvatarController", () => {
     expect(fallback().hidden).toBe(true);
   });
 
-  it("returns borrowed image attributes before Turbo caches the page", async () => {
+  it("keeps its image and fallback through turbo:before-cache, which also fires on a page that stays", async () => {
     await start(markup());
+    const writes: string[] = [];
+    new MutationObserver((records) => {
+      for (const record of records)
+        writes.push(`${(record.target as Element).id} ${record.attributeName}`);
+    }).observe(root(), { attributes: true, subtree: true });
 
     document.dispatchEvent(new Event("turbo:before-cache"));
+    await tick();
 
-    expect(image().hasAttribute("src")).toBe(false);
-    expect(image().hidden).toBe(true);
-    expect(fallback().hidden).toBe(false);
+    expect(image().getAttribute("src")).toBe("/u/123.jpg");
+    expect(image().hidden).toBe(false);
+    expect(fallback().hidden).toBe(true);
+    expect(writes).toEqual([]);
+  });
+
+  it("gives the author's image attributes back on a page restored from the cache", async () => {
+    await start(markup());
+    if (!application) throw new Error("Avatar application missing");
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--avatar", AvatarController),
+    );
+    const restoredImage = image();
+    const restoredFallback = fallback();
+    expect(restoredImage.getAttribute("src")).toBe("/u/123.jpg");
+
+    restoredImage.removeAttribute("data-stimeo--avatar-target");
+    controller().imageTargetDisconnected(restoredImage);
+    restoredFallback.removeAttribute("data-stimeo--avatar-target");
+    controller().fallbackTargetDisconnected(restoredFallback);
+
+    expect(restoredImage.hasAttribute("src")).toBe(false);
+    expect(restoredImage.hidden).toBe(true);
+    expect(restoredFallback.hidden).toBe(false);
+    expect(restoredImage.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
+
+  it("keeps its materialized output after disconnect", async () => {
+    await start(markup());
+
+    controller().disconnect();
+
+    expect(image().getAttribute("src")).toBe("/u/123.jpg");
+    expect(image().hidden).toBe(false);
+    expect(fallback().hidden).toBe(true);
   });
 
   it("uses a directly authored image src when the Value is absent", async () => {
@@ -237,6 +275,34 @@ describe("AvatarController", () => {
     expect(details).toEqual([]);
   });
 
+  it("repaints at once when a stale load arrives after the direct src was removed", async () => {
+    await start(markup({ value: null, directSrc: "/one.jpg" }));
+    image().dispatchEvent(new Event("load"));
+    expect(root().getAttribute("data-state")).toBe("loaded");
+
+    image().removeAttribute("src");
+    image().dispatchEvent(new Event("load"));
+
+    expect(root().getAttribute("data-state")).toBe("empty");
+    expect(image().hidden).toBe(true);
+    expect(fallback().hidden).toBe(false);
+  });
+
+  it("repaints at once without reporting when a stale error arrives after the direct src was removed", async () => {
+    await start(markup({ value: null, directSrc: "/one.jpg" }));
+    image().dispatchEvent(new Event("load"));
+    const details: unknown[] = [];
+    root().addEventListener("stimeo--avatar:error", (event) => details.push(event));
+
+    image().removeAttribute("src");
+    image().dispatchEvent(new Event("error"));
+
+    expect(root().getAttribute("data-state")).toBe("empty");
+    expect(image().hidden).toBe(true);
+    expect(fallback().hidden).toBe(false);
+    expect(details).toEqual([]);
+  });
+
   it("shows the fallback-only form as empty without requiring an image target", async () => {
     await start(markup({ value: null, image: false }));
 
@@ -322,6 +388,45 @@ describe("AvatarController", () => {
     expect(departed.hidden).toBe(true);
     expect(replacement.hidden).toBe(false);
     expect(root().getAttribute("data-state")).toBe("error");
+  });
+
+  it("controls a fallback target inserted at runtime", async () => {
+    await start(markup({ fallback: false }));
+    const inserted = document.createElement("span");
+    inserted.id = "avatar-fallback";
+    inserted.setAttribute("aria-hidden", "true");
+    inserted.setAttribute("data-stimeo--avatar-target", "fallback");
+    inserted.textContent = "JD";
+    root().append(inserted);
+    controller().fallbackTargetConnected();
+    await flushMicrotasks();
+
+    expect(root().getAttribute("data-state")).toBe("loading");
+    expect(inserted.hidden).toBe(true);
+  });
+
+  it("controls the next fallback once the controlled one leaves", async () => {
+    await start(`
+      <span id="avatar" data-controller="stimeo--avatar" role="img" aria-label="Jane Doe"
+            data-stimeo--avatar-src-value="/u/123.jpg">
+        <img id="avatar-image" alt="" aria-hidden="true" data-stimeo--avatar-target="image"
+             data-action="load->stimeo--avatar#onLoad error->stimeo--avatar#onError" />
+        <span id="avatar-fallback" aria-hidden="true"
+              data-stimeo--avatar-target="fallback">JD</span>
+        <span id="avatar-next-fallback" aria-hidden="true"
+              data-stimeo--avatar-target="fallback">JD</span>
+      </span>`);
+    const departed = fallback();
+    const next = requireElement<HTMLElement>("#avatar-next-fallback");
+    expect(departed.hidden).toBe(true);
+    expect(next.hidden).toBe(false);
+
+    departed.remove();
+    controller().fallbackTargetDisconnected(departed);
+    await flushMicrotasks();
+
+    expect(root().getAttribute("data-state")).toBe("loading");
+    expect(next.hidden).toBe(true);
   });
 
   it("ignores an error action from an image that is no longer the target", async () => {
@@ -421,6 +526,40 @@ describe("AvatarController", () => {
     expect(retainedImage.getAttribute("src")).toBe("/u/123.jpg");
     expect(retainedImage.hidden).toBe(true);
     expect(retainedFallback.hidden).toBe(false);
+  });
+
+  it("stops watching the direct image src once disconnected", async () => {
+    const srcWatchers = new WeakSet<MutationObserver>();
+    const delivered: MutationRecord[] = [];
+    class RecordingObserver extends globalThis.MutationObserver {
+      constructor(callback: MutationCallback) {
+        super((records, observer) => {
+          if (srcWatchers.has(observer)) delivered.push(...records);
+          callback(records, observer);
+        });
+      }
+
+      override observe(target: Node, options?: MutationObserverInit): void {
+        if (options?.attributeFilter?.includes("src")) srcWatchers.add(this);
+        super.observe(target, options);
+      }
+    }
+    vi.stubGlobal("MutationObserver", RecordingObserver);
+    try {
+      await start(markup({ value: null, directSrc: "/one.jpg" }));
+      image().setAttribute("src", "/two.jpg");
+      await tick();
+      const whileConnected = delivered.length;
+      expect(whileConnected).toBeGreaterThan(0);
+
+      controller().disconnect();
+      image().setAttribute("src", "/three.jpg");
+      await tick();
+
+      expect(delivered).toHaveLength(whileConnected);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("keeps one complete spoken image name in loading, loaded, error, and empty", async () => {

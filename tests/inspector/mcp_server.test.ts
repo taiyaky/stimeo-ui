@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ExamplesIndex } from "../../src/inspector/examples";
 import {
   EXAMPLE_RESOURCE_PREFIX,
+  JSONRPC_INTERNAL_ERROR,
   JSONRPC_INVALID_PARAMS,
   JSONRPC_INVALID_REQUEST,
   JSONRPC_METHOD_NOT_FOUND,
@@ -218,6 +219,31 @@ describe("McpSession", () => {
     const missingName = roundTrip(session, "tools/call", {});
     const missingNameError = missingName?.error as Record<string, unknown>;
     expect(missingNameError.code).toBe(JSONRPC_INVALID_PARAMS);
+    expect(missingNameError.message).toBe('tools/call requires a string "name" param.');
+  });
+
+  it("answers an unexpected failure inside a tool with an internal error naming it", () => {
+    // A context whose manifest cannot be read makes the catalog tool throw
+    // something that is neither an argument error nor a tool execution error.
+    for (const thrown of [new Error("manifest unavailable"), "manifest unavailable"]) {
+      const context: ToolContext = {
+        manifest: {
+          ...fakeManifest,
+          get controllers(): Manifest["controllers"] {
+            throw thrown;
+          },
+        },
+        examples: fakeExamples,
+      };
+      const session = new McpSession(context);
+      roundTrip(session, "initialize", { protocolVersion: LATEST_PROTOCOL_VERSION });
+      const response = roundTrip(session, "tools/call", { name: "stimeo_catalog" });
+      expect(response?.error).toEqual({
+        code: JSONRPC_INTERNAL_ERROR,
+        message: "Internal error: manifest unavailable",
+      });
+      expect(roundTrip(session, "ping")?.result).toEqual({});
+    }
   });
 
   it("rejects unknown methods", () => {
@@ -260,6 +286,7 @@ describe("McpSession", () => {
     const missingName = roundTrip(session, "prompts/get", {});
     const missingNameError = missingName?.error as Record<string, unknown>;
     expect(missingNameError.code).toBe(JSONRPC_INVALID_PARAMS);
+    expect(missingNameError.message).toBe('prompts/get requires a string "name" param.');
   });
 
   it("round-trips a stimeo_example call with guidance attached", () => {
@@ -407,6 +434,31 @@ describe("runMcpServer", () => {
     const ping = JSON.parse(lines[1] ?? "") as { id: number; result: unknown };
     expect(ping.id).toBe(2);
     expect(ping.result).toEqual({});
+  });
+
+  it("logs a write failure that is not an Error by its string form and keeps serving", async () => {
+    const input = new PassThrough();
+    const lines: string[] = [];
+    const errors: string[] = [];
+    let failNextWrite = true;
+    const done = runMcpServer({
+      input,
+      write: (line) => {
+        if (failNextWrite) {
+          failNextWrite = false;
+          throw "pipe gone";
+        }
+        lines.push(line);
+      },
+      load: () => fakeContext,
+      logError: (message) => errors.push(message),
+    });
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" })}\n`);
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" })}\n`);
+    input.end();
+    await done;
+    expect(errors).toEqual(["pipe gone"]);
+    expect(lines.map((line) => (JSON.parse(line) as { id: number }).id)).toEqual([2]);
   });
 
   it("serves newline-delimited JSON-RPC over a stream until it closes", async () => {
