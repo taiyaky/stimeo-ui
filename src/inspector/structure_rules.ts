@@ -296,9 +296,8 @@ export const structureRules: StructureRules = {
   "stimeo--overflow-indicator": { requiredTargets: ["viewport"] },
   "stimeo--overflow-menu": { requiredTargets: ["items", "more"] },
   // No required targets: a prev/next-only pager (no numbered page buttons) is a
-  // supported configuration — the documented markup contract allows zero `page`
-  // targets — so requiring `page` would reject valid markup. Boundary buttons
-  // stay optional too (either one alone works).
+  // supported configuration, so requiring `page` would reject valid markup.
+  // Boundary buttons stay optional too (either one alone works).
   "stimeo--pagination": {},
   // The toggle may carry a pair of decorations that swap with `aria-pressed`. The
   // accessible name stays the same in both states, so the pair is what changes.

@@ -460,7 +460,7 @@ describe("DirectUploadController", () => {
     expect(query("#du-announcer").textContent).toBe("a.png uploaded");
   });
 
-  // Speech-order regression: completion is read from the polite region.
+  // Speech-order check: completion is read from the polite region.
   it("announces upload completion as speech", async () => {
     await mount();
     fire("direct-upload:initialize", { id: 1, file: { name: "a.png" } });
@@ -641,9 +641,9 @@ describe("DirectUploadController", () => {
       ) as DirectUploadController;
 
     /**
-     * Rewrites `removeOnDone` in place, the way a Turbo morph or a script does, then
-     * delivers the callback directly: happy-dom can deliver the observer's own call late
-     * or drop it, and the contract under test is what the callback does.
+     * Rewrites `removeOnDone` in place, the way a Turbo morph or a script does, then calls
+     * `removeOnDoneValueChanged()` itself rather than depending on when the
+     * MutationObserver delivers it; what each case checks is what the callback does.
      */
     const declareRemoveOnDone = async (raw: string) => {
       element().setAttribute("data-stimeo--direct-upload-remove-on-done-value", raw);

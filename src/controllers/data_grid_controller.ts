@@ -1,6 +1,8 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { setAttributeIfChanged } from "../utils/attribute_write";
+import { AuthoredMutationWatcher } from "../utils/authored_mutation_watcher";
 import { commitField, writeFields } from "../utils/field_mirror";
 import { INTERACTIVE_HOST_SELECTOR, isInteractiveHost } from "../utils/interactive_host";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
@@ -17,15 +19,6 @@ const OBSERVED_ATTRIBUTES = ["aria-selected", "data-value"];
 
 /** The published selection: each selected row with the value it submits. */
 type Selection = ReadonlyMap<HTMLElement, string | undefined>;
-
-/**
- * Sets `name` on `element` only when its value differs. A same-value write still
- * queues a mutation record for every observer on the page, so an unchanged state
- * writes nothing.
- */
-function setAttributeIfChanged(element: Element, name: string, value: string): void {
-  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
-}
 
 /** Whether two selections hold the same rows submitting the same values, in any order. */
 function sameSelection(a: Selection, b: Selection): boolean {
@@ -75,9 +68,10 @@ function nextSortDirection(current: string): SortDirection {
  * `-1`); arrow keys move both DOM focus and that tabbable position. Sort state is
  * exposed via `aria-sort` on headers, selection via `aria-selected` on rows.
  *
- * `selectionchange` dispatches `{ rows: HTMLElement[] }` when the user changes the
- * selection; `sort` dispatches
- * `{ column: HTMLElement, direction: "ascending" | "descending" | "none" }`.
+ * `selectionchange` dispatches `{ rows: HTMLElement[], reason: StateReason }` whenever
+ * the controller changes the selection itself, and `sort` dispatches
+ * `{ column: HTMLElement, direction: "ascending" | "descending" | "none", reason: StateReason }`;
+ * `reason` tells a user's choice from an `api` call.
  *
  * `reconcile` dispatches `{ rows: HTMLElement[] }` — the selected rows, as
  * `selectionchange` carries them — when the page moves the selection instead: a
@@ -86,16 +80,17 @@ function nextSortDirection(current: string): SortDirection {
  * arrives ahead of the selection in `single` mode, or a runtime `selection` that
  * collapses it. One batch of such changes reports once, and only when the
  * selected rows or the values they submit differ from the selection last settled
- * — on connect, by the user, or by the previous `reconcile` — so connecting
- * reports nothing.
+ * — on connect, by a toggle (a user's choice or a `toggleSelect()` call), or by
+ * the previous `reconcile` — so connecting reports nothing.
  *
  * With a `fields` target the selected rows are mirrored into `name`d hidden
  * inputs so the selection can be submitted and read server-side — one per
  * selected row that carries a `data-value`, in DOM order; a row without one
  * submits nothing. `form` points them at a `<form>` by id when the container
- * sits outside it. A selection the user made emits a native bubbling `change`
- * from the container, the way a form control does, so `stimeo--auto-submit` and
- * form-level validation hear it. The mirror is refreshed silently on connect,
+ * sits outside it. When a selection the controller changes — a user's choice or a
+ * `toggleSelect()` call — moves the values the fields submit, the container emits
+ * a native bubbling `change`, the way a form control does, so `stimeo--auto-submit`
+ * and form-level validation hear it. The mirror is refreshed silently on connect,
  * on a replacement container, on row churn, and whenever `selection`, `name` or
  * `form` changes; a selection the page moved is reported by `reconcile` alone.
  *
@@ -138,6 +133,7 @@ function nextSortDirection(current: string): SortDirection {
  */
 export class DataGridController extends Controller<HTMLElement> {
   readonly #moves = new MoveCounter();
+  #connectionGeneration = 0;
   /** The cell this controller last gave the Tab stop. */
   #stopHolder: HTMLElement | null = null;
   static override targets = ["columnHeader", "row", "cell", "fields"];
@@ -169,8 +165,10 @@ export class DataGridController extends Controller<HTMLElement> {
    */
   readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileRows());
   /** Watches the row attributes a page can rewrite in place; set while connected. */
-  #observer: MutationObserver | null = null;
-  /** The selection last settled: on connect, by the user, or by a reported pass. */
+  readonly #observer = new AuthoredMutationWatcher((records) => {
+    if (this.#concernsRows(records)) this.#reconcile.schedule();
+  });
+  /** The selection last settled: on connect, by a toggle, or by a reported pass. */
   #settled: Selection = new Map();
 
   /**
@@ -191,9 +189,9 @@ export class DataGridController extends Controller<HTMLElement> {
 
   /** Releases the row observer and drops a queued pass, so neither outlives the element. */
   override disconnect(): void {
+    this.#connectionGeneration += 1;
     this.#reconcile.disconnect();
-    this.#observer?.disconnect();
-    this.#observer = null;
+    this.#observer.disconnect();
   }
 
   /**
@@ -220,7 +218,7 @@ export class DataGridController extends Controller<HTMLElement> {
     this.#syncSelectable();
     const pageWrote = this.#takePageRecords();
     this.#normalizeSelection();
-    this.#dropOwnRecords(pageWrote);
+    this.#flushMutations(pageWrote);
     this.#mirrorFields(false);
   }
 
@@ -325,16 +323,16 @@ export class DataGridController extends Controller<HTMLElement> {
       // otherwise keep announcing rows as selected while the logic refuses to
       // change them. In ARIA the absence of the attribute is what "not
       // selectable" looks like, so the rows have to lose it outright.
-      for (const row of rows) row.removeAttribute("aria-selected");
+      for (const row of rows) this.#writeSelection(row, null);
       return;
     }
     const single = this.selectionValue === "single";
     const first = rows.find((row) => row.getAttribute("aria-selected") === "true");
     for (const row of rows) {
       if (single) {
-        setAttributeIfChanged(row, "aria-selected", row === first ? "true" : "false");
+        this.#writeSelection(row, row === first ? "true" : "false");
       } else if (row.getAttribute("aria-selected") !== "true") {
-        setAttributeIfChanged(row, "aria-selected", "false");
+        this.#writeSelection(row, "false");
       }
     }
   }
@@ -403,6 +401,12 @@ export class DataGridController extends Controller<HTMLElement> {
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
     if (event.isComposing) return;
+    if (
+      (event.key === "Home" || event.key === "End") &&
+      (event.altKey || event.metaKey || event.shiftKey)
+    ) {
+      return;
+    }
     const cell = event.currentTarget as HTMLElement;
     // A native control inside the cell never calls `preventDefault()` — its
     // activation IS the default action — so the yield above cannot see it. This
@@ -513,6 +517,7 @@ export class DataGridController extends Controller<HTMLElement> {
    * @stimeoRuntimeOnly `selection` decides how this one toggle treats the other rows.
    */
   #toggleRow(row: HTMLElement, reason: StateReason = "user"): void {
+    const generation = this.#connectionGeneration;
     const selected = row.getAttribute("aria-selected") === "true";
     const pageWrote = this.#takePageRecords();
     // Enforce single-ness on every toggle, not only when turning a row on:
@@ -520,11 +525,11 @@ export class DataGridController extends Controller<HTMLElement> {
     // the next baseline pass.
     if (this.selectionValue === "single") {
       for (const other of this.rowTargets) {
-        if (other !== row) setAttributeIfChanged(other, "aria-selected", "false");
+        if (other !== row) this.#writeSelection(other, "false");
       }
     }
-    row.setAttribute("aria-selected", selected ? "false" : "true");
-    this.#dropOwnRecords(pageWrote);
+    this.#writeSelection(row, selected ? "false" : "true");
+    this.#flushMutations(pageWrote);
 
     // Settled before anything is reported, so a listener that moves the rows
     // again is measured against this selection.
@@ -537,7 +542,7 @@ export class DataGridController extends Controller<HTMLElement> {
     }
     const token = this.#moves.record();
     this.#mirrorFields(true);
-    if (!this.#moves.isLatest(token)) return;
+    if (generation !== this.#connectionGeneration || !this.#moves.isLatest(token)) return;
     this.dispatch("selectionchange", { detail: { rows: [...selection.keys()], reason } });
   }
 
@@ -550,22 +555,12 @@ export class DataGridController extends Controller<HTMLElement> {
     );
   }
 
-  /**
-   * Watches the rows' `aria-selected` and `data-value`. Every write the grid makes
-   * to them sits between a take and a drop of the observer's queue, so each record
-   * the callback receives is the page's, and only a record on one of the grid's own
-   * rows schedules a pass.
-   */
+  /** Watches authored state on this component's targets without discarding page records. */
   #observeRows(): void {
-    const observer = new MutationObserver((records) => {
-      if (this.#concernsRows(records)) this.#reconcile.schedule();
-    });
-    observer.observe(this.element, {
+    this.#observer.observe(this.element, {
       subtree: true,
-      attributes: true,
-      attributeFilter: OBSERVED_ATTRIBUTES,
+      attributes: OBSERVED_ATTRIBUTES,
     });
-    this.#observer = observer;
   }
 
   /**
@@ -575,7 +570,7 @@ export class DataGridController extends Controller<HTMLElement> {
    * in what the page wrote to the others.
    */
   #takePageRecords(): boolean {
-    const records = this.#observer?.takeRecords() ?? [];
+    const records = this.#observer.take();
     return records.length > 0 && this.#concernsRows(records);
   }
 
@@ -589,13 +584,10 @@ export class DataGridController extends Controller<HTMLElement> {
     return records.some((record) => rows.has(record.target));
   }
 
-  /**
-   * Drops the records the grid's own writes just queued, so the observer never
-   * takes them for the page's, then schedules the pass the page's records owe.
-   */
-  #dropOwnRecords(pageWrote: boolean): void {
-    this.#observer?.takeRecords();
-    if (pageWrote) this.#reconcile.schedule();
+  /** Expires own claims and reserves a pass for queued authored row changes. */
+  #flushMutations(pageWrote: boolean): void {
+    const authored = this.#concernsRows(this.#observer.take());
+    if (pageWrote || authored) this.#reconcile.schedule();
   }
 
   /**
@@ -635,9 +627,7 @@ export class DataGridController extends Controller<HTMLElement> {
     this.#stopHolder = cell;
     for (const candidate of cells ?? this.#navigableCells()) {
       const wanted = candidate === cell ? "0" : "-1";
-      if (candidate.getAttribute("tabindex") !== wanted) {
-        candidate.setAttribute("tabindex", wanted);
-      }
+      setAttributeIfChanged(candidate, "tabindex", wanted);
     }
     if (focus) cell.focus();
   }
@@ -674,5 +664,14 @@ export class DataGridController extends Controller<HTMLElement> {
     const cells = matrix[row];
     if (!cells || cells.length === 0) return undefined;
     return cells[Math.min(col, cells.length - 1)];
+  }
+  /**
+   * Records one changed selection attribute before this controller's mutation watcher
+   * receives it.
+   */
+  #writeSelection(target: HTMLElement, value: string | null): void {
+    setAttributeIfChanged(target, "aria-selected", value, () => {
+      this.#observer.claim(target, "aria-selected", value);
+    });
   }
 }

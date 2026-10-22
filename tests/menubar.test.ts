@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MenubarController } from "../src/controllers/menubar_controller";
 import { EscapeLayer } from "../src/utils/escape_layer";
 import { auditA11y, expectNoA11yViolations } from "./helpers/a11y";
-import { press, typeKey } from "./helpers/keyboard";
+import { press as keyboardPress, keyEvent, typeKey } from "./helpers/keyboard";
+import { recordListeners } from "./helpers/listeners";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -72,18 +73,18 @@ const tabStops = () =>
     (element) => element.tabIndex === 0,
   );
 /**
- * Dispatches a bubbling, **cancelable** `keydown` on an element (top item or menu
+ * Focuses an element and dispatches a bubbling, **cancelable** `keydown` (top item or menu
  * item alike) and returns the event. Cancelable matters: `defaultPrevented` is the
  * only observable proof that the arrow keys suppress the browser's own scrolling,
  * and a non-cancelable event would report `false` no matter what the handler does.
  */
-const key = (id: string, k: string): KeyboardEvent => typeKey(byId(id), k);
+const key = (id: string, k: string): KeyboardEvent => keyboardPress(byId(id), k);
 /**
  * Places real DOM focus on `id` before dispatching the key: the handler then reads
  * the same `document.activeElement` a browser would, and "where did focus land"
  * becomes a meaningful assertion.
  */
-const pressOn = (id: string, k: string): KeyboardEvent => press(byId(id), k);
+const pressOn = (id: string, k: string): KeyboardEvent => keyboardPress(byId(id), k);
 
 /** The controller instance on the page's first menubar. */
 const menubarOf = (application: Application): MenubarController => {
@@ -104,6 +105,78 @@ describe("MenubarController", () => {
   afterEach(() => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
+  });
+
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Home/End chord (%s, %s) on a top item", async (key, _modifier, init) => {
+    const element = byId("file").parentElement;
+    if (!element) throw new Error("Expected menubar root");
+    element.insertAdjacentHTML("beforeend", top("view", "View", null));
+    await tick();
+    keyboardPress(byId("file"), "ArrowRight");
+    const current = byId("edit");
+    current.focus();
+    const events: Event[] = [];
+    for (const name of ["stimeo--menubar:open", "stimeo--menubar:close"]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = keyboardPress(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(tabStops()).toEqual([current]);
+    expect(expanded("file")).toBe("false");
+    expect(expanded("edit")).toBe("false");
+    expect(keyboardPress(current, key).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(byId(key === "Home" ? "file" : "view"));
+  });
+
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Home/End chord (%s, %s) on a menu item", async (key, _modifier, init) => {
+    byId("edit").click();
+    const current = byId("copy");
+    current.focus();
+    const element = byId("edit").parentElement;
+    if (!element) throw new Error("Expected menubar root");
+    const events: Event[] = [];
+    for (const name of ["stimeo--menubar:open", "stimeo--menubar:close"]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = keyboardPress(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(expanded("edit")).toBe("true");
+    expect(menuHidden("m-edit")).toBe(false);
+    expect(tabStops()).toEqual([byId("edit")]);
+    expect(keyboardPress(current, key).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(byId(key === "Home" ? "cut" : "paste"));
   });
 
   it("sets the tab stop to a menu opened without first focusing its top item", () => {
@@ -179,7 +252,8 @@ describe("MenubarController", () => {
   it("leaves keys on a newly hidden top unclaimed without moving focus", () => {
     byId("file").focus();
     byId("file").hidden = true;
-    const event = key("file", "ArrowRight");
+    /** Keep focus on the now-hidden origin while probing the reachability guard. */
+    const event = typeKey(byId("file"), "ArrowRight");
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(byId("file"));
     byId("file").hidden = false;
@@ -209,7 +283,8 @@ describe("MenubarController", () => {
   it("does not switch menus from a newly hidden owner", () => {
     byId("file").click();
     byId("file").hidden = true;
-    key("new", "ArrowRight");
+    // Preserve item focus while the hidden owner makes the synthetic key inert.
+    typeKey(byId("new"), "ArrowRight");
     expect(expanded("edit")).toBe("false");
     expect(document.activeElement).toBe(byId("new"));
     byId("file").hidden = false;
@@ -336,8 +411,8 @@ describe("MenubarController", () => {
     // <button>, so this asserts both halves: the controller consumes neither key,
     // and the click the browser would fire opens the menu at its first item.
     for (const pressed of ["Enter", " "]) {
-      const event = new KeyboardEvent("keydown", { key: pressed, bubbles: true, cancelable: true });
-      byId("file").dispatchEvent(event);
+      const event = keyEvent(pressed);
+      keyboardPress(byId("file"), event);
       expect(event.defaultPrevented).toBe(false);
       expect(menuHidden("m-file")).toBe(true);
 
@@ -351,7 +426,7 @@ describe("MenubarController", () => {
   it("leaves a modified arrow on a top item to the browser", () => {
     // Alt+arrow is the browser's history shortcut; the menubar must not swallow it,
     // so neither the claim nor the single Tab stop may move.
-    const event = press(byId("file"), "ArrowRight", { altKey: true });
+    const event = keyboardPress(byId("file"), "ArrowRight", { altKey: true });
 
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(byId("file"));
@@ -413,8 +488,9 @@ describe("MenubarController", () => {
     (document.activeElement as HTMLElement).blur();
     expect(document.activeElement).toBe(document.body);
 
-    const press = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    document.body.dispatchEvent(press);
+    const press = keyEvent("Escape");
+    // Body focus stays intact while the document fallback receives Escape.
+    typeKey(document, press);
     expect(menuHidden("m-file")).toBe(true);
     expect(expanded("file")).toBe("false");
     expect(press.defaultPrevented).toBe(true);
@@ -446,7 +522,7 @@ describe("MenubarController", () => {
     // Same contract one level down: the open menu neither claims the chorded press
     // nor advances its roving focus.
     byId("file").click(); // open File, focus New
-    const event = press(byId("new"), "ArrowDown", { altKey: true });
+    const event = keyboardPress(byId("new"), "ArrowDown", { altKey: true });
 
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(byId("new"));
@@ -595,8 +671,8 @@ describe("MenubarController", () => {
 
   it("does not consume Space for typeahead (leaves native button activation)", () => {
     byId("file").click(); // open File, focus New
-    const event = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
-    byId("new").dispatchEvent(event);
+    const event = keyEvent(" ");
+    keyboardPress(byId("new"), event);
     // Space must not be preventDefault-ed, so the button's native Enter/Space →
     // click activation still runs.
     expect(event.defaultPrevented).toBe(false);
@@ -708,12 +784,8 @@ describe("MenubarController", () => {
       document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       expect(menuHidden("m-file")).toBe(false); // a surviving listener would have closed it
 
-      const escapePress = new KeyboardEvent("keydown", {
-        key: "Escape",
-        bubbles: true,
-        cancelable: true,
-      });
-      document.dispatchEvent(escapePress);
+      const escapePress = keyEvent("Escape");
+      keyboardPress(document.activeElement as HTMLElement, escapePress);
       expect(escapePress.defaultPrevented).toBe(false); // the Escape layer is deregistered
       expect(menuHidden("m-file")).toBe(false);
     } finally {
@@ -742,17 +814,20 @@ describe("MenubarController", () => {
   it("removes every listener it adds to its own element on disconnect", () => {
     const instance = menubarOf(application);
     instance.disconnect();
-    const added = vi.spyOn(instance.element, "addEventListener");
-    const removed = vi.spyOn(instance.element, "removeEventListener");
+    const ledger = recordListeners();
+    try {
+      instance.connect();
+      const own = ledger
+        .live(instance.element)
+        .filter(({ type }) => ["click", "focusin", "focusout"].includes(type));
+      expect(own.map(({ type }) => type).sort()).toEqual(["click", "focusin", "focusout"]);
 
-    instance.connect();
-    const own = added.mock.calls.filter(([type]) =>
-      ["click", "focusin", "focusout"].includes(type),
-    );
-    expect(own.map(([type]) => type).sort()).toEqual(["click", "focusin", "focusout"]);
+      instance.disconnect();
 
-    instance.disconnect();
-    for (const call of own) expect(removed).toHaveBeenCalledWith(...call);
+      expect(own.filter(({ live }) => live)).toEqual([]);
+    } finally {
+      ledger.restore();
+    }
   });
 
   it("stops observing its subtree on disconnect", async () => {
@@ -853,7 +928,7 @@ describe("MenubarController", () => {
       byId("file").click();
       capture.clear();
 
-      press(byId("new"), "ArrowRight");
+      keyboardPress(byId("new"), "ArrowRight");
 
       expect(capture.names()).toEqual(["close", "open"]);
       expect(capture.seen[0]?.detail).toEqual({ reason: "user", index: 0, menu: byId("m-file") });
@@ -873,7 +948,7 @@ describe("MenubarController", () => {
     it("reports Escape as escape and an outside click as outside", () => {
       byId("file").click();
       capture.clear();
-      press(byId("new"), "Escape");
+      keyboardPress(byId("new"), "Escape");
 
       expect(capture.reasons()).toEqual(["escape"]);
 
@@ -888,7 +963,7 @@ describe("MenubarController", () => {
       byId("file").click();
       capture.clear();
 
-      press(byId("new"), "Tab");
+      keyboardPress(byId("new"), "Tab");
       expect(capture.seen).toEqual([]);
       await tick();
 
@@ -900,7 +975,7 @@ describe("MenubarController", () => {
       byId("file").click();
       capture.clear();
 
-      press(byId("file"), "ArrowDown");
+      keyboardPress(byId("file"), "ArrowDown");
 
       expect(menuHidden("m-file")).toBe(false);
       expect(capture.seen).toEqual([]);
@@ -1049,7 +1124,7 @@ describe("MenubarController with disabled and hidden entries", () => {
     expect(document.activeElement).toBe(byId("dis-save"));
   });
 
-  it("blocks activation of an aria-disabled item before consumer handlers", () => {
+  it("blocks activation of an aria-disabled item before the handlers inside the menubar element", () => {
     byId("dis-file").click();
     let consumerActivations = 0;
     byId("dis-open").addEventListener("click", () => consumerActivations++);
@@ -1099,10 +1174,11 @@ describe("MenubarController with disabled and hidden entries", () => {
   });
 
   it("moves onto an aria-disabled top, closing the open menu without opening its own", () => {
-    // The APG makes closing unconditional on a horizontal move ("closes the
-    // submenu, moves focus to the next menubar item, and *optionally* opens that
-    // item's submenu"), so only the opening half is skipped here. Leaving the old
-    // menu open would strand a popup that no longer contains focus.
+    // The APG closes the open menu on a horizontal move before focus goes to the
+    // next menubar item. Opening that item's submenu is activation, and an
+    // aria-disabled item is "focusable but cannot be activated", so only the opening
+    // half is skipped here. Leaving the old menu open would strand a popup that focus
+    // has left.
     byId("dis-edit").focus();
     byId("dis-edit").click(); // open Edit, focus Cut
     key("dis-cut", "ArrowRight"); // -> Help (aria-disabled)
@@ -1122,6 +1198,852 @@ describe("MenubarController with disabled and hidden entries", () => {
     byId("dis-open").click();
 
     expect(consumerActivations).toBe(1);
+  });
+
+  /**
+   * `toggle` and `activate` refuse an entry that is `aria-disabled`, natively
+   * `disabled` or `hidden` on every route into them, and a refusal writes nothing:
+   * no state event, no open or closed menu, no focus move, no Tab stop move.
+   *
+   * The routes are a DOM click, an explicit element, and a non-click Event handed
+   * to the action. The click is the comparison: the capture listener swallows it on
+   * an `aria-disabled` entry and the engine dispatches none on a natively `disabled`
+   * button. A script's `click()` still reaches a `hidden` element. The other two
+   * routes pass no capture listener, so only the actions themselves can refuse them.
+   */
+  describe("on every route into toggle and activate", () => {
+    const ROUTES = ["click", "element", "probe"] as const;
+    type Route = (typeof ROUTES)[number];
+
+    /** Each constraint, on a top item and on an item of the File menu. */
+    const CONSTRAINED = {
+      "aria-disabled": { top: "dis-help", item: "dis-open" },
+      disabled: { top: "dis-view", item: "dis-print" },
+      hidden: { top: "dis-edit", item: "dis-hidden" },
+    } as const;
+    type Constraint = keyof typeof CONSTRAINED;
+
+    const MATRIX = (Object.keys(CONSTRAINED) as Constraint[]).flatMap((constraint) =>
+      ROUTES.map((route) => [constraint, route] as const),
+    );
+
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(async () => {
+      byId("dis-file").click(); // opens File and focuses New
+      await tick();
+      capture = captureStateEvents("stimeo--menubar");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    /**
+     * Drives `action` on `id` through one route. The probe bubbles and is
+     * cancelable, and is returned, so a row can show the action left it alone.
+     */
+    const drive = (id: string, action: "toggle" | "activate", route: Route): Event | null => {
+      const target = byId(id);
+      const controller = menubarOf(application);
+      if (route === "click") {
+        target.click();
+        return null;
+      }
+      if (route === "element") {
+        controller[action](target);
+        return null;
+      }
+      const probe = new Event("probe", { bubbles: true, cancelable: true });
+      target.addEventListener("probe", (event) => controller[action](event), { once: true });
+      target.dispatchEvent(probe);
+      return probe;
+    };
+
+    /**
+     * Drives a refused `action` and checks that the refusal neither cancelled the
+     * probe nor stopped it short of the menubar root.
+     */
+    const driveRefused = (id: string, action: "toggle" | "activate", route: Route): void => {
+      const root = menubarOf(application).element;
+      const reached = vi.fn();
+      root.addEventListener("probe", reached);
+      const probe = drive(id, action, route);
+      root.removeEventListener("probe", reached);
+      if (probe) {
+        expect(probe.defaultPrevented).toBe(false);
+        expect(reached).toHaveBeenCalledOnce();
+      }
+    };
+
+    /**
+     * The top carrying `constraint`. The fixture has no `hidden` top, so Edit is
+     * hidden here, and the reconciliation that write starts is let run first.
+     */
+    const constrainedTop = async (constraint: Constraint): Promise<string> => {
+      if (constraint === "hidden") {
+        byId("dis-edit").hidden = true;
+        await tick();
+        capture.clear();
+      }
+      return CONSTRAINED[constraint].top;
+    };
+
+    /** File stays open on New, nothing is reported, and the lone Tab stop stays on File. */
+    const expectFileUntouched = (): void => {
+      expect(capture.seen).toEqual([]);
+      expect(expanded("dis-file")).toBe("true");
+      expect(menuHidden("dis-m-file")).toBe(false);
+      expect(document.activeElement).toBe(byId("dis-new"));
+      expect(tabStops()).toEqual([byId("dis-file")]);
+    };
+
+    it.each(MATRIX)(
+      "refuses toggle on the %s top through %s without closing the open menu",
+      async (constraint, route) => {
+        const id = await constrainedTop(constraint);
+
+        driveRefused(id, "toggle", route);
+        // A refused open writes nothing; an accepted one on a `hidden` or `disabled`
+        // top would be closed again by the reconciliation its own write starts.
+        await tick();
+
+        expectFileUntouched();
+        expect(expanded(id)).toBe("false");
+        expect(menuHidden(byId(id).getAttribute("aria-controls") ?? "")).toBe(true);
+      },
+    );
+
+    it.each(MATRIX)(
+      "refuses activate on the %s item through %s without closing its menu",
+      async (constraint, route) => {
+        driveRefused(CONSTRAINED[constraint].item, "activate", route);
+        await tick();
+
+        expectFileUntouched();
+      },
+    );
+
+    it.each(ROUTES)(
+      "keeps File open through %s once File itself turned aria-disabled",
+      async (route) => {
+        // `aria-disabled` is not one of the attributes the reconciliation watches, so
+        // the menu stays open, and closing it would be activating the top.
+        byId("dis-file").setAttribute("aria-disabled", "true");
+        await tick();
+
+        driveRefused("dis-file", "toggle", route);
+        await tick();
+
+        expectFileUntouched();
+      },
+    );
+
+    it.each(ROUTES)("still opens an enabled top through %s", async (route) => {
+      drive("dis-edit", "toggle", route);
+      await tick();
+
+      const reason = route === "element" ? "api" : "user";
+      expect(capture.names()).toEqual(["close", "open"]);
+      expect(capture.reasons()).toEqual([reason, reason]);
+      expect(menuHidden("dis-m-file")).toBe(true);
+      expect(expanded("dis-edit")).toBe("true");
+      expect(menuHidden("dis-m-edit")).toBe(false);
+      expect(document.activeElement).toBe(byId("dis-cut"));
+      expect(tabStops()).toEqual([byId("dis-edit")]);
+    });
+
+    it.each(ROUTES)("still activates an enabled item through %s", async (route) => {
+      drive("dis-save", "activate", route);
+      await tick();
+
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["select"]);
+      expect(menuHidden("dis-m-file")).toBe(true);
+      expect(document.activeElement).toBe(byId("dis-file"));
+      expect(tabStops()).toEqual([byId("dis-file")]);
+    });
+  });
+});
+
+/**
+ * A click is judged once, when it starts: the capture listener takes the verdict
+ * before any consumer handler on the entry runs, and the action the click reaches
+ * keeps it when the entry it resolves is among those the verdict was taken for. A
+ * consumer command that marks its own entry busy during that click (`disabled` or
+ * `aria-disabled` while it runs) therefore still gets the close or open it started,
+ * exactly as when its handler changes nothing — though a top whose menu that click
+ * opened and that is left natively `disabled` is then closed again, silently, by the
+ * reconciliation. An entry the verdict was not
+ * taken for — a handler that ran first moved the target out of it — is judged when
+ * the action runs, as is any other event.
+ */
+describe("MenubarController judging a click when it starts", () => {
+  let application: Application;
+
+  /**
+   * Mounts `html` and runs `prepare` before Stimulus binds the actions, so a
+   * listener `prepare` adds to an entry runs ahead of the controller's action there.
+   */
+  const mountWith = async (prepare: () => void, html = markup): Promise<void> => {
+    document.body.innerHTML = html;
+    prepare();
+    application = Application.start();
+    application.register("stimeo--menubar", MenubarController);
+    await tick();
+  };
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  /** What a consumer command writes on its own entry; `none` is the positive control. */
+  const MARKS = ["none", "disabled", "aria-disabled"] as const;
+  type Mark = (typeof MARKS)[number];
+
+  /** Adds a consumer command on `id` that marks its own entry with `mark` each time it runs. */
+  const addCommand = (id: string, mark: Mark, command: () => void, type = "click"): void => {
+    const entry = byId(id);
+    entry.addEventListener(type, () => {
+      command();
+      if (mark === "aria-disabled") entry.setAttribute("aria-disabled", "true");
+      else if (mark === "disabled") entry.toggleAttribute("disabled", true);
+    });
+  };
+
+  it.each(MARKS)("closes the menu for an item whose click marks it %s", async (mark) => {
+    const command = vi.fn();
+    await mountWith(() => addCommand("open", mark, command));
+    byId("file").click(); // opens File and focuses New
+    const capture = captureStateEvents("stimeo--menubar");
+
+    byId("open").click();
+
+    expect(command).toHaveBeenCalledOnce();
+    expect(capture.names()).toEqual(["close"]);
+    expect(capture.reasons()).toEqual(["select"]);
+    expect(menuHidden("m-file")).toBe(true);
+    expect(expanded("file")).toBe("false");
+    expect(document.activeElement).toBe(byId("file"));
+    await tick();
+    capture.stop();
+    expect(capture.names()).toEqual(["close"]);
+    expect(tabStops()).toEqual([byId("file")]);
+  });
+
+  it.each(MARKS)("opens the menu of a top whose click marks it %s", async (mark) => {
+    const command = vi.fn();
+    await mountWith(() => addCommand("edit", mark, command));
+    byId("file").click();
+    const capture = captureStateEvents("stimeo--menubar");
+
+    byId("edit").click();
+    capture.stop();
+
+    // A `disabled` top is closed again, silently, by the reconciliation its own write
+    // starts on delivery; the click's open itself is what this row pins.
+    expect(command).toHaveBeenCalledOnce();
+    expect(capture.names()).toEqual(["close", "open"]);
+    expect(capture.reasons()).toEqual(["user", "user"]);
+    expect(menuHidden("m-file")).toBe(true);
+    expect(expanded("edit")).toBe("true");
+    expect(menuHidden("m-edit")).toBe(false);
+    expect(document.activeElement).toBe(byId("cut"));
+    expect(tabStops()).toEqual([byId("edit")]);
+  });
+
+  it.each(MARKS)("closes the open menu of a top whose click marks it %s", async (mark) => {
+    const command = vi.fn();
+    await mountWith(() => addCommand("file", mark, command));
+    pressOn("file", "ArrowDown"); // opens File without a click
+    const capture = captureStateEvents("stimeo--menubar");
+
+    byId("file").click();
+    capture.stop();
+
+    expect(command).toHaveBeenCalledOnce();
+    expect(capture.names()).toEqual(["close"]);
+    expect(capture.reasons()).toEqual(["user"]);
+    expect(expanded("file")).toBe("false");
+    expect(menuHidden("m-file")).toBe(true);
+  });
+
+  it.each(MARKS)(
+    "judges a non-click event when activate runs, after a command marked the item %s",
+    async (mark) => {
+      const command = vi.fn();
+      await mountWith(() => addCommand("open", mark, command, "probe"));
+      byId("file").click();
+      byId("open").addEventListener("probe", (event) => menubarOf(application).activate(event));
+      const capture = captureStateEvents("stimeo--menubar");
+
+      byId("open").dispatchEvent(new Event("probe", { bubbles: true, cancelable: true }));
+      await tick();
+      capture.stop();
+
+      expect(command).toHaveBeenCalledOnce();
+      expect(capture.names()).toEqual(mark === "none" ? ["close"] : []);
+      expect(menuHidden("m-file")).toBe(mark === "none");
+    },
+  );
+
+  it.each(MARKS)(
+    "judges a non-click event when toggle runs, after a command marked the top %s",
+    async (mark) => {
+      const command = vi.fn();
+      await mountWith(() => addCommand("edit", mark, command, "probe"));
+      byId("file").click();
+      byId("edit").addEventListener("probe", (event) => menubarOf(application).toggle(event));
+      const capture = captureStateEvents("stimeo--menubar");
+
+      byId("edit").dispatchEvent(new Event("probe", { bubbles: true, cancelable: true }));
+      await tick();
+      capture.stop();
+
+      expect(command).toHaveBeenCalledOnce();
+      expect(capture.names()).toEqual(mark === "none" ? ["close", "open"] : []);
+      expect(expanded("edit")).toBe(mark === "none" ? "true" : "false");
+      expect(menuHidden("m-file")).toBe(mark === "none");
+    },
+  );
+
+  // An item nested in another item is the shape where more than one item holds the
+  // click target. The capture listener records a verdict for both, and the click is
+  // refused when either one refuses activation, so the action bound on the inner item
+  // refuses it whichever of the two is `hidden`.
+  it.each(["outer", "inner"] as const)(
+    "refuses the inner item of a nested pair when its action runs (%s hidden)",
+    async (hiddenOne) => {
+      await mountWith(
+        () => {},
+        `<div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+          ${top("file", "File", "m-file")}
+          <div id="m-file" role="menu" aria-label="File" hidden data-stimeo--menubar-target="menu">
+            <div id="outer" role="menuitem" tabindex="-1" data-stimeo--menubar-target="item">
+              <span id="inner" data-stimeo--menubar-target="item"
+                    data-action="click->stimeo--menubar#activate">Run</span>
+            </div>
+          </div>
+        </div>`,
+      );
+      byId("file").click();
+      byId(hiddenOne).hidden = true;
+      await tick();
+      const capture = captureStateEvents("stimeo--menubar");
+
+      byId("inner").click();
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual([]);
+      expect(menuHidden("m-file")).toBe(false);
+    },
+  );
+
+  it("swallows a click on the aria-disabled inner item of a nested pair", async () => {
+    await mountWith(
+      () => {},
+      `<div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+        ${top("file", "File", "m-file")}
+        <div id="m-file" role="menu" aria-label="File" hidden data-stimeo--menubar-target="menu">
+          <div id="outer" role="menuitem" tabindex="-1" data-stimeo--menubar-target="item">
+            <span id="inner" aria-disabled="true" data-stimeo--menubar-target="item"
+                  data-action="click->stimeo--menubar#activate">Run</span>
+          </div>
+        </div>
+      </div>`,
+    );
+    byId("file").click();
+    await tick();
+    const command = vi.fn();
+    byId("inner").addEventListener("click", command);
+    const capture = captureStateEvents("stimeo--menubar");
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+
+    byId("inner").dispatchEvent(click);
+    await tick();
+    capture.stop();
+
+    expect(command).not.toHaveBeenCalled();
+    expect(click.defaultPrevented).toBe(true);
+    expect(capture.names()).toEqual([]);
+    expect(menuHidden("m-file")).toBe(false);
+  });
+});
+
+/**
+ * Entries nested in one another. An operation is refused when any entry this menubar
+ * owns that holds the operation's target refuses activation — the target being the
+ * event's target, or the element handed to the action. A `hidden`, natively `disabled`
+ * or `aria-disabled` inner entry therefore refuses what lands inside it whichever entry
+ * receives the action, and an outer entry that refuses refuses what lands inside it
+ * too. What lands on the outer entry outside the inner one is judged on the outer
+ * entry alone.
+ */
+describe("MenubarController with nested entries", () => {
+  let application: Application;
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  /** The state the inner entry carries; `enabled` with an enabled outer is the positive control. */
+  const INNER = {
+    enabled: "",
+    "aria-disabled": 'aria-disabled="true"',
+    hidden: "hidden",
+    disabled: "disabled",
+  } as const;
+  type Inner = keyof typeof INNER;
+
+  /** The state the outer entry carries; its `aria-disabled` reaches the inner entry too. */
+  const OUTER = { enabled: "", "aria-disabled": 'aria-disabled="true"', hidden: "hidden" } as const;
+  type Outer = keyof typeof OUTER;
+
+  /**
+   * Where an operation lands and which entry receives the action; `label` is the text
+   * holder inside the inner entry, and `element` hands the landing entry to the action.
+   * A natively `disabled` button is dispatched no click of its own, while happy-dom
+   * delivers one dispatched on content inside it, so a click inside the inner entry
+   * lands on the label.
+   */
+  const ROUTES = {
+    "a click inside the inner, received by the inner": {
+      kind: "click",
+      at: "label",
+      receiver: "inner",
+    },
+    "a click inside the inner, received by the outer": {
+      kind: "click",
+      at: "label",
+      receiver: "outer",
+    },
+    "the inner as the element": { kind: "element", at: "inner", receiver: "inner" },
+    "a probe inside the inner, received by the inner": {
+      kind: "probe",
+      at: "label",
+      receiver: "inner",
+    },
+    "a probe inside the inner, received by the outer": {
+      kind: "probe",
+      at: "label",
+      receiver: "outer",
+    },
+    "a click on the outer": { kind: "click", at: "outer", receiver: "outer" },
+    "the outer as the element": { kind: "element", at: "outer", receiver: "outer" },
+    "a probe on the outer": { kind: "probe", at: "outer", receiver: "outer" },
+  } as const;
+  type Route = keyof typeof ROUTES;
+
+  /** Whether `route` lands inside the inner entry. */
+  const insideInner = (route: Route): boolean => ROUTES[route].at !== "outer";
+
+  /** Whether an entry holding the route's target refuses activation. */
+  const refuses = (inner: Inner, outer: Outer, route: Route): boolean =>
+    outer !== "enabled" || (insideInner(route) && inner !== "enabled");
+
+  /** Whether the capture listener stops `route`: a click an `aria-disabled` entry holds. */
+  const stops = (inner: Inner, outer: Outer, route: Route): boolean =>
+    ROUTES[route].kind === "click" &&
+    (outer === "aria-disabled" || (insideInner(route) && inner === "aria-disabled"));
+
+  const ROWS = (Object.keys(INNER) as Inner[]).flatMap((inner) =>
+    (Object.keys(OUTER) as Outer[]).flatMap((outer) =>
+      (Object.keys(ROUTES) as Route[]).map((route) => ({
+        inner,
+        outer,
+        route,
+        outcome: refuses(inner, outer, route) ? "refuses" : "accepts",
+      })),
+    ),
+  );
+
+  /**
+   * Delivers `route` to `action`. A consumer command listens where the event lands, so
+   * a click the capture listener stops shows as a command that never ran.
+   */
+  const drive = (action: "activate" | "toggle", route: Route) => {
+    const { kind, at, receiver } = ROUTES[route];
+    const controller = menubarOf(application);
+    const command = vi.fn();
+    if (kind === "element") {
+      controller[action](byId(at));
+      return { event: null, command };
+    }
+    byId(at).addEventListener(kind, command);
+    byId(receiver).addEventListener(kind, (event) => controller[action](event));
+    const event =
+      kind === "click"
+        ? new MouseEvent("click", { bubbles: true, cancelable: true })
+        : new Event("probe", { bubbles: true, cancelable: true });
+    byId(at).dispatchEvent(event);
+    return { event, command };
+  };
+
+  /** Only a click an `aria-disabled` entry holds is cancelled, and it reaches no consumer. */
+  const expectDelivery = (
+    inner: Inner,
+    outer: Outer,
+    route: Route,
+    { event, command }: ReturnType<typeof drive>,
+  ): void => {
+    if (!event) return;
+    const stopped = stops(inner, outer, route);
+    expect(event.defaultPrevented).toBe(stopped);
+    expect(command).toHaveBeenCalledTimes(stopped ? 0 : 1);
+  };
+
+  describe("activate on an item pair", () => {
+    /** Mounts the pair inside File's menu and opens File, focusing its first navigable item. */
+    const mountPair = async (inner: Inner, outer: Outer): Promise<void> => {
+      application = await mount(`
+        <div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+          ${top("file", "File", "m-file")}
+          <div id="m-file" role="menu" aria-label="File" hidden data-stimeo--menubar-target="menu">
+            <div id="outer" role="menuitem" tabindex="-1" ${OUTER[outer]}
+                 data-stimeo--menubar-target="item">
+              <button id="inner" role="menuitem" tabindex="-1" ${INNER[inner]}
+                      data-stimeo--menubar-target="item"><span id="label">Run</span></button>
+            </div>
+          </div>
+        </div>`);
+      byId("file").click();
+      await tick();
+    };
+
+    it.each(ROWS)(
+      "$outcome the $inner inner item in the $outer outer item through $route",
+      async ({ inner, outer, route }) => {
+        await mountPair(inner, outer);
+        const focused = document.activeElement;
+        const capture = captureStateEvents("stimeo--menubar");
+
+        const delivered = drive("activate", route);
+        await tick();
+        capture.stop();
+
+        expectDelivery(inner, outer, route, delivered);
+        if (refuses(inner, outer, route)) {
+          expect(capture.seen).toEqual([]);
+          expect(expanded("file")).toBe("true");
+          expect(menuHidden("m-file")).toBe(false);
+          expect(document.activeElement).toBe(focused);
+        } else {
+          expect(capture.names()).toEqual(["close"]);
+          expect(capture.reasons()).toEqual(["select"]);
+          expect(menuHidden("m-file")).toBe(true);
+          expect(document.activeElement).toBe(byId("file"));
+        }
+        expect(tabStops()).toEqual([byId("file")]);
+      },
+    );
+
+    it.each(["enabled", "hidden"] as const)(
+      "judges a probe dispatched at the text inside the %s inner item by the items holding it",
+      async (inner) => {
+        await mountPair(inner, "enabled");
+        const text = byId("label").firstChild as Text;
+        // Pinned: the target is a node that is not an element.
+        expect(text.nodeType).toBe(Node.TEXT_NODE);
+        byId("outer").addEventListener("probe", (event) => menubarOf(application).activate(event));
+        const capture = captureStateEvents("stimeo--menubar");
+
+        text.dispatchEvent(new Event("probe", { bubbles: true }));
+        await tick();
+        capture.stop();
+
+        expect(capture.names()).toEqual(inner === "hidden" ? [] : ["close"]);
+        expect(menuHidden("m-file")).toBe(inner !== "hidden");
+      },
+    );
+  });
+
+  describe("toggle on a top pair", () => {
+    /** Mounts a top nested in another top, each controlling its own menu. */
+    const mountPair = async (inner: Inner, outer: Outer): Promise<void> => {
+      application = await mount(`
+        <div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+          <div id="outer" role="menuitem" ${OUTER[outer]} aria-haspopup="menu"
+               aria-expanded="false" aria-controls="m-outer" data-stimeo--menubar-target="top">
+            <button id="inner" role="menuitem" ${INNER[inner]} aria-haspopup="menu"
+                    aria-expanded="false" aria-controls="m-inner"
+                    data-stimeo--menubar-target="top"><span id="label">Run</span></button>
+          </div>
+          ${menu("m-outer", "Outer", item("outer-item", "Outer item"))}
+          ${menu("m-inner", "Inner", item("inner-item", "Inner item"))}
+        </div>`);
+    };
+
+    it.each(ROWS)(
+      "$outcome the $inner inner top in the $outer outer top through $route",
+      async ({ inner, outer, route }) => {
+        await mountPair(inner, outer);
+        const focused = document.activeElement;
+        const stopsBefore = tabStops();
+        const capture = captureStateEvents("stimeo--menubar");
+
+        const delivered = drive("toggle", route);
+        await tick();
+        capture.stop();
+
+        expectDelivery(inner, outer, route, delivered);
+        const { kind, at, receiver } = ROUTES[route];
+        const opened = kind === "element" ? at : receiver;
+        const shut = opened === "inner" ? "outer" : "inner";
+        if (refuses(inner, outer, route)) {
+          expect(capture.seen).toEqual([]);
+          expect(expanded("outer")).toBe("false");
+          expect(expanded("inner")).toBe("false");
+          expect(menuHidden("m-outer")).toBe(true);
+          expect(menuHidden("m-inner")).toBe(true);
+          expect(document.activeElement).toBe(focused);
+          expect(tabStops()).toEqual(stopsBefore);
+        } else {
+          expect(capture.names()).toEqual(["open"]);
+          expect(capture.reasons()).toEqual([kind === "element" ? "api" : "user"]);
+          expect(expanded(opened)).toBe("true");
+          expect(menuHidden(`m-${opened}`)).toBe(false);
+          expect(expanded(shut)).toBe("false");
+          expect(menuHidden(`m-${shut}`)).toBe(true);
+          expect(tabStops()).toEqual([byId(opened)]);
+        }
+      },
+    );
+
+    it.each(["enabled", "hidden"] as const)(
+      "judges a probe dispatched at the text inside the %s inner top by the tops holding it",
+      async (inner) => {
+        await mountPair(inner, "enabled");
+        const text = byId("label").firstChild as Text;
+        // Pinned: the target is a node that is not an element.
+        expect(text.nodeType).toBe(Node.TEXT_NODE);
+        byId("outer").addEventListener("probe", (event) => menubarOf(application).toggle(event));
+        const capture = captureStateEvents("stimeo--menubar");
+
+        text.dispatchEvent(new Event("probe", { bubbles: true }));
+        await tick();
+        capture.stop();
+
+        expect(capture.names()).toEqual(inner === "hidden" ? [] : ["open"]);
+        expect(menuHidden("m-outer")).toBe(inner === "hidden");
+      },
+    );
+  });
+});
+
+/**
+ * `aria-disabled="true"` extends to every focusable descendant, so an entry inside an
+ * element that carries it is refused as if it carried it itself: its click is
+ * swallowed before the handlers inside the menubar element run, and `toggle` /
+ * `activate` refuse it through an element or any other event. It stays an arrow-key
+ * destination all the same.
+ */
+describe("MenubarController under an aria-disabled ancestor", () => {
+  let application: Application;
+
+  beforeEach(async () => {
+    application = await mount(`
+      <div id="inh-outer">
+        <div id="inh-bar" data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+          ${top("inh-file", "File", "inh-m-file")}
+          ${menu("inh-m-file", "File", `${item("inh-new", "New")}${item("inh-save", "Save")}`)}
+          ${top("inh-edit", "Edit", "inh-m-edit")}
+          ${menu("inh-m-edit", "Edit", `${item("inh-cut", "Cut")}${item("inh-copy", "Copy")}`)}
+        </div>
+      </div>
+      <div id="inh-other" data-controller="stimeo--menubar" role="menubar" aria-label="Other">
+        ${top("inh-tools", "Tools", "inh-m-tools")}
+        ${menu("inh-m-tools", "Tools", item("inh-run", "Run"))}
+      </div>`);
+  });
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const ROUTES = ["click", "element", "probe"] as const;
+  type Route = (typeof ROUTES)[number];
+
+  /** Entries outside each aria-disabled ancestor, which keep working beside it. */
+  const CONTROLS = {
+    "inh-m-edit": { top: "inh-file", menu: "inh-m-file", item: "inh-new" },
+    "inh-bar": { top: "inh-tools", menu: "inh-m-tools", item: "inh-run" },
+    "inh-outer": { top: "inh-tools", menu: "inh-m-tools", item: "inh-run" },
+  } as const;
+  type Ancestor = keyof typeof CONTROLS;
+  const ANCESTORS = Object.keys(CONTROLS) as Ancestor[];
+
+  const rows = (ancestors: readonly Ancestor[]) =>
+    ancestors.flatMap((ancestor) => ROUTES.map((route) => [ancestor, route] as const));
+
+  /** The top items of `rootId` that sit in the Tab sequence. */
+  const stopsIn = (rootId: string) =>
+    Array.from(
+      byId(rootId).querySelectorAll<HTMLElement>("[data-stimeo--menubar-target='top']"),
+    ).filter((element) => element.tabIndex === 0);
+
+  /** What one route showed of its event: the click's or probe's fate on the page. */
+  interface Seen {
+    prevented: boolean;
+    handled: number;
+    reached: number;
+  }
+
+  /**
+   * Drives `action` on `id` through `route`. A click and a probe are cancelable and
+   * bubble; a consumer handler on the entry and a listener on the document report
+   * whether each one got past the entry. The element route has no event to report.
+   */
+  const drive = (id: string, action: "toggle" | "activate", route: Route): Seen | null => {
+    const entry = byId(id);
+    const root = entry.closest("[data-controller~='stimeo--menubar']");
+    const controller =
+      root && application.getControllerForElementAndIdentifier(root, "stimeo--menubar");
+    if (!(controller instanceof MenubarController)) throw new Error("Expected menubar controller");
+    if (route === "element") {
+      controller[action](entry);
+      return null;
+    }
+    const seen = { prevented: false, handled: 0, reached: 0 };
+    const handler = () => seen.handled++;
+    const reached = () => seen.reached++;
+    const type = route === "click" ? "click" : "probe";
+    entry.addEventListener(type, handler);
+    if (route === "probe") {
+      entry.addEventListener("probe", (event) => controller[action](event), { once: true });
+    }
+    document.addEventListener(type, reached);
+    const event =
+      route === "click"
+        ? new MouseEvent("click", { bubbles: true, cancelable: true })
+        : new Event("probe", { bubbles: true, cancelable: true });
+    entry.dispatchEvent(event);
+    document.removeEventListener(type, reached);
+    entry.removeEventListener(type, handler);
+    seen.prevented = event.defaultPrevented;
+    return seen;
+  };
+
+  /** A refused click stops short of consumer handlers; a refused probe goes on untouched. */
+  const expectRefusedRoute = (route: Route, seen: Seen | null): void => {
+    if (route === "click") expect(seen).toEqual({ prevented: true, handled: 0, reached: 0 });
+    if (route === "probe") expect(seen).toEqual({ prevented: false, handled: 1, reached: 1 });
+  };
+
+  it.each(rows(ANCESTORS))(
+    "refuses an item under an aria-disabled %s through %s",
+    async (ancestor, route) => {
+      byId("inh-edit").click(); // opens Edit and focuses Cut
+      byId(ancestor).setAttribute("aria-disabled", "true");
+      await tick();
+      const capture = captureStateEvents("stimeo--menubar");
+
+      const seen = drive("inh-cut", "activate", route);
+      await tick();
+      capture.stop();
+
+      expectRefusedRoute(route, seen);
+      expect(capture.seen).toEqual([]);
+      expect(expanded("inh-edit")).toBe("true");
+      expect(menuHidden("inh-m-edit")).toBe(false);
+      expect(document.activeElement).toBe(byId("inh-cut"));
+      expect(stopsIn("inh-bar")).toEqual([byId("inh-edit")]);
+    },
+  );
+
+  it.each(rows(["inh-bar", "inh-outer"]))(
+    "refuses a top under an aria-disabled %s through %s",
+    async (ancestor, route) => {
+      byId("inh-file").click(); // opens File and focuses New
+      byId(ancestor).setAttribute("aria-disabled", "true");
+      await tick();
+      const capture = captureStateEvents("stimeo--menubar");
+
+      const seen = drive("inh-edit", "toggle", route);
+      await tick();
+      capture.stop();
+
+      expectRefusedRoute(route, seen);
+      expect(capture.seen).toEqual([]);
+      expect(expanded("inh-file")).toBe("true");
+      expect(menuHidden("inh-m-file")).toBe(false);
+      expect(expanded("inh-edit")).toBe("false");
+      expect(menuHidden("inh-m-edit")).toBe(true);
+      expect(document.activeElement).toBe(byId("inh-new"));
+      expect(stopsIn("inh-bar")).toEqual([byId("inh-file")]);
+    },
+  );
+
+  it.each(rows(ANCESTORS))(
+    "still opens and activates entries outside an aria-disabled %s through %s",
+    async (ancestor, route) => {
+      byId(ancestor).setAttribute("aria-disabled", "true");
+      await tick();
+      const control = CONTROLS[ancestor];
+      const capture = captureStateEvents("stimeo--menubar");
+
+      const opened = drive(control.top, "toggle", route);
+      expect(menuHidden(control.menu)).toBe(false);
+      const activated = drive(control.item, "activate", route);
+      capture.stop();
+
+      expect(capture.names()).toEqual(["open", "close"]);
+      expect(capture.reasons()).toEqual([route === "element" ? "api" : "user", "select"]);
+      expect(menuHidden(control.menu)).toBe(true);
+      if (route !== "element") {
+        const passed = { prevented: false, handled: 1, reached: 1 };
+        expect([opened, activated]).toEqual([passed, passed]);
+      }
+    },
+  );
+
+  it("keeps tops under an aria-disabled menubar reachable with the arrow keys", () => {
+    byId("inh-bar").setAttribute("aria-disabled", "true");
+
+    pressOn("inh-file", "ArrowRight");
+
+    expect(document.activeElement).toBe(byId("inh-edit"));
+    expect(stopsIn("inh-bar")).toEqual([byId("inh-edit")]);
+  });
+
+  it("opens the top of an aria-disabled menu and moves through its items", () => {
+    // The top sits outside the menu, so the menu's own aria-disabled does not reach it.
+    byId("inh-m-edit").setAttribute("aria-disabled", "true");
+
+    byId("inh-edit").click();
+    expect(expanded("inh-edit")).toBe("true");
+    expect(document.activeElement).toBe(byId("inh-cut"));
+
+    pressOn("inh-cut", "ArrowDown");
+    expect(document.activeElement).toBe(byId("inh-copy"));
+  });
+
+  it("never opens a menu with the keyboard from a top under an aria-disabled ancestor", () => {
+    byId("inh-outer").setAttribute("aria-disabled", "true");
+
+    expect(pressOn("inh-file", "ArrowDown").defaultPrevented).toBe(true);
+    expect(pressOn("inh-file", "ArrowUp").defaultPrevented).toBe(true);
+
+    expect(menuHidden("inh-m-file")).toBe(true);
+    expect(expanded("inh-file")).toBe("false");
+    expect(document.activeElement).toBe(byId("inh-file"));
+  });
+
+  it("closes the open menu without opening the next when an arrow lands under an aria-disabled ancestor", async () => {
+    byId("inh-file").click(); // opens File and focuses New
+    byId("inh-bar").setAttribute("aria-disabled", "true");
+    await tick();
+
+    pressOn("inh-new", "ArrowRight");
+
+    expect(document.activeElement).toBe(byId("inh-edit"));
+    expect(menuHidden("inh-m-file")).toBe(true);
+    expect(expanded("inh-edit")).toBe("false");
+    expect(menuHidden("inh-m-edit")).toBe(true);
+    expect(stopsIn("inh-bar")).toEqual([byId("inh-edit")]);
   });
 });
 
@@ -1381,10 +2303,10 @@ describe("MenubarController under runtime DOM changes", () => {
     document.body.innerHTML = "";
   });
 
-  /** Dispatches an Escape at the document and reports whether a layer owned it. */
+  /** Presses Escape from current focus and reports whether a document layer owned it. */
   const escapeConsumed = (): boolean => {
-    const press = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    document.dispatchEvent(press);
+    const press = keyEvent("Escape");
+    keyboardPress(document.activeElement as HTMLElement, press);
     return press.defaultPrevented;
   };
 
@@ -1747,12 +2669,12 @@ describe("MenubarController yielding a key a descendant already consumed", () =>
         <button id="dp-file" role="menuitem" aria-haspopup="menu" aria-expanded="false"
                 aria-controls="dp-m-file" data-stimeo--menubar-target="top"
                 data-action="click->stimeo--menubar#toggle
-                             keydown->stimeo--menubar#onTopKeydown">File <span id="dp-top-inner">*</span></button>
+                             keydown->stimeo--menubar#onTopKeydown">File <span id="dp-top-inner" tabindex="0">*</span></button>
         <ul id="dp-m-file" role="menu" aria-label="File" hidden data-stimeo--menubar-target="menu">
           <li role="none">
             <button id="dp-new" role="menuitem" tabindex="-1" data-stimeo--menubar-target="item"
                     data-action="click->stimeo--menubar#activate
-                                 keydown->stimeo--menubar#onItemKeydown">New <span id="dp-item-inner">*</span></button>
+                                 keydown->stimeo--menubar#onItemKeydown">New <span id="dp-item-inner" tabindex="0">*</span></button>
           </li>
           <li role="none">
             <button id="dp-open" role="menuitem" tabindex="-1" data-stimeo--menubar-target="item"
@@ -1774,11 +2696,9 @@ describe("MenubarController yielding a key a descendant already consumed", () =>
     byId("dp-file").focus();
     byId("dp-top-inner").addEventListener("keydown", (event) => event.preventDefault());
 
-    byId("dp-top-inner").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }),
-    );
+    keyboardPress(byId("dp-top-inner"), "ArrowRight");
 
-    expect(document.activeElement).toBe(byId("dp-file"));
+    expect(document.activeElement).toBe(byId("dp-top-inner"));
     expect(tabStops()).toEqual([byId("dp-file")]);
     expect(menuHidden("dp-m-edit")).toBe(true);
   });
@@ -1788,11 +2708,9 @@ describe("MenubarController yielding a key a descendant already consumed", () =>
     byId("dp-file").click(); // open, focus New
     byId("dp-item-inner").addEventListener("keydown", (event) => event.preventDefault());
 
-    byId("dp-item-inner").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
-    );
+    keyboardPress(byId("dp-item-inner"), "ArrowDown");
 
-    expect(document.activeElement).toBe(byId("dp-new"));
+    expect(document.activeElement).toBe(byId("dp-item-inner"));
   });
 });
 
@@ -1919,7 +2837,7 @@ describe("MenubarController target API", () => {
     document.body.innerHTML = "";
   });
 
-  it("retains the existing DOM Event success as a positive control", () => {
+  it("opens from a DOM click event as a positive control", () => {
     const reports: Array<{ reason?: string }> = [];
     element("api-root").addEventListener("stimeo--menubar:open", (event) => {
       reports.push((event as CustomEvent<{ reason?: string }>).detail);
@@ -1930,7 +2848,7 @@ describe("MenubarController target API", () => {
   });
 
   it.each([false, true])(
-    "accepts an owned target or its descendant (%s) after an Event positive control",
+    "accepts an owned target or its descendant (%s) through the element API",
     (descendant) => {
       const reports: Array<{ reason?: string }> = [];
       element("api-root").addEventListener("stimeo--menubar:open", (event) => {
@@ -2028,6 +2946,64 @@ describe("MenubarController target API", () => {
       expect(element("api-panel-b").hidden).toBe(true);
       expect(reports.map((detail) => detail.reason)).toEqual(["select"]);
       expect(document.activeElement).toBe(inside ? element("api-b") : element("api-outside"));
+      expect(element("api-b").tabIndex).toBe(0);
+    },
+  );
+
+  /** Puts `constraint` on `target` the way an author writes it. */
+  const constrain = (target: HTMLElement, constraint: "aria-disabled" | "disabled" | "hidden") => {
+    if (constraint === "aria-disabled") target.setAttribute("aria-disabled", "true");
+    else target.toggleAttribute(constraint, true);
+  };
+  const CONSTRAINED_SOURCES = (["aria-disabled", "disabled", "hidden"] as const).flatMap(
+    (constraint) => [false, true].map((descendant) => [constraint, descendant] as const),
+  );
+
+  it.each(CONSTRAINED_SOURCES)(
+    "refuses the %s top through the element API, from the top or its descendant (%s)",
+    async (constraint, descendant) => {
+      const opener = element("api-b");
+      constrain(opener, constraint);
+      await tick();
+      element("api-outside").focus();
+      const capture = captureStateEvents("stimeo--menubar", ["open", "close"], element("api-root"));
+      const source = descendant ? opener.querySelector("span") : opener;
+      if (!(source instanceof HTMLElement)) throw new Error("Missing API source");
+
+      instance().toggle(source);
+      await tick();
+      capture.stop();
+
+      expect(capture.seen).toEqual([]);
+      expect(opener.getAttribute("aria-expanded")).toBe("false");
+      expect(element("api-panel-b").hidden).toBe(true);
+      expect(document.activeElement).toBe(element("api-outside"));
+      expect(element("api-a").tabIndex).toBe(0);
+      expect(opener.tabIndex).toBe(-1);
+    },
+  );
+
+  it.each(CONSTRAINED_SOURCES)(
+    "refuses the %s menu item through the element API, from the item or its descendant (%s)",
+    async (constraint, descendant) => {
+      element("api-outside").focus();
+      instance().toggle(element("api-b"));
+      const owned = element("api-panel-b").querySelector("button");
+      if (!(owned instanceof HTMLElement)) throw new Error("Missing menu item");
+      const child = document.createElement("span");
+      owned.append(child);
+      constrain(owned, constraint);
+      await tick();
+      const capture = captureStateEvents("stimeo--menubar", ["open", "close"], element("api-root"));
+
+      instance().activate(descendant ? child : owned);
+      await tick();
+      capture.stop();
+
+      expect(capture.seen).toEqual([]);
+      expect(element("api-panel-b").hidden).toBe(false);
+      expect(element("api-b").getAttribute("aria-expanded")).toBe("true");
+      expect(document.activeElement).toBe(element("api-outside"));
       expect(element("api-b").tabIndex).toBe(0);
     },
   );
@@ -2172,4 +3148,218 @@ describe("MenubarController target API", () => {
     expect(element("api-panel-b").hidden).toBe(true);
     expect(reports).toHaveBeenCalledOnce();
   });
+});
+
+/**
+ * The item an action resolves is the one the action is bound to (the event's
+ * `currentTarget`), whatever the event's target has become since. A handler that moves
+ * the target out of a refused item before `activate` runs leaves the item itself to
+ * judge, so the item is still refused.
+ */
+describe("MenubarController when the target leaves the resolved item", () => {
+  let application: Application;
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const mountBar = async (openState: string): Promise<MenubarController> => {
+    document.body.innerHTML = `
+      <div id="bar" data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+        ${top("file", "File", "m-file")}
+        <ul id="m-file" role="menu" aria-label="File" hidden data-stimeo--menubar-target="menu">
+          <li role="none"><button id="new" role="menuitem" tabindex="-1"
+                data-stimeo--menubar-target="item">New</button></li>
+          <li role="none"><button id="open" role="menuitem" tabindex="-1" ${openState}
+                data-stimeo--menubar-target="item"><span id="label">Open</span></button></li>
+        </ul>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--menubar", MenubarController);
+    await tick();
+    byId("file").click();
+    await tick();
+    return application.getControllerForElementAndIdentifier(
+      byId("bar"),
+      "stimeo--menubar",
+    ) as MenubarController;
+  };
+
+  it.each([
+    ["aria-disabled", 'aria-disabled="true"', []],
+    ["hidden", "hidden", []],
+    ["disabled", "disabled", []],
+    ["enabled", "", ["close"]],
+  ] as const)(
+    "judges the %s item when a handler moves the probe target out of it",
+    async (_state, openState, reported) => {
+      const controller = await mountBar(openState);
+      byId("label").addEventListener("probe", () => byId("bar").append(byId("label")));
+      byId("open").addEventListener("probe", (event) => controller.activate(event));
+      const capture = captureStateEvents("stimeo--menubar");
+
+      byId("label").dispatchEvent(new Event("probe", { bubbles: true }));
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual(reported);
+    },
+  );
+
+  it.each([
+    ["aria-disabled", 'aria-disabled="true"', []],
+    ["enabled", "", ["close"]],
+  ] as const)(
+    "judges the %s item whose click target a document capture handler moves into another",
+    async (_state, openState, reported) => {
+      const controller = await mountBar(openState);
+      // Runs before the controller's own capture pass, so the click is recorded for New.
+      const move = () => byId("new").append(byId("label"));
+      document.addEventListener("click", move, { capture: true });
+      byId("open").addEventListener("click", (event) => controller.activate(event));
+      const capture = captureStateEvents("stimeo--menubar");
+
+      byId("label").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      document.removeEventListener("click", move, { capture: true });
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual(reported);
+    },
+  );
+});
+
+/**
+ * A top whose event target a handler takes out of it before `toggle` runs is judged
+ * itself: an element target moved elsewhere, or a text target the handler replaces.
+ */
+describe("MenubarController when the target leaves the resolved top", () => {
+  let application: Application;
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const mountTop = async (fileState: string): Promise<MenubarController> => {
+    document.body.innerHTML = `
+      <div id="bar" data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+        <button id="file" role="menuitem" ${fileState} aria-haspopup="menu" aria-expanded="false"
+                aria-controls="m-file"
+                data-stimeo--menubar-target="top"><span id="label">File</span></button>
+        <ul id="m-file" role="menu" aria-label="File" hidden data-stimeo--menubar-target="menu">
+          <li role="none"><button id="new" role="menuitem" tabindex="-1"
+                data-stimeo--menubar-target="item">New</button></li>
+        </ul>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--menubar", MenubarController);
+    await tick();
+    return application.getControllerForElementAndIdentifier(
+      byId("bar"),
+      "stimeo--menubar",
+    ) as MenubarController;
+  };
+
+  it.each([
+    ["aria-disabled", 'aria-disabled="true"', []],
+    ["hidden", "hidden", []],
+    ["disabled", "disabled", []],
+    ["enabled", "", ["open"]],
+  ] as const)(
+    "judges the %s top when a handler moves the probe target out of it",
+    async (_state, fileState, reported) => {
+      const controller = await mountTop(fileState);
+      byId("label").addEventListener("probe", () => byId("bar").append(byId("label")));
+      byId("file").addEventListener("probe", (event) => controller.toggle(event));
+      const capture = captureStateEvents("stimeo--menubar");
+
+      byId("label").dispatchEvent(new Event("probe", { bubbles: true }));
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual(reported);
+    },
+  );
+
+  it.each([
+    ["aria-disabled", 'aria-disabled="true"', []],
+    ["hidden", "hidden", []],
+    ["disabled", "disabled", []],
+    ["enabled", "", ["open"]],
+  ] as const)(
+    "judges the %s top when a handler replaces the text node the probe started on",
+    async (_state, fileState, reported) => {
+      const controller = await mountTop(fileState);
+      const text = byId("label").firstChild as Text;
+      text.addEventListener("probe", () => {
+        byId("label").textContent = "Saving";
+      });
+      byId("file").addEventListener("probe", (event) => controller.toggle(event));
+      const capture = captureStateEvents("stimeo--menubar");
+
+      text.dispatchEvent(new Event("probe", { bubbles: true }));
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual(reported);
+    },
+  );
+});
+
+/**
+ * A click on a nested pair is judged for both items when it starts, so a handler that
+ * marks either one `aria-disabled` during the click does not undo the close that click
+ * started, whichever item the action is bound to.
+ */
+describe("MenubarController with a nested pair marked during a click", () => {
+  let application: Application;
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it.each([
+    ["no item", "inner", "none"],
+    ["the inner item", "inner", "inner"],
+    ["the inner item", "outer", "inner"],
+    ["the outer item", "inner", "outer"],
+    ["the outer item", "outer", "outer"],
+  ] as const)(
+    "closes when a handler marks %s aria-disabled, with the action on the %s item",
+    async (_marked, receiver, marked) => {
+      document.body.innerHTML = `
+        <div id="bar" data-controller="stimeo--menubar" role="menubar" aria-label="Main">
+          ${top("file", "File", "m-file")}
+          <div id="m-file" role="menu" aria-label="File" hidden data-stimeo--menubar-target="menu">
+            <div id="outer" role="menuitem" tabindex="-1" data-stimeo--menubar-target="item">
+              <button id="inner" role="menuitem" tabindex="-1"
+                      data-stimeo--menubar-target="item"><span id="label">Run</span></button>
+            </div>
+          </div>
+        </div>`;
+      application = Application.start();
+      application.register("stimeo--menubar", MenubarController);
+      await tick();
+      const controller = application.getControllerForElementAndIdentifier(
+        byId("bar"),
+        "stimeo--menubar",
+      ) as MenubarController;
+      byId("file").click();
+      await tick();
+      byId("label").addEventListener("click", () => {
+        if (marked !== "none") byId(marked).setAttribute("aria-disabled", "true");
+      });
+      byId(receiver).addEventListener("click", (event) => controller.activate(event));
+      const capture = captureStateEvents("stimeo--menubar");
+
+      byId("label").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual(["close"]);
+    },
+  );
 });

@@ -4,6 +4,7 @@ import { TooltipController } from "../src/controllers/tooltip_controller";
 import { EscapeLayer } from "../src/utils/escape_layer";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { keyEvent, press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -219,19 +220,14 @@ describe("TooltipController", () => {
   it("dismisses on Escape at the document level even when focus is elsewhere", () => {
     fire(trigger(), "mouseenter");
     expect(content().hidden).toBe(false);
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    typeKey(document, "Escape");
     expect(content().hidden).toBe(true);
   });
 
   it("dismisses on Escape pressed on the trigger, consuming the press", () => {
     fire(trigger(), "mouseenter");
     trigger().focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
-    trigger().dispatchEvent(event);
+    const event = pressKey(trigger(), "Escape");
     expect(event.defaultPrevented).toBe(true);
     expect(content().hidden).toBe(true);
   });
@@ -245,15 +241,13 @@ describe("TooltipController", () => {
     let aboveDismissed = 0;
     const above = new EscapeLayer();
     above.activate(document, { onDismiss: () => aboveDismissed++ });
-    const first = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    trigger().dispatchEvent(first);
+    const first = pressKey(trigger(), "Escape");
     expect(first.defaultPrevented).toBe(true);
     expect(aboveDismissed).toBe(1);
     expect(content().hidden).toBe(false);
 
     above.deactivate();
-    const second = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    trigger().dispatchEvent(second);
+    const second = pressKey(trigger(), "Escape");
     expect(second.defaultPrevented).toBe(true);
     expect(content().hidden).toBe(true);
   });
@@ -268,8 +262,7 @@ describe("TooltipController", () => {
       // A show request while the tooltip is already shown leaves the state, and
       // so the order of the Escape stack, where it was.
       focus(trigger(), "focusin");
-      const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-      document.dispatchEvent(press);
+      const press = typeKey(document, "Escape");
       expect(press.defaultPrevented).toBe(true);
       expect(aboveDismissed).toBe(1);
       expect(content().hidden).toBe(false);
@@ -280,15 +273,15 @@ describe("TooltipController", () => {
 
   it("ignores an Escape already handled by an inner layer", () => {
     fire(trigger(), "mouseenter");
-    const handled = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    const handled = keyEvent("Escape");
     handled.preventDefault();
-    document.dispatchEvent(handled);
+    typeKey(document, handled);
     // The layered-Escape contract: a consumed press dismisses at most one layer.
     expect(content().hidden).toBe(false);
 
-    const handledOnTrigger = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    const handledOnTrigger = keyEvent("Escape");
     handledOnTrigger.preventDefault();
-    trigger().dispatchEvent(handledOnTrigger);
+    pressKey(trigger(), handledOnTrigger);
     expect(content().hidden).toBe(false);
   });
 
@@ -338,12 +331,7 @@ describe("TooltipController", () => {
   it("removes the document Escape listener on disconnect while open", () => {
     fire(trigger(), "mouseenter");
     controller().disconnect();
-    const event = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
-    document.dispatchEvent(event);
+    const event = typeKey(document, "Escape");
     expect(event.defaultPrevented).toBe(false);
     expect(content().hidden).toBe(false);
   });
@@ -395,8 +383,7 @@ describe("TooltipController", () => {
 
     // The node never left the element, so it is still the content this tooltip shows.
     expect(moved.hidden).toBe(false);
-    const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-    document.dispatchEvent(press);
+    const press = typeKey(document, "Escape");
     expect(press.defaultPrevented).toBe(true);
     expect(moved.hidden).toBe(true);
   });
@@ -416,8 +403,7 @@ describe("TooltipController", () => {
 
     // Only the content this tooltip shows holds what the shown state lent.
     expect(content().hidden).toBe(false);
-    const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-    document.dispatchEvent(press);
+    const press = typeKey(document, "Escape");
     expect(press.defaultPrevented).toBe(true);
   });
 
@@ -430,16 +416,14 @@ describe("TooltipController", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     // The removal itself released the layer, so the press reaches whatever is below.
-    const firstEscape = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-    document.dispatchEvent(firstEscape);
+    const firstEscape = typeKey(document, "Escape");
     expect(firstEscape.defaultPrevented).toBe(false);
 
     root().append(detachedContent);
     detachedContent.hidden = false;
     window.dispatchEvent(new Event("scroll"));
     expect(detachedContent.hidden).toBe(false);
-    const secondEscape = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-    document.dispatchEvent(secondEscape);
+    const secondEscape = typeKey(document, "Escape");
     expect(secondEscape.defaultPrevented).toBe(false);
   });
 
@@ -450,8 +434,7 @@ describe("TooltipController", () => {
       detachedContent.remove();
       expect(() => controller().show()).not.toThrow();
       expect(capture.seen).toEqual([]);
-      const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-      document.dispatchEvent(press);
+      const press = typeKey(document, "Escape");
       expect(press.defaultPrevented).toBe(false);
 
       // The same request shows the tooltip once the target is back.
@@ -502,8 +485,7 @@ describe("TooltipController", () => {
 
     /** Presses Escape at the document and reports whether a layer consumed it. */
     const pressEscape = (): boolean => {
-      const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-      document.dispatchEvent(press);
+      const press = typeKey(document, "Escape");
       return press.defaultPrevented;
     };
 
@@ -1067,7 +1049,7 @@ describe("TooltipController", () => {
       await vi.advanceTimersByTimeAsync(0);
       capture.clear();
 
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      typeKey(document, "Escape");
 
       expect(capture.names()).toEqual(["close"]);
       expect(capture.reasons()).toEqual(["escape"]);

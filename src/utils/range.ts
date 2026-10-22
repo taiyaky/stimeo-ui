@@ -26,7 +26,7 @@ export function rangeFraction(value: number, min: number, max: number): number {
   const span = max - min;
   if (!(span > 0)) return 0;
 
-  const clamped = Math.min(max, Math.max(min, value));
+  const clamped = clampRange(value, min, max);
   let fraction: number;
   if (Number.isFinite(span)) {
     fraction = (clamped - min) / span;
@@ -39,4 +39,9 @@ export function rangeFraction(value: number, min: number, max: number): number {
 
   if (!Number.isFinite(fraction)) return 0;
   return Math.min(1, Math.max(0, fraction));
+}
+
+/** Clamps a numeric value to the supplied bounds; inverted bounds resolve to `max`. */
+export function clampRange(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }

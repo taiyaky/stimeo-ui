@@ -4,7 +4,13 @@ import { join, relative } from "node:path";
 import process from "node:process";
 import { describe, expect, it } from "vitest";
 import { buildCheckReport, formatGithubAnnotation, runCli } from "../../src/inspector/cli";
-import type { ControllerManifest, FileReport, Manifest } from "../../src/inspector/types";
+import { buildManifest } from "../../src/inspector/manifest";
+import type {
+  CheckReport,
+  ControllerManifest,
+  FileReport,
+  Manifest,
+} from "../../src/inspector/types";
 
 /** Collects CLI output for assertions, optionally with an injected manifest. */
 function capture(argv: string[], load?: () => Manifest): { code: number; output: string } {
@@ -310,6 +316,22 @@ describe("runCli", () => {
       },
     );
   });
+
+  it.each(["stimeo--live-counter", "stimeo--presence", "stimeo--typing-indicator"])(
+    "check warns that %s from stimeo-ui/cable has no announcer, against the built manifest",
+    (identifier) => {
+      // The real manifest knows the cable controllers, so the only finding on a bare
+      // host is the missing seat, and a warning alone leaves the run passing.
+      withFiles({ "page.html": `<div data-controller="${identifier}"></div>` }, (dir) => {
+        const { code, output } = capture(["check", "--json", dir], () => buildManifest("0.0.0"));
+        const report = JSON.parse(output) as CheckReport;
+        const diagnostics = report.files.flatMap((file) => file.diagnostics);
+        expect(diagnostics.map((diagnostic) => diagnostic.code)).toEqual(["missing-announcer"]);
+        expect(diagnostics[0]?.message).toContain(`"${identifier}"`);
+        expect(code).toBe(0);
+      });
+    },
+  );
 
   it("check --github emits workflow-command annotations", () => {
     const dir = mkdtempSync(join(tmpdir(), "stimeo-cli-"));

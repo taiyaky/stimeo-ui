@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DataGridController } from "../src/controllers/data_grid_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { keyEvent, press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
@@ -76,7 +77,7 @@ describe("DataGridController", () => {
   const row = (index: number) => at(rows(), index);
   const cell = (index: number) => at(cells(), index);
   const press = (el: HTMLElement, key: string, init: KeyboardEventInit = {}) =>
-    el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, ...init }));
+    !pressKey(el, key, { bubbles: true, ...init }).defaultPrevented;
   /**
    * Counts, from here on, how often the grid walks its `role="row"` elements. A
    * reconcile pass rebuilds the cell matrix exactly once, and so does a navigation
@@ -288,12 +289,13 @@ describe("DataGridController", () => {
     const first = cell(0);
     first.focus();
     const inner = document.createElement("span");
+    inner.tabIndex = -1;
     first.append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
 
     press(inner, "ArrowRight", { cancelable: true });
 
-    expect(document.activeElement).toBe(first);
+    expect(document.activeElement).toBe(inner);
   });
 
   it("keeps a single tab stop across cells and headers on connect", async () => {
@@ -366,13 +368,8 @@ describe("DataGridController", () => {
     await start();
     cell(0).focus();
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    cell(0).dispatchEvent(event);
+    const event = keyEvent("ArrowRight", { altKey: true, bubbles: true, cancelable: true });
+    pressKey(cell(0), event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(cell(0));
@@ -381,13 +378,8 @@ describe("DataGridController", () => {
 
     // Shift+arrow is the APG selection-extension binding, which this grid does
     // not implement — so it must not run the plain-arrow branch either.
-    const shifted = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      shiftKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    cell(0).dispatchEvent(shifted);
+    const shifted = keyEvent("ArrowRight", { shiftKey: true, bubbles: true, cancelable: true });
+    pressKey(cell(0), shifted);
     expect(shifted.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(cell(0));
   });
@@ -399,6 +391,61 @@ describe("DataGridController", () => {
     press(cell(0), "ArrowUp"); // header row is above; clamp keeps column
     expect(document.activeElement).toBe(header(0));
   });
+
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (
+        [
+          { altKey: true },
+          { metaKey: true },
+          { shiftKey: true },
+          { ctrlKey: true, altKey: true },
+          { ctrlKey: true, metaKey: true },
+          { ctrlKey: true, shiftKey: true },
+        ] satisfies KeyboardEventInit[]
+      ).map((modifiers) => ({ key, modifiers })),
+    ),
+  )(
+    "yields modified boundary key $key $modifiers without changing grid state",
+    async ({ key, modifiers }) => {
+      await start("multiple");
+      cell(1).focus();
+      const before = root().outerHTML;
+      const seen: string[] = [];
+      for (const name of ["stimeo--data-grid:sort", "stimeo--data-grid:selectionchange"]) {
+        root().addEventListener(name, () => seen.push(name));
+      }
+      const walks = countWalks();
+      const event = pressKey(cell(1), key, modifiers);
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(cell(1));
+      expect(root().outerHTML).toBe(before);
+      expect(walks()).toBe(0);
+      expect(seen).toEqual([]);
+    },
+  );
+
+  it.each(["Home", "End"])(
+    "keeps exact Control boundary key %s for grid navigation",
+    async (key) => {
+      await start("multiple");
+      const seen: string[] = [];
+      root().addEventListener("stimeo--data-grid:selectionchange", () => seen.push("selection"));
+      const event = pressKey(cell(1), key, { ctrlKey: true });
+      const target = key === "Home" ? header(0) : cell(3);
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(target);
+      expect(target.tabIndex).toBe(0);
+      expect([...headers(), ...cells()].filter((candidate) => candidate.tabIndex === 0)).toEqual([
+        target,
+      ]);
+      expect(rows().map((candidate) => candidate.getAttribute("aria-selected"))).toEqual([
+        "false",
+        "false",
+      ]);
+      expect(seen).toEqual([]);
+    },
+  );
 
   it("jumps within a row with Home/End and across the grid with Ctrl+Home/End", async () => {
     await start();
@@ -482,7 +529,8 @@ describe("DataGridController", () => {
       root(),
       "stimeo--data-grid",
     ) as DataGridController;
-    // The value-changed callback runs off the attribute mutation (async in happy-dom).
+    // The value-changed callback runs off the attribute mutation, which a MutationObserver
+    // delivers asynchronously.
     controller.selectionValue = "multiple";
     await tick();
     expect(root().getAttribute("aria-multiselectable")).toBe("true");
@@ -509,7 +557,7 @@ describe("DataGridController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Speech-order regression over the grid: roles, sort state, and cell names are
+  // Speech-order check over the grid: roles, sort state, and cell names are
   // announced in a stable order so a lost role/state shows up as a diff.
   it("announces the grid roles and the sortable header state", async () => {
     await start();
@@ -786,13 +834,8 @@ describe("DataGridController", () => {
       return control;
     };
     const fire = (el: HTMLElement, key: string, init: KeyboardEventInit = {}) => {
-      const event = new KeyboardEvent("keydown", {
-        key,
-        bubbles: true,
-        cancelable: true,
-        ...init,
-      });
-      el.dispatchEvent(event);
+      const event = keyEvent(key, { bubbles: true, cancelable: true, ...init });
+      pressKey(el, event);
       return event;
     };
 
@@ -815,6 +858,7 @@ describe("DataGridController", () => {
       await start("single");
       const button = nest("button");
       const label = document.createElement("span");
+      label.tabIndex = -1;
       button.append(label);
 
       const event = fire(label, "Enter");
@@ -1062,12 +1106,9 @@ describe("DataGridController", () => {
       await tick();
       const caption = document.querySelector("caption") as HTMLElement;
 
-      const event = new KeyboardEvent("keydown", {
-        key: "ArrowRight",
-        bubbles: true,
-        cancelable: true,
-      });
-      caption.dispatchEvent(event);
+      const event = keyEvent("ArrowRight", { bubbles: true, cancelable: true });
+      // The nonfocusable caption probes the matrix guard without gaining focus.
+      typeKey(caption, event);
 
       expect(event.defaultPrevented).toBe(false);
       expect(cell(0).tabIndex).toBe(0);
@@ -1095,26 +1136,14 @@ describe("DataGridController", () => {
       // so a move that leaves the event uncancelled makes both widgets act.
       await start();
 
-      const moved = new KeyboardEvent("keydown", {
-        key: "ArrowRight",
-        bubbles: true,
-        cancelable: true,
-      });
-      expect(cell(0).dispatchEvent(moved)).toBe(false);
+      const moved = keyEvent("ArrowRight", { bubbles: true, cancelable: true });
+      expect(!pressKey(cell(0), moved).defaultPrevented).toBe(false);
 
-      const jumped = new KeyboardEvent("keydown", {
-        key: "Home",
-        bubbles: true,
-        cancelable: true,
-      });
-      expect(cell(1).dispatchEvent(jumped)).toBe(false);
+      const jumped = keyEvent("Home", { bubbles: true, cancelable: true });
+      expect(!pressKey(cell(1), jumped).defaultPrevented).toBe(false);
 
-      const sorted = new KeyboardEvent("keydown", {
-        key: "Enter",
-        bubbles: true,
-        cancelable: true,
-      });
-      expect(header(0).dispatchEvent(sorted)).toBe(false);
+      const sorted = keyEvent("Enter", { bubbles: true, cancelable: true });
+      expect(!pressKey(header(0), sorted).defaultPrevented).toBe(false);
     });
 
     it("reads the writing direction from the grid, not from the focused cell", async () => {
@@ -1878,9 +1907,9 @@ describe("DataGridController settled reports", () => {
   const items = () =>
     Array.from(root().querySelectorAll<HTMLElement>('[data-stimeo--data-grid-target="row"]'));
   const act = (index: number) => {
-    items()
-      [index]?.querySelector("td")
-      ?.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    const cell = items()[index]?.querySelector<HTMLElement>("td");
+    if (!cell) throw new Error(`Missing row cell ${index}`);
+    pressKey(cell, " ");
   };
   const write = (index: number) => {
     items().forEach((item, position) => {

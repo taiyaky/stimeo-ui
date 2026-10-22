@@ -635,7 +635,8 @@ describe("FileDropzoneController", () => {
     const oldList = list();
 
     oldList.removeAttribute("data-stimeo--file-dropzone-target");
-    // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+    // The case asserts right after the change, so it calls the Stimulus target callback
+    // directly instead of waiting for the MutationObserver delivery.
     (controller() as FileDropzoneController).listTargetDisconnected(oldList);
     removeButtons()[0]?.click();
 
@@ -927,8 +928,8 @@ describe("FileDropzoneController", () => {
       await mount();
       drop(file("a.jpg", "image/jpeg"));
       input().remove();
-      // Drive the callback directly: happy-dom delivers target callbacks unreliably, and a
-      // throw from one it delivers surfaces outside the test.
+      // Call the callback directly inside `expect`, so a throw from it fails this case
+      // rather than surfacing outside the test from the MutationObserver delivery.
       expect(() =>
         (controller() as FileDropzoneController).inputTargetDisconnected(),
       ).not.toThrow();
@@ -993,9 +994,9 @@ describe("FileDropzoneController", () => {
     });
 
     /**
-     * Chooses `files` in `element` the way its native dialog does. Stimulus binds the
-     * action of an appended input unreliably under happy-dom, so the call it would make
-     * with that event is made directly when the binding did not run.
+     * Chooses `files` in `element` the way its native dialog does and dispatches its
+     * `change`, then calls `onChange` with that event directly when no `data-action`
+     * binding delivered it.
      */
     const chooseIn = (element: HTMLInputElement, ...files: File[]) => {
       const instance = controller() as FileDropzoneController;
@@ -1124,7 +1125,8 @@ describe("FileDropzoneController", () => {
       const only = list();
       only.remove();
 
-      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      // Call the callback directly inside `expect`, so a throw from it fails this case
+      // rather than surfacing outside the test from the MutationObserver delivery.
       expect(() =>
         (controller() as FileDropzoneController).listTargetDisconnected(only),
       ).not.toThrow();

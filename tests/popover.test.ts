@@ -4,6 +4,7 @@ import { PopoverController } from "../src/controllers/popover_controller";
 import { EscapeLayer } from "../src/utils/escape_layer";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { keyEvent, press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -111,21 +112,15 @@ describe("PopoverController", () => {
 
   it("closes on Escape and restores focus to the trigger", () => {
     trigger().click();
-    query<HTMLInputElement>("#field").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-    );
+    pressKey(query<HTMLInputElement>("#field"), "Escape", { bubbles: true });
     expect(panel().hidden).toBe(true);
     expect(document.activeElement).toBe(trigger());
   });
 
   it("consumes the Escape it owns", () => {
     trigger().click();
-    const event = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
-    query<HTMLInputElement>("#field").dispatchEvent(event);
+    const event = keyEvent("Escape", { bubbles: true, cancelable: true });
+    pressKey(query<HTMLInputElement>("#field"), event);
     // Owning the press marks it handled so outer layers skip the same Escape.
     expect(event.defaultPrevented).toBe(true);
     expect(panel().hidden).toBe(true);
@@ -133,13 +128,9 @@ describe("PopoverController", () => {
 
   it("ignores an Escape already handled by an inner layer", () => {
     trigger().click();
-    const handled = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
+    const handled = keyEvent("Escape", { bubbles: true, cancelable: true });
     handled.preventDefault();
-    query<HTMLInputElement>("#field").dispatchEvent(handled);
+    pressKey(query<HTMLInputElement>("#field"), handled);
     expect(panel().hidden).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
   });
@@ -152,8 +143,9 @@ describe("PopoverController", () => {
     (document.activeElement as HTMLElement | null)?.blur();
     expect(document.activeElement).toBe(document.body);
 
-    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    document.body.dispatchEvent(event);
+    const event = keyEvent("Escape", { bubbles: true, cancelable: true });
+    // Focus is deliberately on the body so only the document fallback can claim Escape.
+    typeKey(document.body, event);
 
     expect(event.defaultPrevented).toBe(true);
     expect(panel().hidden).toBe(true);
@@ -169,15 +161,17 @@ describe("PopoverController", () => {
     let aboveDismissed = 0;
     const above = new EscapeLayer();
     above.activate(document, { onDismiss: () => aboveDismissed++ });
-    const first = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    document.body.dispatchEvent(first);
+    const first = keyEvent("Escape", { bubbles: true, cancelable: true });
+    // Neither layer receives focus while the document stack chooses the Escape owner.
+    typeKey(document.body, first);
     expect(first.defaultPrevented).toBe(true);
     expect(aboveDismissed).toBe(1);
     expect(panel().hidden).toBe(false);
 
     above.deactivate();
-    const second = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    document.body.dispatchEvent(second);
+    const second = keyEvent("Escape", { bubbles: true, cancelable: true });
+    // The body remains the origin after the newer document layer releases ownership.
+    typeKey(document.body, second);
     expect(second.defaultPrevented).toBe(true);
     expect(panel().hidden).toBe(true);
   });
@@ -211,11 +205,10 @@ describe("PopoverController", () => {
   });
 
   it("hands off to a second popover when its trigger is clicked", async () => {
-    // The trade-off capture buys: `document` now sees the click
-    // before the trigger's own handler, so the open instance must let go *and*
-    // the new one must still open. Milder here than in the menu family — this
-    // controller's outside-click close does not restore focus, so nothing moves
-    // mid-dispatch — but "the second one never opens" is the same failure.
+    // Capture has a cost: `document` sees the click before the trigger's own
+    // handler, so the open instance must let go *and* the new one must still open.
+    // This controller's outside-click close does not restore focus, so nothing moves
+    // mid-dispatch; this case guards that the first lets go and the second opens at all.
     const second = document.createElement("div");
     second.innerHTML = `
       <div data-controller="stimeo--popover">
@@ -283,9 +276,7 @@ describe("PopoverController", () => {
     trigger().click();
     controller().disconnect();
     // An Escape after teardown must not throw or mutate anything further.
-    query<HTMLInputElement>("#field").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-    );
+    pressKey(query<HTMLInputElement>("#field"), "Escape", { bubbles: true });
     expect(panel().hidden).toBe(false);
   });
 
@@ -353,8 +344,8 @@ describe("PopoverController", () => {
     // The node never left the element, so it is still the panel this popover shows.
     expect(moved.hidden).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
-    const press = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    moved.dispatchEvent(press);
+    const press = keyEvent("Escape", { bubbles: true, cancelable: true });
+    pressKey(query<HTMLInputElement>("#field"), press);
     expect(press.defaultPrevented).toBe(true);
     expect(moved.hidden).toBe(true);
   });
@@ -374,8 +365,8 @@ describe("PopoverController", () => {
     // Only the panel this popover shows holds what the open state lent.
     expect(panel().hidden).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
-    const press = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    panel().dispatchEvent(press);
+    const press = keyEvent("Escape", { bubbles: true, cancelable: true });
+    pressKey(query<HTMLInputElement>("#field"), press);
     expect(press.defaultPrevented).toBe(true);
   });
 
@@ -525,7 +516,8 @@ describe("PopoverController", () => {
       const only = trigger();
       only.remove();
 
-      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      // The test stays synchronous, so it calls the Stimulus target callback directly
+      // instead of waiting for the MutationObserver delivery.
       expect(() => controller().triggerTargetDisconnected(only)).not.toThrow();
     });
 
@@ -657,7 +649,7 @@ describe("PopoverController", () => {
       trigger().click();
       capture.clear();
 
-      query("#field").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      pressKey(query("#field"), "Escape", { bubbles: true });
 
       expect(capture.reasons()).toEqual(["escape"]);
     });
@@ -752,8 +744,9 @@ describe("PopoverController", () => {
     const pressEscape = (): boolean => {
       const active = document.activeElement;
       if (active instanceof HTMLElement) active.blur();
-      const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-      document.dispatchEvent(press);
+      const press = keyEvent("Escape", { cancelable: true });
+      // Body focus exercises document ownership without reopening a panel by focus.
+      typeKey(document, press);
       return press.defaultPrevented;
     };
 
@@ -1102,8 +1095,9 @@ describe("PopoverController", () => {
       controller().open();
 
       expect(panel().contains(document.activeElement)).toBe(false);
-      const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-      document.dispatchEvent(press);
+      const press = keyEvent("Escape", { cancelable: true });
+      // Body focus exercises document ownership without reopening a panel by focus.
+      typeKey(document, press);
       expect(press.defaultPrevented).toBe(false);
     });
   });

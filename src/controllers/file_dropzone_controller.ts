@@ -295,6 +295,9 @@ export class FileDropzoneController extends Controller<HTMLElement> {
    * behind the current one stays empty. This is the only place the listener is
    * attached, so the pair with {@link listTargetDisconnected} keeps it from outliving
    * the element it is on; the watch ends with the connection.
+   *
+   * @stimeoListenerLifetime element each list is bound when it becomes a target and
+   *   unbound when it stops being one or the controller disconnects.
    */
   listTargetConnected(list: HTMLElement): void {
     list.addEventListener("click", this.#onItemClick);

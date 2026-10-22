@@ -4,7 +4,8 @@ import type { Diagnostic } from "./types";
 export const ANNOUNCER_IDENTIFIER = "stimeo--announcer";
 
 /**
- * Controllers that reach assistive tech through the shared announcer.
+ * Controllers of the `stimeo-ui` entry point and of `stimeo-ui/cable` that reach
+ * assistive tech through the shared announcer.
  *
  * A message they need spoken cannot ride a live region of their own: a region
  * only announces what changes *after* assistive tech already knows about it,
@@ -28,17 +29,20 @@ export const ANNOUNCING_CONTROLLERS: readonly string[] = [
   "stimeo--flash",
   "stimeo--form-field",
   "stimeo--frame-loading",
+  "stimeo--live-counter",
   "stimeo--meter",
   "stimeo--multi-select",
   "stimeo--nested-form",
   "stimeo--network-status",
   "stimeo--password-strength",
+  "stimeo--presence",
   "stimeo--progress",
   "stimeo--skeleton",
   "stimeo--sortable",
   "stimeo--spinner",
   "stimeo--submit-once",
   "stimeo--tags-input",
+  "stimeo--typing-indicator",
 ];
 
 /** One scanned source and the path to report it under. */

@@ -1,3 +1,4 @@
+import { setAttributeIfChanged } from "./attribute_write";
 import { sharedRegistry } from "./shared_registry";
 
 /** What a lease's record says: the authored declaration, the last write and the leases beneath. */
@@ -242,9 +243,7 @@ export class StylePropertyLease<T extends HTMLElement = HTMLElement> {
       );
     });
     for (const [name, recorded] of records) {
-      if (element.getAttribute(name) === recorded) continue;
-      if (recorded === null) element.removeAttribute(name);
-      else element.setAttribute(name, recorded);
+      setAttributeIfChanged(element, name, recorded);
     }
   }
 

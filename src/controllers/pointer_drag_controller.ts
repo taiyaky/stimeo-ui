@@ -1,11 +1,15 @@
 import { Controller } from "@hotwired/stimulus";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { DetachGate } from "../utils/detach_gate";
 import { ownerOf } from "../utils/event_owner";
+import { closestInFlatTree, flatTreeContains } from "../utils/focus_candidate";
+import { ListenerSet } from "../utils/listener_set";
+import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
 import { OwnedPointerSession, type OwnedPointerSessionEnd } from "../utils/owned_pointer_session";
+import { TabindexLoan } from "../utils/tabindex_loan";
 import { TransientHooks } from "../utils/transient_hooks";
 
 /** The drag hook a connection may find written by an earlier, now-gone one. */
@@ -68,11 +72,19 @@ interface KeyboardSession {
  * movement fires `move` (deltas cumulative from the origin), and release fires
  * `end` (`pointercancel` → `cancel`). Keyboard flow: Space/Enter on the handle
  * grabs (`start`, `data-grabbed`), the arrow keys emit synthetic `move` events of
- * `keyboardStep` px each, Space/Enter drops (`end`) and Escape cancels — so every
- * consumer gets a keyboard path for free.
+ * `keyboardStep` px each, Space/Enter drops (`end`) and Escape or focus leaving the
+ * keyboard-operable handle cancels — so every consumer gets a keyboard path for free.
+ * Bare Home/End preserve a grab without moving; modified Home/End and Tab are yielded.
+ * Native controls inside open shadow roots retain their editing keys and cancel a settled grab.
+ * Closed shadow roots expose only their host; their editing components must stop propagation
+ * of owned keys and use `reset()` when internal focus should end the surrounding grab
+ * (`reset()` always ends the gesture in flight; with `follow` on it also returns the
+ * element to its origin, dropping the committed follow offset and the inline `translate`,
+ * and with `follow` off it leaves the inline `translate` alone).
  *
  * `start` dispatches `{ x, y, pointerType }`; `move` dispatches `{ dx, dy, x, y, pointerType }`;
- * `end` dispatches `{ dx, dy, pointerType }`; `cancel` dispatches `{ pointerType }`.
+ * `end` dispatches `{ dx, dy, pointerType }`; `cancel` dispatches `{ pointerType }`, also
+ * when `reset()` ends a started drag or a grab (a press below the threshold ends silently).
  *
  * @remarks
  * Behavior only: consumers own all visuals (ghost, placeholder, transforms) by
@@ -129,11 +141,19 @@ export class PointerDragController extends Controller<HTMLElement> {
 
   /** Marker attribute recording that this controller set the touch-action. */
   static readonly #TOUCH_ACTION_MARKER = "data-pointer-drag-touch-action";
-  /** Marker attribute recording that this controller set `tabindex`. */
-  static readonly #TABINDEX_MARKER = "data-pointer-drag-tabindex";
+  /** Keyboard handles retain their borrowed tab stop while holding focus. */
+  readonly #tabindex = new TabindexLoan("0", this.identifier, { preserveFocus: true });
 
   #pointer: PointerSession | null = null;
   #keyboard: KeyboardSession | null = null;
+  /** The session whose focus departure is waiting for synchronous focus restoration. */
+  #keyboardFocusSession: KeyboardSession | null = null;
+  /** Delegated input listeners share one connected lifetime. */
+  readonly #listeners = new ListenerSet();
+  /** Active open shadow trees report focus pairs hidden by host retargeting. */
+  readonly #shadowFocus = new ListenerSet();
+  /** Settles focus after a DOM move, before the next task, without retaining old sessions. */
+  readonly #keyboardFocus = new MicrotaskCoalescer(() => this.#settleKeyboardFocus());
   /** Committed follow offset the current gesture started from; its deltas add onto it. */
   #followBase = { x: 0, y: 0 };
   /**
@@ -164,15 +184,24 @@ export class PointerDragController extends Controller<HTMLElement> {
     if (!this.#keyboard) TRANSIENT_GRAB.reset(this.element);
     // Delegated on the container so dynamically added handles need no per-element
     // data-action.
-    this.element.addEventListener("pointerdown", this.#onPointerDown);
-    this.element.addEventListener("keydown", this.#onKeydown);
+    this.#listeners.add(this.element, "pointerdown", this.#onPointerDown);
+    this.#listeners.add(this.element, "keydown", this.#onKeydown);
+    this.#listeners.add(this.element, "focusout", this.#onFocusout);
+    this.#listeners.add(this.element, "focusin", this.#onFocusin);
+    this.#keyboardFocus.activate();
     if (!this.hasHandleTarget) this.#prepareHandle(this.element);
+    if (this.#keyboard) {
+      this.#watchShadowFocus(this.#keyboard.handle);
+      this.#checkKeyboardFocus(this.#keyboard);
+    }
   }
 
   override disconnect(): void {
     this.#morphRender.disconnect();
-    this.element.removeEventListener("pointerdown", this.#onPointerDown);
-    this.element.removeEventListener("keydown", this.#onKeydown);
+    this.#listeners.dispose();
+    this.#shadowFocus.dispose();
+    this.#keyboardFocus.cancel();
+    this.#keyboardFocusSession = null;
     // A mid-session disconnect on a STILL-connected element is ambiguous: an
     // in-page move (a consumer like sortable re-inserts the item mid-grab —
     // Stimulus reconnects the same instance in the same mutation batch, and
@@ -192,14 +221,20 @@ export class PointerDragController extends Controller<HTMLElement> {
   }
 
   /**
-   * Returns the element to its origin: drops the committed follow offset and the
-   * inline `translate` that carries it.
+   * Ends the gesture in flight and, with `follow` on, returns the element to its origin.
    *
-   * In follow mode the inline `translate` belongs to this controller, so this is the
-   * way to put the element back at the start. An in-flight drag is cancelled first,
-   * or its deltas would land on top of the offset just cleared.
+   * A pointer drag or keyboard grab in flight always ends, whatever `follow` says: a
+   * started drag or a grab dispatches `cancel`, a press still below the threshold ends
+   * silently. With `follow` on the inline `translate` belongs to this controller, so the
+   * committed follow offset and the `translate` carrying it are dropped too — the way
+   * to put the element back at the start. With `follow` off the inline `translate` is
+   * the author's and stays as it is. The `follow` that decides is the one the gesture
+   * in flight started with, or the current declaration when no gesture is in flight.
    */
   reset(): void {
+    // Read before the sessions end below: a gesture in flight answers to the `follow`
+    // it started with.
+    const follows = this.#pointer || this.#keyboard ? this.#gestureFollows : this.followValue;
     // Cancel first, then clear: the cancel contract snaps back to the committed
     // offset, so clearing before it would be undone on the way out.
     const live = this.#pointer?.started
@@ -209,6 +244,7 @@ export class PointerDragController extends Controller<HTMLElement> {
         : null;
     if (this.#pointer || this.#keyboard) this.#teardownSessions();
     if (live) this.#dispatchCancel(live);
+    if (!follows) return;
     this.#followBase = { x: 0, y: 0 };
     this.#applyFollow(0, 0);
   }
@@ -288,7 +324,8 @@ export class PointerDragController extends Controller<HTMLElement> {
    *
    * @stimeoRuntimeOnly `disabled` decides whether this one pointer press starts a gesture.
    */
-  readonly #onPointerDown = (event: PointerEvent): void => {
+  readonly #onPointerDown = (rawEvent: Event): void => {
+    const event = rawEvent as PointerEvent;
     // One session at a time: ignore a second pointerdown (multi-touch, an
     // errant tap, a grabbed keyboard session) so an in-flight drag is never
     // silently overwritten and its captured pointer orphaned.
@@ -376,7 +413,8 @@ export class PointerDragController extends Controller<HTMLElement> {
    * @stimeoRuntimeOnly `disabled` decides whether this one key is taken and `keyboardStep` is the
    *   distance of one keyboard move.
    */
-  readonly #onKeydown = (event: KeyboardEvent): void => {
+  readonly #onKeydown = (rawEvent: Event): void => {
+    const event = rawEvent as KeyboardEvent;
     if (this.disabledValue) return;
     const handle = this.#handleFor(event.target);
     if (!handle) return;
@@ -391,7 +429,7 @@ export class PointerDragController extends Controller<HTMLElement> {
     // Neither does a native control or editing surface inside the handle: typing
     // a space into a field and activating a link are default actions, not claims.
     // Widgets that do claim their keys keep composing through the yield above.
-    if (this.#ownsNativeKeys(event.target, handle)) return;
+    if (this.#ownsNativeKeys((event.composedPath()[0] ?? event.target) as Element, handle)) return;
     // A chorded arrow belongs to the browser. "Someone already consumed it"
     // outranks that, so it is checked after the yields above.
     if (isReservedArrowChord(event)) return;
@@ -422,12 +460,10 @@ export class PointerDragController extends Controller<HTMLElement> {
     }
 
     if (!this.#keyboard) return;
-    // While grabbed, the handle owns the keyboard. `Home` / `End` move nothing
-    // here, but a composition partner acts on them (a roving group jumps focus
-    // to the ends), and focus leaving the handle strands the grab: the arrows
-    // and Escape that end it are all delivered to whatever holds focus. So they
-    // are consumed here and do nothing, the same reason every arrow is consumed.
+    // Bare jumps preserve grabbed focus; modified Home/End yield to enclosing navigation
+    // or native behavior.
     if (event.key === "Home" || event.key === "End") {
+      if (hasModifierChord(event)) return;
       event.preventDefault();
       return;
     }
@@ -452,10 +488,72 @@ export class PointerDragController extends Controller<HTMLElement> {
     });
   };
 
+  /** Tracks visible internal focus before settling ownership in the same task. */
+  readonly #onFocusin = (): void => {
+    const session = this.#keyboard;
+    if (session) {
+      this.#watchShadowFocus(session.handle);
+      this.#checkKeyboardFocus(session);
+    }
+  };
+
+  /** A focus pair within one shadow tree does not bubble beyond its retargeted host. */
+  #watchShadowFocus(handle: HTMLElement): void {
+    const tree = handle.getRootNode();
+    let active = (tree as Node & { readonly activeElement?: Element | null }).activeElement;
+    while (active?.shadowRoot) {
+      const shadow = active.shadowRoot;
+      this.#shadowFocus.add(shadow, "focusin", this.#onFocusin);
+      active = shadow.activeElement;
+    }
+  }
+
+  /** Same-tree destinations retain ownership before the browser's focusin checkpoint. */
+  readonly #onFocusout = (rawEvent: Event): void => {
+    const destination = (rawEvent as FocusEvent).relatedTarget;
+    const session = this.#keyboard;
+    if (
+      session &&
+      this.#handleFor(destination) === session.handle &&
+      !this.#ownsNativeKeys(destination as Element, session.handle)
+    ) {
+      return;
+    }
+    this.#checkKeyboardFocus(this.#keyboard);
+  };
+
+  /** A new session's departure replaces a completed session's pending check. */
+  #checkKeyboardFocus(session: KeyboardSession | null): void {
+    this.#keyboardFocusSession = session;
+    this.#keyboardFocus.schedule();
+  }
+
+  /**
+   * Synchronous reinsertion/refocus may keep the same operable handle after focusout.
+   * Reading its own tree keeps focus resolution aligned with delegated event retargeting.
+   */
+  #settleKeyboardFocus(): void {
+    const session = this.#keyboardFocusSession;
+    this.#keyboardFocusSession = null;
+    if (!session || this.#keyboard !== session || !this.element.isConnected) return;
+    const tree = session.handle.getRootNode();
+    const active =
+      (tree as Node & { readonly activeElement?: Element | null }).activeElement ?? null;
+    if (
+      this.#handleFor(active) === session.handle &&
+      !this.#ownsNativeKeys(active as Element, session.handle)
+    ) {
+      return;
+    }
+    this.#clearKeyboardSession();
+    this.#dispatchCancel("keyboard");
+  }
+
   /** Enters the grabbed mode: `data-grabbed` on element + handle, then `start`. */
   #grabKeyboard(handle: HTMLElement): void {
     this.#beginGesture();
     this.#keyboard = { handle, dx: 0, dy: 0 };
+    this.#watchShadowFocus(handle);
     this.element.setAttribute("data-grabbed", "true");
     handle.setAttribute("data-grabbed", "true");
     this.dispatch("start", { detail: { x: 0, y: 0, pointerType: "keyboard" } });
@@ -503,8 +601,10 @@ export class PointerDragController extends Controller<HTMLElement> {
   }
 
   #clearKeyboardSession(): void {
+    this.#shadowFocus.dispose();
     this.#keyboard?.handle.removeAttribute("data-grabbed");
     this.#keyboard = null;
+    this.#keyboardFocusSession = null;
     this.element.removeAttribute("data-grabbed");
   }
 
@@ -525,6 +625,7 @@ export class PointerDragController extends Controller<HTMLElement> {
         : null;
     this.#teardownSessions();
     for (const handle of this.#handles()) this.#restoreHandle(handle);
+    this.#tabindex.returnAll();
     // An in-flight offset must leave the DOM even where nobody is listening: a
     // re-inserted element would have the next gesture read it back as a committed
     // base. An idle element carries no in-flight offset, and its translate is left
@@ -675,16 +776,15 @@ export class PointerDragController extends Controller<HTMLElement> {
       handle.style.touchAction = lent;
       handle.setAttribute(PointerDragController.#TOUCH_ACTION_MARKER, "true");
     }
-    if (handle.tabIndex < 0 && !handle.hasAttribute("tabindex")) {
-      handle.setAttribute("tabindex", "0");
-      handle.setAttribute(PointerDragController.#TABINDEX_MARKER, "true");
-    }
+    this.#tabindex.lend(handle, { onlyIfUnfocusable: true });
   }
 
-  /** Whether the key belongs to a native control or editing surface in the handle. */
-  #ownsNativeKeys(target: EventTarget | null, handle: HTMLElement): boolean {
-    const owner = (target as Element | null)?.closest(NATIVE_KEY_OWNERS) ?? null;
-    return owner !== null && owner !== handle && handle.contains(owner);
+  /** Native key ownership follows visible shadow focus and its flat-tree ancestry. */
+  #ownsNativeKeys(target: Element, handle: HTMLElement): boolean {
+    let element = target;
+    while (element.shadowRoot?.activeElement) element = element.shadowRoot.activeElement;
+    const owner = closestInFlatTree(element, NATIVE_KEY_OWNERS);
+    return owner !== null && owner !== handle && flatTreeContains(handle, owner);
   }
 
   /** Reverts the marker-owned touch-action + tabindex (authored values untouched). */
@@ -698,23 +798,7 @@ export class PointerDragController extends Controller<HTMLElement> {
       }
       handle.removeAttribute(PointerDragController.#TOUCH_ACTION_MARKER);
     }
-    if (handle.hasAttribute(PointerDragController.#TABINDEX_MARKER)) {
-      // Only remove what is verifiably still ours and safe to remove: another
-      // owner (e.g. a roving list) may have rewritten the value since, and
-      // stripping tabindex off the focused element would blur it to <body>
-      // (losing the user's place — worse than leaking one tab stop).
-      const ours = handle.getAttribute("tabindex") === "0";
-      if (ours && document.activeElement !== handle) {
-        handle.removeAttribute("tabindex");
-        handle.removeAttribute(PointerDragController.#TABINDEX_MARKER);
-        return;
-      }
-      // The loan ends when someone else owns the value; it stays recorded when
-      // the value is still ours and only the focus stopped us returning it —
-      // otherwise an in-page move (teardown + reconnect while focused) drops the
-      // record and the borrowed tab stop is never given back.
-      if (!ours) handle.removeAttribute(PointerDragController.#TABINDEX_MARKER);
-    }
+    this.#tabindex.return(handle);
   }
   /** Current `threshold` declaration resolved against its numeric contract. */
   get #safeThreshold(): number {

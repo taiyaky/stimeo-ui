@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { ensureId } from "../utils/aria_ids";
 import { AttributeLease } from "../utils/attribute_lease";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { type StateReason, stateReasonFor } from "../utils/state_reason";
 
@@ -91,11 +92,14 @@ export class DropdownController extends Controller<HTMLElement> {
     }
   };
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /** Starts in the closed state and registers outside-click handling. */
   override connect(): void {
     this.#associateTriggerWithMenu();
     this.#close("api");
-    document.addEventListener("click", this.#onOutsideClick, true);
+    this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
     this.#morphRender.observe(this.element);
     this.#connected = true;
     this.#reporting = true;
@@ -106,7 +110,7 @@ export class DropdownController extends Controller<HTMLElement> {
     this.#connected = false;
     this.#reporting = false;
     this.#escapeLayer.deactivate();
-    document.removeEventListener("click", this.#onOutsideClick, true);
+    this.#listeners.dispose();
     this.#morphRender.disconnect();
   }
 

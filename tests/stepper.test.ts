@@ -146,8 +146,9 @@ describe("StepperController", () => {
   };
 
   /**
-   * Target callbacks are delivered unreliably under happy-dom, so the one Stimulus
-   * makes for an inserted or removed step is made here directly as well.
+   * Appends a step and also makes the target callback Stimulus makes for it, so the
+   * repaint the arrival schedules is queued before the caller's `await`; `removeStep`
+   * does the same for a step that leaves.
    */
   const addStep = (label: string) => {
     const step = buildStep(label);
@@ -637,7 +638,7 @@ describe("StepperController pending page writes", () => {
     return seen;
   };
   beforeEach(async () => {
-    document.body.innerHTML = `<div data-controller="stimeo--stepper" data-stimeo--stepper-index-value="0" data-stimeo--stepper-total-value="3"><li data-stimeo--stepper-target="step"><button data-stimeo--stepper-index-param="0" data-action="click->stimeo--stepper#goto">0</button></li><li data-stimeo--stepper-target="step"><button data-stimeo--stepper-index-param="1" data-action="click->stimeo--stepper#goto">1</button></li><li data-stimeo--stepper-target="step"><button data-stimeo--stepper-index-param="2" data-action="click->stimeo--stepper#goto">2</button></li></div>`;
+    document.body.innerHTML = `<div data-controller="stimeo--stepper" data-stimeo--stepper-index-value="0"><li data-stimeo--stepper-target="step"><button data-stimeo--stepper-index-param="0" data-action="click->stimeo--stepper#goto">0</button></li><li data-stimeo--stepper-target="step"><button data-stimeo--stepper-index-param="1" data-action="click->stimeo--stepper#goto">1</button></li><li data-stimeo--stepper-target="step"><button data-stimeo--stepper-index-param="2" data-action="click->stimeo--stepper#goto">2</button></li></div>`;
     application = Application.start();
     application.register("stimeo--stepper", StepperController);
     await tick();

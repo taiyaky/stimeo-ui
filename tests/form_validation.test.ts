@@ -18,9 +18,9 @@ import { tick } from "./helpers/timing";
  * the wiring is re-implemented here.
  *
  * happy-dom note: its constraint engine evaluates validity correctly
- * (`checkValidity()` is honest), but it ships **no default message text** for
- * native failures — `validationMessage` is empty unless `setCustomValidity()` set
- * it. So native-required cases assert *state* (`aria-invalid`, `defaultPrevented`,
+ * (`checkValidity()` is honest), but its native `validationMessage` is a fixed
+ * generic text ("Constraints not satisfied"), not a browser's message. So
+ * native-required cases assert *state* (`aria-invalid`, `defaultPrevented`,
  * focus, events), and the *message rendering* path is exercised with
  * `setCustomValidity()`, whose text is engine-independent.
  */
@@ -198,10 +198,10 @@ describe("FormValidationController", () => {
     expect(emailInput().getAttribute("aria-errormessage")).toBe(errorFor("email").id);
   });
 
-  // Speech-order regression. form-validation does not own the accessible
+  // Speech-order check. form-validation does not own the accessible
   // description (form-field carries the ARIA), so this freezes the integration:
   // the invalid control reads its error and the visual paragraph follows in order.
-  // The separately seated Announcer path is covered by form_field.test.ts.
+  // The separately seated `stimeo--announcer` path is covered by form_field.test.ts.
   it("exposes the invalid control and its routed error message in order", async () => {
     emailInput().value = "person@example.com";
     nameInput().value = "Ada";
@@ -1058,7 +1058,7 @@ describe("FormValidationController with an unwired control", () => {
  * message overrides authored on the control, a generic fallback override, and the
  * built-in `disallow="whitespace"` rule. These let a field exceed native
  * validation — controlled wording + a rule past the native set — with no consumer
- * JavaScript, and fix headless browsers that return an empty native message.
+ * JavaScript, and give a message where the engine's native one is empty or generic.
  */
 describe("FormValidationController declarative messages and custom rules", () => {
   let application: Application;
@@ -1103,7 +1103,7 @@ describe("FormValidationController declarative messages and custom rules", () =>
     const event = submit(); // empty required field -> valueMissing
 
     expect(event.defaultPrevented).toBe(true);
-    // The override renders even though happy-dom's native validationMessage is "".
+    // The override renders in place of happy-dom's generic native validationMessage.
     expect(errorText()).toBe("本文を入力してください");
   });
 

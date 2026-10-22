@@ -1,3 +1,12 @@
+/**
+ * Guarded `localStorage` access shared by controllers that persist client state.
+ *
+ * `window.localStorage` can throw while resolving the storage object or while
+ * reading, writing, or removing a key. The result keeps an unavailable store
+ * distinct from an available store whose key is unset, so callers can expose an
+ * accurate success or failure state without duplicating exception guards.
+ */
+
 /** A successful guarded storage operation. */
 export interface StorageSuccess<T> {
   readonly ok: true;
@@ -12,15 +21,6 @@ export interface StorageFailure {
 
 /** Result of accessing browser storage without allowing an exception to escape. */
 export type StorageResult<T> = StorageSuccess<T> | StorageFailure;
-
-/**
- * Guarded `localStorage` access shared by controllers that persist client state.
- *
- * `window.localStorage` can throw while resolving the storage object or while
- * reading, writing, or removing a key. The result keeps an unavailable store
- * distinct from an available store whose key is unset, so callers can expose an
- * accurate success or failure state without duplicating exception guards.
- */
 
 /**
  * Reads `key` from `localStorage`.

@@ -68,6 +68,17 @@ export function logicalArrowKey(key: string, element: Element): string {
   return key === "ArrowRight" ? "ArrowLeft" : "ArrowRight";
 }
 
+/**
+ * The element whose writing direction orders a grid's columns: the nearest
+ * `<table>` holding `grid` inside `root`, else `grid` itself. Table columns follow
+ * the table's direction, so a direction declared only on a row group such as
+ * `<tbody>` does not reorder them and must not reverse the arrows either.
+ */
+export function gridDirectionElement(grid: Element, root: Element): Element {
+  const table = grid.closest("table");
+  return table !== null && root.contains(table) ? table : grid;
+}
+
 /** Modifiers a widget may claim on an arrow key, named for the `allow` list. */
 export type ArrowModifier = "alt" | "ctrl" | "meta" | "shift";
 
@@ -82,7 +93,8 @@ export type ArrowModifier = "alt" | "ctrl" | "meta" | "shift";
  * depending on where focus happens to sit — a coin-flip the user cannot see.
  *
  * `allow` is for the combinations APG assigns to a pattern **and the widget
- * actually implements** — today only Combobox's optional `Alt+Down`/`Alt+Up`.
+ * actually implements** — for example `Alt+Down`/`Alt+Up`, which the APG Combobox
+ * pattern makes optional and `stimeo--combobox` implements.
  * Listing one the widget does not implement defeats the point: the chord then
  * runs the plain-arrow branch, which is exactly what this guard exists to stop.
  * Non-arrow keys return `false`, so chorded letters and
@@ -107,21 +119,20 @@ export function isReservedArrowChord(
 }
 
 /**
- * True when a press arrived carrying any modifier, for the keys the browser and
- * the OS own outright: return without calling `preventDefault()` and without
- * moving any state.
+ * True when a press carries Alt, Control, Meta, or Shift, regardless of its key.
  *
- * `Control+Home` and `Control+End` jump the document to its ends, and a widget
- * that swallows them makes the shortcut work or not depending on where focus
- * happens to sit. {@link isReservedArrowChord} answers the same question for the
- * arrows, but returns `false` for every other key so that this one can decide.
+ * This predicate reports modifier presence only; key ownership stays with the
+ * caller. Check the widget's implemented key/modifier bindings and their state
+ * conditions before using this result to yield a chord. An unimplemented chord
+ * must not fall through to the bare-key behavior.
  *
- * There is no `allow` list here on purpose. APG assigns no modifier chord to
- * `Home`/`End`, so a widget that wanted one would be claiming a combination the
- * pattern never gave it.
+ * Dedicated bindings, such as a grid's Control+Home/End navigation, belong in
+ * the caller. Unlike {@link isReservedArrowChord}, this function examines every
+ * key and has no arrow-specific reservation or `allow` list.
  *
  * @example
  * ```ts
+ * // A Home/End handler with no modifier bindings yields every modified press.
  * case "Home":
  * case "End":
  *   if (hasModifierChord(event)) return;

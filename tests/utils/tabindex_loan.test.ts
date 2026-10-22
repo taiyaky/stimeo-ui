@@ -62,6 +62,66 @@ describe("TabindexLoan", () => {
   });
 
   describe("returning", () => {
+    it("returns one element without ending loans on the others", () => {
+      const other = document.createElement("div");
+      loan.lend(element);
+      loan.lend(other);
+      expect(loan.return(element)).toBe(true);
+      expect(element.hasAttribute("tabindex")).toBe(false);
+      expect(other.getAttribute("tabindex")).toBe("-1");
+      loan.returnAll();
+      expect(other.hasAttribute("tabindex")).toBe(false);
+    });
+
+    it("retains a protected focused loan for its next element return", () => {
+      const protectedLoan = new TabindexLoan("0", "stimeo--protected", { preserveFocus: true });
+      protectedLoan.lend(element);
+      element.focus();
+      expect(protectedLoan.return(element)).toBe(false);
+      expect(element.getAttribute("tabindex")).toBe("0");
+      element.blur();
+      expect(protectedLoan.return(element)).toBe(true);
+      expect(element.hasAttribute("tabindex")).toBe(false);
+    });
+
+    it("retains a focused restored loan for a later returnAll without lending it again", () => {
+      const protectedLoan = new TabindexLoan("0", "stimeo--protected", { preserveFocus: true });
+      protectedLoan.lend(element);
+      const copy = element.cloneNode(true) as HTMLElement;
+      element.replaceWith(copy);
+      copy.focus();
+      const restored = new TabindexLoan("0", "stimeo--protected", { preserveFocus: true });
+      expect(restored.return(copy)).toBe(false);
+      expect(copy.getAttribute("tabindex")).toBe("0");
+      copy.blur();
+      restored.returnAll();
+      expect(copy.hasAttribute("tabindex")).toBe(false);
+      expect(copy.hasAttribute("data-stimeo--protected-tabindex-loan")).toBe(false);
+      protectedLoan.returnAll();
+    });
+
+    it("ends a focused hold when the author owns its changed value", () => {
+      const protectedLoan = new TabindexLoan("0", "stimeo--protected", { preserveFocus: true });
+      protectedLoan.lend(element);
+      element.focus();
+      element.setAttribute("tabindex", "-1");
+      expect(protectedLoan.return(element)).toBe(true);
+      expect(element.getAttribute("tabindex")).toBe("-1");
+      expect(element.hasAttribute("data-stimeo--protected-tabindex-loan")).toBe(false);
+    });
+
+    it("keeps a covering loan when a protected focused hold returns", () => {
+      const protectedLoan = new TabindexLoan("0", "stimeo--protected", { preserveFocus: true });
+      const cover = new TabindexLoan("0", "stimeo--cover");
+      protectedLoan.lend(element);
+      cover.lend(element);
+      element.focus();
+      expect(protectedLoan.return(element)).toBe(true);
+      expect(element.getAttribute("tabindex")).toBe("0");
+      cover.returnAll();
+      expect(element.hasAttribute("tabindex")).toBe(false);
+    });
+
     it("removes the attribute it lent", () => {
       loan.lend(element);
       loan.returnAll();

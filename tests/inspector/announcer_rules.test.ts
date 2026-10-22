@@ -63,6 +63,18 @@ describe("announcerSeatingDiagnostic", () => {
     expect(result?.diagnostic.length).toBe("stimeo--spinner".length);
   });
 
+  it.each(["stimeo--live-counter", "stimeo--presence", "stimeo--typing-indicator"])(
+    "reports %s from stimeo-ui/cable, which speaks through the same announcer",
+    (identifier) => {
+      const result = announcerSeatingDiagnostic([
+        { file: "page.html", source: `<div data-controller="${identifier}"></div>` },
+      ]);
+
+      expect(result?.diagnostic.code).toBe("missing-announcer");
+      expect(result?.diagnostic.message).toContain(`"${identifier}"`);
+    },
+  );
+
   it("reports the earliest identifier in a file that mentions several", () => {
     const source = `<div data-controller="stimeo--meter"></div>\n<div data-controller="stimeo--progress"></div>`;
     expect(
@@ -70,7 +82,7 @@ describe("announcerSeatingDiagnostic", () => {
     ).toContain("stimeo--meter");
   });
 
-  it("declares only namespaced Core identifiers", () => {
+  it("declares only unique, namespaced identifiers", () => {
     expect(ANNOUNCING_CONTROLLERS.length).toBeGreaterThan(0);
     for (const identifier of ANNOUNCING_CONTROLLERS) {
       expect(identifier).toMatch(/^stimeo--[a-z][a-z-]*$/);

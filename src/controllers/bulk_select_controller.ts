@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { AttributeLease } from "../utils/attribute_lease";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -66,8 +67,8 @@ type SelectionDetail = { count: number; allPages: boolean };
  * the select-all box first when the bar holds it, so the keyboard user keeps a Tab
  * position instead of falling back to the document.
  *
- * A non-finite `totalCount` counts as the Value's default `0`, so the count never
- * renders as `NaN`. The attribute keeps what the page wrote.
+ * A non-finite or negative `totalCount` counts as the Value's default `0`, so the
+ * count never renders as `NaN` or below zero. The attribute keeps what the page wrote.
  *
  * The delegated listener and the pending repair are both released on `disconnect()`.
  */
@@ -125,15 +126,18 @@ export class BulkSelectController extends Controller<HTMLElement> {
     }
   };
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     this.#allPagesMode = this.element.dataset.allPages === "true";
     this.#reconcile.observe(this.element);
-    this.element.addEventListener("change", this.#onChange);
+    this.#listeners.add(this.element, "change", this.#onChange);
     this.#recompute();
   }
 
   override disconnect(): void {
-    this.element.removeEventListener("change", this.#onChange);
+    this.#listeners.dispose();
     this.#reconcile.disconnect();
   }
 
@@ -186,7 +190,7 @@ export class BulkSelectController extends Controller<HTMLElement> {
     this.#reconcile.schedule();
   }
 
-  /** Repaints so wording changed at runtime is used by the next announcement. */
+  /** Schedules a repair pass; the next announcement reads the current `announceText` itself. */
   announceTextValueChanged(): void {
     this.#reconcile.schedule();
   }
@@ -256,7 +260,7 @@ export class BulkSelectController extends Controller<HTMLElement> {
     announce(fillTemplate(this.announceTextValue, { count: detail.count }));
   }
 
-  /** The declared `totalCount`, or the default `0` in place of a non-finite one. */
+  /** The declared `totalCount`, or the default `0` in place of a non-finite or negative one. */
   get #totalCount(): number {
     const declared = this.#safeTotalCount;
     return declared;

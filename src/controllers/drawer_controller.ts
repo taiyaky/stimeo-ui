@@ -362,7 +362,7 @@ export class DrawerController extends Controller<HTMLElement> {
     if (this.hasOverlayTarget) this.#writeHidden(this.overlayTarget, hidden);
   }
 
-  /** Fully reflects the closed state up front (used on connect when not open). */
+  /** Fully reflects the closed state up front; `connect()` normalizes to it before any open. */
   #applyClosedState(): void {
     this.#setState("closed");
     if (this.hasPanelTarget) this.#writeHidden(this.panelTarget, true);

@@ -279,8 +279,11 @@ export const a11yRules: A11yRules = {
     },
   ],
   // Context menu: same menu/menuitem contract as stimeo--menu. No rule on the
-  // right-click region — aria-haspopup there is a discoverability nicety, not
-  // load-bearing.
+  // right-click region. Its role and name are authored, but a native element
+  // (a table row, a list item, a button) has its role without a `role`
+  // attribute, so requiring one would flag valid markup; `aria-keyshortcuts`
+  // only advertises a key the region already handles, and the pattern works
+  // without it.
   "stimeo--context-menu": [
     {
       target: "menu",

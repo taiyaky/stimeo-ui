@@ -2,8 +2,14 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OtpController } from "../src/controllers/otp_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { composeDraft } from "./helpers/ime";
+import { keyEvent, press as pressKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
+import {
+  disconnectAndStopApplication,
+  reconnectKeepingFocus,
+  restoreFromCache,
+} from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 interface FixtureOptions {
@@ -76,8 +82,8 @@ function type(field: HTMLInputElement, text: string): void {
 }
 
 function press(field: HTMLElement, key: string, init: KeyboardEventInit = {}): KeyboardEvent {
-  const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
-  field.dispatchEvent(event);
+  const event = keyEvent(key, { bubbles: true, cancelable: true, ...init });
+  pressKey(field, event);
   return event;
 }
 
@@ -153,7 +159,9 @@ describe("OtpController", () => {
       "stimeo--otp:change",
       () => {
         fields()[3]?.remove();
-        first.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "1" }));
+        const confirmation = new Event("compositionend", { bubbles: true });
+        Object.defineProperty(confirmation, "data", { value: "1" });
+        first.dispatchEvent(confirmation);
       },
       { once: true },
     );
@@ -271,6 +279,24 @@ describe("OtpController", () => {
     expect(first.getAttribute("aria-describedby")).toBe("hint");
   });
 
+  it("keeps the error marks of a field that moves within the group", async () => {
+    const digits = fields();
+    const first = digits[0] as HTMLInputElement;
+    type(first, "\u3042");
+    await tick();
+    const second = digits[1] as HTMLInputElement;
+    expect(second.getAttribute("aria-invalid")).toBe("true");
+
+    // Re-inserting the field in place lets Stimulus release it and take it back.
+    second.parentElement?.insertBefore(second, second.nextSibling);
+    controller().fieldTargetDisconnected(second);
+    controller().fieldTargetConnected(second);
+    await tick();
+
+    expect(second.getAttribute("aria-invalid")).toBe("true");
+    expect(first.getAttribute("aria-invalid")).toBe("true");
+  });
+
   it("ignores a lease marker it could not have written", async () => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = `
@@ -341,9 +367,9 @@ describe("OtpController", () => {
   }
 
   /**
-   * The connected instance, for driving a lifecycle callback directly: happy-dom
-   * does not deliver Value and target callbacks reliably, and each callback is
-   * idempotent, so a second delivery from Stimulus changes nothing.
+   * The connected instance, for driving a lifecycle callback directly so a case stays
+   * synchronous instead of waiting for Stimulus to deliver it; each callback is
+   * idempotent, so a later delivery from Stimulus changes nothing.
    */
   function controller(): OtpController {
     const found = application.getControllerForElementAndIdentifier(root(), "stimeo--otp");
@@ -549,6 +575,55 @@ describe("OtpController", () => {
 
     expect(chord.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(digits[0]);
+  });
+
+  it.each(
+    (["Home", "End", "Backspace"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("preserves a modified non-arrow key (%s, %s)", async (key, _modifier, init) => {
+    const digits = fields();
+    digits.forEach((digit, index) => {
+      type(digit, String(index + 1));
+    });
+    const current = digits[1];
+    if (!current) throw new Error("Expected middle digit");
+    current.focus();
+    const element = root();
+    const events: Event[] = [];
+    for (const name of [
+      "stimeo--otp:change",
+      "stimeo--otp:complete",
+      "stimeo--otp:invalid",
+      "input",
+      "change",
+    ]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = press(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(digits.map((digit) => digit.value)).toEqual(["1", "2", "3", "4"]);
+    expect(combined()).toBe("1234");
+    expect(press(current, key).defaultPrevented).toBe(true);
+    if (key === "Backspace") {
+      expect(current.value).toBe("");
+      expect(combined()).toBe("134");
+    } else {
+      expect(document.activeElement).toBe(digits[key === "Home" ? 0 : 3]);
+      expect(combined()).toBe("1234");
+    }
   });
 
   it("leaves chorded Home, End, and Backspace to the document", async () => {
@@ -933,7 +1008,7 @@ describe("OtpController", () => {
     const handler = listen("change", "complete", "invalid", "reconcile");
     const second = digits[1] as HTMLInputElement;
     second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(second, "う");
+    composeDraft(second, "う");
     root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
     controller().patternValueChanged();
     await tick();
@@ -964,7 +1039,7 @@ describe("OtpController", () => {
     const handler = listen("change", "complete", "invalid", "reconcile");
     const fourth = digits[3] as HTMLInputElement;
     fourth.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(fourth, "ご");
+    composeDraft(fourth, "ご");
     root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
     controller().patternValueChanged();
     await tick();
@@ -988,7 +1063,7 @@ describe("OtpController", () => {
     const handler = listen("change", "complete", "invalid", "reconcile");
     const second = digits[1] as HTMLInputElement;
     second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(second, "ご");
+    composeDraft(second, "ご");
     root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
     controller().patternValueChanged();
     await tick();
@@ -1028,7 +1103,7 @@ describe("OtpController", () => {
     const handler = listen("change", "complete", "invalid", "reconcile");
     const third = digits[2] as HTMLInputElement;
     third.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(third, "ｂ");
+    composeDraft(third, "ｂ");
     root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
     controller().patternValueChanged();
     await tick();
@@ -1053,7 +1128,7 @@ describe("OtpController", () => {
     const reconcileHandler = listen("reconcile");
     const second = digits[1] as HTMLInputElement;
     second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    second.value = "あ";
+    composeDraft(second, "あ");
     root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
     controller().patternValueChanged();
 
@@ -1077,7 +1152,7 @@ describe("OtpController", () => {
     const reconcileHandler = listen("reconcile");
     const second = digits[1] as HTMLInputElement;
     second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(second, "う");
+    composeDraft(second, "う");
     const arrived = document.createElement("input");
     arrived.className = "field";
     arrived.setAttribute("data-stimeo--otp-target", "field");
@@ -1104,7 +1179,7 @@ describe("OtpController", () => {
     const handler = listen("change", "complete", "invalid", "reconcile");
     const second = digits[1] as HTMLInputElement;
     second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(second, "う");
+    composeDraft(second, "う");
     const first = digits[0] as HTMLInputElement;
     first.remove();
     controller().fieldTargetDisconnected(first);
@@ -1125,6 +1200,123 @@ describe("OtpController", () => {
     expect(combined()).toBe("2");
   });
 
+  it("rewrites a combined value a Turbo morph emptied while the digits stayed, reporting nothing", async () => {
+    paste(fields()[0] as HTMLElement, "1234");
+    await tick();
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const value = document.getElementById("otp-value") as HTMLInputElement;
+
+    // Idiomorph empties a retained hidden input whose new markup carries no value
+    // while the digits keep theirs, so only the morph event can bring the pass.
+    value.removeAttribute("value");
+    value.value = "";
+    value.dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(combined()).toBe("1234");
+    expect(root().getAttribute("data-state")).toBe("complete");
+    expect(order(handler)).toEqual([]);
+  });
+
+  it("reports digits a Turbo morph emptied as reconcile and republishes the state", async () => {
+    paste(fields()[0] as HTMLElement, "1234");
+    await tick();
+    const handler = listen("change", "complete", "invalid", "reconcile");
+
+    for (const field of fields()) {
+      field.removeAttribute("value");
+      field.value = "";
+    }
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(combined()).toBe("");
+    expect(root().getAttribute("data-state")).toBe("empty");
+    expect(order(handler)).toEqual([["reconcile", { value: "" }]]);
+  });
+
+  it("re-marks entered fields after a Turbo morph stripped the marks it wrote", async () => {
+    paste(fields()[0] as HTMLElement, "1234");
+    await tick();
+    const handler = listen("change", "complete", "invalid", "reconcile");
+
+    // The server's markup carries the digits but none of the controller's marks.
+    for (const field of fields()) field.removeAttribute("data-filled");
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(fields().map((field) => field.getAttribute("data-filled"))).toEqual([
+      "true",
+      "true",
+      "true",
+      "true",
+    ]);
+    expect(order(handler)).toEqual([]);
+  });
+
+  it("re-marks a field mid-composition by the character it had committed after a Turbo morph", async () => {
+    paste(fields()[0] as HTMLElement, "1234");
+    await tick();
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const second = fields()[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(second, "あ");
+
+    for (const field of fields()) field.removeAttribute("data-filled");
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(fields().map((field) => field.getAttribute("data-filled"))).toEqual([
+      "true",
+      "true",
+      "true",
+      "true",
+    ]);
+    expect(second.value).toBe("あ");
+    expect(combined()).toBe("1234");
+    expect(order(handler)).toEqual([]);
+  });
+
+  it("leaves a field composing its first character unmarked after a Turbo morph", async () => {
+    paste(fields()[0] as HTMLElement, "123");
+    await tick();
+    const fourth = fields()[3] as HTMLInputElement;
+    fourth.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(fourth, "あ");
+
+    for (const field of fields()) field.removeAttribute("data-filled");
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(fields().map((field) => field.getAttribute("data-filled"))).toEqual([
+      "true",
+      "true",
+      "true",
+      null,
+    ]);
+    expect(combined()).toBe("123");
+  });
+
+  it("takes the digits a Turbo morph left as committed, so a rejected keystroke keeps them", async () => {
+    paste(fields()[0] as HTMLElement, "1234");
+    await tick();
+    for (const field of fields()) {
+      field.removeAttribute("value");
+      field.value = "";
+    }
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await tick();
+    const handler = listen("change", "complete", "reconcile");
+
+    type(fields()[0] as HTMLInputElement, "x");
+    await tick();
+
+    expect(fields()[0]?.value).toBe("");
+    expect(combined()).toBe("");
+    expect(root().getAttribute("data-state")).toBe("empty");
+    expect(order(handler)).toEqual([]);
+  });
+
   it("reports a form reset mid-composition as reconcile at once, apart from the commit", async () => {
     await remount({ inForm: true });
     const digits = fields();
@@ -1134,7 +1326,7 @@ describe("OtpController", () => {
     const handler = listen("change", "complete", "invalid", "reconcile");
     const second = digits[1] as HTMLInputElement;
     second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(second, "う");
+    composeDraft(second, "う");
     (document.getElementById("form") as HTMLFormElement).reset();
     await tick();
 
@@ -1151,6 +1343,24 @@ describe("OtpController", () => {
     ]);
   });
 
+  it("counts a field mid-composition by the digit a form reset restored into it", async () => {
+    await remount({ inForm: true, fieldAttrs: (index) => (index === 1 ? 'value="9"' : "") });
+    const second = fields()[1] as HTMLInputElement;
+    type(second, "2");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(second, "う");
+    (document.getElementById("form") as HTMLFormElement).reset();
+    await tick();
+
+    expect(second.value).toBe("9");
+    expect(second.getAttribute("data-filled")).toBe("true");
+    expect(combined()).toBe("9");
+    expect(order(handler)).toEqual([["reconcile", { value: "9" }]]);
+  });
+
   it("gives the error surface back when the form is reset mid-composition", async () => {
     await remount({
       inForm: true,
@@ -1164,7 +1374,7 @@ describe("OtpController", () => {
 
     const second = digits[1] as HTMLInputElement;
     second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(second, "う");
+    composeDraft(second, "う");
     (document.getElementById("form") as HTMLFormElement).reset();
     await tick();
 
@@ -1182,7 +1392,7 @@ describe("OtpController", () => {
     const handler = listen("change", "complete", "invalid", "reconcile");
     const fourth = digits[3] as HTMLInputElement;
     fourth.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(fourth, "よ");
+    composeDraft(fourth, "よ");
     const arrived = document.createElement("input");
     arrived.className = "field";
     arrived.setAttribute("data-stimeo--otp-target", "field");
@@ -1215,7 +1425,7 @@ describe("OtpController", () => {
     const handler = listen("change", "complete", "invalid", "reconcile");
     const third = digits[2] as HTMLInputElement;
     third.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(third, "う");
+    composeDraft(third, "う");
     root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
     controller().patternValueChanged();
     await tick();
@@ -1248,7 +1458,7 @@ describe("OtpController", () => {
     const handler = listen("change", "complete", "invalid", "reconcile");
     const third = digits[2] as HTMLInputElement;
     third.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(third, "ｂ");
+    composeDraft(third, "ｂ");
     root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
     controller().patternValueChanged();
     await tick();
@@ -1261,6 +1471,316 @@ describe("OtpController", () => {
     expect(order(handler)).toEqual([["reconcile", { value: "1" }]]);
   });
 
+  /** Sends the plain edit an engine announces once it dropped a conversion silently. */
+  function editAfterDroppedComposition(field: HTMLInputElement, data: string): void {
+    field.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data,
+      }),
+    );
+  }
+
+  it("takes keystrokes again once a script ended a composition without compositionend", async () => {
+    const digits = fields();
+    type(digits[0] as HTMLInputElement, "1");
+    await tick();
+    const second = digits[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(second, "う");
+
+    // A script writes the field, and the engine drops the conversion without compositionend.
+    second.value = "";
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    editAfterDroppedComposition(second, "2");
+    await tick();
+    type(second, "2");
+    await tick();
+
+    expect(combined()).toBe("12");
+    expect(second.getAttribute("data-filled")).toBe("true");
+    expect(order(handler)).toEqual([["change", { value: "12" }]]);
+  });
+
+  it("applies a held pattern drop once a composition ends without compositionend", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "a1");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const third = digits[2] as HTMLInputElement;
+    third.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(third, "ｂ");
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    await tick();
+    third.value = "";
+    editAfterDroppedComposition(third, "2");
+    await tick();
+
+    expect(digits.map((field) => field.value)).toEqual(["", "1", "", ""]);
+    expect(order(handler)).toEqual([["reconcile", { value: "1" }]]);
+  });
+
+  it("applies a held pattern drop before the input a script sends after its write", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "a12");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const last = digits[3] as HTMLInputElement;
+    last.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(last, "ｂ");
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    await tick();
+
+    // A script writes the field and tells listeners; the engine drops the conversion.
+    type(last, "4");
+    await tick();
+
+    // The page's pattern decides the code before the script's digit is taken.
+    expect(digits.map((field) => field.value)).toEqual(["", "1", "2", "4"]);
+    expect(order(handler)).toEqual([
+      ["reconcile", { value: "12" }],
+      ["change", { value: "124" }],
+    ]);
+  });
+
+  it("takes a confirmation an engine sends after a dropped composition as a commit, even of the text the field began with", async () => {
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "12");
+    await tick();
+    const second = digits[1] as HTMLInputElement;
+    second.focus();
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(second, "に");
+    // A script writes the field: the next key shows the composition over.
+    second.value = "5";
+    press(second, "Shift");
+    await tick();
+    const handler = listen("change", "complete", "invalid", "reconcile");
+
+    // An engine that kept composing across the write confirms the user's "2".
+    second.value = "2";
+    const confirmation = new Event("compositionend", { bubbles: true });
+    Object.defineProperty(confirmation, "data", { value: "2" });
+    second.dispatchEvent(confirmation);
+    await tick();
+
+    // Nothing read the script's write, so the commit moves no value; it steps forward.
+    expect(combined()).toBe("12");
+    expect(order(handler)).toEqual([]);
+    expect(document.activeElement).toBe(digits[2]);
+  });
+
+  it("keeps the digit a field committed when it moves keeping focus mid-composition, and takes the commit", async () => {
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "12");
+    await tick();
+    const second = digits[1] as HTMLInputElement;
+    second.focus();
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(second, "さ");
+    const handler = listen("change", "complete", "invalid", "reconcile");
+
+    // A move that keeps focus and the conversion: Stimulus releases the field and takes it back.
+    controller().fieldTargetDisconnected(second);
+    controller().fieldTargetConnected(second);
+    await tick();
+    expect(second.value).toBe("さ");
+    expect(combined()).toBe("12");
+    expect(handler).not.toHaveBeenCalled();
+
+    second.value = "3";
+    const confirmation = new Event("compositionend", { bubbles: true });
+    Object.defineProperty(confirmation, "data", { value: "3" });
+    second.dispatchEvent(confirmation);
+    await tick();
+
+    expect(combined()).toBe("13");
+    expect(order(handler)).toEqual([["change", { value: "13" }]]);
+  });
+
+  it("judges the digits again by a pattern that changed while the group moved, as a reconciliation", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    paste(fields()[0] as HTMLElement, "1a2b");
+    await tick();
+    const editHandler = listen("change", "complete");
+    const reconcileHandler = listen("reconcile");
+
+    // The morph that moves the group also changes its pattern.
+    reconnectKeepingFocus(controller(), () =>
+      root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]"),
+    );
+    await tick();
+
+    expect(fields().map((field) => field.value)).toEqual(["1", "", "2", ""]);
+    expect(editHandler).not.toHaveBeenCalled();
+    expect(reconcileHandler).toHaveBeenCalledOnce();
+    expect(reconcileHandler.mock.calls[0]?.[0]?.detail).toEqual({ value: "12" });
+  });
+
+  it("judges nothing again when the group moves with its pattern unchanged", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    paste(fields()[0] as HTMLElement, "1a2b");
+    await tick();
+    const handler = listen("change", "complete", "reconcile");
+
+    reconnectKeepingFocus(controller());
+    await tick();
+
+    expect(combined()).toBe("1a2b");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("holds nothing when the group moves keeping focus after a pattern change it already applied", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "1a2");
+    await tick();
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    await tick();
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const fourth = digits[3] as HTMLInputElement;
+    fourth.focus();
+    fourth.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(fourth, "ご");
+
+    reconnectKeepingFocus(controller());
+    await tick();
+    // A script writes the field and tells listeners, which ends the conversion: an edit.
+    type(fourth, "5");
+    await tick();
+
+    expect(digits.map((field) => field.value)).toEqual(["1", "", "2", "5"]);
+    expect(order(handler)).toEqual([["change", { value: "125" }]]);
+  });
+
+  it.each([
+    ["before", true],
+    ["with", false],
+  ])(
+    "applies a pattern drop declared %s a move keeping focus mid-composition before the commit",
+    async (_when, before) => {
+      await remount({ pattern: "[0-9a-f]" });
+      const digits = fields();
+      paste(digits[0] as HTMLElement, "a12");
+      await tick();
+      const handler = listen("change", "complete", "invalid", "reconcile");
+      const fourth = digits[3] as HTMLInputElement;
+      fourth.focus();
+      fourth.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      composeDraft(fourth, "ご");
+      const declare = () => root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+      if (before) {
+        declare();
+        controller().patternValueChanged();
+      }
+      await tick();
+
+      reconnectKeepingFocus(controller(), before ? undefined : declare);
+      await tick();
+      expect(digits.map((field) => field.value)).toEqual(["a", "1", "2", "ご"]);
+      expect(handler).not.toHaveBeenCalled();
+
+      fourth.value = "５";
+      fourth.dispatchEvent(new Event("compositionend", { bubbles: true }));
+      await tick();
+
+      expect(digits.map((field) => field.value)).toEqual(["", "1", "2", "5"]);
+      expect(order(handler)).toEqual([
+        ["reconcile", { value: "12" }],
+        ["change", { value: "125" }],
+      ]);
+    },
+  );
+
+  it("moves with the arrows again once a composition on another field followed a dropped one", async () => {
+    const digits = fields();
+    const first = digits[0] as HTMLInputElement;
+    const second = digits[1] as HTMLInputElement;
+    first.focus();
+    first.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    // A script writes the field, and the engine drops the conversion without compositionend.
+    first.value = "";
+
+    second.focus();
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    second.value = "２";
+    second.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+    const third = document.activeElement as HTMLInputElement;
+    expect(third).toBe(digits[2]);
+
+    press(third, "ArrowLeft");
+
+    expect(document.activeElement).toBe(second);
+    expect(combined()).toBe("2");
+  });
+
+  it("reads every field back when the same instance connects again", async () => {
+    const digits = fields();
+    const first = digits[0] as HTMLInputElement;
+    const instance = controller();
+    instance.disconnect();
+    first.value = "7";
+
+    instance.connect();
+
+    expect(first.getAttribute("data-filled")).toBe("true");
+    expect(combined()).toBe("7");
+  });
+
+  it("applies a pattern drop at once when a script write already ended the composition", async () => {
+    await remount({ pattern: "[0-9a-f]" });
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "a");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const second = digits[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(second, "う");
+    // A script writes the field, and the engine drops the conversion without compositionend.
+    second.value = "";
+    root().setAttribute("data-stimeo--otp-pattern-value", "[0-9]");
+    controller().patternValueChanged();
+    await tick();
+
+    expect(digits.map((field) => field.value)).toEqual(["", "", "", ""]);
+    expect(order(handler)).toEqual([["reconcile", { value: "" }]]);
+  });
+
+  it("counts a field a script wrote mid-composition by what it wrote when the page reconciles", async () => {
+    const digits = fields();
+    paste(digits[0] as HTMLElement, "12");
+    await tick();
+
+    const handler = listen("change", "complete", "invalid", "reconcile");
+    const third = digits[2] as HTMLInputElement;
+    third.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(third, "さ");
+    // A script writes the field, and the engine drops the conversion without compositionend.
+    third.value = "3";
+    const arrived = document.createElement("input");
+    arrived.className = "field";
+    arrived.setAttribute("data-stimeo--otp-target", "field");
+    arrived.setAttribute("aria-label", "Digit 5");
+    root().insertBefore(arrived, document.getElementById("error"));
+    controller().fieldTargetConnected(arrived);
+    await tick();
+
+    expect(combined()).toBe("123");
+    expect(third.getAttribute("data-filled")).toBe("true");
+    expect(order(handler)).toEqual([["reconcile", { value: "123" }]]);
+  });
+
   it("takes a cancelled composition as no edit: no event and no step forward", async () => {
     await remount({ pattern: "[0-9a-f]" });
     const digits = fields();
@@ -1271,7 +1791,7 @@ describe("OtpController", () => {
     const second = digits[1] as HTMLInputElement;
     second.focus();
     second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    type(second, "あ");
+    composeDraft(second, "あ");
     // Cancelling puts back the text the field had before the composition began.
     second.value = "1";
     second.dispatchEvent(new Event("compositionend", { bubbles: true }));
@@ -1282,7 +1802,7 @@ describe("OtpController", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it("drops the page changes a composition held when the controller disconnects", async () => {
+  it("judges the digits again by the pattern it finds once a disconnection ended the composition holding the drop", async () => {
     await remount({ pattern: "[0-9a-f]" });
     const digits = fields();
     paste(digits[0] as HTMLElement, "a");
@@ -1295,22 +1815,18 @@ describe("OtpController", () => {
     // Stimulus delivers its own callback too; both land mid-composition.
     await tick();
     expect(digits[0]?.value).toBe("a");
+    const handler = listen("change", "complete", "reconcile");
 
+    // The field loses focus, so the disconnection ends the composition and its drop.
+    second.blur();
     const instance = controller();
     instance.disconnect();
     instance.connect();
-
-    // A reconnection reads the fields as they are; a later reconciliation does
-    // not bring back the drop the disconnection discarded.
-    const arrived = document.createElement("input");
-    arrived.className = "field";
-    arrived.setAttribute("data-stimeo--otp-target", "field");
-    arrived.setAttribute("aria-label", "Digit 5");
-    root().insertBefore(arrived, document.getElementById("error"));
-    instance.fieldTargetConnected(arrived);
     await tick();
 
-    expect(digits[0]?.value).toBe("a");
+    // The digits were judged by the old pattern; the connection judges them by the new one.
+    expect(digits[0]?.value).toBe("");
+    expect(order(handler)).toEqual([["reconcile", { value: "" }]]);
   });
 
   it("keeps a server-rendered value the pattern rejects", async () => {
@@ -1365,6 +1881,29 @@ describe("OtpController", () => {
     expect(combined()).toBe("1234");
   });
 
+  it("drops a confirmation into a full field with no selection, as it drops a typed digit", async () => {
+    const digits = fields();
+    const first = digits[0] as HTMLInputElement;
+    paste(first, "5");
+    await tick();
+    first.focus();
+    first.setSelectionRange(1, 1);
+    first.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(first, "5３");
+    const handler = listen("change", "complete", "invalid", "reconcile");
+
+    // `maxlength="1"` cuts the draft back to the digit the field held; the commit still
+    // carries the confirmed character, the same length as the field.
+    first.value = "5";
+    const confirmation = new Event("compositionend", { bubbles: true });
+    Object.defineProperty(confirmation, "data", { value: "３" });
+    first.dispatchEvent(confirmation);
+    await tick();
+
+    expect(digits.map((field) => field.value)).toEqual(["5", "", "", ""]);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("guards auto-advance processing during active IME composition and triggers on end", async () => {
     const digits = fields();
     const changeHandler = listen("change");
@@ -1375,7 +1914,7 @@ describe("OtpController", () => {
     await tick();
 
     // Simulate input while composing (e.g. typing hiragana "う")
-    type(digits[0] as HTMLInputElement, "う");
+    composeDraft(digits[0] as HTMLInputElement, "う");
     await tick();
 
     // Focus should remain and value should not be validated/cleared yet
@@ -1563,6 +2102,21 @@ describe("OtpController", () => {
     expect(combined()).toBe("5");
   });
 
+  it("reads a field that arrives with a digit before its reconciliation runs", async () => {
+    const arrived = document.createElement("input");
+    arrived.className = "field";
+    arrived.setAttribute("data-stimeo--otp-target", "field");
+    arrived.setAttribute("aria-label", "Digit 5");
+    arrived.setAttribute("value", "7");
+    root().insertBefore(arrived, document.getElementById("error"));
+
+    // Stimulus wires the field in its observer's microtask; the reconciliation
+    // that callback schedules runs in a later one.
+    await Promise.resolve();
+
+    expect(arrived.getAttribute("data-filled")).toBe("true");
+  });
+
   it("follows the digit count when a field is removed at runtime", async () => {
     const digits = fields();
     paste(digits[0] as HTMLElement, "1234");
@@ -1633,7 +2187,7 @@ describe("OtpController", () => {
     await tick();
     expect(root().getAttribute("data-state")).toBe("partial");
 
-    // One of four and one of three are both partial, so nothing public moved.
+    // One of four and one of three are both partial, so the published value and state hold.
     const handler = listen("reconcile", "change", "complete");
     digits[3]?.remove();
     await tick();

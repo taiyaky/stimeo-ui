@@ -90,7 +90,7 @@ describe("MeterController", () => {
       send(invalid);
       expect(root().getAttribute("aria-valuenow")).toBe("25");
     }
-    // A JSON null is nullish and keeps the existing detail fallback.
+    // A JSON null counts as no param, so the event detail supplies the value.
     send("null");
     expect(root().getAttribute("aria-valuenow")).toBe("80");
     root().removeAttribute(attr);
@@ -191,15 +191,15 @@ describe("MeterController", () => {
     expect(root().getAttribute("aria-valuenow")).toBe("30");
   });
 
-  // All three tokens go through the same `replaceAll` chain, but each is a
-  // separate call: dropping one leaves the raw `{token}` in what AT announces.
+  // All three tokens are filled in one pass from the same values object; a token
+  // missing from that object stays as the raw `{token}` in what AT announces.
   // Ownership is asserted here because the take-back below depends on it.
   it("fills aria-valuetext from the template including the segment", async () => {
     await start(
       'data-stimeo--meter-value-value="72" data-stimeo--meter-high-value="80" data-stimeo--meter-value-text-value="{value} units, {percent}% ({state})"',
     );
     expect(root().getAttribute("aria-valuetext")).toBe("72 units, 72% (medium)");
-    expect(root().hasAttribute("data-stimeo--meter-owns-valuetext")).toBe(true);
+    expect(root().hasAttribute("data-stimeo--meter-aria-valuetext-lease")).toBe(true);
   });
 
   // `aria-valuetext` is shared: a consumer may author it instead of giving a
@@ -208,7 +208,7 @@ describe("MeterController", () => {
   it("keeps a consumer-authored aria-valuetext when no template is given", async () => {
     await start('data-stimeo--meter-value-value="72" aria-valuetext="72 GB of 100 GB used"');
     expect(root().getAttribute("aria-valuetext")).toBe("72 GB of 100 GB used");
-    expect(root().hasAttribute("data-stimeo--meter-owns-valuetext")).toBe(false);
+    expect(root().hasAttribute("data-stimeo--meter-aria-valuetext-lease")).toBe(false);
     instance().setValue({ params: { amount: 90 } } as unknown as Event);
     expect(root().getAttribute("aria-valuetext")).toBe("72 GB of 100 GB used");
   });
@@ -223,7 +223,7 @@ describe("MeterController", () => {
     root().removeAttribute("data-stimeo--meter-value-text-value");
     instance().setValue({ params: { amount: 40 } } as unknown as Event);
     expect(root().hasAttribute("aria-valuetext")).toBe(false);
-    expect(root().hasAttribute("data-stimeo--meter-owns-valuetext")).toBe(false);
+    expect(root().hasAttribute("data-stimeo--meter-aria-valuetext-lease")).toBe(false);
   });
 
   it("clamps out-of-range values (including the string form)", async () => {

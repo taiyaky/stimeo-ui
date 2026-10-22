@@ -2,12 +2,14 @@ import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { announce, fillTemplate } from "../utils/announce";
 import { ensureId } from "../utils/aria_ids";
-import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
+import { setAttributeIfChanged } from "../utils/attribute_write";
 import { ChipRow } from "../utils/chip_row";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { matchingPart, readLabel, writeLabel } from "../utils/element_part";
 import { commitField, writeFields } from "../utils/field_mirror";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { MoveCounter } from "../utils/move_counter";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
@@ -59,8 +61,8 @@ import { TemplateRow } from "../utils/template_row";
  * Implements the WAI-ARIA APG **Combobox** pattern in its list-autocomplete,
  * multi-select form. Focus stays on the input; the active option is tracked with
  * `aria-activedescendant` and selection with `aria-selected`. Selected options are
- * mirrored as removable chips. For single selection use {@link ListboxController}
- * or {@link ComboboxController}; for free-text tags use {@link TagsInputController}.
+ * mirrored as removable chips. For single selection use `stimeo--listbox` or
+ * `stimeo--combobox`; for free-text tags use `stimeo--tags-input`.
  *
  * Behavior provided:
  * - Typing filters options by substring and opens the list; `ArrowDown`/`ArrowUp`
@@ -77,6 +79,7 @@ import { TemplateRow } from "../utils/template_row";
  *   `Delete`/`Backspace` remove the focused chip, and `Backspace` on an empty
  *   input removes the last and keeps input focus; removal from a chip re-homes
  *   focus to a neighbor or the input.
+ *   The current `tags` container defines horizontal direction for the chips and input boundary.
  * - An open list with nothing left to offer is reported on the root as
  *   `data-stimeo--multi-select-empty`, and any declared `empty` region is shown
  *   for exactly that state and hidden for its opposite, whatever the markup
@@ -86,16 +89,17 @@ import { TemplateRow } from "../utils/template_row";
  *   runtime options, and runtime cap changes (`0` = unlimited).
  * - With a `fields` target the selected values are mirrored into named hidden
  *   inputs (default name `options[]`), so the selection submits with a normal
- *   form and no consumer JS — parity with {@link TagsInputController}. An optional
+ *   form and no consumer JS — parity with `stimeo--tags-input`. An optional
  *   `form` value sets the hidden inputs' `form` attribute, associating them with a
  *   `<form>` by id even when the picker lives outside it. Without a `fields`
- *   target the hidden inputs are simply not written. A selection the user
- *   changed emits a native bubbling `change` from the container, the way a form
- *   control does, so `stimeo--auto-submit` and form-level validation hear it;
- *   the rebuilds that follow connect, a replacement container, option churn, or
- *   a `name` / `form` change stay silent.
- * `change` dispatches `{ values: string[], reason: StateReason }`; `reconcile` carries `{ values }`.
- * `filter` dispatches `{ query: string }`.
+ *   target the hidden inputs are simply not written. A selection the controller
+ *   changes — a user's choice or a `toggleOption()` call — emits a native bubbling
+ *   `change` from the container, the way a form control does, so
+ *   `stimeo--auto-submit` and form-level validation hear it; the rebuilds that
+ *   follow connect, a replacement container, option churn, or a `name` / `form`
+ *   change stay silent.
+ * `change` dispatches `{ values: string[], reason: StateReason }`;
+ * `reconcile` carries `{ values }`. `filter` dispatches `{ query: string }`.
  */
 export class MultiSelectController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
@@ -198,13 +202,16 @@ export class MultiSelectController extends Controller<HTMLElement> {
   });
   /** Shared delegated interaction for the replaceable row of removable chips. */
   readonly #chipRow = new ChipRow({
-    directionElement: this.element,
+    getDirectionElement: () => this.#chipDirectionElement,
     getItems: () => this.tagTargets,
     getButton: (tag) =>
       matchingPart<HTMLButtonElement>(tag, `button${this.#rows.selector("remove")}`),
     onRemove: (index) => this.#removeTagAt(index),
     focusAfterEnd: () => this.#focusInput(),
   });
+
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
 
   /** Starts closed, syncs chips for any pre-selected options, and listens out. */
   override connect(): void {
@@ -222,7 +229,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // Seed the hidden fields from any pre-selected options so the form submits
     // the initial selection without an interaction.
     this.#syncFields();
-    document.addEventListener("click", this.#onOutsideClick, true);
+    this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
     this.#connected = true;
     this.#reconcile.observe(this.element);
   }
@@ -251,7 +258,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     this.#reconcile.disconnect();
     this.#composition.disconnect();
     this.#chipRow.disconnect();
-    document.removeEventListener("click", this.#onOutsideClick, true);
+    this.#listeners.dispose();
     this.#releaseTabindex();
   }
 
@@ -546,11 +553,11 @@ export class MultiSelectController extends Controller<HTMLElement> {
   /**
    * Closes the list and clears the active option.
    *
-   * Survives a missing input in both directions. `connect()` calls this second,
-   * so dereferencing the input here would throw before the chips, the roving
-   * seed, the chip listeners, the hidden fields and the outside-click listener —
-   * and Stimulus keeps the controller alive after that throw, so none of them
-   * would ever run and the selection would silently stop submitting. An input
+   * Survives a missing input in both directions. `connect()` calls this before it
+   * builds the chips, so dereferencing the input here would throw before the chips,
+   * the roving seed, the chip listeners, the hidden fields and the outside-click
+   * listener — and Stimulus keeps the controller alive after that throw, so none of
+   * them would ever run and the selection would silently stop submitting. An input
    * removed while the list is open must still let it come down *and* forget its
    * active option, so only the `aria-expanded` write is guarded.
    */
@@ -571,6 +578,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // list or move the active option — composition depends on this yield.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     if (!this.hasInputTarget) return;
     // Ignore keys fired during IME composition: the `Enter` that confirms a
     // candidate (and arrows that move within it) must not select an option or
@@ -581,13 +589,8 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // clear a removed id now, so a synchronously dispatched key cannot commit a
     // detached node before the callback gets its turn.
     this.#reconcileActiveForInteraction();
-    // Logical, not physical. The key is normalised rather than a new case added:
-    // the horizontal branches are not mirror images — one guards its edge and the
-    // other hands focus back to the input — so normalising the key keeps each
-    // branch, guards and all, with its own direction. Both handlers
-    // read the same element on purpose; probing the focused child would let the
-    // input and the chips disagree at the boundary between them.
-    switch (logicalArrowKey(event.key, this.element)) {
+    // The tags container defines the same logical boundary as its chip buttons.
+    switch (logicalArrowKey(event.key, this.#chipDirectionElement)) {
       case "ArrowDown":
         event.preventDefault();
         if (this.#isClosed) this.open();
@@ -669,6 +672,11 @@ export class MultiSelectController extends Controller<HTMLElement> {
     if (!this.#toggleSelection(option, reason)) return;
     if (focus && (event !== null || this.element.contains(document.activeElement)))
       this.#focusInput();
+  }
+
+  /** Current tags container, or the root while the target is absent. */
+  get #chipDirectionElement(): HTMLElement {
+    return this.hasTagsTarget ? this.tagsTarget : this.element;
   }
 
   /**
@@ -784,7 +792,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
       // holds the old text in place too.
       if (!label || !button || !name) continue;
       if (readLabel(label) !== text) writeLabel(label, text);
-      if (button.getAttribute("aria-label") !== name) button.setAttribute("aria-label", name);
+      setAttributeIfChanged(button, "aria-label", name);
     }
   }
 
@@ -996,7 +1004,10 @@ export class MultiSelectController extends Controller<HTMLElement> {
     return this.#selectedOptions.map((option) => this.#optionValue(option));
   }
 
-  /** Normalized cardinality cap: zero and below are unlimited; a positive value floors, never below 1. */
+  /**
+   * Normalized cardinality cap: zero and below are unlimited; a positive value floors,
+   * never below 1.
+   */
   get #selectionLimit(): number {
     if (this.#safeMax <= 0) return 0;
     return Math.max(1, Math.floor(this.#safeMax));

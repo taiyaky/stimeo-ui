@@ -6,6 +6,7 @@ import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /**
  * Behavioral tests for {@link SpinnerController}: show-delay suppression, the
@@ -325,8 +326,7 @@ describe("SpinnerController", () => {
     controller.start();
     // Remove the element first, then invoke disconnect() directly: that is the
     // definite-detach path, so teardown runs synchronously and the test does not wait
-    // on Stimulus' MutationObserver, whose flush timing varies by environment
-    // (especially under coverage).
+    // on the MutationObserver delivery of Stimulus' own disconnect.
     root().remove();
     controller.disconnect();
     vi.advanceTimersByTime(300);
@@ -504,7 +504,7 @@ describe("SpinnerController", () => {
   });
 
   it("returns a restored load to idle on a spinner with no targets", async () => {
-    // Both targets are optional in the markup contract, so the reduced form has to
+    // Every target is optional in the markup contract, so the reduced form has to
     // come back to idle as well as the full one.
     document.body.innerHTML = `<div data-controller="stimeo--spinner"></div>`;
     application = Application.start();
@@ -591,16 +591,12 @@ describe("SpinnerController", () => {
   // --- `delay`, `minDuration` and `timeout` belong to one cycle ------------------------
 
   /**
-   * Rewrites a timing Value and delivers its Value callback directly when the
-   * controller defines one, since happy-dom does not reliably run it for an attribute
-   * write.
+   * Rewrites the `delay`, `minDuration` or `timeout` declaration and waits for Stimulus to
+   * deliver it, so the assertions that follow see whatever the controller does with the
+   * change.
    */
-  const declareTiming = (name: "delay" | "min-duration" | "timeout", value: number) => {
-    root().setAttribute(`data-stimeo--spinner-${name}-value`, String(value));
-    const camel = name === "min-duration" ? "minDuration" : name;
-    const callback: unknown = Reflect.get(instance(), `${camel}ValueChanged`);
-    if (typeof callback === "function") callback.call(instance());
-  };
+  const declareTiming = (name: "delay" | "min-duration" | "timeout", value: number) =>
+    writeValueAttribute(root(), `data-stimeo--spinner-${name}-value`, String(value));
 
   it.each([
     { direction: "shrinks", next: 50 },
@@ -612,7 +608,7 @@ describe("SpinnerController", () => {
       instance().start();
       vi.advanceTimersByTime(100);
 
-      declareTiming("delay", next);
+      await declareTiming("delay", next);
       vi.advanceTimersByTime(199);
       expect(root().getAttribute("data-state")).toBe("pending");
       vi.advanceTimersByTime(1);
@@ -638,7 +634,7 @@ describe("SpinnerController", () => {
       vi.advanceTimersByTime(100);
       instance().stop(); // held back until t=500
 
-      declareTiming("min-duration", next);
+      await declareTiming("min-duration", next);
       vi.advanceTimersByTime(399);
       expect(indicator().hidden).toBe(false);
       vi.advanceTimersByTime(1);
@@ -665,7 +661,7 @@ describe("SpinnerController", () => {
       instance().start();
       vi.advanceTimersByTime(100);
 
-      declareTiming("timeout", next);
+      await declareTiming("timeout", next);
       vi.advanceTimersByTime(899);
       expect(root().getAttribute("data-state")).toBe("loading");
       vi.advanceTimersByTime(1);
@@ -687,19 +683,19 @@ describe("SpinnerController", () => {
     for (const type of ["show", "hide", "timeout", "reconcile"]) {
       root().addEventListener(`stimeo--spinner:${type}`, () => events.push(type));
     }
-    declareTiming("delay", 20);
-    declareTiming("min-duration", 20);
-    declareTiming("timeout", 20);
+    await declareTiming("delay", 20);
+    await declareTiming("min-duration", 20);
+    await declareTiming("timeout", 20);
     await vi.advanceTimersByTimeAsync(1000);
     expect(root().getAttribute("data-state")).toBe("idle");
     expect(region().getAttribute("aria-busy")).toBe("false");
     expect(events).toEqual([]);
 
     // A load started with no ceiling is not given one by a later declaration.
-    declareTiming("timeout", 0);
-    declareTiming("delay", 0);
+    await declareTiming("timeout", 0);
+    await declareTiming("delay", 0);
     instance().start();
-    declareTiming("timeout", 20);
+    await declareTiming("timeout", 20);
     await vi.advanceTimersByTimeAsync(1000);
     expect(root().getAttribute("data-state")).toBe("loading");
     expect(events).toEqual(["show"]);

@@ -15,7 +15,7 @@
 <p class="nav-menu__caption"><%= t("components.navigation_menu.demo.click_caption") %></p>
 <nav class="nav-menu" data-controller="stimeo--navigation-menu"
      aria-label="<%= t("components.navigation_menu.demo.label") %>">
-  <ul class="nav-menu__list">
+  <ul class="nav-menu__list" data-stimeo--navigation-menu-target="list">
     <li class="nav-menu__item">
       <button
         type="button"
@@ -72,7 +72,7 @@
 <nav class="nav-menu" data-controller="stimeo--navigation-menu"
      data-stimeo--navigation-menu-open-on-hover-value="true"
      aria-label="<%= t("components.navigation_menu.demo.hover.label") %>">
-  <ul class="nav-menu__list">
+  <ul class="nav-menu__list" data-stimeo--navigation-menu-target="list">
     <li class="nav-menu__item" data-stimeo--navigation-menu-target="hoverArea">
       <a class="demo-baritem nav-menu__link" href="#solutions">
         <%= t("components.navigation_menu.demo.hover.solutions.label") %>

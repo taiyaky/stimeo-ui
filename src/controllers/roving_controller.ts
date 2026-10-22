@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { ownerIndex } from "../utils/event_owner";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
+import { ListenerSet } from "../utils/listener_set";
 import { isRtl } from "../utils/logical_scroll";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { RovingTabindex, type RovingWrap, rovingMove } from "../utils/roving_tabindex";
@@ -15,8 +16,8 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  * technique, surfaced as a standalone controller. It is the policy layer over the
  * shared `RovingTabindex` util (the same split `stimeo--focus` makes over its trap),
  * giving the orientation / wrap / Home-End the util deliberately leaves out. No
- * dedicated APG pattern; it is the keyboard primitive Toolbar / Menu / Radio Group
- * and friends build on. Core (zero dependencies).
+ * dedicated APG pattern; it is the technique the APG Toolbar, Menu and Radio Group
+ * patterns share. Core (zero dependencies).
  *
  * Markup contract (identifier: `stimeo--roving`):
  *   <div data-controller="stimeo--roving"
@@ -41,7 +42,7 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  * `tabindex="0"` sitting on one would take the whole set out of the Tab sequence
  * while focus stayed behind. `aria-disabled` items stay reachable; suppressing
  * their activation belongs to the consuming pattern. A key that resolves to no
- * reachable item is left to the page (unlike Toolbar, which consumes it).
+ * reachable item is left to the page (unlike `stimeo--toolbar`, which consumes it).
  *
  * `change` dispatches `{ index, item }`.
  *
@@ -77,13 +78,16 @@ export class RovingController extends Controller<HTMLElement> {
   #connected = false;
   #observer: MutationObserver | null = null;
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     // Establish the single tab stop from the DOM (source of truth): keep an
     // existing tabbable item, else default to the first. Silent — no change event
     // for the initial mount.
     this.#ensureTabStop(false);
-    this.element.addEventListener("keydown", this.#onKeydown);
-    this.element.addEventListener("focusin", this.#onFocusin);
+    this.#listeners.add(this.element, "keydown", this.#onKeydown);
+    this.#listeners.add(this.element, "focusin", this.#onFocusin);
     this.#watchState();
     this.#connected = true;
     this.#reconcile.observe(this.element);
@@ -92,8 +96,7 @@ export class RovingController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#connected = false;
     this.#reconcile.disconnect();
-    this.element.removeEventListener("keydown", this.#onKeydown);
-    this.element.removeEventListener("focusin", this.#onFocusin);
+    this.#listeners.dispose();
     this.#observer?.disconnect();
     this.#observer = null;
   }
@@ -144,8 +147,7 @@ export class RovingController extends Controller<HTMLElement> {
     } else if ((horizontal && event.key === backwardKey) || (vertical && event.key === "ArrowUp")) {
       next = this.#step(current, -1, wrap);
     } else if (this.homeEndValue && (event.key === "Home" || event.key === "End")) {
-      // Chorded Home/End are the browser's document jumps; APG gives the widget
-      // no modifier combination for them.
+      // This navigation implements bare Home/End only; modified presses yield.
       if (hasModifierChord(event)) return;
       next = event.key === "Home" ? this.#firstReachable() : this.#lastReachable();
     } else {

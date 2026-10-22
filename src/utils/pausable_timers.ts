@@ -15,7 +15,7 @@ interface Entry {
  *
  * A notification that takes itself away has to stop while the pointer is over it
  * or the focus is inside it, and pick up where it left off once both have gone
- * (WAI-ARIA and WCAG 2.2 call this being able to pause a time limit). Each reason
+ * (WCAG 2.2 success criterion 2.2.1, Timing Adjustable). Each reason
  * to hold is tracked on its own, because a pointer leaving while focus stays is
  * not a release: the time left is banked when the first reason arrives, and the
  * timer is armed again with that bank only after the last one is released.

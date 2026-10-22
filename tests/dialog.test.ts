@@ -2,7 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DialogController } from "../src/controllers/dialog_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
-import { typeKey } from "./helpers/keyboard";
+import { press as pressKey, typeKey } from "./helpers/keyboard";
 import { expectUpperModalOnTop, openUpperModal, TARGET_SWAPS } from "./helpers/modal_stack";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
@@ -66,7 +66,7 @@ describe("DialogController", () => {
     expect(dialog().hidden).toBe(false);
     expect(document.body.style.overflow).toBe("hidden");
 
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    typeKey(document, "Escape");
     expect(dialog().hidden).toBe(true);
   });
 
@@ -92,7 +92,7 @@ describe("DialogController", () => {
   it("closes on Escape, restores focus and scroll", () => {
     trigger().focus();
     trigger().click();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    typeKey(document, "Escape");
     expect(dialog().hidden).toBe(true);
     expect(document.activeElement).toBe(trigger());
     expect(document.body.style.overflow).toBe("");
@@ -127,7 +127,7 @@ describe("DialogController", () => {
     trigger().click();
     const cancel = document.getElementById("cancel") as HTMLButtonElement;
     cancel.focus();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    typeKey(document, "Tab");
     expect(document.activeElement).toBe(document.getElementById("ok"));
   });
 
@@ -135,8 +135,7 @@ describe("DialogController", () => {
     trigger().click();
     const ok = document.getElementById("ok") as HTMLButtonElement;
     ok.focus();
-    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-    ok.dispatchEvent(tab);
+    const tab = pressKey(ok, "Tab");
     expect(tab.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(document.getElementById("cancel"));
   });
@@ -146,7 +145,7 @@ describe("DialogController", () => {
     expect(background.inert).toBe(false);
     trigger().click();
     expect(background.inert).toBe(true);
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    typeKey(document, "Escape");
     expect(background.inert).toBe(false);
   });
 
@@ -158,7 +157,7 @@ describe("DialogController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // Speech-order regression. Captured before AND after the open state change:
+  // Speech-order check. Captured before AND after the open state change:
   // the modal dialog and its contents only enter the accessibility tree once it
   // is shown, so the whole ordered phrase array pins role/name/state.
   it("does not announce the dialog while closed", async () => {
@@ -179,13 +178,12 @@ describe("DialogController", () => {
     ]);
   });
 
-  // Teardown regression: disconnect() must drop the document-level keydown
+  // Teardown check: disconnect() must drop the document-level keydown
   // listener and revert the modal side effects (scroll lock, background inert)
   // even though it leaves the markup as-is. A surviving listener would still act
   // on the detached controller, so Escape closing the dialog would surface the
-  // leak. Invoked directly to avoid happy-dom's flaky async MutationObserver
-  // lifecycle. This single case covers the whole disconnect contract — both the
-  // side-effect restoration (scroll/inert) and the listener removal.
+  // leak. The test stays synchronous, so it calls disconnect() directly instead
+  // of removing the element and waiting for the MutationObserver delivery.
   it("releases the global keydown listener and modal side effects on disconnect", () => {
     const background = document.getElementById("background") as HTMLElement;
     const root = document.querySelector("[data-controller='stimeo--dialog']") as HTMLElement;
@@ -200,7 +198,7 @@ describe("DialogController", () => {
 
     expect(document.body.style.overflow).toBe("");
     expect(background.inert).toBe(false);
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    typeKey(document, "Escape");
     expect(dialog().hidden).toBe(false);
   });
 
@@ -268,7 +266,7 @@ describe("DialogController", () => {
       trigger().click();
       capture.clear();
 
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      typeKey(document, "Escape");
 
       expect(capture.reasons()).toEqual(["escape"]);
     });
@@ -484,7 +482,7 @@ describe("DialogController", () => {
       await tick();
       original.remove();
       await tick();
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      typeKey(document, "Escape");
 
       expect(successor.hidden).toBe(true);
       expect(document.activeElement).toBe(trigger());

@@ -28,11 +28,11 @@ import {
  * that are not listed here).
  *
  * This is deliberately **not** a Ruby parser. It understands hash literals,
- * string and symbol keys, string values, and nothing else; every other
- * construct is treated as opaque rather than approximated. Text that merely
- * *looks* like a hash — a `%q[…]` body, a regexp, a heredoc — is stepped over
- * whole by {@link skipLiteral} and {@link maskHeredocs}, so a spelling inside
- * prose is never read as wiring.
+ * string and symbol keys, string values and decimal number literals, and
+ * nothing else; every other construct is treated as opaque rather than
+ * approximated. Text that merely *looks* like a hash — a `%q[…]` body, a
+ * regexp, a heredoc — is stepped over whole by {@link skipLiteral} and
+ * {@link maskHeredocs}, so a spelling inside prose is never read as wiring.
  */
 
 /** One decoded `data:` entry, named as the helper will render it. */

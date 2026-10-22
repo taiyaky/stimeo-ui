@@ -5,6 +5,7 @@ import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /**
  * Behavioral tests for {@link CountUpController}: the DOM-authored target
@@ -212,7 +213,7 @@ describe("CountUpController", () => {
     expect(el().hasAttribute("aria-label")).toBe(false);
   });
 
-  // --- Guards the suite has to hold open ------------------------------------
+  // --- Edge cases of starting and ending a run ------------------------------
 
   it("ignores a second start while a run is in flight", async () => {
     await mount();
@@ -315,15 +316,11 @@ describe("CountUpController", () => {
   // --- When `from` and `duration` are read ------------------------------------
 
   /**
-   * Rewrites a Value and delivers its callback directly when the controller defines
-   * one, since happy-dom does not reliably run it for an attribute write.
+   * Rewrites the `from` or `duration` declaration and waits for Stimulus to deliver it, so
+   * the assertions that follow see whatever the controller does with the change.
    */
-  const declare = (name: "from" | "duration", value: number) => {
-    el().setAttribute(`data-stimeo--count-up-${name}-value`, String(value));
-    const owner = controller();
-    const callback: unknown = Reflect.get(owner ?? {}, `${name}ValueChanged`);
-    if (typeof callback === "function") callback.call(owner);
-  };
+  const declare = (name: "from" | "duration", value: number) =>
+    writeValueAttribute(el(), `data-stimeo--count-up-${name}-value`, String(value));
 
   it("keeps the from a running animation started with, and counts the next run from the new one", async () => {
     await mount('data-stimeo--count-up-once-value="false" data-stimeo--count-up-from-value="200"');
@@ -331,7 +328,7 @@ describe("CountUpController", () => {
     flush(0);
     expect(el().textContent).toBe("200");
 
-    declare("from", 1000);
+    await declare("from", 1000);
     flush(600); // 200 + (1200 - 200) × 0.875, counted from this run's own starting value
     expect(el().textContent).toBe("1075");
     flush(1200);
@@ -355,7 +352,7 @@ describe("CountUpController", () => {
     flush(250);
     expect(el().textContent).toBe("694"); // 1200 × (1 − 0.75³)
 
-    declare("duration", 500);
+    await declare("duration", 500);
     flush(400); // still 400 / 1000 of the way: 1200 × (1 − 0.6³)
     expect(el().textContent).toBe("941");
     expect(ends).toEqual([]);
@@ -382,7 +379,7 @@ describe("CountUpController", () => {
     flush(0);
     flush(250);
 
-    declare("duration", 2000);
+    await declare("duration", 2000);
     flush(500); // halfway through the 1000 ms the run began with
     expect(el().textContent).toBe("1050");
     flush(1000);
@@ -394,8 +391,8 @@ describe("CountUpController", () => {
     await mount('data-stimeo--count-up-once-value="false"');
     const ends: number[] = [];
     el().addEventListener("stimeo--count-up:end", () => ends.push(1));
-    declare("from", 500);
-    declare("duration", 300);
+    await declare("from", 500);
+    await declare("duration", 300);
     await tick();
     expect(frames).toHaveLength(0);
     expect(el().textContent).toBe("1,200 users");
@@ -515,7 +512,7 @@ describe("CountUpController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Speech-order regression -----------------------------------------------
+  // --- Speech-order check ----------------------------------------------------
 
   it("names the ticking number with the authored text, on a host that keeps its role", async () => {
     await mount();

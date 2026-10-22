@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { KeyedTimers } from "../utils/keyed_timers";
+import { ListenerSet } from "../utils/listener_set";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -78,7 +79,7 @@ const speakers = sharedRegistry("stimeo-ui.presence.registry.v1", () => new Map<
  *        data-stimeo--presence-channel-value="PresenceChannel"
  *        data-stimeo--presence-params-value='{"room":"doc_7"}'
  *        data-stimeo--presence-id-value="17" data-stimeo--presence-name-value="Alice">
- *     <span data-stimeo--presence-target="count" data-other="%{count} viewing"></span>
+ *     <span data-stimeo--presence-target="count" data-other="{count} viewing"></span>
  *     <ul data-stimeo--presence-target="list"></ul>
  *     <template data-stimeo--presence-target="template">
  *       <li><span data-presence-name></span></li>
@@ -102,7 +103,7 @@ const speakers = sharedRegistry("stimeo-ui.presence.registry.v1", () => new Map<
  * `template` pair, one clone per peer is appended (elements marked
  * `data-presence-name` receive the name; the clone root is tagged
  * `data-presence-id`), and the `count` target renders through localizable
- * `data-zero` / `data-one` / `data-other` templates (`%{count}`). Richer
+ * `data-zero` / `data-one` / `data-other` templates (`{count}`). Richer
  * per-user rendering (avatars, links) belongs to the consumer via the `join` /
  * `leave` / `change` events or a server-rendered Turbo Stream. A `template` holds
  * one root element: the clone appended for a peer, and the node removed when the
@@ -122,9 +123,10 @@ const speakers = sharedRegistry("stimeo-ui.presence.registry.v1", () => new Map<
  * whatever a Turbo cache snapshot preserved (hooks + rendered clones), renders
  * the known-empty count (the `data-present*` hooks stay absent until the first
  * beacon), and the stream re-populates; a `count` or `list` target swapped in by a
- * Stream or a morph arrives empty and is drawn from the roster as it connects; the subscription, heartbeat interval,
- * per-peer expiry timers, and the `pagehide` listener are all released on
- * `disconnect()` (Turbo navigation included).
+ * Stream or a morph arrives empty and is drawn from the roster as it connects;
+ * the subscription, heartbeat interval, per-peer expiry timers, and the
+ * `pagehide` listener are all released on `disconnect()` (Turbo navigation
+ * included).
  *
  * The live resources follow the declaration; Values changed together move them
  * once, after the batch, and nothing moves before `connect()` or after
@@ -206,6 +208,8 @@ export class PresenceController extends Controller<HTMLElement> {
    * and emptied the list, and drawing from there would overwrite what teardown left.
    */
   #connected = false;
+  /** The `pagehide` listener of one open subscription; closing it releases the listener. */
+  readonly #cycleListeners = new ListenerSet();
   /** The `speakers` key this element holds, recomputed on every claim. */
   #speakerKey = "";
   /** The id that key was claimed for, which the leaving notice names. */
@@ -341,12 +345,12 @@ export class PresenceController extends Controller<HTMLElement> {
       received: (data: unknown) => this.#onReceived(data),
     });
     this.#armHeartbeat();
-    window.addEventListener("pagehide", this.#onPageHide);
+    this.#cycleListeners.add(window, "pagehide", this.#onPageHide);
   }
 
   /** Releases what {@link #open} acquired. */
   #close(): void {
-    window.removeEventListener("pagehide", this.#onPageHide);
+    this.#cycleListeners.dispose();
     // Best-effort graceful leave, and only from the last element speaking for
     // this peer; a lost notice is caught by peers' expiry timers instead.
     this.#sendLeaveNotice(this.#releaseSpeaker());
@@ -570,7 +574,7 @@ export class PresenceController extends Controller<HTMLElement> {
 
   /**
    * Builds the count copy. Localizable through `data-zero` / `data-one` /
-   * `data-other` templates on the count target (`%{count}`); the bare number is
+   * `data-other` templates on the count target (`{count}`); the bare number is
    * the fallback (copy-free, so nothing to localize by default).
    */
   #countMessage(count: number): string {
@@ -578,7 +582,7 @@ export class PresenceController extends Controller<HTMLElement> {
     const template =
       (count === 0 ? templates.zero : count === 1 ? templates.one : templates.other) ??
       templates.other;
-    return template ? template.replace("%{count}", String(count)) : String(count);
+    return template ? fillTemplate(template, { count }) : String(count);
   }
 
   /** Replaces the clones in the list target with one per present peer. */

@@ -35,6 +35,11 @@ export class MorphRenderWatcher {
     this.#pass.schedule();
   }
 
+  /** Whether a pass requested by a morph or {@link schedule} has yet to run. */
+  get pending(): boolean {
+    return this.#pass.pending;
+  }
+
   /** Releases observation and pending work synchronously; safe to repeat. */
   disconnect(): void {
     this.#listeners.dispose();

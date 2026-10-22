@@ -1,8 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
+import { isAriaDisabled } from "../utils/aria_disabled";
 import { isReservedArrowChord } from "../utils/arrow_step";
+import { ClickVerdicts } from "../utils/click_verdicts";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
-import { ownerIndex } from "../utils/event_owner";
+import { ownerIndex, ownersOf } from "../utils/event_owner";
+import { ListenerSet } from "../utils/listener_set";
 import { isRtl } from "../utils/logical_scroll";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -15,7 +18,7 @@ import { targetSelector } from "../utils/target_selector";
  *
  * Markup contract (identifier: `stimeo--navigation-menu`):
  *   <nav data-controller="stimeo--navigation-menu" aria-label="Main">
- *     <ul>
+ *     <ul data-stimeo--navigation-menu-target="list">
  *       <li>
  *         <button data-stimeo--navigation-menu-target="trigger"
  *                 aria-expanded="false" aria-controls="nav-products"
@@ -42,8 +45,9 @@ import { targetSelector } from "../utils/target_selector";
  * destination, closes it. `ArrowLeft`/`ArrowRight` move focus between the
  * *navigable* triggers without rewriting `tabindex` (they keep their natural Tab
  * order); a modified press (`Alt`/`Ctrl`/`Meta`/`Shift`, e.g. the browser's
- * `Alt+←` history back) is left to the browser. Hover open/close is opt-in via
- * `openOnHover`.
+ * `Alt+←` history back) is left to the browser. `ArrowLeft`/`ArrowRight` follow
+ * the writing direction of the optional `list` target, or of the root while there
+ * is none. Hover open/close is opt-in via `openOnHover`.
  *
  * Every `panel` must be a **descendant of the nav element**: Stimulus resolves
  * targets within the controller's own scope, so a panel moved outside it (a
@@ -52,8 +56,9 @@ import { targetSelector } from "../utils/target_selector";
  * By default the hover region is each trigger and its panel. An optional
  * `hoverArea` target widens it: mark a wrapper that contains **exactly one**
  * trigger (e.g. the `<li>` holding a top-level *link*, its disclosure button, and
- * its panel — the APG "Disclosure Navigation with Top-Level Links" arrangement)
- * and hovering anywhere over that wrapper opens the contained trigger's panel.
+ * its panel — the arrangement of the APG example
+ * "Disclosure (Show/Hide) Navigation Menu with Top-Level Links") and hovering
+ * anywhere over that wrapper opens the contained trigger's panel.
  * Wrapping several triggers at once (marking the whole `<ul>`, say) is not
  * supported: every hover over the area then resolves to the *first* contained
  * trigger. A trigger or panel inside a `hoverArea` defers to the wrapper (its own
@@ -98,7 +103,7 @@ export class NavigationMenuController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
   readonly #numbers = new NumberValueReader();
 
-  static override targets = ["trigger", "panel", "hoverArea"];
+  static override targets = ["trigger", "panel", "hoverArea", "list"];
   static override values = {
     openOnHover: { type: Boolean, default: false },
     hoverDelay: { type: Number, default: 150 },
@@ -113,6 +118,8 @@ export class NavigationMenuController extends Controller<HTMLElement> {
   declare readonly triggerTargets: HTMLElement[];
   declare readonly panelTargets: HTMLElement[];
   declare readonly hoverAreaTargets: HTMLElement[];
+  declare readonly listTarget: HTMLElement;
+  declare readonly hasListTarget: boolean;
 
   declare openOnHoverValue: boolean;
   declare hoverDelayValue: number;
@@ -121,11 +128,11 @@ export class NavigationMenuController extends Controller<HTMLElement> {
   readonly #hoverTimers = new SafeTimeout();
 
   /**
-   * Elements currently carrying hover listeners. Removal always mirrors this
-   * set (not a recomputed target snapshot), so a rebuild driven by target churn
-   * can never strand a listener on an element that stopped being a target.
+   * The hover listeners on the elements that were wired. Releasing the set reaches
+   * exactly those elements (not a recomputed target snapshot), so a rebuild driven by
+   * target churn can never strand a listener on an element that stopped being a target.
    */
-  readonly #hoverWired = new Set<HTMLElement>();
+  readonly #hoverListeners = new ListenerSet();
 
   /**
    * The trigger whose hover region the pointer currently occupies, if any. Only
@@ -147,12 +154,19 @@ export class NavigationMenuController extends Controller<HTMLElement> {
   /** Escape-stack membership while any panel is open; the shared resolver dismisses via it. */
   readonly #escapeLayer = new EscapeLayer();
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
+  /** The activation verdict the capture pass took for a click, with the triggers it judged. */
+  readonly #clickVerdicts = new ClickVerdicts();
+
   /** Establishes the closed baseline and the dismissal listeners. */
   override connect(): void {
     this.#connected = true;
     this.#closeAll("api");
-    document.addEventListener("click", this.#onOutsideClick, true);
-    this.element.addEventListener("focusout", this.#onFocusOut);
+    this.#listeners.add(this.element, "click", this.#onClickCapture, { capture: true });
+    this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
+    this.#listeners.add(this.element, "focusout", this.#onFocusOut);
     if (this.openOnHoverValue) this.#addHoverListeners();
     this.#reporting = true;
   }
@@ -162,8 +176,7 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     this.#connected = false;
     this.#reporting = false;
     this.#escapeLayer.deactivate();
-    document.removeEventListener("click", this.#onOutsideClick, true);
-    this.element.removeEventListener("focusout", this.#onFocusOut);
+    this.#listeners.dispose();
     this.#removeHoverListeners();
     this.#hoverTimers.clearAll();
   }
@@ -222,16 +235,26 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    * would be unopenable until the pointer left and came back. Keyboard
    * activation (pointer elsewhere) still toggles it closed, and `Escape` and
    * outside clicks dismiss either way.
+   *
+   * A trigger that is `hidden`, natively `disabled` or `aria-disabled` (itself or
+   * through an ancestor) never opens, whether this receives a DOM event of any
+   * type or an explicit element: the refusal leaves an open panel open and reports
+   * nothing, and only the pending hover timer is dropped, as for every explicit
+   * activation. Nor does a trigger whose target lies inside a nested trigger that
+   * refuses. A click keeps the verdict taken as it started, before the handlers
+   * inside the nav element ran, when the trigger held its target then; a trigger that
+   * verdict was not taken for, and anything else, is judged now. A panel already open
+   * behind such a trigger still closes.
    */
   toggle(source: Event | HTMLElement): void {
-    const { host, origin, reason } = actionSource(source);
+    const { event, host, origin, reason } = actionSource(source);
     const trigger = host?.closest<HTMLElement>(targetSelector(this.identifier, "trigger"));
     if (!trigger || !this.triggerTargets.includes(trigger)) return;
     if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
       return;
     this.#hoverTimers.clearAll();
     if (!this.#isExpanded(trigger)) {
-      this.#openPanel(trigger, reason);
+      if (!this.#refuses(trigger, event, origin)) this.#openPanel(trigger, reason);
       return;
     }
     if (this.openOnHoverValue && this.#hoveredTrigger === trigger) return;
@@ -267,10 +290,10 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     if (index === -1 || triggers.length < 2) return;
 
     event.preventDefault();
-    // Logical, not physical: the triggers are an ordered row, so which one is
-    // "next" follows the writing direction. Read from the controller element —
-    // the nav lays the triggers out, and a trigger may carry its own `dir`.
-    const forward = isRtl(this.element) ? "ArrowLeft" : "ArrowRight";
+    // The trigger row owns direction; each trigger may carry its own independent dir.
+    const forward = isRtl(this.hasListTarget ? this.listTarget : this.element)
+      ? "ArrowLeft"
+      : "ArrowRight";
     const step = event.key === forward ? 1 : -1;
     triggers[(index + step + triggers.length) % triggers.length]?.focus();
   }
@@ -279,13 +302,12 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    * Opens `trigger`'s panel, closing any other open panel first. Re-opening an
    * already-open panel only re-asserts the Escape layer: the close/open
    * round-trip would rewrite `aria-expanded` and `hidden` for no state change.
+   *
+   * Both callers have already judged the trigger: `toggle` — by a click's verdict from
+   * before the handlers inside the nav element ran when that verdict was taken
+   * for the trigger, and now otherwise — and the hover open, as its timer fires.
    */
   #openPanel(trigger: HTMLElement, reason: StateReason): void {
-    // Guarded here rather than in `toggle`, because hover reaches this method
-    // without going through it. Reaching an `aria-disabled` trigger is what the
-    // attribute asks for — opening its panel is the activation it forbids, and
-    // opening a popup counts as activation.
-    if (trigger.getAttribute("aria-disabled") === "true") return;
     if (this.#isExpanded(trigger)) {
       this.#syncEscapeLayer();
       return;
@@ -350,6 +372,34 @@ export class NavigationMenuController extends Controller<HTMLElement> {
   }
 
   /**
+   * Whether `trigger` refuses activation: it is out of reach (its own `hidden` or
+   * native `disabled`) or `aria-disabled`, itself or through an ancestor, which
+   * keeps it reachable but never opened.
+   */
+  #isActivationDisabled(trigger: HTMLElement): boolean {
+    return !this.#isNavigable(trigger) || isAriaDisabled(trigger);
+  }
+
+  /**
+   * Whether opening `trigger`'s panel is refused for `event`, or for `origin` — the
+   * explicit element, or the trigger a hover landed on — when there is no event. A
+   * click keeps the verdict its capture pass took, before the handlers inside
+   * the nav element could change it, when `trigger` was among the triggers holding
+   * its target. Otherwise — any other event, an explicit element, a hover, or a click
+   * recorded without `trigger` — `trigger` itself and the triggers holding the event's
+   * target, or `origin`, are judged now, and any one that refuses activation refuses
+   * `trigger`. `trigger` is judged on its own because a handler can move the target
+   * out of it before `toggle` runs.
+   */
+  #refuses(trigger: HTMLElement, event: Event | null, origin: Element | null): boolean {
+    const recorded = this.#clickVerdicts.for(event, trigger);
+    if (recorded !== undefined) return recorded;
+    if (this.#isActivationDisabled(trigger)) return true;
+    const target = event ? event.target : origin;
+    return ownersOf(this.triggerTargets, target).some((owner) => this.#isActivationDisabled(owner));
+  }
+
+  /**
    * Aligns Escape-stack membership with the open state: joins (or re-asserts to
    * the top) while a panel is open, leaves once none is. Re-asserting when the
    * user switches panels is deliberate — the nav is again the newest layer.
@@ -377,6 +427,22 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     this.#closePanel(open, "escape");
     open.focus();
   }
+
+  /**
+   * Judges a click on a trigger before the handlers inside the nav element
+   * run, and records the verdict for the `toggle` the click goes on to reach: refused
+   * when any trigger holding the target refuses activation, recorded with all of
+   * those triggers. The click itself is left to run its course: a refused one opens
+   * nothing, and nothing else is stopped.
+   */
+  readonly #onClickCapture = (event: MouseEvent): void => {
+    const triggers = ownersOf(this.triggerTargets, event.target);
+    this.#clickVerdicts.record(
+      event,
+      triggers,
+      triggers.some((trigger) => this.#isActivationDisabled(trigger)),
+    );
+  };
 
   /** Closes panels when a click lands outside the nav element. */
   readonly #onOutsideClick = (event: MouseEvent): void => {
@@ -433,11 +499,14 @@ export class NavigationMenuController extends Controller<HTMLElement> {
    * place). Focus outside the closing panel is left alone.
    */
   #openFromHover(trigger: HTMLElement): void {
-    // Checked before the rescue below, not only inside `#openPanel`. The rescue
-    // exists to get focus out of a panel that is about to be hidden; when the
-    // destination refuses to open, nothing is hidden and moving focus buys
-    // nothing — it just walks the caret out of a panel that stays open.
-    if (trigger.getAttribute("aria-disabled") === "true") return;
+    // Checked here, before the rescue below; `#openPanel` does not check again.
+    // The rescue exists to get focus out of a panel that is about to be hidden;
+    // when the destination refuses to open, nothing is hidden and moving focus
+    // buys nothing — it just walks the caret out of a panel that stays open.
+    // Reaching an `aria-disabled` trigger is what the attribute asks for, while
+    // opening its panel is the activation it forbids. A hover lands on `trigger`,
+    // so every trigger holding it is judged, an outer one included.
+    if (this.#refuses(trigger, null, trigger)) return;
     const open = this.#openTrigger;
     if (open && open !== trigger && this.#holdsFocus(this.#panelFor(open))) open.focus();
     this.#openPanel(trigger, "pointer");
@@ -460,29 +529,24 @@ export class NavigationMenuController extends Controller<HTMLElement> {
     return panel?.contains(document.activeElement) ?? false;
   }
 
-  /** Wires hover open/close on each hover element (opt-in), tracking what was wired. */
+  /** Wires hover open/close on each hover element (opt-in). */
   #addHoverListeners(): void {
     for (const element of this.#hoverElements) {
-      element.addEventListener("mouseenter", this.#onPointerEnter);
-      element.addEventListener("mouseleave", this.#onPointerLeave);
-      this.#hoverWired.add(element);
+      this.#hoverListeners.add(element, "mouseenter", this.#onPointerEnter);
+      this.#hoverListeners.add(element, "mouseleave", this.#onPointerLeave);
     }
   }
 
-  /** Removes the hover listeners from exactly the elements that were wired. */
+  /** Releases the hover listeners from exactly the elements that were wired. */
   #removeHoverListeners(): void {
-    for (const element of this.#hoverWired) {
-      element.removeEventListener("mouseenter", this.#onPointerEnter);
-      element.removeEventListener("mouseleave", this.#onPointerLeave);
-    }
-    this.#hoverWired.clear();
+    this.#hoverListeners.dispose();
     this.#hoveredTrigger = null;
   }
 
   /**
    * Rebuilds the hover wiring from the current targets. Target callbacks call
    * this so items added or removed after connect (e.g. a Turbo Stream append)
-   * participate in hover; the wired-set removal keeps the rebuild symmetric.
+   * participate in hover; releasing the wired set keeps the rebuild symmetric.
    * Stimulus fires those callbacks during teardown too, hence the `#connected`
    * guard — a rebuild after `disconnect()` would resurrect the listeners.
    */

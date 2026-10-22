@@ -1,12 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IntersectionWatcher, isBeforeRootStart } from "../../src/utils/intersection_watcher";
 
-/**
- * Contract tests for {@link IntersectionWatcher}: support detection, root
- * resolution, restart/re-arm behavior, stale callback isolation, and
- * exception-safe observer ownership.
- */
-
 interface ObserverRecord {
   callback: (entries: IntersectionObserverEntry[]) => void;
   options: IntersectionObserverInit | undefined;
@@ -98,6 +92,11 @@ const installObserver = ({
   return records;
 };
 
+/**
+ * Contract tests for {@link IntersectionWatcher}: support detection, root
+ * resolution, restart/re-arm behavior, stale callback isolation, and
+ * exception-safe observer ownership.
+ */
 describe("IntersectionWatcher", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

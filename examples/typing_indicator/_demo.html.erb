@@ -4,11 +4,11 @@
     it automatically after silence. Own echoes are suppressed by design, so open
     this page in a second tab to see the indicator. The guest name is randomized
     per render so each tab is a distinct "user" (a real app passes
-    current_user.name). The data-one/data-many templates keep the announcement
-    localizable; %{name}/%{names} are substituted by the controller. The status slot is
+    current_user.name). The data-one/data-many templates keep the visible copy
+    localizable; {name}/{names} are substituted by the controller. The status slot is
     plain visible copy — assistive tech is reached through the page's shared announcer
-    instead, so the announce-one/announce-many values carry the spoken wording ({name}
-    syntax, not %{}). Leaving them off shows the indicator without announcing it. %>
+    instead, so the announce-one/announce-many values carry the spoken wording with
+    the same {name}/{names} syntax. Leaving them off shows the indicator without announcing it. %>
 <% guest = t("components.typing_indicator.demo.guest_name", token: SecureRandom.hex(2)) %>
 <% announce_one = t("components.typing_indicator.demo.announce_one") %>
 <% announce_many = t("components.typing_indicator.demo.announce_many") %>

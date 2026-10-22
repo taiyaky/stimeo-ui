@@ -33,8 +33,10 @@ const setReducedMotion = (reduce: boolean) => {
 class FakeResizeObserver implements ResizeObserver {
   static instances: FakeResizeObserver[] = [];
   readonly observed = new Set<Element>();
+  readonly #callback: ResizeObserverCallback;
 
-  constructor(private readonly callback: ResizeObserverCallback) {
+  constructor(callback: ResizeObserverCallback) {
+    this.#callback = callback;
     FakeResizeObserver.instances.push(this);
   }
   observe(element: Element): void {
@@ -48,7 +50,7 @@ class FakeResizeObserver implements ResizeObserver {
   }
   /** Test helper: notify as if the observed element gained (or changed) its box. */
   trigger(): void {
-    this.callback([], this);
+    this.#callback([], this);
   }
 }
 

@@ -5,6 +5,7 @@ import { LayoutObserver } from "../utils/layout_observer";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
+import { OwnedText } from "../utils/owned_text";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { TabindexLoan } from "../utils/tabindex_loan";
 import type { MenuController } from "./menu_controller";
@@ -28,13 +29,13 @@ const BOUNDARY = "boundary";
 const SAVED_ROLE = "role";
 const SAVED_TABINDEX = "tabindex";
 const SAVED_MENU_TARGET = "saved-menu";
-/** Menu's target attribute — set to `item` while banked so Menu drives the item. */
+/** The `stimeo--menu` target attribute, set to `item` while banked so that controller drives it. */
 const MENU_TARGET = "data-stimeo--menu-target";
 /** Everything this controller writes on an item; all removed on the way back to the bar. */
 const BOOKKEEPING = [BANKED, INDEX, SAVED_ROLE, SAVED_TABINDEX, SAVED_MENU_TARGET] as const;
 /**
  * Suffix of the marker on the More label this controller wrote into the trigger;
- * the marker holds that label as its value. The trigger is this controller's only
+ * the record holds `["text", original, written]`. The trigger is this controller's only
  * while it holds that label and nothing else: text the consumer rewrites there, or
  * an element child, an `aria-label` or an `aria-labelledby` they add, makes it
  * theirs.
@@ -50,7 +51,8 @@ interface MovableParent {
  * Headless **overflow / priority menu**: items that no longer fit their container are
  * moved into a "More" dropdown (lowest `data-priority` first) and moved back as space
  * returns, watched with a {@link ResizeObserver} (no dedicated APG pattern — a
- * composition; the menu's a11y is delegated to Menu, so it is not re-implemented).
+ * composition; the menu's a11y is delegated to `stimeo--menu`, so it is not
+ * re-implemented).
  *
  * Markup contract (identifier: `stimeo--overflow-menu`):
  *   <nav data-controller="stimeo--overflow-menu" aria-label="Actions">
@@ -71,7 +73,7 @@ interface MovableParent {
  * This controller does not own the root's role. It ships none: a navigation bar is
  * a named `<nav>` whose items stay in the normal Tab order. A consumer may add
  * `role="toolbar"`, but that alone is not an APG Toolbar — the single-tab-stop
- * roving is {@link ToolbarController}'s behavior, not this one's — and a named
+ * roving is `stimeo--toolbar`'s behavior, not this one's — and a named
  * role still needs `aria-label` / `aria-labelledby`.
  *
  * Two parts of that contract are load-bearing and easy to drop. The banked-items
@@ -82,15 +84,15 @@ interface MovableParent {
  * by keyboard at all (`Enter` / `Space` / `ArrowDown`). It is spelled out above rather
  * than referenced, because the keyboard half of this contract lives *only* in the
  * consumer's markup — nothing in this controller's source would reveal its absence.
- * Items need no bindings of their own — Menu delegates their handling from its own
- * element, so a control that only becomes a menu item at runtime is operable the
+ * Items need no bindings of their own — `stimeo--menu` delegates their handling from its
+ * own element, so a control that only becomes a menu item at runtime is operable the
  * moment it lands.
  *
  * A bare More trigger — no text, no element child, no `aria-label` or
  * `aria-labelledby` — gets `moreLabel` as its text on every pass, before the pass
- * measures it, marked with `data-<identifier>-owns-label` whose value is that
- * label. The trigger stays this controller's only while it holds that label and
- * nothing else — the text still matches the marker, and it has no element child,
+ * measures it, recording `["text", original, written]` in `data-<identifier>-owns-label`.
+ * The trigger stays this controller's only while it holds that label and
+ * nothing else — the text still matches the written string, and it has no element child,
  * `aria-label` or `aria-labelledby` — and only then does a `moreLabel` swapped at
  * runtime rewrite it, or an empty one hand it back bare. Any other trigger content
  * is the author's and is never written: a trigger the consumer has rewritten, or
@@ -101,8 +103,8 @@ interface MovableParent {
  * On connect (and every debounced resize) it measures the items against the container's
  * content width and, when they overflow, banks the lowest-priority ones into the More
  * menu — giving each `role="menuitem"` / `tabindex="-1"` and the menu's `item` target so
- * Menu drives it — until the rest fit beside the More button. When nothing overflows the
- * More wrapper (button *and* menu) is `hidden`. The controller element carries
+ * `stimeo--menu` drives it — until the rest fit beside the More button. When nothing
+ * overflows the More wrapper (button *and* menu) is `hidden`. The controller element carries
  * `data-overflowing` / `data-overflow-count`, and a `change` event fires on connect and
  * on later update or resize transitions; retained-element morphs report `reconcile`.
  *
@@ -170,6 +172,10 @@ interface MovableParent {
  * Behavior only — no styling.
  */
 export class OverflowMenuController extends Controller<HTMLElement> {
+  /** Plain labels leave authored structure and accessible names alone. */
+  readonly #labelText = new OwnedText(this.#attr(OWNED_LABEL), "text", (trigger) =>
+    this.#carriesOnlyText(trigger),
+  );
   /** Numeric read boundaries share one reader for this controller instance. */
   readonly #numbers = new NumberValueReader();
 
@@ -211,14 +217,14 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   #lastHidden: number | null = null;
   /**
    * Counts the passes and restores begun on this instance. Moving focus and closing
-   * the composed Menu run page code, which can start a pass or a restore of its own;
+   * the composed `stimeo--menu` run page code, which can start a pass or a restore of its own;
    * that one writes the whole state, so a pass that finds this count moved on after
    * such a call writes and reports nothing more.
    */
   #pass = 0;
   /**
-   * Whether every item is being returned to the bar. Closing the composed Menu there
-   * runs page code, and a pass it starts would bank items again behind the More
+   * Whether every item is being returned to the bar. Closing the composed `stimeo--menu`
+   * there runs page code, and a pass it starts would bank items again behind the More
    * wrapper that the restore then hides, so no pass runs until the restore ends —
    * the outermost one, when that page code starts another restore inside it.
    */
@@ -526,14 +532,14 @@ export class OverflowMenuController extends Controller<HTMLElement> {
    *
    * Children never seen before — inserted by the consumer since the last pass — have no
    * canonical position yet, so they keep their DOM neighbours. The exception is a
-   * *trailing* run of them: appending to the bar means appending to the toolbar, so
-   * everything banked is emitted before it.
+   * *trailing* run of them: appending to the bar means appending at the end of the whole
+   * item set, so everything banked is emitted before it.
    *
    * With no known child at all (a fresh instance connecting to markup that already
    * holds banked items), a fully-banked snapshot's inert boundary preserves whether an
-   * unindexed run was prepended or appended before connect. Markup that holds banked items but no boundary —
-   * server-rendered or hand-authored — uses the saved index as the
-   * offset, the inverse of the move that banked it.
+   * unindexed run was prepended or appended before connect. Markup that holds banked
+   * items but no boundary — server-rendered or hand-authored — uses the saved index as
+   * the offset, the inverse of the move that banked it.
    */
   #merge(
     bar: readonly HTMLElement[],
@@ -661,22 +667,17 @@ export class OverflowMenuController extends Controller<HTMLElement> {
       this.#releaseLabel(trigger);
       return;
     }
-    if (owned && trigger.textContent === label) return;
-    trigger.textContent = label;
-    trigger.setAttribute(this.#attr(OWNED_LABEL), label);
+    this.#labelText.write(trigger, label);
   }
 
   /**
    * Whether the trigger holds the label this controller wrote there and nothing
-   * else: the text still matches the marker, and the trigger carries nothing but
+   * else: the text still matches the record's written string, and the trigger carries nothing but
    * text. Ownership is read afresh on every call, so a trigger the consumer adds to
    * is theirs for as long as the addition is there.
    */
   #ownsLabel(trigger: HTMLElement): boolean {
-    return (
-      trigger.getAttribute(this.#attr(OWNED_LABEL)) === trigger.textContent &&
-      this.#carriesOnlyText(trigger)
-    );
+    return this.#labelText.owns(trigger);
   }
 
   /**
@@ -685,9 +686,7 @@ export class OverflowMenuController extends Controller<HTMLElement> {
    * included: taking the marker off would itself write to it.
    */
   #releaseLabel(trigger: HTMLElement): void {
-    if (!this.#ownsLabel(trigger)) return;
-    trigger.textContent = "";
-    trigger.removeAttribute(this.#attr(OWNED_LABEL));
+    this.#labelText.clear(trigger);
   }
 
   /**
@@ -719,18 +718,18 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   }
 
   /**
-   * Whether the menu `more` composes is expanded. Menu owns that state and reflects it on
-   * the trigger's `aria-expanded`, so read the contract rather than guess from `hidden`
-   * (which is absent until Menu connects).
+   * Whether the menu `more` composes is expanded. `stimeo--menu` owns that state and
+   * reflects it on the trigger's `aria-expanded`, so read the contract rather than guess
+   * from `hidden` (which is absent until `stimeo--menu` connects).
    */
   #menuExpanded(more: HTMLElement): boolean {
     return this.#trigger(more)?.getAttribute("aria-expanded") === "true";
   }
 
   /**
-   * Collapses the menu `more` composes before the wrapper is hidden. Menu owns the state
-   * (and the Escape-stack membership that goes with it), so ask it; the DOM fallback covers
-   * markup that reached an expanded state with no Menu mounted.
+   * Collapses the menu `more` composes before the wrapper is hidden. `stimeo--menu` owns
+   * the state (and the Escape-stack membership that goes with it), so ask it; the DOM
+   * fallback covers markup that reached an expanded state with no `stimeo--menu` mounted.
    */
   #closeMenu(more: HTMLElement): void {
     if (!this.#menuExpanded(more)) return;
@@ -870,8 +869,8 @@ export class OverflowMenuController extends Controller<HTMLElement> {
   }
 
   /**
-   * Gives an item menuitem semantics for Menu to drive and records its canonical index,
-   * saving every authored value it overwrites ("" means the attribute was absent).
+   * Gives an item menuitem semantics for `stimeo--menu` to drive and records its canonical
+   * index, saving every authored value it overwrites ("" means the attribute was absent).
    */
   #bank(item: HTMLElement): void {
     if (!item.hasAttribute(this.#attr(BANKED))) {

@@ -19,10 +19,16 @@ import { valueRelationRules } from "./value_relation_rules";
 
 /**
  * Current manifest *format* version, stamped onto every generated manifest as
- * `schemaVersion`. Bump on breaking schema changes; a reader compares it with
- * the shape its own engine knows how to consume.
+ * `schemaVersion`. Readers accept a manifest by its shape rather than this
+ * number; it records the format revision. Bump it when a newer engine would
+ * refuse a manifest of the earlier shape (a field added to the required
+ * arrays), when an older engine reading a newer manifest could report what the
+ * newer contract does not — another severity, or a finding a new field
+ * excludes — or when renaming or removing a field stops an older engine from
+ * running one of its checks on a newer manifest. An optional field an older
+ * engine skips, losing only the new check, keeps the version.
  */
-export const SCHEMA_VERSION = 15;
+export const SCHEMA_VERSION = 16;
 
 /**
  * Minimal structural view of a Stimulus controller class, exposing only the

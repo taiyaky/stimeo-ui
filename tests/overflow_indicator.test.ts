@@ -50,8 +50,10 @@ const setReducedMotion = (reduce: boolean) => {
 class FakeResizeObserver implements ResizeObserver {
   static instances: FakeResizeObserver[] = [];
   readonly observed = new Set<Element>();
+  readonly #callback: ResizeObserverCallback;
 
-  constructor(private readonly callback: ResizeObserverCallback) {
+  constructor(callback: ResizeObserverCallback) {
+    this.#callback = callback;
     FakeResizeObserver.instances.push(this);
   }
 
@@ -68,7 +70,7 @@ class FakeResizeObserver implements ResizeObserver {
   }
 
   trigger(): void {
-    this.callback([], this);
+    this.#callback([], this);
   }
 }
 
@@ -439,11 +441,13 @@ describe("OverflowIndicatorController", () => {
   });
 
   it("reconciles a pending marker carried in by a restored snapshot", async () => {
-    // Turbo clones the page for its cache *before* `disconnect()` runs, so a
-    // restored visit brings the pending markers back while the fresh instance has
-    // no in-memory record of them. The marker itself must be enough to undo the
-    // displaced `aria-disabled` — otherwise the button keeps announcing itself as
-    // disabled forever while staying focusable.
+    // A snapshot Turbo takes while the controller is still connected — a render held
+    // by a paused `turbo:before-render`, a new stylesheet or a view transition, a
+    // promoted frame navigation, or a page that stays — carries the pending markers,
+    // and a restored visit brings them back while the fresh instance has no in-memory
+    // record of them. The marker itself must be enough to undo the displaced
+    // `aria-disabled`; otherwise the button keeps announcing itself as disabled while
+    // staying focusable.
     document.body.innerHTML = markup;
     const restored = button("end");
     restored.setAttribute("data-overflow-indicator-pending-disabled", "");

@@ -9,6 +9,7 @@ import { MenuController } from "../src/controllers/menu_controller";
 import { PopoverController } from "../src/controllers/popover_controller";
 import { TooltipController } from "../src/controllers/tooltip_controller";
 import { byId } from "./helpers/dom";
+import { press as pressKey, typeKey } from "./helpers/keyboard";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -40,11 +41,12 @@ describe("Escape layering across controllers", () => {
     document.body.style.overflow = "";
   });
 
-  /** Dispatches a cancelable Escape keydown from `origin`, like a real keypress. */
+  /** Presses Escape from an element, or tests document fallback without moving body focus. */
   const pressEscape = (origin: EventTarget = document): KeyboardEvent => {
-    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    origin.dispatchEvent(event);
-    return event;
+    if (origin instanceof HTMLElement && origin !== document.body)
+      return pressKey(origin, "Escape");
+    // A document or body origin exercises the stack without assigning an element focus.
+    return typeKey(origin, "Escape");
   };
 
   it("lets an element-level inner layer own the press over an outer popover", async () => {
@@ -83,8 +85,8 @@ describe("Escape layering across controllers", () => {
     expect(byId("pop").hidden).toBe(false);
     expect(byId("pop-trigger").getAttribute("aria-expanded")).toBe("true");
 
-    // The next press is unowned, so the popover (focus still inside) takes it.
-    pressEscape(byId("note-close"));
+    // The hidden inner close control cannot receive fresh focus during this fallback press.
+    typeKey(byId("note-close"), "Escape");
     expect(byId("pop").hidden).toBe(true);
   });
 
@@ -589,9 +591,7 @@ describe("Escape layering across controllers", () => {
     byId("dlg-trigger").click();
     byId("cb-input").focus();
     // Open the list the keyboard way (ArrowDown), like a user inside the dialog.
-    byId("cb-input").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
-    );
+    pressKey(byId("cb-input"), "ArrowDown", { bubbles: true, cancelable: true });
     expect(byId("cb-list").hidden).toBe(false);
 
     // While the list is open the widget-local handler is the deepest owner …

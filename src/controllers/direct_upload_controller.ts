@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { validSelector } from "../utils/declared_value";
 import { KeyedTimers } from "../utils/keyed_timers";
+import { ListenerSet } from "../utils/listener_set";
 import { cloneTemplateRoot } from "../utils/template_row";
 
 /** Detail shapes for the ActiveStorage `direct-upload:*` events. */
@@ -22,7 +23,7 @@ const GENERATED_ATTRIBUTE = "generated";
  * Headless progress UI for ActiveStorage Direct Uploads: subscribes to the
  * `direct-upload:*` events and renders a per-file progress row (no dedicated APG
  * pattern; the rows follow the `role="progressbar"` practice). The companion to
- * {@link FileDropzoneController}, which leaves transport out of scope.
+ * `stimeo--file-dropzone`, which leaves transport out of scope.
  *
  * Markup contract (identifier: `stimeo--direct-upload`):
  *   <div data-controller="stimeo--direct-upload"
@@ -156,12 +157,15 @@ export class DirectUploadController extends Controller<HTMLElement> {
     this.#complete(this.#key(detail.id), this.#name(detail));
   };
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     this.#connected = true;
-    document.addEventListener("direct-upload:initialize", this.#onInitialize);
-    document.addEventListener("direct-upload:progress", this.#onProgress);
-    document.addEventListener("direct-upload:error", this.#onError);
-    document.addEventListener("direct-upload:end", this.#onEnd);
+    this.#listeners.add(document, "direct-upload:initialize", this.#onInitialize);
+    this.#listeners.add(document, "direct-upload:progress", this.#onProgress);
+    this.#listeners.add(document, "direct-upload:error", this.#onError);
+    this.#listeners.add(document, "direct-upload:end", this.#onEnd);
     this.#discardInherited();
     // An in-page move runs disconnect() → connect() on the same instance, and
     // teardown cancelled any pending removals; completed rows re-earn theirs.
@@ -170,10 +174,7 @@ export class DirectUploadController extends Controller<HTMLElement> {
 
   override disconnect(): void {
     this.#connected = false;
-    document.removeEventListener("direct-upload:initialize", this.#onInitialize);
-    document.removeEventListener("direct-upload:progress", this.#onProgress);
-    document.removeEventListener("direct-upload:error", this.#onError);
-    document.removeEventListener("direct-upload:end", this.#onEnd);
+    this.#listeners.dispose();
     this.#removals.clearAll();
     // `#rows` is kept: `disconnect()` also fires on an in-page move, where the
     // rows travel with the element and the next event should keep updating

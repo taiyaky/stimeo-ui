@@ -89,6 +89,27 @@ describe("ConditionalFieldsController", () => {
     expect(region().hasAttribute("data-visible")).toBe(false);
   });
 
+  it.each(["true", "false"])(
+    "reconciles an authored aria-hidden=%s signal after initial unobserved rendering",
+    async (authored) => {
+      await mount(`${CHECKBOX}
+        <fieldset data-stimeo--conditional-fields-target="region" data-when-checked>
+          <input name="street">
+        </fieldset>`);
+      expect(region().getAttribute("aria-hidden")).toBe("true");
+      expect(region().hidden).toBe(true);
+
+      // A property edit is silent; the authored region attribute starts reconciliation.
+      trigger().checked = true;
+      region().setAttribute("aria-hidden", authored);
+      await tick();
+
+      expect(region().hidden).toBe(false);
+      expect(region().getAttribute("aria-hidden")).toBeNull();
+      expect(query<HTMLInputElement>("[name='street']").disabled).toBe(false);
+    },
+  );
+
   it("repairs an owned disabled marker while preserving authored disabled controls", async () => {
     await mount(`${CHECKBOX}
       <fieldset data-stimeo--conditional-fields-target="region" data-when-checked>

@@ -5,7 +5,8 @@ import { RovingController } from "../src/controllers/roving_controller";
 import { SortableController } from "../src/controllers/sortable_controller";
 import { MicrotaskCoalescer } from "../src/utils/microtask_coalescer";
 import { expectNoA11yViolations } from "./helpers/a11y";
-import { press } from "./helpers/keyboard";
+import { press, typeKey } from "./helpers/keyboard";
+import { recordListeners } from "./helpers/listeners";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay, flushMicrotasks } from "./helpers/timing";
@@ -98,8 +99,7 @@ describe("SortableController", () => {
     document.querySelector<HTMLElement>(
       `#${id} [data-stimeo--pointer-drag-target='handle']`,
     ) as HTMLElement;
-  const key = (id: string, k: string) =>
-    handle(id).dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+  const key = (id: string, k: string) => press(handle(id), k);
 
   /**
    * Lays the items out along `axis` as consecutive `size`-px slots via stubbed
@@ -152,6 +152,55 @@ describe("SortableController", () => {
       key("i2", "ArrowDown");
       expect(order()).toEqual(["i1", "i3", "i2"]);
       expect(announced()).toBe("Card B, position 3 of 3");
+    });
+
+    it("keeps the grab through settled DOM moves and commits the final position", async () => {
+      const reorders = await mount();
+      const cancellations = vi.fn();
+      root().addEventListener("stimeo--pointer-drag:cancel", cancellations);
+      press(handle("i2"), " ");
+      for (const [arrow, expected] of [
+        ["ArrowUp", ["i2", "i1", "i3"]],
+        ["ArrowDown", ["i1", "i2", "i3"]],
+        ["ArrowDown", ["i1", "i3", "i2"]],
+      ] as const) {
+        press(handle("i2"), arrow);
+        await delay(0);
+        expect(order()).toEqual(expected);
+        expect(document.activeElement).toBe(handle("i2"));
+        expect(handle("i2").getAttribute("data-grabbed")).toBe("true");
+        expect(root().getAttribute("data-sortable-dragging")).toBe("true");
+      }
+      expect(cancellations).not.toHaveBeenCalled();
+      press(handle("i2"), "Enter");
+      expect(reorders).toEqual([{ item: document.querySelector("#i2"), from: 1, to: 2 }]);
+      expect(root().hasAttribute("data-sortable-dragging")).toBe(false);
+    });
+
+    it("rolls back on actual focus departure and accepts the next grab", async () => {
+      const reorders = await mount(`${fixture}<button id="outside">Outside</button>`);
+      const cancellations = vi.fn();
+      root().addEventListener("stimeo--pointer-drag:cancel", cancellations);
+      press(handle("i2"), " ");
+      press(handle("i2"), "ArrowUp");
+      await delay(0);
+      expect(order()).toEqual(["i2", "i1", "i3"]);
+      expect(press(handle("i2"), "Tab").defaultPrevented).toBe(false);
+      const outside = document.getElementById("outside") as HTMLElement;
+      // Actual focus() supplies the Tab default that happy-dom does not implement.
+      outside.focus();
+      await flushMicrotasks();
+      expect(order()).toEqual(["i1", "i2", "i3"]);
+      expect(cancellations).toHaveBeenCalledOnce();
+      expect(root().hasAttribute("data-sortable-dragging")).toBe(false);
+      expect(handle("i2").hasAttribute("data-grabbed")).toBe(false);
+      expect(announced()).toBe("Reorder canceled, Card B returned to position 2 of 3");
+      expect(document.activeElement).toBe(outside);
+      expect(reorders).toEqual([]);
+      press(handle("i1"), " ");
+      press(handle("i1"), "ArrowDown");
+      press(handle("i1"), "Enter");
+      expect(reorders).toEqual([{ item: document.querySelector("#i1"), from: 0, to: 1 }]);
     });
 
     it("clamps at the ends", async () => {
@@ -227,7 +276,7 @@ describe("SortableController", () => {
     });
 
     it("stays silent for a step the consumer gave no wording", async () => {
-      // Opt-in: the library ships no English copy, so an unset template
+      // Opt-in: each announce template defaults to empty, so an unset one
       // announces nothing rather than falling back to a built-in string.
       await mount();
       root().removeAttribute("data-stimeo--sortable-announce-grabbed-text-value");
@@ -467,25 +516,24 @@ describe("SortableController", () => {
         "stimeo--sortable",
       ) as SortableController;
       controller.disconnect();
-      const added = vi.spyOn(root(), "addEventListener");
-      controller.connect();
-      const listeners = added.mock.calls
-        .filter(([type]) => type.startsWith("stimeo--pointer-drag:"))
-        .map(([type, listener]) => [type, listener]);
-      added.mockRestore();
+      const ledger = recordListeners();
+      try {
+        controller.connect();
+        const drag = () =>
+          ledger.live(root()).filter(({ type }) => type.startsWith("stimeo--pointer-drag:"));
+        expect(drag().map(({ type }) => type)).toEqual([
+          "stimeo--pointer-drag:start",
+          "stimeo--pointer-drag:move",
+          "stimeo--pointer-drag:end",
+          "stimeo--pointer-drag:cancel",
+        ]);
 
-      const removed = vi.spyOn(root(), "removeEventListener");
-      controller.disconnect();
-      const released = removed.mock.calls.map(([type, listener]) => [type, listener]);
-      removed.mockRestore();
+        controller.disconnect();
 
-      expect(listeners.map(([type]) => type)).toEqual([
-        "stimeo--pointer-drag:start",
-        "stimeo--pointer-drag:move",
-        "stimeo--pointer-drag:end",
-        "stimeo--pointer-drag:cancel",
-      ]);
-      expect(released).toEqual(expect.arrayContaining(listeners));
+        expect(drag()).toEqual([]);
+      } finally {
+        ledger.restore();
+      }
     });
 
     it("drops the pending lost-item check and the root hook when it disconnects mid-grab", async () => {
@@ -647,7 +695,7 @@ describe("SortableController", () => {
   });
 
   describe("container resolution", () => {
-    /** The documented list-less shape: items sit directly under the controller. */
+    /** The list-less shape: items sit directly under the controller (only `item` is required). */
     const listless = `
       <main>
         <div id="root" data-controller="stimeo--sortable"
@@ -669,9 +717,9 @@ describe("SortableController", () => {
       </main>`;
 
     it("reorders without a list target, keeping the item among the items", async () => {
-      // `list` is documented optional, and the reorder is defined against the
-      // items themselves: the last slot is after the last item, not after
-      // whatever else the container happens to hold.
+      // `list` is optional (only `item` is required), and the reorder is defined against
+      // the items themselves: the last slot is after the last item, not after whatever
+      // else the container happens to hold.
       await mount(listless);
       press(handle("i1"), " ");
       press(handle("i1"), "ArrowDown");
@@ -818,10 +866,8 @@ describe("SortableController", () => {
       expect(handle("i2").tabIndex).toBe(-1);
     });
 
-    it("keeps the grab when Home or End arrives", async () => {
-      // Every key the handle owns while grabbed has to be consumed there, or a
-      // composition partner moves focus away and the session is stranded with
-      // no way back — Escape then lands on a handle that holds no session.
+    it("keeps the grab when bare Home or End arrives", async () => {
+      // Bare Home/End are consumed so the ancestor roving group keeps focus in place.
       await mount(conforming);
       press(handle("i1"), " ");
       const end = press(handle("i1"), "End");
@@ -854,9 +900,8 @@ describe("SortableController", () => {
 
   describe("optional markup and the axis defaults", () => {
     it("falls back to the item's own text when no name is authored", async () => {
-      // The documented fallback is the item's collapsed text, handle glyph
-      // included — an author who wants the card's title alone says so with
-      // `data-stimeo--sortable-name`.
+      // The fallback is the item's collapsed text, handle glyph included — an author
+      // who wants the card's title alone says so with `data-stimeo--sortable-name`.
       await mount();
       (document.querySelector("#i1") as HTMLElement).removeAttribute("data-stimeo--sortable-name");
       press(handle("i1"), " ");
@@ -923,20 +968,21 @@ describe("SortableController", () => {
 
   describe("more of the session's edges", () => {
     it("ignores a refused item's drop after the owner's row vanished", async () => {
-      // Both halves of the exclusivity are live here: B was refused while A
-      // held the session, and by the time B lets go the session is gone with
-      // A's row — so B's drop belongs to nobody and must report nothing.
+      /**
+       * Unfocused key delivery keeps refused producers live while isolating the
+       * composer's ownership checks from each producer's focus-departure cancel.
+       */
       const reorders = await mount();
       press(handle("i1"), " ");
-      press(handle("i2"), " "); // refused, but B's own pointer-drag is grabbed
-      press(handle("i3"), " "); // and so is C's
+      typeKey(handle("i2"), " ");
+      typeKey(handle("i3"), " ");
       (document.querySelector("#i1") as HTMLElement).remove();
       await delay(0);
       expect(root().hasAttribute("data-sortable-dragging")).toBe(false);
 
       announcements = [];
-      press(handle("i2"), " "); // B drops into a session-less controller
-      press(handle("i3"), "Escape"); // C cancels into one
+      typeKey(handle("i2"), " ");
+      typeKey(handle("i3"), "Escape");
       expect(announcements).toEqual([]);
       expect(order()).toEqual(["i2", "i3"]);
       expect(reorders).toHaveLength(0);
@@ -1077,7 +1123,7 @@ describe("SortableController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Speech-order regression ------------------------------------------------
+  // --- Speech-order check -----------------------------------------------------
 
   it("keeps the list announceable and reflects the new order after a keyboard move", async () => {
     await mount();

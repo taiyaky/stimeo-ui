@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { AttributeLease } from "../utils/attribute_lease";
 import { FocusTrap } from "../utils/focus_trap";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -35,7 +36,7 @@ type Mode = "inline" | "overlay";
  * No dedicated APG pattern: the base is **Disclosure** (the trigger's
  * `aria-expanded` controls the panel's expanded state) and, *below* the
  * `breakpoint`, it borrows the **Dialog (Modal)** focus behavior via the shared
- * `FocusTrap` (the same trap used by dialog / alert-dialog / drawer).
+ * `FocusTrap`.
  *
  * Above the breakpoint it is an **inline**, non-modal element that toggles
  * `expanded`↔`collapsed` (a rail), persisting that preference in `localStorage`.
@@ -127,6 +128,8 @@ export class SidebarController extends Controller<HTMLElement> {
   #collapsed = false;
   /** The matched media query (`min-width: breakpoint`), watched for mode changes. */
   #mql: MediaQueryList | null = null;
+  /** The change listener on the matched query; a new breakpoint releases it first. */
+  readonly #mediaListeners = new ListenerSet();
   /** Exact normalized query currently represented by the active media-query listener. */
   #mqlQuery: string | null = null;
   /** Owns the cancellable close-transition wait and its bounded fallback. */
@@ -175,7 +178,7 @@ export class SidebarController extends Controller<HTMLElement> {
     this.#collapsed = this.#restoreCollapsed();
     this.#mqlQuery = this.#breakpointQuery;
     this.#mql = this.#matchBreakpoint(this.#mqlQuery);
-    this.#mql?.addEventListener("change", this.#onMediaChange);
+    if (this.#mql) this.#mediaListeners.add(this.#mql, "change", this.#onMediaChange);
     const mode = this.#computeMode();
     const resume = this.#lived && mode === "overlay" && this.#isOverlayOpen;
     this.#lived = true;
@@ -187,7 +190,7 @@ export class SidebarController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#connected = false;
     this.#morphRender.disconnect();
-    this.#mql?.removeEventListener("change", this.#onMediaChange);
+    this.#mediaListeners.dispose();
     this.#mql = null;
     this.#mqlQuery = null;
     this.#transition.cancel();
@@ -287,10 +290,10 @@ export class SidebarController extends Controller<HTMLElement> {
     const query = this.#breakpointQuery;
     if (this.#mqlQuery === query) return;
 
-    this.#mql?.removeEventListener("change", this.#onMediaChange);
+    this.#mediaListeners.dispose();
     this.#mqlQuery = query;
     this.#mql = this.#matchBreakpoint(query);
-    this.#mql?.addEventListener("change", this.#onMediaChange);
+    if (this.#mql) this.#mediaListeners.add(this.#mql, "change", this.#onMediaChange);
     const next = this.#computeMode();
     if (next !== this.#mode) this.#applyMode(next, true);
   }

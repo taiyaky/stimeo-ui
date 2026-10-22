@@ -2,7 +2,7 @@
 node_modules/
 
 # Lockfiles are intentionally not committed (CI installs fresh; direct deps are
-# exact-pinned). This also keeps the e2e-only dependency tree out of the repo.
+# exact-pinned).
 bun.lock
 bun.lockb
 package-lock.json

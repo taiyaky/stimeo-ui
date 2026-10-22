@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SeparatorController } from "../src/controllers/separator_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { press as keyboardPress, keyEvent, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
@@ -31,8 +32,7 @@ describe("SeparatorController", () => {
   });
 
   const separator = () => query("[data-controller='stimeo--separator']");
-  const key = (k: string) =>
-    separator().dispatchEvent(new KeyboardEvent("keydown", { key: k, cancelable: true }));
+  const key = (k: string) => keyboardPress(separator(), k);
 
   describe("decorative", () => {
     beforeEach(async () => {
@@ -49,7 +49,8 @@ describe("SeparatorController", () => {
 
     it("is not focusable and ignores arrow keys", () => {
       expect(separator().hasAttribute("tabindex")).toBe(false);
-      key("ArrowUp");
+      // A decorative separator cannot take focus; probe its inert handler without moving focus.
+      typeKey(separator(), "ArrowUp");
       expect(separator().hasAttribute("aria-valuenow")).toBe(false);
     });
 
@@ -67,6 +68,31 @@ describe("SeparatorController", () => {
              data-stimeo--separator-focusable-value="true"
              data-action="keydown->stimeo--separator#onKeydown"></div>`);
     });
+
+    it.each(
+      ["Home", "End"].flatMap((key) =>
+        (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+          key,
+          modifier,
+        })),
+      ),
+    )(
+      "yields modified boundary key $modifier+$key without changing widget state",
+      async ({ key, modifier }) => {
+        separator().focus();
+        const seen: string[] = [];
+        for (const name of ["stimeo--separator:change", "stimeo--separator:reconcile"]) {
+          separator().addEventListener(name, () => seen.push(name));
+        }
+        const before = separator().outerHTML;
+        const event = keyboardPress(separator(), key, { [modifier]: true });
+        expect(event.defaultPrevented).toBe(false);
+        expect(document.activeElement).toBe(separator());
+        expect(separator().outerHTML).toBe(before);
+        expect(separator().getAttribute("aria-valuenow")).toBe("50");
+        expect(seen).toEqual([]);
+      },
+    );
 
     it("increases the value on ArrowRight (vertical orientation)", () => {
       key("ArrowRight");
@@ -126,20 +152,16 @@ describe("SeparatorController", () => {
     it("leaves a modified arrow to the browser", () => {
       // A chorded arrow is the browser's (history back/forward and the like), so
       // the separator neither consumes the key nor moves its value.
-      const chord = new KeyboardEvent("keydown", {
-        key: "ArrowRight",
-        altKey: true,
-        cancelable: true,
-      });
-      separator().dispatchEvent(chord);
+      const chord = keyEvent("ArrowRight", { altKey: true });
+      keyboardPress(separator(), chord);
 
       expect(chord.defaultPrevented).toBe(false);
       expect(separator().getAttribute("aria-valuenow")).toBe("50");
     });
 
     it("prevents default on a handled key", () => {
-      const event = new KeyboardEvent("keydown", { key: "ArrowRight", cancelable: true });
-      separator().dispatchEvent(event);
+      const event = keyEvent("ArrowRight");
+      keyboardPress(separator(), event);
       expect(event.defaultPrevented).toBe(true);
     });
 
@@ -514,9 +536,7 @@ describe("SeparatorController", () => {
       document.querySelectorAll<HTMLElement>("[data-controller='stimeo--separator']"),
     );
 
-    separators[1]?.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowRight", cancelable: true }),
-    );
+    keyboardPress(separators[1] as HTMLElement, "ArrowRight");
 
     expect(separators[0]?.getAttribute("aria-valuenow")).toBe("20");
     expect(separators[1]?.getAttribute("aria-valuenow")).toBe("71");

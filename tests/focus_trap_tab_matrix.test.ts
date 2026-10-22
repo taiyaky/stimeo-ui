@@ -5,6 +5,7 @@ import { MenuController } from "../src/controllers/menu_controller";
 import { MenubarController } from "../src/controllers/menubar_controller";
 import { MultiSelectController } from "../src/controllers/multi_select_controller";
 import { byId } from "./helpers/dom";
+import { press as keyboardPress } from "./helpers/keyboard";
 import { describeTrapTabMatrix, focusClick, type TabInner } from "./helpers/trap_tab_matrix";
 
 /**
@@ -72,7 +73,7 @@ const INNERS: TabInner[] = [
     markup: (p) => `
       <div data-controller="stimeo--context-menu">
         <div id="${p}-region" data-stimeo--context-menu-target="region" tabindex="0"
-             aria-haspopup="menu" aria-controls="${p}-list"
+             role="group" aria-controls="${p}-list"
              data-action="contextmenu->stimeo--context-menu#open
                           keydown->stimeo--context-menu#onRegionKeydown">Area</div>
         <ul id="${p}-list" role="menu" data-stimeo--context-menu-target="menu" hidden>
@@ -134,9 +135,7 @@ const INNERS: TabInner[] = [
     // Opened from the keyboard: the list opens and focus stays on the trigger.
     open: (p) => {
       byId(`${p}-trigger`).focus();
-      byId(`${p}-trigger`).dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
-      );
+      keyboardPress(byId(`${p}-trigger`), "ArrowDown");
     },
     isOpen: (p) => !byId(`${p}-list`).hidden,
   },

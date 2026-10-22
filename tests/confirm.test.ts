@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfirmController } from "../src/controllers/confirm_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
-import { typeKey } from "./helpers/keyboard";
+import { press as pressKey, typeKey } from "./helpers/keyboard";
 import { expectUpperModalOnTop, openUpperModal, TARGET_SWAPS } from "./helpers/modal_stack";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -128,7 +128,7 @@ describe("ConfirmController", () => {
     // confirmation, so a leaked handler would no-op on Escape anyway. A leaked trap
     // WOULD still yank outside focus back into the dialog on Tab — assert it doesn't.
     opener.focus();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    typeKey(document, "Tab");
     expect(document.activeElement).toBe(opener);
   });
 
@@ -196,7 +196,7 @@ describe("ConfirmController", () => {
   it("resolves false on Escape", async () => {
     await start(DIALOG);
     const promise = turboConfirm()("Delete?");
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    typeKey(document, "Escape");
     await expect(promise).resolves.toBe(false);
   });
 
@@ -225,7 +225,7 @@ describe("ConfirmController", () => {
     await start(DIALOG);
     turboConfirm()("Sure?");
     confirmBtn().focus();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    typeKey(document, "Tab");
     expect(document.activeElement).toBe(cancelBtn());
   });
 
@@ -233,8 +233,7 @@ describe("ConfirmController", () => {
     await start(DIALOG);
     turboConfirm()("Sure?");
     expect(document.activeElement).toBe(cancelBtn());
-    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-    cancelBtn().dispatchEvent(tab);
+    const tab = pressKey(cancelBtn(), "Tab");
     expect(tab.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(confirmBtn());
   });
@@ -282,7 +281,7 @@ describe("ConfirmController", () => {
     turboConfirm()("First?");
     cancelBtn().click();
     turboConfirm()("Second?");
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    typeKey(document, "Escape");
     expect(outcomes).toEqual([false, false]);
   });
 
@@ -384,10 +383,10 @@ describe("ConfirmController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Speech-order regression -----------------------------------------------
+  // --- Speech-order check ----------------------------------------------------
   // The Turbo-hook bridge routes `data-turbo-confirm` through this accessible
   // alertdialog; freeze the announced role, name, and the injected message in
-  // order so a regression in the bridge surfaces as a diff.
+  // order so a change in the bridge surfaces as a diff.
   it("announces the alertdialog role, name, and injected message in order", async () => {
     await start(DIALOG);
     turboConfirm()("Delete this item?");
@@ -1092,7 +1091,7 @@ describe("ConfirmController", () => {
       expect(document.activeElement).toBe(inside(successor, "cancel"));
       expect(document.body.style.overflow).toBe("hidden");
       expect(query("main").inert).toBe(true);
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      typeKey(document, "Escape");
       await expect(answer).resolves.toBe(false);
       expect(document.activeElement).toBe(opener());
     });

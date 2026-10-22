@@ -597,7 +597,7 @@ describe("EmptyStateController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Speech-order regression: the placeholder the controller reveals for an empty
+  // Speech-order check: the placeholder the controller reveals for an empty
   // list reads as its role followed by its authored text.
   it("reads the empty placeholder as a paragraph when there are no items", async () => {
     await mount("");

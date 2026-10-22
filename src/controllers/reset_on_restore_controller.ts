@@ -85,9 +85,9 @@ function restoreField(element: Element): void {
  *
  * The `reset` a restored copy runs is dispatched while that copy connects, before the
  * controllers inside it: a document or window listener hears it, an action on a
- * controller inside does not. Each Stimeo controller normalizes its own transient state
- * when it connects to a restored copy. {@link reset} is also a public action that runs
- * the sweep on the live page.
+ * controller inside does not. Stimeo controllers are written to normalize their own
+ * transient state when they connect to a restored copy. {@link reset} is also a public
+ * action that runs the sweep on the live page.
  */
 export class ResetOnRestoreController extends Controller<HTMLElement> {
   static override values = {

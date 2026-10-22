@@ -83,10 +83,10 @@ export interface ControllerManifest {
    */
   readonly a11y: readonly A11yRequirement[];
   /**
-   * Keyboard prerequisites (stage 3): targets whose documented contract makes
-   * the *author* responsible for focusability — the controller
-   * moves focus (or relies on the Tab order) but never writes `tabindex` for
-   * them. Each listed target must be natively focusable or carry `tabindex`.
+   * Keyboard prerequisites (stage 3): targets whose markup contract in the
+   * controller's class TSDoc makes the *author* responsible for focusability —
+   * the controller moves focus (or relies on the Tab order) but never writes
+   * `tabindex` for them. Each listed target must be natively focusable or carry `tabindex`.
    * Targets whose controller initializes a roving tabindex on connect (tabs,
    * toolbar, radio group, …) are deliberately excluded.
    */
@@ -563,6 +563,10 @@ export interface CardinalityRule {
   readonly min?: number;
   /** Largest permitted count (inclusive); omit for no ceiling. */
   readonly max?: number;
+  /** Diagnostic severity; omitted constraints report errors. */
+  readonly severity?: DiagnosticSeverity;
+  /** Ignore targets and containers across template contents from the owning scope. */
+  readonly excludeTemplateContents?: boolean;
   /**
    * Restricts the constraint to one configuration of the controller's own
    * value; omit for unconditional constraints. Multiplicity is frequently a
@@ -685,11 +689,12 @@ export interface TemplateRootRule {
  * present.
  *
  * `requiredTargets` is unconditional, which cannot express a feature that is
- * entirely opt-in but **incomplete without its whole set**. A breadcrumb without any `collapsible` is a valid plain
- * trail; add one and the disclosure (`ellipsis` + `trigger`) becomes mandatory,
- * because without it the collapsed items have no control that can reveal them. A
- * file-dropzone without an `itemTemplate` never renders a list; add one without a
- * `list` and the selected files render nowhere.
+ * entirely opt-in but **incomplete without its whole set**. A `stimeo--breadcrumb`
+ * without any `collapsible` is a valid plain trail; add one and the disclosure
+ * (`ellipsis` + `trigger`) becomes mandatory, because without it the collapsed
+ * items have no control that can reveal them. A `stimeo--file-dropzone` without an
+ * `itemTemplate` never renders a list; add one without a `list` and the selected
+ * files render nowhere.
  *
  * These fail the same way: the required targets are *present enough* to pass every
  * other check, the page loads, `stimeo check` is green — and the feature silently
@@ -753,8 +758,7 @@ export interface ConditionalTargetRule {
 }
 
 /**
- * One element shape that can act as a host for {@link
- * ConditionalTargetRule.requireSameHost}.
+ * One element shape that can act as a host for {@link ConditionalTargetRule.requireSameHost}.
  *
  * A tag alone is too coarse where the element's `type` decides its role, so an
  * optional attribute filter narrows it. Omitting {@link attr} accepts the tag

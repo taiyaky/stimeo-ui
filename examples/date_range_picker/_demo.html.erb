@@ -1,9 +1,9 @@
 <%# Markup for the date-range-picker (range-selection calendar) demo.
-    stimeo--date-range-picker derives from calendar and handles two-point start/end
-    selection, a provisional range preview mid-selection, marking in-range cells,
-    auto-swapping when start > end, applying presets, and grid keyboard movement
-    (roving). Range ends are shown with aria-selected and the inside with data-in-range;
-    placement and styling live in demo.css.
+    stimeo--date-range-picker reuses stimeo--calendar's month-grid navigation model and
+    handles two-point start/end selection, a provisional range preview mid-selection,
+    marking in-range cells, auto-swapping when start > end, applying presets, and grid
+    keyboard movement (roving). Range ends are shown with aria-selected and the inside
+    with data-in-range; placement and styling live in demo.css.
 
     Two unavailable days are declared as data rather than written onto cells. The
     42 cells are reused for a different date every month, so availability has to

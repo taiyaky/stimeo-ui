@@ -8,6 +8,7 @@ import { DrawerController } from "../../src/controllers/drawer_controller";
 import { FocusController } from "../../src/controllers/focus_controller";
 import { SidebarController } from "../../src/controllers/sidebar_controller";
 import { byId } from "./dom";
+import { keyEvent, typeKey } from "./keyboard";
 import { disconnectAndStopApplication } from "./stimulus";
 import { tick } from "./timing";
 
@@ -217,12 +218,9 @@ export function describeTrapTabMatrix(title: string, inners: TabInner[]): void {
           let moves = 0;
           const counting = new AbortController();
           document.addEventListener("focusin", () => moves++, { signal: counting.signal });
-          const press = new KeyboardEvent("keydown", {
-            key: "Tab",
-            bubbles: true,
-            cancelable: true,
-          });
-          (document.activeElement ?? document.body).dispatchEvent(press);
+          const press = keyEvent("Tab");
+          // Preserve the widget's focus so the counter measures only the Tab move.
+          typeKey(document.activeElement ?? document.body, press);
 
           expect(press.defaultPrevented).toBe(true);
           expect(document.activeElement).toBe(byId("out-next"));

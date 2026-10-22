@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { validSelector } from "../utils/declared_value";
 import { FrameCoalescer } from "../utils/frame_coalescer";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -18,12 +19,12 @@ const DEFAULT_OFFSET = 80;
  * Markup contract (identifier: `stimeo--smart-sticky-header`):
  *   <header data-controller="stimeo--smart-sticky-header"
  *           style="position: sticky; top: 0;">…</header>
+ *   <!-- [data-header-hidden="true"] { transform: translateY(-100%); } -->
  *
  * The scroll source is the window by default; inside an overflow container,
  * point `containerSelector` at it (the header usually sits inside it too). A
  * declaration that cannot be parsed as a selector reads as the window, so a
  * typo costs the container binding rather than the whole header.
- *   <!-- [data-header-hidden="true"] { transform: translateY(-100%); } -->
  *
  * Scrolling down past `offset` px sets `data-header-hidden="true"`, and a
  * scroll-up beyond the `tolerance` jitter guard reveals it again. Within the
@@ -73,11 +74,12 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
 
   /** Coalesces scroll bursts into one measurement per frame. */
   readonly #frames = new FrameCoalescer();
-  /**
-   * The scroll source the listener is on — disconnect and a move to another
-   * source must unbind the SAME node.
-   */
+  /** The scroll source the listener is on, read for the offset and the next move's comparison. */
   #scrollerEl: ScrollSource = window;
+  /** The scroll listener on the current source; a move to another source releases it first. */
+  readonly #scrollListeners = new ListenerSet();
+  /** The element's focus listener of one connection. */
+  readonly #listeners = new ListenerSet();
   /** The validated `containerSelector`, or `""` when the declaration cannot be parsed. */
   #containerSelector = "";
   #lastY = 0;
@@ -131,14 +133,14 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
     // instead of trusting a cached snapshot (which may say hidden at y=0).
     this.#hidden = null;
     this.#listenTo(resolveScrollSource(this.#containerSelector));
-    this.element.addEventListener("focusin", this.#onFocusin);
+    this.#listeners.add(this.element, "focusin", this.#onFocusin);
     this.#apply(false, false);
   }
 
   override disconnect(): void {
     this.#morphRender.disconnect();
-    this.#scrollerEl.removeEventListener("scroll", this.#onScroll);
-    this.element.removeEventListener("focusin", this.#onFocusin);
+    this.#scrollListeners.dispose();
+    this.#listeners.dispose();
     this.#frames.cancel();
   }
 
@@ -151,7 +153,7 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
   #followSource(): void {
     const source = resolveScrollSource(this.#containerSelector);
     if (source === this.#scrollerEl) return;
-    this.#scrollerEl.removeEventListener("scroll", this.#onScroll);
+    this.#scrollListeners.dispose();
     this.#listenTo(source);
   }
 
@@ -162,7 +164,7 @@ export class SmartStickyHeaderController extends Controller<HTMLElement> {
   #listenTo(source: ScrollSource): void {
     this.#scrollerEl = source;
     this.#lastY = scrollOffset(source);
-    source.addEventListener("scroll", this.#onScroll, { passive: true });
+    this.#scrollListeners.add(source, "scroll", this.#onScroll, { passive: true });
   }
 
   /** @stimeoRenderRoot */

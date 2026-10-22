@@ -1,7 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { AttributeLease } from "../utils/attribute_lease";
+import { setAttributeIfChanged } from "../utils/attribute_write";
 import { CompositionTracker } from "../utils/composition_tracker";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -64,6 +66,14 @@ type CharacterCounterDetail = Pick<CharacterCountReading, "length" | "remaining"
  * Runtime target/Value reconciliation dispatches
  * `stimeo--character-counter:reconcile` only when the public derived state
  * changes, and never announces.
+ * All input targets keep composition tracking even while another one is first,
+ * and only the first field's own conversion holds back its `input`.
+ * A composing field that returns first restores its own accepted count silently;
+ * its confirmation is compared with that field's accepted length, never another's,
+ * and a confirmation or cancellation at that length dispatches `reconcile` once when
+ * the state reported last differs from it. A conversion there that ends without
+ * `compositionend` reconciles that accepted count the same way, without reading the
+ * field; the next edit counts what the field holds.
  */
 export class CharacterCounterController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
@@ -84,6 +94,7 @@ export class CharacterCounterController extends Controller<HTMLElement> {
   static events = ["change", "reconcile"] as const;
 
   declare readonly inputTarget: CharacterCounterField;
+  declare readonly inputTargets: CharacterCounterField[];
   declare readonly outputTarget: HTMLElement;
   declare readonly hasInputTarget: boolean;
   declare readonly hasOutputTarget: boolean;
@@ -102,12 +113,55 @@ export class CharacterCounterController extends Controller<HTMLElement> {
     this.identifier,
   );
   readonly #repaint = new MorphRenderWatcher(() => this.#reconcile(true));
+  /**
+   * Commits a confirmed composition. One that ends without `compositionend`
+   * confirmed nothing: a reconciliation it held reads what the field holds; with none
+   * held the field's text waits for the next edit, and the state reported last is
+   * reconciled with the field's accepted count. With a resync pass queued, or another
+   * field first meanwhile, that is left to the pass, which counts the field it binds; the
+   * end queues one, as it does for a reconciliation held, since a field put first and
+   * taken away within one task is never reported. A field still bound that composes again
+   * is not counted, so its accepted count is reconciled by a new conversion starting in it
+   * while it is first, or else by the pass that finds it composing.
+   */
   readonly #composition = new CompositionTracker({
+    onStart: (event) => {
+      if (event.target === this.#acceptedOwed && this.#field === this.#boundField) {
+        this.#reconcileAccepted();
+      }
+    },
     onEnd: (event) => this.#commitFrom(event.currentTarget),
+    onAbandon: () => {
+      const first = this.#field === this.#boundField;
+      if (this.#reconcileHeld && first) this.#recount(true, this.#owedField);
+      else if (first && !this.#repaint.pending) this.#reconcileAccepted();
+      else {
+        if (!this.#reconcileHeld) this.#acceptedOwed = this.#boundField;
+        // A field put first and taken away within the task is never reported: queue a pass.
+        this.#repaint.schedule();
+      }
+    },
   });
+  /** The field bound when its accepted-count reconciliation was left to a pass, until one runs. */
+  #acceptedOwed: CharacterCounterField | null = null;
+  /** A reconciliation owed once the composition ends: the declarations changed while it ran. */
+  #reconcileHeld = false;
+  /** Each field's accepted count and rendering, independent of the field in charge. */
+  readonly #accepted = new WeakMap<
+    CharacterCounterField,
+    {
+      readonly text: string;
+      readonly over: boolean;
+      readonly near: boolean;
+      readonly length: number;
+      readonly detail: CharacterCounterDetail;
+      readonly declared: string;
+    }
+  >();
   #announceId: number | null = null;
   #boundField: CharacterCounterField | null = null;
-  #lastLength: number | null = null;
+  /** The input listener on the bound field; binding another field releases it first. */
+  readonly #fieldListeners = new ListenerSet();
   #lastDetail: CharacterCounterDetail | null = null;
   #reflectedOver: boolean | null = null;
 
@@ -117,12 +171,19 @@ export class CharacterCounterController extends Controller<HTMLElement> {
     // An engine may echo a confirmed composition with one more `input`;
     // committing it again would re-run the reading the commit already took.
     if (this.#composition.consumesConfirmedInput(event)) return;
-    if (this.#composition.isComposing(event as InputEvent)) return;
+    // Only the field's own conversion holds its edit back, never one in another target.
+    const composing = this.#composition.composingElement() === field;
+    if (composing || (event as InputEvent).isComposing === true) return;
     this.#commit(field);
   };
 
-  /** Reflects the current DOM state and opens the mutation-reconciliation window. */
+  /**
+   * Reflects the current DOM state and opens the mutation-reconciliation window. A
+   * field that moved here with its conversion has nothing new to read; the pass waits
+   * for the conversion only if the declarations changed with the move.
+   */
   override connect(): void {
+    this.#observeFields();
     this.#repaint.observe(this.element);
     this.#reconcile(false);
   }
@@ -130,20 +191,32 @@ export class CharacterCounterController extends Controller<HTMLElement> {
   /** Releases listeners, timers, borrowed ARIA, and controller-owned state hooks. */
   override disconnect(): void {
     this.#repaint.disconnect();
-    this.#cancelAnnouncement();
     this.#bindField(null);
+    this.#composition.disconnect();
     this.#clearStateHooks();
-    this.#lastLength = null;
     this.#lastDetail = null;
   }
 
-  /** Rebinds and repaints after an input target is added or replaced at runtime. */
+  /**
+   * Rebinds and repaints after an input target is added or replaced at runtime. A
+   * field that moved here keeping its conversion is the same field: the pass shows what
+   * it showed and holds nothing.
+   */
   inputTargetConnected(): void {
+    this.#observeFields();
     this.#repaint.schedule();
   }
 
-  /** Releases and repaints after an input target is removed or replaced at runtime. */
-  inputTargetDisconnected(): void {
+  /**
+   * Releases and repaints after an input target is removed or replaced at runtime.
+   * A field that moves or leaves mid-composition hears no `compositionend`, so its
+   * composition ends here — unless it kept focus through the move, which keeps the
+   * conversion; a field that stays bound is observed again at once. The pass counts
+   * the field that is first now, and waits only for a conversion in that field.
+   */
+  inputTargetDisconnected(element: CharacterCounterField): void {
+    this.#composition.unobserve(element);
+    if (element === this.#boundField) this.#composition.observe(element);
     this.#repaint.schedule();
   }
 
@@ -172,34 +245,56 @@ export class CharacterCounterController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
-  /** Rewords a pending announcement with the template the consumer changed it to. */
-  announceTextValueChanged(): void {
-    this.#repaint.schedule();
+  /** Rebinds one mutation batch, then counts the field bound now. */
+  #reconcile(report: boolean): void {
+    const owedField = this.#owedField;
+    this.#bindField(this.#field);
+    this.#recount(report, owedField);
   }
 
-  /** Rebinds one mutation batch and reports a changed controller-derived state. */
-  #reconcile(report: boolean): void {
+  /**
+   * The field a pending announcement was earned for, if any. An edit inside the
+   * debounce window has already earned an announcement. Reconciliation never
+   * originates one, but it must not swallow that one either: a pass that counts again
+   * retargets the pending message at the settled reading, so the user hears the count
+   * that ends up displayed rather than nothing; a pass that only shows the count again
+   * leaves it on the count shown, and the commit that applies a pass the composition
+   * held retargets it. A replaced field is the exception — its pending message
+   * describes a field the reader can no longer reach.
+   */
+  get #owedField(): CharacterCounterField | null {
+    return this.#announceId === null ? null : this.#boundField;
+  }
+
+  /**
+   * Counts the bound field and reports a changed controller-derived state. While the
+   * field is composing, the pass shows what it showed and is owed when the composition
+   * ends only if the declarations it counts against changed; a pass with nothing new
+   * to count against — a morph that changes nothing, a target swapped — holds
+   * nothing. A conversion going on in a field the counter no longer watches holds
+   * nothing either.
+   */
+  #recount(report: boolean, owedField: CharacterCounterField | null): void {
+    const owed = this.#acceptedOwed;
+    this.#acceptedOwed = null;
     const previous = this.#lastDetail;
-    // An edit inside the debounce window has already earned an announcement.
-    // Reconciliation never originates one, but it must not swallow that one
-    // either: the pending message is retargeted at the settled reading, so the
-    // user hears the count that ends up displayed rather than nothing. A
-    // replaced field is the exception — its pending message describes a field
-    // the reader can no longer reach.
-    const owedField = this.#announceId === null ? null : this.#boundField;
-    this.#cancelAnnouncement();
-    this.#bindField(this.#field);
-    if (this.#composition.isComposing()) return;
     const field = this.#boundField;
+    if (field !== null && this.#composition.composingElement() === field) {
+      this.#reconcileHeld = this.#accepted.get(field)?.declared !== this.#declared;
+      // The IME owns the text: a morph that wiped the count gets back what it showed.
+      this.#showAgain(field);
+      // Composing again, the field is not counted for the reconciliation it was left.
+      if (owed === field) this.#reconcileAccepted();
+      return;
+    }
+    this.#reconcileHeld = false;
     if (!field) {
       this.#renderEmpty();
-      this.#lastLength = null;
       this.#lastDetail = null;
       return;
     }
     const reading = this.#render(field);
     const detail = this.#detail(reading);
-    this.#lastLength = reading.length;
     this.#lastDetail = detail;
     if (owedField === field) this.#scheduleAnnouncement(reading);
     if (report && previous && this.#detailsDiffer(previous, detail)) {
@@ -216,21 +311,24 @@ export class CharacterCounterController extends Controller<HTMLElement> {
 
   /** Reflects one confirmed user input and reports only a real length transition. */
   #commit(field: CharacterCounterField): void {
+    const held = this.#reconcileHeld;
+    this.#reconcileHeld = false;
+    const previousLength = this.#accepted.get(field)?.length ?? null;
     const reading = this.#render(field);
-    const previousLength = this.#lastLength;
     const previousDetail = this.#lastDetail;
     const detail = this.#detail(reading);
-    this.#lastLength = reading.length;
     this.#lastDetail = detail;
     if (previousLength === reading.length) {
       if (previousDetail && this.#detailsDiffer(previousDetail, detail)) {
         this.dispatch("reconcile", { detail });
       }
+      // The pass the composition held counts again here, and takes the message along.
+      if (held && this.#owedField === field) this.#scheduleAnnouncement(reading);
       return;
     }
 
     this.dispatch("change", { detail });
-    this.#scheduleAnnouncement(reading);
+    if (this.#boundField === field && this.#field === field) this.#scheduleAnnouncement(reading);
   }
 
   /** Selects the public event state from the richer internal reading. */
@@ -268,7 +366,46 @@ export class CharacterCounterController extends Controller<HTMLElement> {
 
     const text = this.#format(length, remaining, max);
     this.#writeOutput(text);
+    this.#accepted.set(field, {
+      text,
+      over,
+      near,
+      length,
+      detail: { length, remaining, over },
+      declared: this.#declared,
+    });
     return { length, remaining, over, max, text };
+  }
+
+  /**
+   * Restores this field's accepted rendering without reading its composition draft.
+   * Its accepted count remains the baseline even while another field is counted.
+   * Nothing is reported here: the state reported last stays the one the commit that
+   * ends the conversion compares with, so a commit at the accepted length reconciles
+   * a state another field published meanwhile.
+   */
+  #showAgain(field: CharacterCounterField): void {
+    const shown = this.#accepted.get(field);
+    if (shown === undefined) return;
+    this.#lastDetail ??= shown.detail;
+    this.#toggle("data-over-limit", shown.over);
+    this.#toggle("data-near-limit", shown.near);
+    this.#reflectInvalid(field, shown.over);
+    this.#writeOutput(shown.text);
+  }
+
+  /**
+   * Reports the bound field's accepted count as `reconcile` when the state reported
+   * last differs from it, without reading the field or announcing. Only that field's
+   * own conversion, shown again silently, leaves the two apart.
+   */
+  #reconcileAccepted(): void {
+    const previous = this.#lastDetail;
+    const field = this.#boundField;
+    const accepted = field && this.#accepted.get(field)?.detail;
+    if (!previous || !accepted || !this.#detailsDiffer(previous, accepted)) return;
+    this.#lastDetail = accepted;
+    this.dispatch("reconcile", { detail: accepted });
   }
 
   /** Clears derived output when the declarative input set has no usable field. */
@@ -278,23 +415,30 @@ export class CharacterCounterController extends Controller<HTMLElement> {
     this.#writeOutput("");
   }
 
-  /** Replaces the observed field symmetrically, returning state from the old one. */
+  /** Tracks every target while only the field in charge supplies accepted input. */
+  #observeFields(): void {
+    for (const input of this.inputTargets) this.#composition.observe(input);
+  }
+
+  /** Replaces the input listener symmetrically, returning state from the old field. */
   #bindField(field: CharacterCounterField | null): void {
     if (field === this.#boundField) return;
 
     const previous = this.#boundField;
     if (previous) {
-      previous.removeEventListener("input", this.#onInput);
-      this.#composition.unobserve(previous);
+      this.#fieldListeners.dispose();
+      if (previous !== this.element && !this.inputTargets.includes(previous)) {
+        this.#composition.unobserve(previous);
+      }
       this.#ariaInvalid.return(previous);
     }
 
+    this.#cancelAnnouncement();
     this.#boundField = field;
-    this.#lastLength = null;
     this.#reflectedOver = null;
     if (!field) return;
 
-    field.addEventListener("input", this.#onInput);
+    this.#fieldListeners.add(field, "input", this.#onInput);
     this.#composition.observe(field);
   }
 
@@ -320,24 +464,27 @@ export class CharacterCounterController extends Controller<HTMLElement> {
   }
 
   /**
-   * Debounces one i18n-neutral message into the shared polite announcer.
+   * Debounces one i18n-neutral message into the shared polite announcer. The message
+   * is worded when it is spoken, so a template the consumer changes meanwhile rewords
+   * it; a template empty now schedules nothing.
    *
-   * @stimeoRuntimeOnly `announceText` is the template of the one announcement this call schedules;
+   * @stimeoRuntimeOnly `announceText` words the one announcement this call schedules;
    *   the count is painted by the marked renderer.
    */
   #scheduleAnnouncement(reading: CharacterCountReading): void {
     this.#cancelAnnouncement();
-    const message = fillTemplate(this.announceTextValue, {
-      count: reading.text,
-      length: reading.length,
-      remaining: reading.remaining ?? "",
-      max: reading.max,
-      over: String(reading.over),
-    });
-    if (message.trim().length === 0) return;
+    const message = (): string =>
+      fillTemplate(this.announceTextValue, {
+        count: reading.text,
+        length: reading.length,
+        remaining: reading.remaining ?? "",
+        max: reading.max,
+        over: String(reading.over),
+      });
+    if (message().trim().length === 0) return;
 
     this.#announceId = this.#timeouts.set(() => {
-      announce(message);
+      announce(message());
       this.#announceId = null;
     }, CharacterCounterController.#announceDelay);
   }
@@ -356,11 +503,7 @@ export class CharacterCounterController extends Controller<HTMLElement> {
 
   /** Reflects a presence-style state hook without redundant attribute writes. */
   #toggle(name: string, on: boolean): void {
-    if (on) {
-      if (this.element.getAttribute(name) !== "true") this.element.setAttribute(name, "true");
-    } else if (this.element.hasAttribute(name)) {
-      this.element.removeAttribute(name);
-    }
+    setAttributeIfChanged(this.element, name, on ? "true" : null);
   }
 
   /** Removes both state hooks owned by this controller. */
@@ -378,6 +521,15 @@ export class CharacterCounterController extends Controller<HTMLElement> {
   get #mode(): DisplayMode {
     if (this.modeValue === "used" || this.modeValue === "both") return this.modeValue;
     return "remaining";
+  }
+
+  /** The declarations a rendering counts against, as it reads them. */
+  get #declared(): string {
+    return [
+      this.#normalizeCount(this.#safeMax),
+      this.#normalizeCount(this.#safeWarnAt),
+      this.#mode,
+    ].join();
   }
 
   /** The watched field: the first target, or a directly controlled form field. */

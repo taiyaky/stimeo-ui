@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RatingController } from "../src/controllers/rating_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { press as keyboardPress, keyEvent, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
@@ -88,12 +89,8 @@ describe("RatingController", () => {
   const fill = () => symbols().map((symbol) => symbol.hasAttribute("data-rating-hover"));
   const tabindexes = () => symbols().map((symbol) => symbol.tabIndex);
   const key = (index: number, value: string) => {
-    const event = new KeyboardEvent("keydown", {
-      key: value,
-      bubbles: true,
-      cancelable: true,
-    });
-    symbols()[index]?.dispatchEvent(event);
+    const event = keyEvent(value);
+    keyboardPress(symbols()[index] as HTMLElement, event);
     return event;
   };
   const declared = () => root().getAttribute("data-stimeo--rating-value-value");
@@ -188,7 +185,8 @@ describe("RatingController", () => {
       capture: true,
       once: true,
     });
-    key(1, "End");
+    // Focus starts outside the rating, so no symbol's blur rewrites the fill first.
+    typeKey(symbols()[1] as HTMLElement, "End");
     expect(snapshots).toEqual([["3", [true, true, true]]]);
   });
 
@@ -232,6 +230,45 @@ describe("RatingController", () => {
       null,
       null,
     ]);
+  });
+
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+        key,
+        modifier,
+      })),
+    ),
+  )(
+    "yields modified boundary key $modifier+$key without changing widget state",
+    async ({ key, modifier }) => {
+      await start();
+      const symbol = symbols()[1] as HTMLElement;
+      symbol.focus();
+      const seen = reports();
+      const native: string[] = [];
+      for (const name of ["input", "change"]) {
+        field().addEventListener(name, () => native.push(name));
+      }
+      const before = root().innerHTML;
+      const event = keyboardPress(symbol, key, { [modifier]: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(symbol);
+      expect(root().innerHTML).toBe(before);
+      expect(declared()).toBe("2");
+      expect(field().value).toBe("2");
+      expect(seen).toEqual([]);
+      expect(native).toEqual([]);
+    },
+  );
+
+  it("keeps modified Enter activation outside boundary keys", async () => {
+    await start();
+    const event = keyboardPress(symbols()[2] as HTMLElement, "Enter", { ctrlKey: true });
+    expect(event.defaultPrevented).toBe(true);
+    expect(declared()).toBe("3");
+    expect(field().value).toBe("3");
+    expect(checked()).toEqual(["false", "false", "true"]);
   });
 
   it("declares the public actions, events, and three render Values", () => {
@@ -378,28 +415,20 @@ describe("RatingController", () => {
     await start();
     symbols()[0]?.focus();
     const inner = document.createElement("span");
+    inner.tabIndex = 0;
     symbols()[0]?.append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
-    const claimed = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
+    const claimed = keyEvent("ArrowRight");
 
-    expect(inner.dispatchEvent(claimed)).toBe(false);
+    expect(!keyboardPress(inner, claimed).defaultPrevented).toBe(false);
     expect(field().value).toBe("2");
-    expect(document.activeElement).toBe(symbols()[0]);
+    expect(document.activeElement).toBe(inner);
   });
 
   it("leaves modified arrows to the browser", async () => {
     await start();
-    const chord = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-      altKey: true,
-    });
-    symbols()[1]?.dispatchEvent(chord);
+    const chord = keyEvent("ArrowRight", { altKey: true });
+    keyboardPress(symbols()[1] as HTMLElement, chord);
 
     expect(chord.defaultPrevented).toBe(false);
     expect(field().value).toBe("2");
@@ -927,7 +956,8 @@ describe("RatingController", () => {
     symbols()[2]?.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
     symbols()[2]?.dispatchEvent(new FocusEvent("focus"));
     symbols()[2]?.dispatchEvent(new FocusEvent("blur"));
-    const arrow = key(2, "ArrowRight");
+    /** Readonly symbols are absent from the accessibility tree; preserve focus for the inert probe. */
+    const arrow = typeKey(symbols()[2] as HTMLElement, "ArrowRight");
 
     expect(field().value).toBe("2");
     expect(fill()).toEqual(before);
@@ -950,7 +980,7 @@ describe("RatingController", () => {
     root().addEventListener("stimeo--rating:change", (event) => changes.push(event));
 
     controller().select({ currentTarget: root() } as unknown as Event);
-    const space = new KeyboardEvent("keydown", { key: " ", cancelable: true });
+    const space = keyEvent(" ");
     controller().onKeydown(space);
 
     expect(field().value).toBe("2");
@@ -1259,7 +1289,7 @@ describe("RatingController target API", () => {
     document.body.innerHTML = "";
   });
 
-  it("retains the existing DOM Event success as a positive control", () => {
+  it("selects on a DOM click and reports it once", () => {
     const reports: Array<{ reason?: string }> = [];
     element("api-root").addEventListener("stimeo--rating:change", (event) => {
       reports.push((event as CustomEvent<{ reason?: string }>).detail);
@@ -1270,7 +1300,7 @@ describe("RatingController target API", () => {
   });
 
   it.each([false, true])(
-    "accepts an owned target or its descendant (%s) after an Event positive control",
+    "accepts an owned target or its descendant (%s) through the element API",
     (descendant) => {
       const reports: Array<{ reason?: string }> = [];
       element("api-root").addEventListener("stimeo--rating:change", (event) => {

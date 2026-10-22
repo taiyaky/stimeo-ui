@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AccordionController } from "../src/controllers/accordion_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { keyEvent, press as pressKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -51,6 +52,50 @@ describe("AccordionController", () => {
     return element;
   };
 
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Home/End chord (%s, %s)", async (key, _modifier, init) => {
+    const element = panel("p1").closest<HTMLElement>("[data-controller]");
+    if (!element) throw new Error("Expected accordion root");
+    const current = triggers()[1];
+    if (!current) throw new Error("Expected middle header");
+    const last = current.cloneNode(true) as HTMLButtonElement;
+    last.id = "b3";
+    last.setAttribute("aria-controls", "p3");
+    const lastPanel = panel("p2").cloneNode(true) as HTMLElement;
+    lastPanel.id = "p3";
+    lastPanel.setAttribute("aria-labelledby", "b3");
+    element.append(last, lastPanel);
+    await tick();
+    current.click();
+    current.focus();
+    const events: Event[] = [];
+    for (const name of ["stimeo--accordion:open", "stimeo--accordion:close"]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = pressKey(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(current.getAttribute("aria-expanded")).toBe("true");
+    expect(panel("p2").hidden).toBe(false);
+    const accepted = pressKey(current, key);
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(key === "Home" ? triggers()[0] : last);
+  });
+
   it.each(["unowned", "hidden"])(
     "ignores keyboard navigation from a %s header and retains a visible positive control",
     (kind) => {
@@ -77,12 +122,8 @@ describe("AccordionController", () => {
       expect(document.activeElement).toBe(outside);
       current.hidden = false;
       first.focus();
-      const accepted = new KeyboardEvent("keydown", {
-        key: "End",
-        bubbles: true,
-        cancelable: true,
-      });
-      first.dispatchEvent(accepted);
+      const accepted = keyEvent("End", { bubbles: true, cancelable: true });
+      pressKey(first, accepted);
       expect(accepted.defaultPrevented).toBe(true);
       expect(document.activeElement).toBe(second);
     },
@@ -244,14 +285,13 @@ describe("AccordionController", () => {
     const first = triggers()[0] as HTMLElement;
     first.focus();
     const inner = document.createElement("span");
+    inner.tabIndex = -1;
     first.append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
 
-    inner.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
-    );
+    pressKey(inner, "ArrowDown", { bubbles: true, cancelable: true });
 
-    expect(document.activeElement).toBe(first);
+    expect(document.activeElement).toBe(inner);
   });
 
   it("expands the controlled panel on click", () => {
@@ -283,19 +323,15 @@ describe("AccordionController", () => {
 
   it("moves focus to the next header on ArrowDown", () => {
     triggers()[0]?.focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      bubbles: true,
-      cancelable: true,
-    });
-    triggers()[0]?.dispatchEvent(event);
+    const event = keyEvent("ArrowDown", { bubbles: true, cancelable: true });
+    pressKey(triggers()[0] as HTMLElement, event);
     expect(document.activeElement).toBe(triggers()[1]);
     expect(event.defaultPrevented).toBe(true);
   });
 
   it("wraps to the first header from the last on ArrowDown", () => {
     triggers()[1]?.focus();
-    triggers()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(triggers()[1] as HTMLElement, "ArrowDown", { bubbles: true });
     expect(document.activeElement).toBe(triggers()[0]);
   });
 
@@ -312,7 +348,7 @@ describe("AccordionController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Speech-order regression: the header must announce its expanded state, and
+  // Speech-order check: the header must announce its expanded state, and
   // that state must flip in the spoken phrase on toggle.
   it("announces the header's expanded state before and after a toggle", async () => {
     const collapsed = await captureSpeech({ container: root(), steps: 2 });
@@ -331,7 +367,7 @@ describe("AccordionController", () => {
     ]);
   });
 
-  // Context-teardown regression. The controller holds no timers, observers, or
+  // Context-teardown check. The controller holds no timers, observers, or
   // document/window listeners (only Stimulus-managed data-action bindings), so
   // unloading its identifier must make the headers inert.
   it("becomes inert after disconnect (no lingering side effects)", () => {
@@ -346,25 +382,25 @@ describe("AccordionController", () => {
     expect(triggers()[0]?.getAttribute("aria-expanded")).toBe("true");
 
     triggers()[1]?.focus();
-    triggers()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(triggers()[1] as HTMLElement, "ArrowDown", { bubbles: true });
     expect(document.activeElement).toBe(triggers()[1]);
   });
 
   it("moves focus to the previous header on ArrowUp, wrapping at the first", () => {
     triggers()[0]?.focus();
-    triggers()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    pressKey(triggers()[0] as HTMLElement, "ArrowUp", { bubbles: true });
     expect(document.activeElement).toBe(triggers()[1]); // wrapped to last
 
-    triggers()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    pressKey(triggers()[1] as HTMLElement, "ArrowUp", { bubbles: true });
     expect(document.activeElement).toBe(triggers()[0]); // regular previous step
   });
 
   it("jumps to the first header on Home and the last on End", () => {
     triggers()[1]?.focus();
-    triggers()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    pressKey(triggers()[1] as HTMLElement, "Home", { bubbles: true });
     expect(document.activeElement).toBe(triggers()[0]);
 
-    triggers()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    pressKey(triggers()[0] as HTMLElement, "End", { bubbles: true });
     expect(document.activeElement).toBe(triggers()[1]);
   });
 
@@ -394,17 +430,17 @@ describe("AccordionController", () => {
 
     // ArrowDown from the first visible header skips the hidden section to the third.
     h1.focus();
-    h1.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(h1, "ArrowDown", { bubbles: true });
     expect(document.activeElement).toBe(h3);
 
     // ArrowUp from the first wraps to the last visible header, never the hidden one.
     h1.focus();
-    h1.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    pressKey(h1, "ArrowUp", { bubbles: true });
     expect(document.activeElement).toBe(h3);
 
     // End lands on the last visible header (h3), not the hidden h2.
     h1.focus();
-    h1.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    pressKey(h1, "End", { bubbles: true });
     expect(document.activeElement).toBe(h3);
   });
 
@@ -412,13 +448,8 @@ describe("AccordionController", () => {
     // Alt+Arrow is a browser binding: the accordion neither moves the header
     // focus nor calls preventDefault().
     triggers()[0]?.focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    triggers()[0]?.dispatchEvent(event);
+    const event = keyEvent("ArrowDown", { altKey: true, bubbles: true, cancelable: true });
+    pressKey(triggers()[0] as HTMLElement, event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(triggers()[0]);
@@ -426,8 +457,8 @@ describe("AccordionController", () => {
 
   it("ignores other keys (no focus move, not prevented)", () => {
     triggers()[0]?.focus();
-    const event = new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true });
-    triggers()[0]?.dispatchEvent(event);
+    const event = keyEvent("a", { bubbles: true, cancelable: true });
+    pressKey(triggers()[0] as HTMLElement, event);
     expect(document.activeElement).toBe(triggers()[0]);
     expect(event.defaultPrevented).toBe(false);
   });

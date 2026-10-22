@@ -115,6 +115,22 @@ describe("MorphRenderWatcher", () => {
     expect(runs).toBe(2);
   });
 
+  it("reports a pass a morph or a request queued until it runs, and none once disconnected", async () => {
+    const { watcher, run, root, child } = setup();
+    expect(watcher.pending).toBe(false);
+    watcher.observe(root);
+    expect(watcher.pending).toBe(false);
+    morph(child);
+    expect(watcher.pending).toBe(true);
+    await flushMicrotasks();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(watcher.pending).toBe(false);
+    watcher.schedule();
+    expect(watcher.pending).toBe(true);
+    watcher.disconnect();
+    expect(watcher.pending).toBe(false);
+  });
+
   it("ignores unrelated events and events outside the observed subtree", async () => {
     const { watcher, run, root } = setup();
     watcher.observe(root);

@@ -1,5 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
@@ -79,7 +79,7 @@ const DEFAULT_MAX = 100;
  * Because no position is ever applied here, two Window Splitter requirements
  * fall to the consumer: `aria-controls` naming the **primary** pane — the one
  * whose size the value reports — and `Enter` to toggle collapse/restore, since
- * collapsing applies a position — {@link ResizableController} implements that
+ * collapsing applies a position — `stimeo--resizable` implements that
  * key for the same divider. Because the increment direction is fixed, the
  * primary pane can only be the left one for a vertical splitter and the bottom
  * one for a horizontal splitter: those are the panes that grow as
@@ -186,6 +186,7 @@ export class SeparatorController extends Controller<HTMLElement> {
   /** Adjusts the value on arrow / Home / End keys (focusable variant only). */
   onKeydown(event: KeyboardEvent): void {
     if (isReservedArrowChord(event) || !this.focusableValue) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
 
     const horizontal = this.#effectiveOrientation === "horizontal";
     const range = this.#effectiveRange;

@@ -63,7 +63,10 @@ export class PreviewGuardController extends Controller<HTMLElement> {
   #observer: MutationObserver | null = null;
   #connected = false;
   #hidden = false;
-  /** Child nodes a placeholder displaced; non-null marks that content — not visibility — was swapped. */
+  /**
+   * Child nodes a placeholder displaced; non-null marks that content — not visibility —
+   * was swapped.
+   */
   #savedNodes: DocumentFragment | null = null;
   /** The descendant that held focus when the guard went up, so show can hand it back. */
   #focused: HTMLElement | null = null;

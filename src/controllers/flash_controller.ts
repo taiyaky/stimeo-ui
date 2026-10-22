@@ -2,8 +2,8 @@ import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { announce } from "../utils/announce";
 import { ownerOf } from "../utils/event_owner";
+import { HoverRecheck } from "../utils/hover_recheck";
 import { KeyedTimers } from "../utils/keyed_timers";
-import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -29,7 +29,7 @@ const SHOWN_ATTRIBUTE = "shown";
  * Headless **Rails flash bridge**: turns server-rendered (and Turbo Stream-inserted)
  * `flash` elements into live-region announcements with auto-dismiss and a stacking
  * cap (no dedicated APG pattern; follows the WAI-ARIA status/alert guidance and WCAG
- * 2.2 **4.1.3 Status Messages**). The general-purpose sibling is Toast; this one is
+ * 2.2 **4.1.3 Status Messages**). The general-purpose sibling is `stimeo--toast`; this one is
  * specialized to the Rails `flash` convention.
  *
  * Capacity evicts by arrival order, independent of DOM order. The same controller
@@ -64,13 +64,13 @@ const SHOWN_ATTRIBUTE = "shown";
  * Turbo cache still carried, which no `dismiss` will report because nobody dismissed them.
  *
  * @remarks
- * Reading is **delegated to the shared Announcer** — but only for the *initial*,
+ * Reading is **delegated to `stimeo--announcer`** — but only for the *initial*,
  * page-loaded messages: an in-place live region present at load is not announced by
  * assistive tech, so the controller bridges those via an `stimeo--announcer:announce`
  * event. Messages inserted *later* (Turbo Stream) are announced by their own freshly
- * inserted `role`, exactly like Toast, so they are not bridged again (no double
+ * inserted `role`, exactly like `stimeo--toast`, so they are not bridged again (no double
  * announcement). Behavior only — no styling; `data-flash-state="leaving"` lets CSS
- * animate removal. Focus is never moved (WCAG 2.2 4.1.3): neither a pause nor the `max`
+ * animate removal. Focus is never moved: neither a pause nor the `max`
  * cap removes a message the pointer is over or focus is inside, so neither takes away
  * the control under the pointer or holding focus; with `pauseOnHover` off the
  * auto-dismiss still runs out under them. The observation follows a
@@ -137,9 +137,9 @@ export class FlashController extends Controller<HTMLElement> {
   /** Messages the pointer or focus moved into since the cap was last applied again. */
   #spared: HTMLElement[] = [];
   /** The next pointer movement, listened for while a hover hold waits on it. */
-  readonly #pointer = new ListenerSet();
-  /** Messages whose hover hold waits for the next pointer movement to be confirmed. */
-  readonly #awaitingPointer = new Set<HTMLElement>();
+  readonly #pointer = new HoverRecheck<HTMLElement>(this.element.ownerDocument, (message) =>
+    this.#resume(message, "hover", null),
+  );
   #observer: MutationObserver | null = null;
   /** Whether the controller is between `connect()` and `disconnect()`. */
   #connected = false;
@@ -189,7 +189,7 @@ export class FlashController extends Controller<HTMLElement> {
     }
     this.#discardInherited();
     this.#reapply.observe(this.element);
-    // Initial, server-rendered flashes: bridge them to the Announcer because an
+    // Initial, server-rendered flashes: bridge them to `stimeo--announcer` because an
     // in-place live region present at page load is not announced on its own.
     for (const message of this.messageTargets) {
       if (this.#owns(message)) this.#process(message, true);
@@ -210,7 +210,6 @@ export class FlashController extends Controller<HTMLElement> {
     this.#reapply.disconnect();
     this.#spared = [];
     this.#pointer.dispose();
-    this.#awaitingPointer.clear();
     for (const message of this.#order) this.#unbindPause(message);
     this.#order.length = 0;
     // The pending finalizes died with the timers above, so a message still marked
@@ -333,6 +332,9 @@ export class FlashController extends Controller<HTMLElement> {
    * Hover and focus listeners, bound and unbound as a pair so the two sides stay in
    * sync. Every message gets them, whatever `pauseOnHover` says, because the cap reads
    * the holds they record; unbinding is idempotent (a no-op when nothing was bound).
+   *
+   * @stimeoListenerLifetime element each message is bound when it is shown and unbound
+   *   by `#unbindPause` when it is forgotten or the controller disconnects.
    */
   #bindPause(message: HTMLElement): void {
     message.addEventListener("mouseenter", this.#onEnter);
@@ -377,7 +379,7 @@ export class FlashController extends Controller<HTMLElement> {
   /**
    * Applies role/state, wires pause listeners, takes the holds the message already has,
    * and schedules auto-dismiss. A message `connect()` takes on (`atConnect`) is bridged
-   * to the Announcer and meets no cap here, `connect()` holding the stack to it; a later
+   * to `stimeo--announcer` and meets no cap here, `connect()` holding the stack to it; a later
    * insert announces through its own role and meets the cap as it arrives. Idempotent
    * per message, and a node that has left the region by the time its insertion is
    * reported is not taken on.
@@ -510,7 +512,7 @@ export class FlashController extends Controller<HTMLElement> {
    */
   #afterMove(message: HTMLElement): void {
     if (!message.contains(document.activeElement)) this.#resume(message, "focus", null);
-    if (this.#dismiss.isHeld(message)) this.#awaitPointer(message);
+    if (this.#dismiss.isHeld(message)) this.#pointer.wait(message);
   }
 
   /**
@@ -522,30 +524,8 @@ export class FlashController extends Controller<HTMLElement> {
     if (message.contains(document.activeElement)) this.#pause(message, "focus");
     if (!message.matches(":hover")) return;
     this.#pause(message, "hover");
-    this.#awaitPointer(message);
+    this.#pointer.wait(message);
   }
-
-  /** Leaves `message`'s hover hold to be confirmed or let go on the next pointer movement. */
-  #awaitPointer(message: HTMLElement): void {
-    this.#awaitingPointer.add(message);
-    this.#pointer.add(document, "pointermove", this.#onPointerMove, {
-      capture: true,
-      passive: true,
-    });
-  }
-
-  /**
-   * Reads `:hover` once the pointer has moved, when the answer is current, and lets go of
-   * the hover hold of every waiting message the pointer is not over. Listens once.
-   */
-  readonly #onPointerMove = (): void => {
-    this.#pointer.dispose();
-    const waiting = [...this.#awaitingPointer];
-    this.#awaitingPointer.clear();
-    for (const message of waiting) {
-      if (!message.matches(":hover")) this.#resume(message, "hover", null);
-    }
-  };
 
   /**
    * Releases every per-message resource: timers, hold, stacking slot, pause listeners,
@@ -559,8 +539,7 @@ export class FlashController extends Controller<HTMLElement> {
     const index = this.#order.indexOf(message);
     if (index !== -1) this.#order.splice(index, 1);
     this.#unbindPause(message);
-    this.#awaitingPointer.delete(message);
-    if (this.#awaitingPointer.size === 0) this.#pointer.dispose();
+    this.#pointer.cancel(message);
   }
 
   /** Marks a message leaving, then removes it after its CSS transition and emits dismiss. */

@@ -74,9 +74,9 @@ describe("IdleController", () => {
   } as const;
 
   /**
-   * Rewrites a Value in place, the way a Turbo morph or a script does, then delivers its
-   * callback directly: happy-dom can deliver the observer's own call late or drop it, and
-   * the contract under test is what the callback does.
+   * Rewrites a Value in place, the way a Turbo morph or a script does, then calls its
+   * callback directly, so the case asserts what the callback does without depending on
+   * when the value observer delivers its own call.
    */
   const declare = async (name: keyof typeof CALLBACKS, raw: string) => {
     root().setAttribute(`data-stimeo--idle-${name}-value`, raw);

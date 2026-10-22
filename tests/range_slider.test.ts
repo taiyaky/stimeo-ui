@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RangeSliderController } from "../src/controllers/range_slider_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { keyEvent, press as pressKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -67,7 +68,49 @@ describe("RangeSliderController", () => {
       "stimeo--range-slider",
     ) as RangeSliderController;
   const press = (thumb: HTMLElement, key: string) =>
-    thumb.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    !pressKey(thumb, key, { bubbles: true }).defaultPrevented;
+
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+        key,
+        modifier,
+      })),
+    ),
+  )(
+    "yields modified boundary key $modifier+$key without changing widget state",
+    async ({ key, modifier }) => {
+      const fields = ["startField", "endField"].map((name) => {
+        const field = document.createElement("input");
+        field.type = "hidden";
+        field.setAttribute("data-stimeo--range-slider-target", name);
+        root().append(field);
+        return field;
+      });
+      await tick();
+      startThumb().focus();
+      const seen: string[] = [];
+      for (const name of [
+        "stimeo--range-slider:change",
+        "stimeo--range-slider:reconcile",
+        "input",
+        "change",
+      ]) {
+        root().addEventListener(name, () => seen.push(name));
+      }
+      const before = root().innerHTML;
+      const event = pressKey(startThumb(), key, { [modifier]: true });
+      const endEvent = pressKey(endThumb(), key, { [modifier]: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(endEvent.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(endThumb());
+      expect(root().innerHTML).toBe(before);
+      expect(controller().startValue).toBe(20);
+      expect(controller().endValue).toBe(80);
+      expect(fields.map((field) => field.value)).toEqual(["20", "80"]);
+      expect(seen).toEqual([]);
+    },
+  );
 
   it.each(["replace", "read", "repeat"])(
     "writes both fields before reporting and suppresses replaced reports: %s",
@@ -202,8 +245,6 @@ describe("RangeSliderController", () => {
     expect(endThumb().getAttribute("aria-valuemax")).toBe("100");
     expect(root().style.getPropertyValue("--stimeo--range-slider-start")).toBe("0.2");
     expect(root().style.getPropertyValue("--stimeo--range-slider-end")).toBe("0.8");
-    expect(root().style.getPropertyValue("--stimeo-range-start")).toBe("");
-    expect(root().style.getPropertyValue("--stimeo-range-end")).toBe("");
   });
 
   it("uses the public Value defaults when every data Value is omitted", async () => {
@@ -436,11 +477,7 @@ describe("RangeSliderController", () => {
     const stray = document.createElement("div");
     stray.setAttribute("data-action", "keydown->stimeo--range-slider#onKeydown");
     track().append(stray);
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
+    const event = keyEvent("ArrowRight", { bubbles: true, cancelable: true });
     Object.defineProperty(event, "currentTarget", { value: stray });
 
     controller().onKeydown(event);
@@ -510,13 +547,8 @@ describe("RangeSliderController", () => {
   it("leaves a modified arrow to the browser", () => {
     // A chorded arrow belongs to the browser (history navigation and friends):
     // the thumb neither consumes it nor steps.
-    const chord = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-      altKey: true,
-    });
-    startThumb().dispatchEvent(chord);
+    const chord = keyEvent("ArrowRight", { bubbles: true, cancelable: true, altKey: true });
+    pressKey(startThumb(), chord);
 
     expect(chord.defaultPrevented).toBe(false);
     expect(startThumb().getAttribute("aria-valuenow")).toBe("20");
@@ -526,9 +558,9 @@ describe("RangeSliderController", () => {
   it.each(["ArrowRight", "ArrowDown", "PageUp", "Home", "End"])(
     "consumes %s on a thumb so the page does not scroll",
     (key) => {
-      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      const event = keyEvent(key, { bubbles: true, cancelable: true });
 
-      startThumb().dispatchEvent(event);
+      pressKey(startThumb(), event);
 
       expect(event.defaultPrevented).toBe(true);
     },
@@ -539,13 +571,9 @@ describe("RangeSliderController", () => {
     unrelated.setAttribute("data-action", "keydown->stimeo--range-slider#onKeydown");
     root().append(unrelated);
     await tick();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
+    const event = keyEvent("ArrowRight", { bubbles: true, cancelable: true });
 
-    unrelated.dispatchEvent(event);
+    pressKey(unrelated, event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(startThumb().getAttribute("aria-valuenow")).toBe("20");
@@ -577,6 +605,68 @@ describe("RangeSliderController", () => {
     press(endThumb(), "Home");
     // Home for the end thumb is the start thumb's value (80).
     expect(endThumb().getAttribute("aria-valuenow")).toBe("80");
+  });
+
+  it.each(
+    (["PageUp", "PageDown"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Alt+Shift", { altKey: true, shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+          ["Meta+Shift", { metaKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Page chord (%s, %s)", async (key, _modifier, init) => {
+    const fields = ["startField", "endField"].map((name) => {
+      const field = document.createElement("input");
+      field.type = "hidden";
+      field.setAttribute("data-stimeo--range-slider-target", name);
+      root().append(field);
+      return field;
+    });
+    await tick();
+    const seen: string[] = [];
+    for (const name of [
+      "stimeo--range-slider:change",
+      "stimeo--range-slider:reconcile",
+      "input",
+      "change",
+    ]) {
+      root().addEventListener(name, () => seen.push(name));
+    }
+    const before = root().outerHTML;
+    for (const current of [startThumb(), endThumb()]) {
+      current.focus();
+      const rejected = pressKey(current, key, init);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(current);
+      expect(root().outerHTML).toBe(before);
+      expect(controller().startValue).toBe(20);
+      expect(controller().endValue).toBe(80);
+      expect(fields.map((field) => field.value)).toEqual(["20", "80"]);
+      expect(seen).toEqual([]);
+    }
+
+    expect(pressKey(startThumb(), key).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(startThumb());
+    expect(controller().startValue).toBe(key === "PageUp" ? 80 : 0);
+    expect(controller().endValue).toBe(80);
+    expect(pressKey(endThumb(), key).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(endThumb());
+    const expected = key === "PageUp" ? [80, 100] : [0, 0];
+    expect([controller().startValue, controller().endValue]).toEqual(expected);
+    expect(fields.map((field) => field.value)).toEqual(expected.map(String));
+    expect(seen).toEqual([
+      "change",
+      "stimeo--range-slider:change",
+      "change",
+      "stimeo--range-slider:change",
+    ]);
   });
 
   it("moves by ten steps on PageUp/PageDown", async () => {
@@ -984,7 +1074,7 @@ describe("RangeSliderController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Speech-order regression scoped to each thumb. Pins role, name, the live
+  // Speech-order check scoped to each thumb. Pins role, name, the live
   // mutual bounds, and the value so a lost role/name or a stale bound surfaces
   // as a diff.
   it("announces each thumb's role, name, bounds, and value", async () => {
@@ -1029,10 +1119,10 @@ describe("RangeSliderController", () => {
       track.dispatchEvent(new PointerEvent("pointerdown", { clientX, bubbles: true }));
     };
     const pressEnd = (key: string) =>
-      endThumb().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+      !pressKey(endThumb(), key, { bubbles: true }).defaultPrevented;
 
     it("ignores RTL when the track was not declared logical", () => {
-      root().style.direction = "rtl";
+      track().style.direction = "rtl";
 
       pressTrack(180);
       expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
@@ -1043,7 +1133,7 @@ describe("RangeSliderController", () => {
 
     it("reads the pointer from the right edge on a logical track under RTL", () => {
       root().setAttribute("data-stimeo--range-slider-logical-track-value", "true");
-      root().style.direction = "rtl";
+      track().style.direction = "rtl";
 
       // 180 / 200 mirrors to 0.1, which lands nearest the start thumb.
       pressTrack(180);
@@ -1052,7 +1142,7 @@ describe("RangeSliderController", () => {
     });
 
     it("keeps the direction a drag started with when logicalTrack changes, and reads it anew at the next press", async () => {
-      root().style.direction = "rtl";
+      track().style.direction = "rtl";
       track().getBoundingClientRect = () => stubRect(200);
       // X=180 → value 90 on the physical mapping, nearer the end thumb.
       track().dispatchEvent(
@@ -1076,7 +1166,7 @@ describe("RangeSliderController", () => {
 
     it("trades the horizontal arrows on a logical track under RTL", () => {
       root().setAttribute("data-stimeo--range-slider-logical-track-value", "true");
-      root().style.direction = "rtl";
+      track().style.direction = "rtl";
 
       pressEnd("ArrowLeft");
       expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
@@ -1086,6 +1176,52 @@ describe("RangeSliderController", () => {
 
       // The vertical pair names an axis the writing direction does not mirror.
       pressEnd("ArrowUp");
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+    });
+
+    it("reads a replacement track and ignores each thumb's direction", async () => {
+      root().setAttribute("data-stimeo--range-slider-logical-track-value", "true");
+      root().style.direction = "rtl";
+      track().style.direction = "ltr";
+      endThumb().style.direction = "rtl";
+      pressEnd("ArrowRight");
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+
+      const replacement = track().cloneNode(true) as HTMLElement;
+      replacement.style.direction = "rtl";
+      track().replaceWith(replacement);
+      await tick();
+      pressEnd("ArrowLeft");
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("100");
+      replacement.style.direction = "ltr";
+      pressEnd("ArrowLeft");
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+    });
+
+    it("falls back to root direction when the track target is absent", async () => {
+      root().setAttribute("data-stimeo--range-slider-logical-track-value", "true");
+      root().style.direction = "rtl";
+      track().removeAttribute("data-stimeo--range-slider-target");
+      await tick();
+      pressEnd("ArrowLeft");
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+    });
+
+    it("keeps a drag's direction when the track direction changes", () => {
+      root().setAttribute("data-stimeo--range-slider-logical-track-value", "true");
+      track().style.direction = "rtl";
+      track().getBoundingClientRect = () => stubRect(200);
+      track().dispatchEvent(
+        new PointerEvent("pointerdown", { clientX: 20, pointerId: 4, bubbles: true }),
+      );
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
+      track().style.direction = "ltr";
+      document.dispatchEvent(
+        new PointerEvent("pointermove", { clientX: 60, pointerId: 4, bubbles: true }),
+      );
+      expect(endThumb().getAttribute("aria-valuenow")).toBe("70");
+      document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 4, bubbles: true }));
+      pressTrack(180);
       expect(endThumb().getAttribute("aria-valuenow")).toBe("90");
     });
   });
@@ -1205,7 +1341,7 @@ describe("RangeSliderController", () => {
       await mount();
       commits.clear();
 
-      startThumb().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+      pressKey(startThumb(), "ArrowRight", {});
 
       expect([startField().value, endField().value]).toEqual(["30", "80"]);
       expect(commits.seen).toEqual([startField()]);
@@ -1246,7 +1382,8 @@ describe("RangeSliderController", () => {
         late.type = "hidden";
         late.setAttribute("data-stimeo--range-slider-target", target);
         root().append(late);
-        // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+        // The callback is called directly, so the case does not depend on when the
+        // MutationObserver delivers the new target.
         if (target === "startField") controller().startFieldTargetConnected();
         else controller().endFieldTargetConnected();
         await flushMicrotasks();

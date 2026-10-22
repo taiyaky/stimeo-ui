@@ -840,7 +840,7 @@ describe("IntersectionController", () => {
   it("has no machine-detectable a11y violations", async () => {
     await mount(`
       <main>
-        <p>Feed content</p>
+        <p>Page content</p>
         <div data-controller="stimeo--intersection" aria-hidden="true"></div>
       </main>`);
     await expectNoA11yViolations(document.body);
@@ -851,13 +851,13 @@ describe("IntersectionController", () => {
   it("keeps the sentinel silent before and after intersection", async () => {
     await mount(`
       <main>
-        <p>Feed content</p>
+        <p>Page content</p>
         <div data-controller="stimeo--intersection" aria-hidden="true"></div>
       </main>`);
     const container = document.querySelector("main") as HTMLElement;
     const before = await captureSpeech({ container, steps: 2 });
     // Freeze the whole ordered array: the aria-hidden sentinel never announces.
-    expect(before).toEqual(["main", "paragraph", "Feed content"]);
+    expect(before).toEqual(["main", "paragraph", "Page content"]);
     observerCallback?.([visible()]);
     await tick();
     const after = await captureSpeech({ container, steps: 2 });

@@ -75,6 +75,37 @@ function roundTrip(
   return response === null ? null : (JSON.parse(response) as Record<string, unknown>);
 }
 
+/** A JSON-RPC request object, for building batches. */
+function request(id: string | number, method: string, params?: unknown): Record<string, unknown> {
+  const message: Record<string, unknown> = { jsonrpc: "2.0", id, method };
+  if (params !== undefined) message.params = params;
+  return message;
+}
+
+/** A JSON-RPC notification object, for building batches. */
+function notification(method: string): Record<string, unknown> {
+  return { jsonrpc: "2.0", method };
+}
+
+/** Sends `messages` as one batch line and returns the parsed answer (null when none is due). */
+function sendBatch(session: McpSession, messages: readonly unknown[]): unknown {
+  const response = session.handleLine(JSON.stringify(messages));
+  return response === null ? null : (JSON.parse(response) as unknown);
+}
+
+/** A session whose initialize negotiated `protocolVersion`, followed by `initialized`. */
+function sessionNegotiating(protocolVersion: string): McpSession {
+  const session = new McpSession(fakeContext);
+  const response = roundTrip(session, "initialize", { protocolVersion });
+  const result = response?.result as Record<string, unknown>;
+  expect(result.protocolVersion).toBe(protocolVersion);
+  session.handleLine(JSON.stringify(notification("notifications/initialized")));
+  return session;
+}
+
+/** The single Invalid Request a batch the session does not take is answered with. */
+const rejectedBatch = { jsonrpc: "2.0", id: null, error: { code: JSONRPC_INVALID_REQUEST } };
+
 /** A session that has completed the initialize handshake. */
 function initializedSession(): McpSession {
   const session = new McpSession(fakeContext);
@@ -113,8 +144,8 @@ describe("McpSession", () => {
     // model, and clients that defer tool definitions still tend to load it
     // with the tool names — so it can be read before any tool is. Both
     // assertions follow from clients truncating it: the trigger vocabulary has
-    // to survive, and it has to survive near the start. 2KB is the tightest
-    // client limit known; the margin below it is slack.
+    // to survive, and it has to survive near the start. Some clients cut it at
+    // 2,048 characters, so the whole text stays under 2KB; the margin is slack.
     const session = new McpSession(fakeContext);
     const response = roundTrip(session, "initialize", { protocolVersion: "2025-03-26" });
     const result = response?.result as Record<string, unknown>;
@@ -371,7 +402,7 @@ describe("McpSession", () => {
     expect((parsed.error as Record<string, unknown>).code).toBe(JSONRPC_PARSE_ERROR);
   });
 
-  it("rejects non-request payloads (including JSON-RPC batches)", () => {
+  it("rejects non-request payloads (including a JSON-RPC batch before initialize)", () => {
     const session = new McpSession(fakeContext);
     for (const line of ['[{"jsonrpc":"2.0","id":1,"method":"ping"}]', '{"method":"ping","id":1}']) {
       const response = JSON.parse(session.handleLine(line) ?? "") as Record<string, unknown>;
@@ -387,6 +418,129 @@ describe("McpSession", () => {
       const response = JSON.parse(session.handleLine(line) ?? "") as Record<string, unknown>;
       expect((response.error as Record<string, unknown>).code).toBe(JSONRPC_INVALID_REQUEST);
     }
+  });
+});
+
+/**
+ * JSON-RPC batches. MCP 2025-03-26 requires a receiver to accept them and keeps
+ * `initialize` out of them; 2025-06-18 removed them and 2024-11-05 predates them. Within
+ * an accepted batch the JSON-RPC 2.0 batch rules apply: one response per request, none
+ * for a notification, nothing at all when every element is a notification, and a single
+ * Invalid Request for an empty array.
+ */
+describe("McpSession JSON-RPC batches", () => {
+  it("answers a batch with one response per request in a session that negotiated 2025-03-26", () => {
+    const session = sessionNegotiating("2025-03-26");
+    const line = session.handleLine(
+      JSON.stringify([
+        request(1, "ping"),
+        notification("notifications/cancelled"),
+        request("list", "tools/list"),
+        request(3, "completion/complete"),
+      ]),
+    );
+    expect(line).not.toContain("\n");
+    const responses = JSON.parse(line ?? "") as Record<string, unknown>[];
+    expect(Array.isArray(responses)).toBe(true);
+    expect(responses.map((response) => response.id)).toEqual([1, "list", 3]);
+    expect(responses[0]?.result).toEqual({});
+    const list = responses[1]?.result as { tools: unknown[] };
+    expect(list.tools).toHaveLength(4);
+    const unknown = responses[2]?.error as Record<string, unknown>;
+    expect(unknown.code).toBe(JSONRPC_METHOD_NOT_FOUND);
+  });
+
+  it("returns nothing for a batch of notifications only", () => {
+    const session = sessionNegotiating("2025-03-26");
+    const line = JSON.stringify([
+      notification("notifications/cancelled"),
+      notification("notifications/progress"),
+    ]);
+    expect(session.handleLine(line)).toBeNull();
+  });
+
+  it("answers an empty batch with a single Invalid Request, not an array", () => {
+    const session = sessionNegotiating("2025-03-26");
+    expect(sendBatch(session, [])).toMatchObject(rejectedBatch);
+  });
+
+  it("answers each malformed element of a batch with its own Invalid Request", () => {
+    const session = sessionNegotiating("2025-03-26");
+    const responses = sendBatch(session, [
+      1,
+      { foo: "boo" },
+      request("a", "ping"),
+      { jsonrpc: "2.0", id: null, method: "ping" },
+      [request(9, "ping")],
+    ]) as Record<string, unknown>[];
+    expect(responses.map((response) => response.id)).toEqual([null, null, "a", null, null]);
+    expect(
+      responses.map((response) => (response.error as { code?: number } | undefined)?.code),
+    ).toEqual([
+      JSONRPC_INVALID_REQUEST,
+      JSONRPC_INVALID_REQUEST,
+      undefined,
+      JSONRPC_INVALID_REQUEST,
+      JSONRPC_INVALID_REQUEST,
+    ]);
+    expect(responses[2]?.result).toEqual({});
+  });
+
+  it("refuses an initialize inside a batch and keeps the negotiated version", () => {
+    const session = sessionNegotiating("2025-03-26");
+    const responses = sendBatch(session, [
+      request(10, "initialize", { protocolVersion: "2025-06-18" }),
+      { jsonrpc: "2.0", method: "initialize", params: { protocolVersion: "2025-06-18" } },
+      request(11, "ping"),
+    ]) as Record<string, unknown>[];
+    expect(responses.map((response) => response.id)).toEqual([10, 11]);
+    const refused = responses[0]?.error as Record<string, unknown>;
+    expect(refused.code).toBe(JSONRPC_INVALID_REQUEST);
+    expect(refused.message).toContain("initialize");
+    expect(responses[1]?.result).toEqual({});
+    // Neither initialize renegotiated, so the session still takes batches.
+    expect(sendBatch(session, [request(12, "ping")])).toEqual([
+      { jsonrpc: "2.0", id: 12, result: {} },
+    ]);
+  });
+
+  it("rejects a batch before initialize, and an initialize inside it negotiates nothing", () => {
+    const session = new McpSession(fakeContext);
+    expect(sendBatch(session, [request(1, "ping")])).toMatchObject(rejectedBatch);
+    expect(sendBatch(session, [notification("notifications/initialized")])).toMatchObject(
+      rejectedBatch,
+    );
+    const initialize = request(2, "initialize", { protocolVersion: "2025-03-26" });
+    expect(sendBatch(session, [initialize])).toMatchObject(rejectedBatch);
+    const early = roundTrip(session, "tools/list")?.error as Record<string, unknown>;
+    expect(early.code).toBe(JSONRPC_SERVER_NOT_INITIALIZED);
+  });
+
+  it("rejects batches in sessions that negotiated 2025-06-18 or 2024-11-05", () => {
+    for (const version of ["2025-06-18", "2024-11-05"]) {
+      const session = sessionNegotiating(version);
+      expect(sendBatch(session, [request(1, "ping")]), version).toMatchObject(rejectedBatch);
+      expect(sendBatch(session, [notification("notifications/cancelled")])).toMatchObject(
+        rejectedBatch,
+      );
+      expect(roundTrip(session, "ping", undefined, 2)?.result).toEqual({});
+    }
+    const fallback = new McpSession(fakeContext);
+    roundTrip(fallback, "initialize", { protocolVersion: "1999-01-01" });
+    expect(sendBatch(fallback, [request(1, "ping")])).toMatchObject(rejectedBatch);
+  });
+
+  it("follows the version a later initialize negotiates", () => {
+    const session = sessionNegotiating("2025-03-26");
+    expect(sendBatch(session, [request(1, "ping")])).toEqual([
+      { jsonrpc: "2.0", id: 1, result: {} },
+    ]);
+    roundTrip(session, "initialize", { protocolVersion: "2025-06-18" }, 2);
+    expect(sendBatch(session, [request(3, "ping")])).toMatchObject(rejectedBatch);
+    roundTrip(session, "initialize", { protocolVersion: "2025-03-26" }, 4);
+    expect(sendBatch(session, [request(5, "ping")])).toEqual([
+      { jsonrpc: "2.0", id: 5, result: {} },
+    ]);
   });
 });
 
@@ -480,5 +634,24 @@ describe("runMcpServer", () => {
     expect(initialize.id).toBe(1);
     expect(list.id).toBe(2);
     expect(list.result.tools).toHaveLength(4);
+  });
+
+  it("answers a batch read as one stdin line with one array line", async () => {
+    const input = new PassThrough();
+    const lines: string[] = [];
+    const done = runMcpServer({
+      input,
+      write: (line) => lines.push(line),
+      load: () => fakeContext,
+    });
+    input.write(`${JSON.stringify(request(1, "initialize", { protocolVersion: "2025-03-26" }))}\n`);
+    input.write(`${JSON.stringify([notification("notifications/initialized")])}\n`);
+    input.write(`${JSON.stringify([request(2, "ping"), request(3, "tools/list")])}\n`);
+    input.end();
+    await done;
+    expect(lines).toHaveLength(2);
+    const batch = JSON.parse(lines[1] ?? "") as { id: number; result: unknown }[];
+    expect(batch.map((response) => response.id)).toEqual([2, 3]);
+    expect(batch[0]?.result).toEqual({});
   });
 });

@@ -4,6 +4,7 @@ import type { CableSubscriptionMixin } from "../src/cable/consumer";
 import { createConfirmedSubscription, setCableConsumer } from "../src/cable/consumer";
 import { PresenceController } from "../src/cable/presence_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { recordListeners } from "./helpers/listeners";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay } from "./helpers/timing";
@@ -182,18 +183,15 @@ describe("PresenceController", () => {
     });
 
     it("unregisters the pagehide listener it registered", async () => {
-      const added = vi.spyOn(window, "addEventListener");
-      const removed = vi.spyOn(window, "removeEventListener");
+      const ledger = recordListeners();
       try {
         await mount();
-        const onPageHide = added.mock.calls.find(([type]) => type === "pagehide")?.[1];
-        expect(onPageHide).toBeDefined();
+        expect(ledger.live(window, "pagehide")).toHaveLength(1);
 
         controller()?.disconnect();
-        expect(removed).toHaveBeenCalledWith("pagehide", onPageHide);
+        expect(ledger.live(window, "pagehide")).toHaveLength(0);
       } finally {
-        added.mockRestore();
-        removed.mockRestore();
+        ledger.restore();
       }
     });
 
@@ -381,8 +379,8 @@ describe("PresenceController", () => {
     it("localizes the count via data-zero / data-one / data-other templates", async () => {
       await mount();
       count().setAttribute("data-zero", "誰も見ていません");
-      count().setAttribute("data-one", "%{count} 人が閲覧中");
-      count().setAttribute("data-other", "%{count} 人が閲覧中");
+      count().setAttribute("data-one", "{count} 人が閲覧中");
+      count().setAttribute("data-other", "{count} 人が閲覧中");
       receive("bob", "Bob");
       expect(count().textContent).toBe("1 人が閲覧中");
       receive("carol", "Carol");
@@ -471,7 +469,7 @@ describe("PresenceController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Speech-order regression ------------------------------------------------
+  // --- Speech-order check -----------------------------------------------------
 
   it("announces a joining peer through the count text and the roster list", async () => {
     await mount();
@@ -1022,14 +1020,14 @@ describe("PresenceController", () => {
       </div>`;
 
     it("falls back to the other copy when only it is declared", async () => {
-      await mount(withCopy(`data-other="%{count} viewing"`));
+      await mount(withCopy(`data-other="{count} viewing"`));
       expect(count().textContent).toBe("0 viewing");
       receive("bob", "Bob");
       expect(count().textContent).toBe("1 viewing");
     });
 
     it("uses the one copy for a single peer and the other copy beyond it", async () => {
-      await mount(withCopy(`data-one="one person" data-other="%{count} people"`));
+      await mount(withCopy(`data-one="one person" data-other="{count} people"`));
       receive("bob", "Bob");
       expect(count().textContent).toBe("one person");
       receive("carol", "Carol");
@@ -1037,14 +1035,30 @@ describe("PresenceController", () => {
     });
 
     it("uses the zero copy for an empty roster", async () => {
-      await mount(withCopy(`data-zero="nobody" data-other="%{count} people"`));
+      await mount(withCopy(`data-zero="nobody" data-other="{count} people"`));
       expect(count().textContent).toBe("nobody");
       receive("bob", "Bob");
       expect(count().textContent).toBe("1 people");
     });
 
+    it("fills every count token and leaves unknown names as authored", async () => {
+      await mount(withCopy(`data-other="{count}/{count} {name} {constructor}"`));
+      expect(count().textContent).toBe("0/0 {name} {constructor}");
+      receive("bob", "Bob");
+      expect(count().textContent).toBe("1/1 {name} {constructor}");
+    });
+
+    it.each([
+      ["zero", 0],
+      ["one", 1],
+    ])("uses the bare number for an explicitly empty %s template", async (key, peers) => {
+      await mount(withCopy(`data-${key}="" data-other="{count} people"`));
+      if (peers === 1) receive("bob", "Bob");
+      expect(count().textContent).toBe(String(peers));
+    });
+
     it("blanks the count copy on teardown", async () => {
-      await mount(withCopy(`data-other="%{count} viewing"`));
+      await mount(withCopy(`data-other="{count} viewing"`));
       receive("bob", "Bob");
       expect(count().textContent).toBe("1 viewing");
       controller()?.disconnect();
@@ -1092,9 +1106,9 @@ describe("PresenceController", () => {
       `${index}:appear:${JSON.stringify({ id, name })}`;
 
     /**
-     * Rewrites a declaration on `element` and delivers its Value callback directly,
-     * since happy-dom does not reliably run it for an attribute write. A Value
-     * without a callback is left to whatever reads it next.
+     * Rewrites a declaration on `element` and calls its Value callback directly, so the
+     * callback has run when this returns instead of waiting for the MutationObserver
+     * delivery. A Value without a callback is left to whatever reads it next.
      */
     const declare = (name: string, value: string, element = root()) => {
       element.setAttribute(`data-stimeo--presence-${name}-value`, value);

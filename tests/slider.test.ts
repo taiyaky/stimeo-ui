@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SliderController } from "../src/controllers/slider_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { keyEvent, press as pressKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -49,9 +50,41 @@ describe("SliderController", () => {
     document.querySelector<HTMLElement>("[data-stimeo--slider-target='track']") as HTMLElement;
   const controller = () =>
     application.getControllerForElementAndIdentifier(root(), "stimeo--slider") as SliderController;
-  const press = (key: string) =>
-    thumb().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  const press = (key: string) => !pressKey(thumb(), key, { bubbles: true }).defaultPrevented;
   const fraction = () => root().style.getPropertyValue("--stimeo--slider-fraction");
+
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+        key,
+        modifier,
+      })),
+    ),
+  )(
+    "yields modified boundary key $modifier+$key without changing widget state",
+    async ({ key, modifier }) => {
+      const field = document.createElement("input");
+      field.type = "hidden";
+      field.setAttribute("data-stimeo--slider-target", "field");
+      root().append(field);
+      await tick();
+      thumb().focus();
+      const seen: string[] = [];
+      for (const name of ["stimeo--slider:change", "stimeo--slider:reconcile", "input", "change"]) {
+        root().addEventListener(name, () => seen.push(name));
+      }
+      const before = root().innerHTML;
+      const value = controller().valueValue;
+      const event = pressKey(thumb(), key, { [modifier]: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(thumb());
+      expect(root().innerHTML).toBe(before);
+      expect(controller().valueValue).toBe(value);
+      expect(field.value).toBe("40");
+      expect(fraction()).toBe("0.4");
+      expect(seen).toEqual([]);
+    },
+  );
 
   it.each(["replace", "read", "repeat"])(
     "keeps only current pending reports after a field listener: %s",
@@ -120,8 +153,8 @@ describe("SliderController", () => {
     root().setAttribute("data-stimeo--slider-step-value", "10");
     root().setAttribute("data-stimeo--slider-value-value", "94");
 
-    // Drive the callback contract directly: happy-dom may drop the Stimulus
-    // MutationObserver delivery under full-suite load.
+    // The test calls the four Value callbacks directly, in one turn, instead of
+    // waiting for the MutationObserver delivery.
     controller().minValueChanged();
     controller().maxValueChanged();
     controller().stepValueChanged();
@@ -314,6 +347,50 @@ describe("SliderController", () => {
     expect(fraction()).toBe("1");
   });
 
+  it.each(
+    (["PageUp", "PageDown"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Alt+Shift", { altKey: true, shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+          ["Meta+Shift", { metaKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Page chord (%s, %s)", async (key, _modifier, init) => {
+    const field = document.createElement("input");
+    field.type = "hidden";
+    field.setAttribute("data-stimeo--slider-target", "field");
+    root().append(field);
+    await tick();
+    thumb().focus();
+    const seen: string[] = [];
+    for (const name of ["stimeo--slider:change", "stimeo--slider:reconcile", "input", "change"]) {
+      root().addEventListener(name, () => seen.push(name));
+    }
+    const before = root().outerHTML;
+    const rejected = pressKey(thumb(), key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(thumb());
+    expect(root().outerHTML).toBe(before);
+    expect(controller().valueValue).toBe(40);
+    expect(field.value).toBe("40");
+    expect(fraction()).toBe("0.4");
+    expect(seen).toEqual([]);
+
+    expect(pressKey(thumb(), key).defaultPrevented).toBe(true);
+    const expected = key === "PageUp" ? 100 : 0;
+    expect(controller().valueValue).toBe(expected);
+    expect(thumb().getAttribute("aria-valuenow")).toBe(String(expected));
+    expect(field.value).toBe(String(expected));
+    expect(document.activeElement).toBe(thumb());
+    expect(seen).toEqual(["change", "stimeo--slider:change"]);
+  });
+
   it("jumps to min on Home and max on End", () => {
     press("Home");
     expect(thumb().getAttribute("aria-valuenow")).toBe("0");
@@ -334,13 +411,8 @@ describe("SliderController", () => {
   it("leaves a modified arrow to the browser", () => {
     // A chorded arrow is the browser's (history back/forward and the like), so
     // the slider neither consumes the key nor steps its value.
-    const chord = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    thumb().dispatchEvent(chord);
+    const chord = keyEvent("ArrowRight", { altKey: true, bubbles: true, cancelable: true });
+    pressKey(thumb(), chord);
 
     expect(chord.defaultPrevented).toBe(false);
     expect(thumb().getAttribute("aria-valuenow")).toBe("40");
@@ -349,15 +421,15 @@ describe("SliderController", () => {
 
   it("consumes a key it handles so the page does not scroll", () => {
     for (const key of ["ArrowRight", "ArrowDown", "PageUp", "Home"]) {
-      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-      thumb().dispatchEvent(event);
+      const event = keyEvent(key, { bubbles: true, cancelable: true });
+      pressKey(thumb(), event);
       expect(event.defaultPrevented).toBe(true);
     }
   });
 
   it("ignores unrelated keys without preventing default", () => {
-    const event = new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true });
-    thumb().dispatchEvent(event);
+    const event = keyEvent("a", { bubbles: true, cancelable: true });
+    pressKey(thumb(), event);
     expect(thumb().getAttribute("aria-valuenow")).toBe("40");
     expect(event.defaultPrevented).toBe(false);
   });
@@ -633,7 +705,7 @@ describe("SliderController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Speech-order regression. Scoping to the thumb (the `role="slider"` element)
+  // Speech-order check. Scoping to the thumb (the `role="slider"` element)
   // yields a single, deterministic announcement; capturing it before and after a
   // keyboard step pins role, accessible name, bounds, and the announced value so
   // a lost role/name or a stale value surfaces as a diff.
@@ -651,7 +723,7 @@ describe("SliderController", () => {
     ]);
   });
 
-  // Disconnect-teardown regression: the drag's `document` listeners are bound to
+  // Disconnect-teardown check: the drag's `document` listeners are bound to
   // an AbortController aborted in disconnect(), so a pointermove after teardown
   // must not move the value (no leaked listener).
   it("removes drag listeners on disconnect so a later pointermove is ignored", () => {
@@ -689,7 +761,7 @@ describe("SliderController", () => {
     };
 
     it("ignores RTL when the track was not declared logical", () => {
-      root().style.direction = "rtl";
+      track().style.direction = "rtl";
 
       pressTrack(200);
       expect(thumb().getAttribute("aria-valuenow")).toBe("100");
@@ -700,7 +772,7 @@ describe("SliderController", () => {
 
     it("reads the pointer from the right edge on a logical track under RTL", () => {
       root().setAttribute("data-stimeo--slider-logical-track-value", "true");
-      root().style.direction = "rtl";
+      track().style.direction = "rtl";
 
       pressTrack(200);
       expect(thumb().getAttribute("aria-valuenow")).toBe("0");
@@ -710,7 +782,7 @@ describe("SliderController", () => {
     });
 
     it("keeps the direction a drag started with when logicalTrack changes, and reads it anew at the next press", async () => {
-      root().style.direction = "rtl";
+      track().style.direction = "rtl";
       track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
       track().dispatchEvent(
         new PointerEvent("pointerdown", { clientX: 40, pointerId: 2, bubbles: true }),
@@ -732,7 +804,7 @@ describe("SliderController", () => {
 
     it("trades the horizontal arrows on a logical track under RTL", () => {
       root().setAttribute("data-stimeo--slider-logical-track-value", "true");
-      root().style.direction = "rtl";
+      track().style.direction = "rtl";
 
       // The greater value sits at the visual left, so ArrowLeft must increase.
       press("ArrowLeft");
@@ -754,6 +826,53 @@ describe("SliderController", () => {
 
       press("ArrowLeft");
       expect(thumb().getAttribute("aria-valuenow")).toBe("90");
+    });
+
+    it("reads the current track direction while ignoring the thumb direction", async () => {
+      root().setAttribute("data-stimeo--slider-logical-track-value", "true");
+      root().style.direction = "rtl";
+      track().style.direction = "ltr";
+      thumb().style.direction = "rtl";
+      press("ArrowRight");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+
+      const replacement = track().cloneNode(true) as HTMLElement;
+      replacement.style.direction = "rtl";
+      track().replaceWith(replacement);
+      await tick();
+      press("ArrowLeft");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("60");
+
+      replacement.style.direction = "ltr";
+      press("ArrowRight");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("70");
+    });
+
+    it("falls back to root direction when the track target is absent", async () => {
+      root().setAttribute("data-stimeo--slider-logical-track-value", "true");
+      root().style.direction = "rtl";
+      track().removeAttribute("data-stimeo--slider-target");
+      await tick();
+      press("ArrowLeft");
+      expect(thumb().getAttribute("aria-valuenow")).toBe("50");
+    });
+
+    it("keeps a drag's direction when the track direction changes", () => {
+      root().setAttribute("data-stimeo--slider-logical-track-value", "true");
+      track().style.direction = "rtl";
+      track().getBoundingClientRect = () => new DOMRect(0, 0, 200, 10);
+      track().dispatchEvent(
+        new PointerEvent("pointerdown", { clientX: 160, pointerId: 4, bubbles: true }),
+      );
+      expect(thumb().getAttribute("aria-valuenow")).toBe("20");
+      track().style.direction = "ltr";
+      document.dispatchEvent(
+        new PointerEvent("pointermove", { clientX: 40, pointerId: 4, bubbles: true }),
+      );
+      expect(thumb().getAttribute("aria-valuenow")).toBe("80");
+      document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 4, bubbles: true }));
+      pressTrack(40);
+      expect(thumb().getAttribute("aria-valuenow")).toBe("20");
     });
   });
 
@@ -881,7 +1000,8 @@ describe("SliderController", () => {
       late.type = "hidden";
       late.setAttribute("data-stimeo--slider-target", "field");
       root().append(late);
-      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      // The test calls the target callback directly instead of waiting for the
+      // MutationObserver delivery.
       controller().fieldTargetConnected();
       await flushMicrotasks();
 

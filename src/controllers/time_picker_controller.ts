@@ -1,6 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
-import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { setAttributeIfChanged } from "../utils/attribute_write";
+import { AuthoredMutationWatcher } from "../utils/authored_mutation_watcher";
 import { commitField, writeField } from "../utils/field_mirror";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { MoveCounter } from "../utils/move_counter";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
@@ -9,6 +12,9 @@ import { targetSelector } from "../utils/target_selector";
 
 /** A time segment kind, as declared by `data-segment` on each spinbutton. */
 type SegmentKind = "hour" | "minute" | "second" | "meridiem";
+
+/** The numeric hour presentation, independent of labels and canonical time. */
+type HourMode = "h11" | "h12" | "h23";
 
 /** Canonical controller state. Hours are always stored on the 24-hour clock. */
 interface TimeState {
@@ -23,10 +29,6 @@ const PM = 1;
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_HOUR = 60 * SECONDS_PER_MINUTE;
 const SECONDS_PER_DAY = 24 * SECONDS_PER_HOUR;
-
-/** Modifier keys that reserve document/browser shortcuts outside the widget. */
-const hasModifier = (event: KeyboardEvent): boolean =>
-  event.altKey || event.ctrlKey || event.metaKey || event.shiftKey;
 
 /**
  * Headless, accessible **time picker** behavior. Each segment (hour, minute,
@@ -52,7 +54,8 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  *
  * All published state is settled before its reports. A synchronous listener
  * that confirms another value leaves that newer confirmation to report itself;
- * reports still pending for the replaced value are not sent. A read-only listener
+ * reports still pending for the replaced value are not sent. A listener that
+ * disconnects the controller ends the reports still pending. A read-only listener
  * or a confirmation that moves no published value leaves pending reports intact.
  * An event already being dispatched still reaches its remaining listeners.
  *
@@ -73,29 +76,44 @@ const hasModifier = (event: KeyboardEvent): boolean =>
  * discarded on another action, a segment target change, a page write taken in
  * from a segment, or focus departure.
  *
- * A user action that changes the composed value dispatches exactly one bubbling
- * native `change` from the field, when present, and one
- * `stimeo--time-picker:change` with `{ value: string }`. Retained
+ * A user action that changes the composed value dispatches one bubbling native
+ * `change` from the field, when present, then one `stimeo--time-picker:change` with
+ * `{ value: string }` unless a listener of that native `change` has confirmed another
+ * value or disconnected the controller. Retained
  * `aria-valuenow`/`data-segment` changes, runtime targets, and
  * `hourCycle`/`seconds` Value changes are reconciled for Turbo morph
  * compatibility; when such a pass moves the composed value — dropping a `second`
  * segment, say — it reports `stimeo--time-picker:reconcile` with the same detail
  * instead, so a consumer can tell its own edit from this controller's repair.
  * Initial connection reports neither.
+ * `amLabel` and `pmLabel` supply the visible and accessible meridiem text,
+ * defaulting to `AM` and `PM`. Label changes preserve the composed time and
+ * do not dispatch value-change events.
+ * `hour12ZeroBased` selects hours 0–11 when `hourCycle` is 12; its default
+ * false keeps hours 1–12. It has no effect on a 24-hour presentation.
+ * A change of the hour range (`hourCycle` or `hour12ZeroBased`) discards partial
+ * digit entry and preserves the instant. A 12-hour presentation without a
+ * `meridiem` segment reads as morning.
+ * During a simultaneous DOM update, an untouched retained hour keeps its time;
+ * an explicitly written or replacement hour is read in the new range.
  */
 export class TimePickerController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
   readonly #numbers = new NumberValueReader();
 
   readonly #moves = new MoveCounter();
+  #connectionGeneration = 0;
   #move = 0;
 
   static override targets = ["segment", "field"];
   static override values = {
     hourCycle: { type: Number, default: 24 },
+    hour12ZeroBased: { type: Boolean, default: false },
     step: { type: Number, default: 1 },
     seconds: { type: Boolean, default: false },
     wrap: { type: Boolean, default: true },
+    amLabel: { type: String, default: "AM" },
+    pmLabel: { type: String, default: "PM" },
   };
 
   static valueConstraints = {
@@ -109,9 +127,12 @@ export class TimePickerController extends Controller<HTMLElement> {
   declare readonly fieldTarget: HTMLInputElement;
   declare readonly hasFieldTarget: boolean;
   declare hourCycleValue: number;
+  declare hour12ZeroBasedValue: boolean;
   declare stepValue: number;
   declare secondsValue: boolean;
   declare wrapValue: boolean;
+  declare amLabelValue: string;
+  declare pmLabelValue: string;
 
   /**
    * Collapses target, Value, and retained-attribute morphs into one render that
@@ -125,19 +146,27 @@ export class TimePickerController extends Controller<HTMLElement> {
   #typeSegment: SegmentKind | null = null;
   /** Last composed value, used to suppress duplicate user notifications. */
   #lastValue = "";
-  #observer: MutationObserver | null = null;
-  #connected = false;
+  /** Presentation provenance distinguishes untouched segments from authored writes. */
+  #renderedHourMode: HourMode | null = null;
+  #renderedSegments = new WeakSet<HTMLElement>();
+  readonly #authoredSegments = new Set<HTMLElement>();
+  readonly #observer = new AuthoredMutationWatcher((records) => {
+    if (!this.#recordAuthoredSegments(records)) return;
+    this.#reconcile.schedule();
+  });
   /**
    * Whether the segments changed since state was last adopted from them. The next
    * adoption also discards the direct-entry buffer, and runs before any key reads it.
    */
   #domDirty = false;
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /** Seeds state from the DOM, renders canonical ARIA, and starts morph observation. */
   override connect(): void {
-    this.#connected = true;
     this.#reconcile.observe(this.element);
-    this.element.addEventListener("focusout", this.#onFocusOut);
+    this.#listeners.add(this.element, "focusout", this.#onFocusOut);
     this.#domDirty = false;
     this.#adoptDomState();
     this.#render();
@@ -146,12 +175,14 @@ export class TimePickerController extends Controller<HTMLElement> {
 
   /** Releases the observer, listener, queued reconciliation, and transient input state. */
   override disconnect(): void {
-    this.#connected = false;
+    this.#connectionGeneration += 1;
     this.#reconcile.disconnect();
-    this.element.removeEventListener("focusout", this.#onFocusOut);
-    this.#observer?.disconnect();
-    this.#observer = null;
+    this.#listeners.dispose();
+    this.#observer.disconnect();
     this.#domDirty = false;
+    this.#renderedHourMode = null;
+    this.#renderedSegments = new WeakSet<HTMLElement>();
+    this.#authoredSegments.clear();
     this.#clearTypeBuffer();
     this.#lastValue = "";
   }
@@ -161,8 +192,23 @@ export class TimePickerController extends Controller<HTMLElement> {
     this.#reconcile.schedule();
   }
 
+  /** Refreshes the 12-hour range while retaining the canonical time. */
+  hour12ZeroBasedValueChanged(): void {
+    this.#reconcile.schedule();
+  }
+
   /** Recomposes the optional seconds portion after a runtime Value change. */
   secondsValueChanged(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Refreshes the visible and accessible AM label without changing the time. */
+  amLabelValueChanged(): void {
+    this.#reconcile.schedule();
+  }
+
+  /** Refreshes the visible and accessible PM label without changing the time. */
+  pmLabelValueChanged(): void {
     this.#reconcile.schedule();
   }
 
@@ -173,7 +219,8 @@ export class TimePickerController extends Controller<HTMLElement> {
   }
 
   /** Rebuilds state after a segment leaves the retained controller element. */
-  segmentTargetDisconnected(): void {
+  segmentTargetDisconnected(segment?: HTMLElement): void {
+    if (segment && !this.segmentTargets.includes(segment)) this.#renderedSegments.delete(segment);
     this.#domDirty = true;
     this.#reconcile.schedule();
   }
@@ -199,12 +246,13 @@ export class TimePickerController extends Controller<HTMLElement> {
     if (!kind) return;
 
     const key = logicalArrowKey(event.key, this.element);
-    if ((key === "Home" || key === "End") && hasModifier(event)) return;
+    if ((key === "Home" || key === "End") && hasModifierChord(event)) return;
 
     // Taking in the page's writes consumes the records the observer would have
     // answered, so the pass it would have queued is queued here. A key that renders
     // leaves that pass nothing to report.
     if (this.#adoptPendingDom()) this.#reconcile.schedule();
+    if (this.#renderedHourMode !== this.#hourMode) this.#clearTypeBuffer();
     switch (key) {
       case "ArrowUp":
         event.preventDefault();
@@ -233,7 +281,13 @@ export class TimePickerController extends Controller<HTMLElement> {
         this.#commitRender();
         break;
       default:
-        if (kind !== "meridiem" && /^[0-9]$/.test(event.key) && !hasModifier(event)) {
+        if (
+          kind !== "meridiem" &&
+          /^[0-9]$/.test(event.key) &&
+          !event.ctrlKey &&
+          !event.altKey &&
+          !event.metaKey
+        ) {
           event.preventDefault();
           this.#typeDigit(segment, kind, event.key);
           return;
@@ -267,10 +321,7 @@ export class TimePickerController extends Controller<HTMLElement> {
       const scale = kind === "hour" ? SECONDS_PER_HOUR : kind === "minute" ? SECONDS_PER_MINUTE : 1;
       this.#setFromSeconds(this.#secondsOfDay + delta * scale);
     } else if (kind === "hour") {
-      // The displayed hour is a projection of the canonical one, so stepping it
-      // moves the instant: 11 → 12 crosses noon or midnight even here, where the
-      // step never leaves the segment's own bounds. Clamping on the canonical
-      // clock is what "no wrapping" means — the day is not crossed.
+      // Hour stepping crosses noon while clamping at the first and last hour of the day.
       this.#state.hour = Math.min(23, Math.max(0, this.#state.hour + delta));
     } else {
       const { min, max } = this.#bounds(kind);
@@ -290,7 +341,7 @@ export class TimePickerController extends Controller<HTMLElement> {
     this.#typeBuffer = candidate <= max ? `${this.#typeBuffer}${digit}` : digit;
 
     this.#setDisplayed(kind, Number(this.#typeBuffer));
-    this.#commitRender();
+    this.#commitRender(true);
 
     if (this.#typeBuffer.length >= 2 || Number(this.#typeBuffer) * 10 > max) {
       this.#clearTypeBuffer();
@@ -316,15 +367,24 @@ export class TimePickerController extends Controller<HTMLElement> {
    * and reports whether it did.
    */
   #adoptPendingDom(): boolean {
-    const pending = this.#observer?.takeRecords() ?? [];
-    if (pending.some(({ target }) => this.segmentTargets.includes(target as HTMLElement))) {
-      this.#domDirty = true;
-    }
+    this.#recordAuthoredSegments(this.#observer.take());
     if (!this.#domDirty) return false;
     this.#domDirty = false;
     this.#clearTypeBuffer();
     this.#adoptDomState();
     return true;
+  }
+
+  /** Keeps same-value author writes distinct from the controller's own reflections. */
+  #recordAuthoredSegments(records: MutationRecord[]): boolean {
+    let changed = false;
+    for (const { target } of records) {
+      if (!(target instanceof HTMLElement) || !this.segmentTargets.includes(target)) continue;
+      this.#authoredSegments.add(target);
+      changed = true;
+    }
+    if (changed) this.#domDirty = true;
+    return changed;
   }
 
   /** Reconciles one coalesced target, Value, or retained-attribute mutation batch. */
@@ -335,6 +395,8 @@ export class TimePickerController extends Controller<HTMLElement> {
 
   /** Rebuilds canonical state from the targets; an absent hour represents midnight. */
   #adoptDomState(): void {
+    const mode = this.#hourMode;
+    const presentationChanged = this.#renderedHourMode !== null && this.#renderedHourMode !== mode;
     let displayedHour = 0;
     let meridiem = AM;
     let minute = 0;
@@ -343,7 +405,18 @@ export class TimePickerController extends Controller<HTMLElement> {
     for (const segment of this.segmentTargets) {
       const kind = this.#kindOf(segment);
       if (!kind) continue;
-      const value = this.#authoredValue(segment, kind);
+      const retained =
+        presentationChanged &&
+        this.#renderedSegments.has(segment) &&
+        !this.#authoredSegments.has(segment);
+      let value: number;
+      if (retained && kind === "hour") {
+        value = mode === "h23" ? this.#state.hour : this.#state.hour % 12;
+      } else if (retained && kind === "meridiem") {
+        value = this.#state.hour >= 12 ? PM : AM;
+      } else {
+        value = this.#authoredValue(segment, kind);
+      }
       if (kind === "hour") displayedHour = value;
       else if (kind === "minute") minute = value;
       else if (kind === "second") second = value;
@@ -358,6 +431,7 @@ export class TimePickerController extends Controller<HTMLElement> {
       minute,
       second,
     };
+    this.#authoredSegments.clear();
   }
 
   /** Reads and integer-clamps one authored `aria-valuenow`. */
@@ -391,10 +465,11 @@ export class TimePickerController extends Controller<HTMLElement> {
   }
 
   /** Reflects canonical state to every segment without dispatching user events. */
-  #renderSegments(): void {
-    this.#withoutObservation(() => {
-      for (const segment of this.segmentTargets) this.#renderSegment(segment);
-    });
+  #renderSegments(preserveTypeBuffer = false): void {
+    const mode = this.#hourMode;
+    if (this.#renderedHourMode !== mode && !preserveTypeBuffer) this.#clearTypeBuffer();
+    this.#renderedHourMode = mode;
+    for (const segment of this.segmentTargets) this.#renderSegment(segment);
   }
 
   /**
@@ -422,16 +497,17 @@ export class TimePickerController extends Controller<HTMLElement> {
     }
   }
 
-  /** Reflects one completed user action and dispatches its final change exactly once. */
-  #commitRender(): void {
-    this.#renderSegments();
+  /** Reflects one completed user action and dispatches its final change at most once. */
+  #commitRender(preserveTypeBuffer = false): void {
+    const generation = this.#connectionGeneration;
+    this.#renderSegments(preserveTypeBuffer);
     const value = this.#composedValue;
     const changed = value !== this.#lastValue;
     this.#lastValue = value;
     if (changed) this.#move = this.#moves.record();
     const move = this.#move;
     if (this.#writeField(value)) commitField(this.fieldTarget);
-    if (!this.#moves.isLatest(move)) return;
+    if (generation !== this.#connectionGeneration || !this.#moves.isLatest(move)) return;
     if (changed) this.dispatch("change", { detail: { value } });
   }
 
@@ -439,11 +515,16 @@ export class TimePickerController extends Controller<HTMLElement> {
   #renderSegment(segment: HTMLElement): void {
     const kind = this.#kindOf(segment);
     if (!kind) return;
+    this.#renderedSegments.add(segment);
     const value = this.#displayValue(kind);
-    const text = kind === "meridiem" ? (value === PM ? "PM" : "AM") : pad(value);
+    const text =
+      kind === "meridiem" ? (value === PM ? this.pmLabelValue : this.amLabelValue) : pad(value);
     const { min, max } = this.#bounds(kind);
 
-    segment.setAttribute("aria-valuenow", String(value));
+    const serialized = String(value);
+    setAttributeIfChanged(segment, "aria-valuenow", serialized, () => {
+      this.#observer.claim(segment, "aria-valuenow", serialized);
+    });
     segment.setAttribute("aria-valuetext", text);
     segment.setAttribute("aria-valuemin", String(min));
     segment.setAttribute("aria-valuemax", String(max));
@@ -465,7 +546,10 @@ export class TimePickerController extends Controller<HTMLElement> {
   /** Returns a canonical unit in the presentation form exposed by its segment. */
   #displayValue(kind: SegmentKind): number {
     if (kind === "hour") {
-      return this.#safeHourCycle === 12 ? this.#state.hour % 12 || 12 : this.#state.hour;
+      const mode = this.#hourMode;
+      if (mode === "h23") return this.#state.hour;
+      const hour = this.#state.hour % 12;
+      return mode === "h11" ? hour : hour || 12;
     }
     if (kind === "meridiem") return this.#state.hour >= 12 ? PM : AM;
     return this.#state[kind];
@@ -475,7 +559,8 @@ export class TimePickerController extends Controller<HTMLElement> {
   #bounds(kind: SegmentKind): { min: number; max: number } {
     switch (kind) {
       case "hour":
-        return this.#safeHourCycle === 12 ? { min: 1, max: 12 } : { min: 0, max: 23 };
+        if (this.#hourMode === "h23") return { min: 0, max: 23 };
+        return this.#hourMode === "h11" ? { min: 0, max: 11 } : { min: 1, max: 12 };
       case "minute":
       case "second":
         return { min: 0, max: 59 };
@@ -486,36 +571,10 @@ export class TimePickerController extends Controller<HTMLElement> {
 
   /** Watches retained segment state while excluding this controller's own reflections. */
   #observeMutations(): void {
-    const observer = new MutationObserver((records) => {
-      const changed = records.some(
-        ({ target }) => target instanceof HTMLElement && this.segmentTargets.includes(target),
-      );
-      if (!changed) return;
-      this.#domDirty = true;
-      this.#reconcile.schedule();
-    });
-    this.#observer = observer;
-    this.#observeWith(observer);
-  }
-
-  /** Registers retained attribute observation on the controller subtree. */
-  #observeWith(observer: MutationObserver): void {
-    observer.observe(this.element, {
+    this.#observer.observe(this.element, {
       subtree: true,
-      attributes: true,
-      attributeFilter: ["aria-valuenow", "data-segment"],
+      attributes: ["aria-valuenow", "data-segment"],
     });
-  }
-
-  /** Temporarily pauses observation so derived ARIA writes cannot become DOM input. */
-  #withoutObservation(run: () => void): void {
-    const observer = this.#observer;
-    observer?.disconnect();
-    try {
-      run();
-    } finally {
-      if (observer && this.#connected) this.#observeWith(observer);
-    }
   }
 
   /** Reads a segment's declared kind, or null when absent/invalid. */
@@ -534,6 +593,12 @@ export class TimePickerController extends Controller<HTMLElement> {
       this.#state.minute * SECONDS_PER_MINUTE +
       this.#state.second
     );
+  }
+
+  /** Selects one numeric presentation without inferring a language or changing time. */
+  get #hourMode(): HourMode {
+    if (this.#safeHourCycle !== 12) return "h23";
+    return this.hour12ZeroBasedValue ? "h11" : "h12";
   }
   /** Current `hourCycle` declaration resolved against its numeric contract. */
   get #safeHourCycle(): number {

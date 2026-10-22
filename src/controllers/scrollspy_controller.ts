@@ -3,6 +3,7 @@ import { actionSource } from "../utils/action_source";
 import { validSelector } from "../utils/declared_value";
 import { FrameCoalescer } from "../utils/frame_coalescer";
 import { IntersectionWatcher } from "../utils/intersection_watcher";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -103,9 +104,8 @@ export class ScrollspyController extends Controller<HTMLElement> {
 
   /**
    * The one offset shared by observation, active-section selection, and
-   * scrolling. Stimulus parses a malformed Number Value as `NaN`; degrading it
-   * to the declared default keeps every path aligned instead of only repairing
-   * the observer margin while selection and scrolling still receive `NaN`.
+   * scrolling. Stimulus parses a malformed Number Value as `NaN`; it reads as the
+   * declared default here, so all three paths share one finite offset.
    */
   get #offset(): number {
     return this.#safeOffset;
@@ -134,12 +134,11 @@ export class ScrollspyController extends Controller<HTMLElement> {
   #rootElement: HTMLElement | null = null;
 
   /**
-   * The source the `scroll` listener is currently attached to — the resolved
-   * root, or the window while the viewport is spied. `null` means "nothing
-   * attached", so teardown always detaches from the source it attached to
+   * The `scroll` listener on the source it was attached to — the resolved root, or
+   * the window while the viewport is spied. Teardown releases it from that source
    * rather than from whatever the selector resolves to now.
    */
-  #scrollSource: HTMLElement | Window | null = null;
+  readonly #scrollListeners = new ListenerSet();
 
   /** Coalesces a scroll burst into one measurement per frame. */
   readonly #frames = new FrameCoalescer();
@@ -373,13 +372,13 @@ export class ScrollspyController extends Controller<HTMLElement> {
    */
   #syncScrollListener(): void {
     this.#detachScrollListener();
-    this.#scrollSource = this.#rootElement ?? window;
-    this.#scrollSource.addEventListener("scroll", this.#onScroll, { passive: true });
+    this.#scrollListeners.add(this.#rootElement ?? window, "scroll", this.#onScroll, {
+      passive: true,
+    });
   }
 
   #detachScrollListener(): void {
-    this.#scrollSource?.removeEventListener("scroll", this.#onScroll);
-    this.#scrollSource = null;
+    this.#scrollListeners.dispose();
   }
 
   /**

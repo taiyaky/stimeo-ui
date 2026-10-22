@@ -1,29 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
-import { toFiniteNumber } from "../utils/coerce";
+import { eventNumber, type NumericValueEvent } from "../utils/coerce";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
-import { rangeFraction } from "../utils/range";
-
-/**
- * Event shape `setValue` accepts: an action param `amount` or a `detail.value`.
- * Both are typed `number | string` because, while Stimulus coerces numeric action
- * params to numbers, a `progress:set` CustomEvent (or a non-numeric-looking param)
- * may carry a string; {@link ProgressController.setValue} normalizes either form.
- */
-type SetValueEvent = Event & {
-  params?: { amount?: number | string };
-  detail?: { value?: number | string };
-};
-
-/**
- * Suffix of the marker on an `aria-valuetext` this controller wrote, so a render
- * takes back only its own text. `aria-valuetext` is shared: a consumer may author
- * it instead of supplying a template, and that text is theirs to keep across
- * renders.
- */
-const OWNED_VALUE_TEXT = "owns-valuetext";
+import { clampRange, rangeFraction } from "../utils/range";
+import { TemplateAttributeLease } from "../utils/template_attribute_lease";
 
 /**
  * Headless progress-bar behavior backed by the WAI-ARIA `progressbar` role.
@@ -37,7 +19,7 @@ const OWNED_VALUE_TEXT = "owns-valuetext";
  *   </div>
  *
  * This is the *progress over time* role (a task advancing toward completion),
- * deliberately distinct from {@link MeterController}'s point-in-time `meter`. The
+ * deliberately distinct from `stimeo--meter`'s point-in-time `meter`. The
  * controller owns value normalization and ARIA value-attribute synchronization;
  * the bar's width/animation is the consumer's, driven off the
  * `--stimeo--progress-ratio` (0–1) custom property and `data-state`.
@@ -47,18 +29,15 @@ const OWNED_VALUE_TEXT = "owns-valuetext";
  *
  * @remarks
  * Behavior only — no styling is emitted. An indeterminate bar drops
- * `aria-valuenow` (per ARIA) so assistive tech announces "busy" rather than a
- * stale value; the consumer animates the indeterminate look off
+ * `aria-valuenow` (per ARIA) so assistive tech treats the bar as indeterminate
+ * rather than reading a stale value; the consumer animates the indeterminate look off
  * `data-state="indeterminate"`.
  */
 export class ProgressController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
   readonly #numbers = new NumberValueReader();
 
-  /** The marker above, in the namespace this controller is registered under. */
-  get #ownedValueText(): string {
-    return `data-${this.identifier}-${OWNED_VALUE_TEXT}`;
-  }
+  readonly #valueText = new TemplateAttributeLease<HTMLElement>("aria-valuetext", this.identifier);
 
   static override targets = ["bar"];
   static override values = {
@@ -102,9 +81,13 @@ export class ProgressController extends Controller<HTMLElement> {
     this.#render();
   }
 
-  /** Closes the window in which a queued repaint may still run. */
+  /**
+   * Closes the window in which a queued repaint may still run, and returns
+   * `aria-valuetext` to the authored value unless the page wrote its own meanwhile.
+   */
   override disconnect(): void {
     this.#repaint.disconnect();
+    this.#valueText.release(this.element);
   }
 
   /**
@@ -112,8 +95,8 @@ export class ProgressController extends Controller<HTMLElement> {
    * `detail.value` CustomEvent, normalizes it into range, syncs ARIA, and
    * dispatches `change` (always) plus `complete` when `max` is reached.
    */
-  setValue(event: SetValueEvent): void {
-    const next = toFiniteNumber(event.params?.amount ?? event.detail?.value);
+  setValue(event: NumericValueEvent): void {
+    const next = eventNumber(event);
     if (next === null) return;
     const value = this.#clamp(next);
     this.valueValue = value;
@@ -157,7 +140,7 @@ export class ProgressController extends Controller<HTMLElement> {
 
   /** Clamps `raw` into the configured `[min, max]` range. */
   #clamp(raw: number): number {
-    return Math.min(this.#safeMax, Math.max(this.#safeMin, raw));
+    return clampRange(raw, this.#safeMin, this.#safeMax);
   }
 
   /** Current fraction of the range in `[0, 1]`; `0` when the range is empty. */
@@ -179,7 +162,7 @@ export class ProgressController extends Controller<HTMLElement> {
       // `aria-valuetext` outranks `aria-valuenow` for assistive tech, so a text
       // this controller derived from a value would announce the very number the
       // indeterminate state drops.
-      this.#clearOwnValueText();
+      this.#valueText.render(this.element, this.valueTextValue, null);
       this.element.style.removeProperty("--stimeo--progress-ratio");
       this.element.setAttribute("data-state", "indeterminate");
       return;
@@ -192,32 +175,15 @@ export class ProgressController extends Controller<HTMLElement> {
     this.#applyValueText(value);
   }
 
-  /**
-   * Sets `aria-valuetext` from the consumer-provided template, substituting
-   * `{value}` and `{percent}`. Left to the consumer so the human-readable text
-   * stays i18n-neutral in the library. With no template the attribute belongs to
-   * the consumer, so only a text this controller wrote is taken back
-   * ({@link OWNED_VALUE_TEXT}).
-   */
+  /** Renders the template-derived text while preserving the author's attribute ownership. */
   #applyValueText(value: number): void {
-    if (this.valueTextValue.length === 0) {
-      this.#clearOwnValueText();
-      return;
-    }
-    const percent = Math.round(this.#ratio * 100);
-    const text = this.valueTextValue
-      .replaceAll("{value}", String(value))
-      .replaceAll("{percent}", String(percent));
-    this.element.setAttribute("aria-valuetext", text);
-    this.element.setAttribute(this.#ownedValueText, "");
+    this.#valueText.render(
+      this.element,
+      this.valueTextValue,
+      fillTemplate(this.valueTextValue, { value, percent: Math.round(this.#ratio * 100) }),
+    );
   }
 
-  /** Removes `aria-valuetext` only when this controller is the one that wrote it. */
-  #clearOwnValueText(): void {
-    if (!this.element.hasAttribute(this.#ownedValueText)) return;
-    this.element.removeAttribute("aria-valuetext");
-    this.element.removeAttribute(this.#ownedValueText);
-  }
   /** Current `value` declaration resolved against its numeric contract. */
   get #safeValue(): number {
     return this.#numbers.read(

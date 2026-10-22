@@ -4,6 +4,7 @@ import { MenuController } from "../src/controllers/menu_controller";
 import { OverflowMenuController } from "../src/controllers/overflow_menu_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { press as pressKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -53,7 +54,7 @@ const COMPOSED_MARKUP = `
     </div>
   </div>`;
 
-/** The composition without per-element item bindings — Menu delegates those. */
+/** The composition without per-element item bindings — `stimeo--menu` delegates those. */
 const DELEGATED_MARKUP = COMPOSED_MARKUP.replace(
   / data-action="click->stimeo--menu#activate keydown->stimeo--menu#onItemKeydown"/g,
   "",
@@ -482,7 +483,7 @@ describe("OverflowMenuController", () => {
     expect(ids(items())).toEqual(["z", "a", "b"]);
   });
 
-  it("keeps the corruption from being written back into the saved index", async () => {
+  it("keeps the canonical index intact across a re-bank after a head insert", async () => {
     setup(MARKUP());
     setGeom(150, { a: 100, b: 100, c: 100 });
     await start();
@@ -510,8 +511,8 @@ describe("OverflowMenuController", () => {
     setGeom(1000, { a: 100, b: 100, c: 100, z: 100 });
     instance().update();
 
-    // Appending to the bar means appending to the toolbar, so Z lands last; pinned
-    // explicitly so the restore ordering cannot drift it.
+    // Appending to the bar means appending at the end of the whole item set, so Z lands
+    // last; pinned explicitly so the restore ordering cannot drift it.
     expect(ids(items())).toEqual(["a", "b", "c", "z"]);
   });
 
@@ -1042,15 +1043,15 @@ describe("OverflowMenuController", () => {
     expect(events).toEqual([]);
   });
 
-  it("leaves focus and More alone when a Menu close handler re-banks an item", async () => {
-    // Every item fits again, so the pass closes the expanded Menu before it rescues
+  it("leaves focus and More alone when a stimeo--menu close handler re-banks an item", async () => {
+    // Every item fits again, so the pass closes the expanded menu before it rescues
     // focus from the trigger and hides More. A close handler narrows the bar and
     // re-measures: that pass banks c again, so the trigger keeps focus and More stays.
     setup(COMPOSED_MARKUP);
     setGeom(250, { a: 100, b: 100, c: 100 });
     await start(["stimeo--menu", MenuController]);
     trigger().focus();
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(trigger(), "ArrowDown");
     trigger().focus();
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
     const events: Array<{ overflowCount: number; total: number }> = [];
@@ -1076,12 +1077,12 @@ describe("OverflowMenuController", () => {
     expect(events).toEqual([]);
   });
 
-  it("returns every item to the bar when a Menu close handler re-measures during disconnect", async () => {
+  it("returns every item to the bar when a stimeo--menu close handler re-measures during disconnect", async () => {
     setup(COMPOSED_MARKUP);
     setGeom(250, { a: 100, b: 100, c: 100 });
     await start(["stimeo--menu", MenuController]);
     trigger().focus();
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(trigger(), "ArrowDown");
     trigger().focus();
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
     const controller = instance();
@@ -1105,7 +1106,7 @@ describe("OverflowMenuController", () => {
     setGeom(250, { a: 100, b: 100, c: 100 });
     await start(["stimeo--menu", MenuController]);
     trigger().focus();
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(trigger(), "ArrowDown");
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
     const controller = instance();
     let closes = 0;
@@ -1176,7 +1177,7 @@ describe("OverflowMenuController", () => {
     setup(MARKUP());
     setGeom(250, { a: 100, b: 100, c: 100 });
     await start();
-    trigger().setAttribute("aria-expanded", "true"); // Menu opened it
+    trigger().setAttribute("aria-expanded", "true"); // as `stimeo--menu` writes it on open
     const c = query("#c");
     c.focus();
 
@@ -1526,21 +1527,21 @@ describe("OverflowMenuController", () => {
     expect(root().hasAttribute("data-overflow-count")).toBe(false);
   });
 
-  it("lets the keyboard reach banked items through the composed Menu", async () => {
+  it("lets the keyboard reach banked items through the composed stimeo--menu", async () => {
     setup(COMPOSED_MARKUP);
     setGeom(150, { a: 100, b: 100, c: 100 }); // budget 100 → B and C are banked
     await start(["stimeo--menu", MenuController]);
     expect(ids(menu())).toEqual(["b", "c"]);
 
     // The central contract: this controller adds no keyboard behavior of its own — the
-    // banked items must be operable purely because Menu now owns them.
+    // banked items must be operable purely because `stimeo--menu` owns them once banked.
     trigger().focus();
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(trigger(), "ArrowDown");
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
     expect(menu().hidden).toBe(false);
     expect(document.activeElement).toBe(query("#b")); // first banked item
 
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    pressKey(trigger(), "ArrowUp");
     expect(document.activeElement).toBe(query("#c")); // last banked item
   });
 
@@ -1589,7 +1590,7 @@ describe("OverflowMenuController", () => {
     setGeom(150, { a: 100, b: 100, c: 100 }); // budget 100 → B and C are banked
     await start(["stimeo--menu", MenuController]);
     trigger().focus();
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(trigger(), "ArrowDown");
     const b = query("#b");
     expect(document.activeElement).toBe(b);
 
@@ -1610,7 +1611,7 @@ describe("OverflowMenuController", () => {
     setGeom(250, { a: 100, b: 100, c: 100 }); // budget 200 → only C is banked
     await start(["stimeo--menu", MenuController]);
     trigger().focus();
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(trigger(), "ArrowDown");
     const a = query("#a");
     a.focus(); // the user tabbed back out to a bar item, leaving the menu open
 
@@ -1628,7 +1629,7 @@ describe("OverflowMenuController", () => {
     setGeom(150, { a: 100, b: 100, c: 100 });
     await start(["stimeo--menu", MenuController]);
     trigger().focus();
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    pressKey(trigger(), "ArrowUp");
     const c = query("#c");
     expect(document.activeElement).toBe(c); // focus is on the item that *stays* banked
 
@@ -1838,7 +1839,7 @@ describe("OverflowMenuController", () => {
     setGeom(150, { a: 100, b: 100, c: 100 });
     await start(["stimeo--menu", MenuController]);
     trigger().focus();
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(trigger(), "ArrowDown");
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
 
     document.dispatchEvent(new Event("turbo:before-cache"));
@@ -1854,9 +1855,10 @@ describe("OverflowMenuController", () => {
     setGeom(150, { a: 100, b: 100, c: 100 });
     await start(["stimeo--menu", MenuController]);
     trigger().focus();
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(trigger(), "ArrowDown");
 
-    instance().disconnect(); // Menu stays mounted; Overflow alone goes away
+    // `stimeo--menu` stays mounted; only `stimeo--overflow-menu` goes away.
+    instance().disconnect();
 
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
     expect(menu().hidden).toBe(true);
@@ -1960,9 +1962,12 @@ describe("OverflowMenuController", () => {
     setGeom(1000, { a: 100, b: 100, c: 100 });
     await start();
     expect(trigger().textContent).toBe("More");
-    // The marker holds the label itself: the text is this controller's only while
-    // the two still agree.
-    expect(trigger().getAttribute(OWNS_LABEL)).toBe("More");
+    // The record carries the last label; ownership requires that text alone.
+    expect(JSON.parse(trigger().getAttribute(OWNS_LABEL) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "More",
+    ]);
   });
 
   it("writes its label back on the next pass after a morph empties the trigger", async () => {
@@ -1976,7 +1981,11 @@ describe("OverflowMenuController", () => {
     window.dispatchEvent(new Event("resize"));
     vi.advanceTimersByTime(100);
     expect(trigger().textContent).toBe("More");
-    expect(trigger().getAttribute(OWNS_LABEL)).toBe("More");
+    expect(JSON.parse(trigger().getAttribute(OWNS_LABEL) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "More",
+    ]);
   });
 
   it("measures the More trigger with the label it writes back", async () => {
@@ -2006,7 +2015,11 @@ describe("OverflowMenuController", () => {
     root().setAttribute(MORE_LABEL, "Mehr");
     await vi.advanceTimersByTimeAsync(0);
     expect(trigger().textContent).toBe("Mehr");
-    expect(trigger().getAttribute(OWNS_LABEL)).toBe("Mehr");
+    expect(JSON.parse(trigger().getAttribute(OWNS_LABEL) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "Mehr",
+    ]);
   });
 
   it("follows a More label swap without measuring the bar or dispatching change", async () => {
@@ -2165,7 +2178,11 @@ describe("OverflowMenuController", () => {
     application.register(alias, OverflowMenuController);
     await vi.advanceTimersByTimeAsync(0);
     expect(trigger().textContent).toBe("More");
-    expect(trigger().getAttribute(`data-${alias}-owns-label`)).toBe("More");
+    expect(JSON.parse(trigger().getAttribute(`data-${alias}-owns-label`) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "More",
+    ]);
     expect(trigger().hasAttribute(OWNS_LABEL)).toBe(false);
   });
 
@@ -2208,7 +2225,11 @@ describe("OverflowMenuController", () => {
     await start();
     expect(trigger().textContent).toBe("More");
     add(trigger());
-    expect(trigger().getAttribute(OWNS_LABEL)).toBe(trigger().textContent);
+    expect(JSON.parse(trigger().getAttribute(OWNS_LABEL) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      trigger().textContent,
+    ]);
     return trigger().outerHTML;
   };
 
@@ -2264,7 +2285,11 @@ describe("OverflowMenuController", () => {
       root().setAttribute(MORE_LABEL, "Encore");
       await vi.advanceTimersByTimeAsync(0);
       expect(trigger().textContent).toBe("Encore");
-      expect(trigger().getAttribute(OWNS_LABEL)).toBe("Encore");
+      expect(JSON.parse(trigger().getAttribute(OWNS_LABEL) ?? "null")).toEqual([
+        "text",
+        expect.any(String),
+        "Encore",
+      ]);
       instance().disconnect();
       expect(trigger().textContent).toBe("");
       expect(bookkeeping(trigger())).toEqual([]);
@@ -2281,13 +2306,11 @@ describe("OverflowMenuController", () => {
     expect(query("#b").hasAttribute("data-action")).toBe(false);
 
     trigger().focus();
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(trigger(), "ArrowDown");
     expect(document.activeElement).toBe(query("#b"));
 
     // Roving between banked items works without any per-element `data-action`.
-    query("#b").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
-    );
+    pressKey(query("#b"), "ArrowDown");
     expect(document.activeElement).toBe(query("#c"));
 
     (query("#c") as HTMLButtonElement).click();
@@ -2586,7 +2609,8 @@ describe("OverflowMenuController", () => {
       onlyRow.remove();
       onlyMore.remove();
 
-      // Drive the callbacks directly: happy-dom delivers target callbacks unreliably.
+      // Call the callbacks directly, so a throw from either fails this case through
+      // `expect` instead of escaping from the MutationObserver delivery.
       expect(() => instance().itemsTargetDisconnected(onlyRow)).not.toThrow();
       expect(() => instance().moreTargetDisconnected(onlyMore)).not.toThrow();
       await settle();
@@ -2641,7 +2665,7 @@ describe("OverflowMenuController", () => {
       await start(["stimeo--menu", MenuController]);
       expect(ids(menu())).toEqual(["c"]);
       trigger().focus();
-      trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      pressKey(trigger(), "ArrowDown");
       expect(trigger().getAttribute("aria-expanded")).toBe("true");
       const controller = instance();
       more().addEventListener(

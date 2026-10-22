@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DateRangePickerController } from "../src/controllers/date_range_picker_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { keyEvent, press as pressKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -165,8 +166,111 @@ describe("DateRangePickerController", () => {
     cell(iso).dispatchEvent(new MouseEvent("click", { bubbles: true }));
   const hover = (iso: string) =>
     cell(iso).dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
-  const key = (el: HTMLElement, k: string, init: KeyboardEventInit = {}) =>
-    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, ...init }));
+
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Home/End chord (%s, %s)", async (key, _modifier, init) => {
+    await mount();
+    click("2026-06-10");
+    const current = cell("2026-06-10");
+    current.focus();
+    const element = root();
+    const events: Event[] = [];
+    for (const name of [
+      "stimeo--date-range-picker:change",
+      "stimeo--date-range-picker:monthchange",
+      "stimeo--date-range-picker:reconcile",
+      "input",
+      "change",
+    ]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = pressKey(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(field("start").value).toBe("2026-06-10");
+    expect(field("end").value).toBe("2026-06-20");
+    expect(current.tabIndex).toBe(0);
+    expect(pressKey(current, key).defaultPrevented).toBe(true);
+    expect(document.activeElement?.getAttribute("data-date")).toBe(
+      key === "Home" ? "2026-06-07" : "2026-06-13",
+    );
+    expect(field("start").value).toBe("2026-06-10");
+    expect(field("end").value).toBe("2026-06-20");
+  });
+
+  it.each(
+    (["PageUp", "PageDown"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Alt+Shift", { altKey: true, shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+          ["Meta+Shift", { metaKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Page chord (%s, %s)", async (key, _modifier, init) => {
+    await mount();
+    click("2026-06-10");
+    const current = cell("2026-06-10");
+    current.focus();
+    await tick();
+    const events: string[] = [];
+    for (const name of [
+      "stimeo--date-range-picker:change",
+      "stimeo--date-range-picker:monthchange",
+      "stimeo--date-range-picker:reconcile",
+      "input",
+      "change",
+    ]) {
+      root().addEventListener(name, () => events.push(name));
+    }
+    const before = root().outerHTML;
+    const rejected = pressKey(current, key, init);
+    await tick();
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(root().outerHTML).toBe(before);
+    expect(field("start").value).toBe("2026-06-10");
+    expect(field("end").value).toBe("2026-06-20");
+    expect(events).toEqual([]);
+
+    expect(pressKey(current, key).defaultPrevented).toBe(true);
+    await tick();
+    const month = key === "PageUp" ? "05" : "07";
+    const moved = cell(`2026-${month}-10`);
+    expect(document.activeElement).toBe(moved);
+    expect(moved.tabIndex).toBe(0);
+    expect(field("start").value).toBe("2026-06-10");
+    expect(field("end").value).toBe("2026-06-20");
+    expect(events).toEqual(["stimeo--date-range-picker:monthchange"]);
+    events.length = 0;
+
+    expect(pressKey(moved, key, { shiftKey: true }).defaultPrevented).toBe(true);
+    await tick();
+    const year = key === "PageUp" ? 2025 : 2027;
+    expect(document.activeElement).toBe(cell(`${year}-${month}-10`));
+    expect(cell(`${year}-${month}-10`).tabIndex).toBe(0);
+    expect(field("start").value).toBe("2026-06-10");
+    expect(field("end").value).toBe("2026-06-20");
+    expect(events).toEqual(["stimeo--date-range-picker:monthchange"]);
+  });
 
   it.each([
     ["focusin", "focus"],
@@ -190,11 +294,9 @@ describe("DateRangePickerController", () => {
       reports.push(event as CustomEvent),
     );
     click("2026-06-12");
-    expect(() =>
-      controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" })),
-    ).not.toThrow();
+    expect(() => controller().onKeydown(keyEvent("Enter"))).not.toThrow();
     expect(reports).toHaveLength(0);
-    key(cell("2026-06-14"), "Enter");
+    pressKey(cell("2026-06-14"), "Enter");
     expect(reports).toHaveLength(1);
   });
 
@@ -213,9 +315,9 @@ describe("DateRangePickerController", () => {
       reports.push(event as CustomEvent),
     );
     foreign.addEventListener("keydown", (event) => controller().onKeydown(event));
-    key(foreign, "Enter");
+    pressKey(foreign, "Enter");
     expect(reports).toHaveLength(0);
-    key(target, "Enter");
+    pressKey(target, "Enter");
     expect(reports).toHaveLength(1);
   });
 
@@ -394,21 +496,21 @@ describe("DateRangePickerController", () => {
     },
   );
 
-  it.each(["a", "b"])(
+  it.each(["a later start", "the published start"])(
     "compares a range confirmed after an availability write with the last publication: %s",
     async (mode) => {
       await mount();
-      const start = mode === "a" ? "2026-06-12" : "2026-06-10";
-      root()
-        .querySelector<HTMLElement>("[data-date='" + start + "']")
-        ?.click();
+      const start = mode === "a later start" ? "2026-06-12" : "2026-06-10";
+      root().querySelector<HTMLElement>(`[data-date='${start}']`)?.click();
       const seen: unknown[] = [];
       root().addEventListener("stimeo--date-range-picker:change", (event) =>
         seen.push((event as CustomEvent).detail),
       );
       root().setAttribute("data-stimeo--date-range-picker-min-value", start);
       root().querySelector<HTMLElement>("[data-date='2026-06-20']")?.click();
-      expect(seen).toEqual(mode === "a" ? [{ start, end: "2026-06-20", reason: "user" }] : []);
+      expect(seen).toEqual(
+        mode === "a later start" ? [{ start, end: "2026-06-20", reason: "user" }] : [],
+      );
     },
   );
 
@@ -598,7 +700,7 @@ describe("DateRangePickerController", () => {
     Object.defineProperty(outsideClick, "target", { value: root() });
     const outsideFocus = new FocusEvent("focus");
     Object.defineProperty(outsideFocus, "target", { value: root() });
-    const outsideKey = new KeyboardEvent("keydown", { key: "ArrowRight" });
+    const outsideKey = keyEvent("ArrowRight");
     Object.defineProperty(outsideKey, "target", { value: root() });
 
     expect(() => controller().selectDate(outsideClick)).not.toThrow();
@@ -628,7 +730,7 @@ describe("DateRangePickerController", () => {
     });
     const focus = new FocusEvent("focus");
     Object.defineProperty(focus, "target", { value: extra });
-    const keyboard = new KeyboardEvent("keydown", { key: "ArrowRight" });
+    const keyboard = keyEvent("ArrowRight");
     Object.defineProperty(keyboard, "target", { value: extra });
 
     controller().previewTo(focus);
@@ -650,14 +752,88 @@ describe("DateRangePickerController", () => {
     const from = cell("2026-06-12");
     from.focus();
 
-    key(from, "ArrowRight"); // "previous day" under RTL
+    pressKey(from, "ArrowRight"); // "previous day" under RTL
     expect(document.activeElement).toBe(cell("2026-06-11"));
 
-    key(cell("2026-06-11"), "ArrowLeft"); // "next day"
+    pressKey(cell("2026-06-11"), "ArrowLeft"); // "next day"
     expect(document.activeElement).toBe(cell("2026-06-12"));
 
-    key(cell("2026-06-12"), "ArrowUp"); // -7 days regardless of direction
+    pressKey(cell("2026-06-12"), "ArrowUp"); // -7 days regardless of direction
     expect(document.activeElement).toBe(cell("2026-06-05"));
+  });
+
+  /** Inline direction isolates container resolution from the browser's dir mapping. */
+  describe("layout direction", () => {
+    const grid = () => {
+      const element = document.querySelector<HTMLElement>(
+        "[data-stimeo--date-range-picker-target='grid']",
+      );
+      if (!element) throw new Error("Expected date range grid");
+      return element;
+    };
+
+    it.each(["ltr", "rtl"] as const)(
+      "reads the %s grid direction when the root and focused cell disagree",
+      async (direction) => {
+        await mount();
+        const opposite = direction === "rtl" ? "ltr" : "rtl";
+        root().style.direction = opposite;
+        grid().style.direction = direction;
+        cell("2026-06-12").style.direction = opposite;
+
+        const event = pressKey(cell("2026-06-12"), "ArrowRight");
+        const next = direction === "rtl" ? "2026-06-11" : "2026-06-13";
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(document.activeElement).toBe(cell(next));
+        expect(cell(next).tabIndex).toBe(0);
+      },
+    );
+
+    it("reads a live change to the grid direction on the next key", async () => {
+      await mount();
+      root().style.direction = "ltr";
+      grid().style.direction = "rtl";
+      pressKey(cell("2026-06-12"), "ArrowRight");
+      expect(document.activeElement).toBe(cell("2026-06-11"));
+
+      grid().style.direction = "ltr";
+      pressKey(cell("2026-06-11"), "ArrowRight");
+      expect(document.activeElement).toBe(cell("2026-06-12"));
+      pressKey(cell("2026-06-12"), "ArrowUp");
+      expect(document.activeElement).toBe(cell("2026-06-05"));
+    });
+
+    it("reads the current grid after its target is replaced", async () => {
+      await mount();
+      root().style.direction = "ltr";
+      const original = grid();
+      original.style.direction = "ltr";
+      const replacement = original.cloneNode() as HTMLElement;
+      replacement.style.direction = "rtl";
+      replacement.append(...original.children);
+      original.replaceWith(replacement);
+      await tick();
+
+      const event = pressKey(cell("2026-06-12"), "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(cell("2026-06-11"));
+      expect(cell("2026-06-11").tabIndex).toBe(0);
+    });
+
+    it("falls back to the root when no grid target remains", async () => {
+      await mount();
+      root().style.direction = "rtl";
+      const container = grid();
+      container.style.direction = "ltr";
+      container.removeAttribute("data-stimeo--date-range-picker-target");
+      await tick();
+
+      const event = pressKey(cell("2026-06-12"), "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(cell("2026-06-11"));
+      expect(cell("2026-06-11").tabIndex).toBe(0);
+    });
   });
 
   it("renders the confirmed range: ends selected, inner cells in range", async () => {
@@ -686,17 +862,14 @@ describe("DateRangePickerController", () => {
     });
     click("2026-06-05"); // pending start
 
+    /** A generic descendant claims the key without native-control semantics. */
     const inner = document.createElement("span");
+    inner.tabIndex = -1;
     cell("2026-06-08").append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
-    const claimed = new KeyboardEvent("keydown", {
-      key: "Enter",
-      bubbles: true,
-      cancelable: true,
-    });
-    const notCanceled = inner.dispatchEvent(claimed);
+    const claimed = pressKey(inner, "Enter");
 
-    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(claimed.defaultPrevented).toBe(true); // the claim really took (a non-cancelable event would not)
     expect(detail).toEqual([]); // the range must not confirm
     expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(true); // still pending
   });
@@ -778,8 +951,8 @@ describe("DateRangePickerController", () => {
   it("updates the pending preview as keyboard focus moves", async () => {
     await mount();
     click("2026-06-10");
-    key(cell("2026-06-10"), "ArrowRight");
-    key(cell("2026-06-11"), "ArrowRight");
+    pressKey(cell("2026-06-10"), "ArrowRight");
+    pressKey(cell("2026-06-11"), "ArrowRight");
 
     expect(cell("2026-06-11").hasAttribute("data-in-range")).toBe(true);
     expect(cell("2026-06-12").hasAttribute("data-range-end")).toBe(true);
@@ -829,7 +1002,7 @@ describe("DateRangePickerController", () => {
   it("cancels an in-progress selection on Escape, restoring the confirmed range", async () => {
     await mount();
     click("2026-06-05"); // pending start replaces preview
-    key(cell("2026-06-05"), "Escape");
+    pressKey(cell("2026-06-05"), "Escape");
     // Confirmed range is shown again; the abandoned start is no longer marked.
     expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(false);
     expect(cell("2026-06-10").getAttribute("aria-selected")).toBe("true");
@@ -841,27 +1014,17 @@ describe("DateRangePickerController", () => {
     click("2026-06-05");
     // Widget-local half of the shared layered-Escape contract: a composing
     // press steers the IME conversion and never clears the pending range.
-    cell("2026-06-05").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, isComposing: true }),
-    );
+    pressKey(cell("2026-06-05"), "Escape", { isComposing: true });
     expect(cell("2026-06-05").hasAttribute("data-range-start")).toBe(true);
   });
 
   it("leaves a modified arrow to the browser", async () => {
     // A chorded arrow belongs to the browser (history back/forward), not the grid:
     // the press is neither cancelled nor allowed to move the roving tab stop.
-    // The local `key` helper builds a non-cancelable event, which could not report
-    // a claim either way, so the event is built here.
     await mount();
     expect(cell("2026-06-10").getAttribute("tabindex")).toBe("0");
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    cell("2026-06-10").dispatchEvent(event);
+    const event = pressKey(cell("2026-06-10"), "ArrowRight", { altKey: true });
 
     expect(event.defaultPrevented).toBe(false);
     expect(cell("2026-06-10").getAttribute("tabindex")).toBe("0");
@@ -870,18 +1033,13 @@ describe("DateRangePickerController", () => {
 
   it("claims every grid key it acts on", async () => {
     await mount();
-    const press = (iso: string, k: string): [string, boolean] => {
-      const event = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true });
-      cell(iso).dispatchEvent(event);
-      return [k, event.defaultPrevented];
-    };
-
-    expect([
-      press("2026-06-10", "Enter"),
-      press("2026-06-10", "Escape"),
-      press("2026-06-10", "ArrowRight"),
-      press("2026-06-11", " "),
-    ]).toEqual([
+    const gestures = [
+      ["2026-06-10", "Enter"],
+      ["2026-06-10", "Escape"],
+      ["2026-06-10", "ArrowRight"],
+      ["2026-06-11", " "],
+    ] as const;
+    expect(gestures.map(([iso, key]) => [key, pressKey(cell(iso), key).defaultPrevented])).toEqual([
       ["Enter", true],
       ["Escape", true],
       ["ArrowRight", true],
@@ -892,10 +1050,10 @@ describe("DateRangePickerController", () => {
   it("moves roving focus with the arrow keys", async () => {
     await mount();
     expect(cell("2026-06-10").getAttribute("tabindex")).toBe("0");
-    key(cell("2026-06-10"), "ArrowRight");
+    pressKey(cell("2026-06-10"), "ArrowRight");
     expect(cell("2026-06-11").getAttribute("tabindex")).toBe("0");
     expect(cell("2026-06-10").getAttribute("tabindex")).toBe("-1");
-    key(cell("2026-06-11"), "ArrowDown");
+    pressKey(cell("2026-06-11"), "ArrowDown");
     expect(cell("2026-06-18").getAttribute("tabindex")).toBe("0");
   });
 
@@ -915,7 +1073,7 @@ describe("DateRangePickerController", () => {
     // navigation focuses the new stop, that focus event must be a no-op (the cell
     // is already the tab stop) — this is what prevents a redundant double-render.
     await mount();
-    key(cell("2026-06-10"), "ArrowRight"); // roving stop → 06-11, which is focused
+    pressKey(cell("2026-06-10"), "ArrowRight"); // roving stop → 06-11, which is focused
     expect(cell("2026-06-11").getAttribute("tabindex")).toBe("0");
 
     cell("2026-06-11").dispatchEvent(new FocusEvent("focus")); // the focus a real focus() fires
@@ -943,7 +1101,7 @@ describe("DateRangePickerController", () => {
     click("2026-06-10");
     renders = 0;
 
-    key(cell("2026-06-10"), "ArrowRight");
+    pressKey(cell("2026-06-10"), "ArrowRight");
 
     expect(renders).toBe(1);
   });
@@ -1093,7 +1251,7 @@ describe("DateRangePickerController", () => {
     click("2026-06-12");
     expect(cell("2026-06-12").hasAttribute("data-range-start")).toBe(false);
 
-    key(cell("2026-06-12"), "Enter");
+    pressKey(cell("2026-06-12"), "Enter");
     expect(cell("2026-06-12").hasAttribute("data-range-start")).toBe(false);
   });
 
@@ -1304,14 +1462,14 @@ describe("DateRangePickerController", () => {
     await mount({ disabledDates: ["2026-07-01"] });
     click("2026-06-30");
 
-    key(cell("2026-06-30"), "ArrowRight");
+    pressKey(cell("2026-06-30"), "ArrowRight");
     await tick();
 
     expect(cell("2026-07-01").getAttribute("aria-disabled")).toBe("true");
     expect(cell("2026-07-01").hasAttribute("data-range-end")).toBe(false);
     expect(cell("2026-06-30").hasAttribute("data-range-start")).toBe(true);
 
-    key(cell("2026-07-01"), "ArrowRight");
+    pressKey(cell("2026-07-01"), "ArrowRight");
     expect(cell("2026-07-02").hasAttribute("data-range-end")).toBe(true);
   });
 
@@ -1321,27 +1479,27 @@ describe("DateRangePickerController", () => {
     root().addEventListener("stimeo--date-range-picker:change", (e) => {
       detail.push((e as CustomEvent).detail);
     });
-    key(cell("2026-06-10"), "Enter"); // pending start
-    key(cell("2026-06-10"), "ArrowRight"); // roving focus → 06-11
+    pressKey(cell("2026-06-10"), "Enter"); // pending start
+    pressKey(cell("2026-06-10"), "ArrowRight"); // roving focus → 06-11
     expect(cell("2026-06-11").getAttribute("tabindex")).toBe("0");
-    key(cell("2026-06-11"), " "); // Space confirms
+    pressKey(cell("2026-06-11"), " "); // Space confirms
     expect(detail).toEqual([{ start: "2026-06-10", end: "2026-06-11", reason: "user" }]);
   });
 
   it("moves to week edges with Home/End", async () => {
     await mount();
     // 2026-06-10 is a Wednesday; the week runs Sun 06-07 … Sat 06-13.
-    key(cell("2026-06-10"), "Home");
+    pressKey(cell("2026-06-10"), "Home");
     expect(cell("2026-06-07").getAttribute("tabindex")).toBe("0");
-    key(cell("2026-06-07"), "End");
+    pressKey(cell("2026-06-07"), "End");
     expect(cell("2026-06-13").getAttribute("tabindex")).toBe("0");
   });
 
   it("moves up a week and crosses months with PageUp", async () => {
     await mount();
-    key(cell("2026-06-10"), "ArrowUp"); // → 06-03
+    pressKey(cell("2026-06-10"), "ArrowUp"); // → 06-03
     expect(cell("2026-06-03").getAttribute("tabindex")).toBe("0");
-    key(cell("2026-06-03"), "PageUp"); // → 05-03 (month transition, deferred focus)
+    pressKey(cell("2026-06-03"), "PageUp"); // → 05-03 (month transition, deferred focus)
     await tick();
     expect(monthLabel().textContent).toBe("May 2026");
     expect(cell("2026-05-03").getAttribute("tabindex")).toBe("0");
@@ -1350,7 +1508,7 @@ describe("DateRangePickerController", () => {
   it("moves by one month with PageDown when Shift is not held", async () => {
     await mount();
 
-    key(cell("2026-06-10"), "PageDown");
+    pressKey(cell("2026-06-10"), "PageDown");
     await tick();
 
     expect(monthLabel().textContent).toBe("July 2026");
@@ -1360,8 +1518,8 @@ describe("DateRangePickerController", () => {
   it("keeps focus on a same-month move made before a deferred month focus lands", async () => {
     await mount();
 
-    key(cell("2026-06-10"), "PageDown");
-    key(cell("2026-07-10"), "ArrowRight");
+    pressKey(cell("2026-06-10"), "PageDown");
+    pressKey(cell("2026-07-10"), "ArrowRight");
     expect(document.activeElement).toBe(cell("2026-07-11"));
     await tick();
 
@@ -1371,12 +1529,12 @@ describe("DateRangePickerController", () => {
 
   it("moves by year with Shift+PageUp and Shift+PageDown", async () => {
     await mount();
-    key(cell("2026-06-10"), "PageDown", { shiftKey: true });
+    pressKey(cell("2026-06-10"), "PageDown", { shiftKey: true });
     await tick();
     expect(monthLabel().textContent).toBe("June 2027");
     expect(cell("2027-06-10").getAttribute("tabindex")).toBe("0");
 
-    key(cell("2027-06-10"), "PageUp", { shiftKey: true });
+    pressKey(cell("2027-06-10"), "PageUp", { shiftKey: true });
     await tick();
     expect(monthLabel().textContent).toBe("June 2026");
     expect(cell("2026-06-10").getAttribute("tabindex")).toBe("0");
@@ -1385,7 +1543,7 @@ describe("DateRangePickerController", () => {
   it("clamps a leap day when Shift+PageDown moves to a non-leap year", async () => {
     await mount({ start: "2024-02-29", end: "2024-02-29" });
 
-    key(cell("2024-02-29"), "PageDown", { shiftKey: true });
+    pressKey(cell("2024-02-29"), "PageDown", { shiftKey: true });
     await tick();
 
     expect(monthLabel().textContent).toBe("February 2025");
@@ -1533,7 +1691,7 @@ describe("DateRangePickerController", () => {
 
   it("keeps a deferred month-transition focus through turbo:before-cache", async () => {
     await mount();
-    key(cell("2026-06-10"), "PageUp");
+    pressKey(cell("2026-06-10"), "PageUp");
     const target = cell("2026-05-10");
     const focused = vi.fn();
     target.addEventListener("focus", focused);
@@ -1561,7 +1719,7 @@ describe("DateRangePickerController", () => {
 
   it("cancels a deferred month-transition focus on disconnect", async () => {
     await mount();
-    key(cell("2026-06-10"), "PageUp");
+    pressKey(cell("2026-06-10"), "PageUp");
     const target = cell("2026-05-10");
     const focused = vi.fn();
     target.addEventListener("focus", focused);
@@ -1625,7 +1783,7 @@ describe("DateRangePickerController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Speech-order regression scoped to a range endpoint. Pins the gridcell role,
+  // Speech-order check scoped to a range endpoint. Pins the gridcell role,
   // the accessible name (the day number), and the selected state so a lost
   // role/name or a dropped aria-selected surfaces as a diff.
   it("announces the endpoint cell's role, name, and selected state", async () => {

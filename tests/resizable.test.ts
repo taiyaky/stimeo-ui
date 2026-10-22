@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ResizableController } from "../src/controllers/resizable_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { keyEvent, press as pressKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
@@ -36,19 +37,48 @@ describe("ResizableController", () => {
     document.body.innerHTML = "";
   });
 
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Home/End chord (%s, %s)", async (key, _modifier, init) => {
+    const element = document.getElementById("resizable");
+    const current = document.getElementById("splitter");
+    if (!element || !current) throw new Error("Expected splitter");
+    current.focus();
+    const events: Event[] = [];
+    for (const name of ["stimeo--resizable:change", "stimeo--resizable:reconcile"]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = pressKey(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(current.getAttribute("aria-valuenow")).toBe("50");
+    expect(element.style.getPropertyValue("--stimeo--resizable-fraction")).toBe("0.5");
+    expect(pressKey(current, key).defaultPrevented).toBe(true);
+    expect(current.getAttribute("aria-valuenow")).toBe(key === "Home" ? "20" : "80");
+    expect(events).toHaveLength(1);
+  });
+
   describe("F6 pane cycling", () => {
     const root = () => document.getElementById("resizable") as HTMLElement;
     const primary = () => document.getElementById("pane-1") as HTMLElement;
     const secondary = () =>
       document.querySelector("[data-stimeo--resizable-target='secondary']") as HTMLElement;
     const f6 = (from: HTMLElement, init: KeyboardEventInit = {}) => {
-      const event = new KeyboardEvent("keydown", {
-        key: "F6",
-        bubbles: true,
-        cancelable: true,
-        ...init,
-      });
-      from.dispatchEvent(event);
+      const event = keyEvent("F6", { bubbles: true, cancelable: true, ...init });
+      pressKey(from, event);
       return event;
     };
 
@@ -130,23 +160,54 @@ describe("ResizableController", () => {
       expect(primary().hasAttribute("tabindex")).toBe(false);
     });
 
+    it("stops cycling after connecting twice without a disconnect", () => {
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--resizable",
+      ) as ResizableController;
+      const splitter = document.getElementById("splitter") as HTMLElement;
+      controller.connect();
+      expect(f6(splitter).defaultPrevented).toBe(true);
+      splitter.focus();
+
+      controller.disconnect();
+
+      expect(f6(splitter).defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(splitter);
+    });
+
     it("yields a key a descendant widget already consumed", () => {
       const splitter = document.getElementById("splitter") as HTMLElement;
       splitter.focus();
-      const event = new KeyboardEvent("keydown", { key: "F6", bubbles: true, cancelable: true });
+      const event = keyEvent("F6", { bubbles: true, cancelable: true });
       event.preventDefault();
-      splitter.dispatchEvent(event);
+      pressKey(splitter, event);
 
       expect(document.activeElement).toBe(splitter);
     });
 
-    it("leaves a chorded F6 to the browser", () => {
+    it.each([
+      ["Alt", { altKey: true }],
+      ["Ctrl", { ctrlKey: true }],
+      ["Meta", { metaKey: true }],
+      ["Shift", { shiftKey: true }],
+      ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+    ] as const)("leaves a chorded F6 to the browser (%s)", (_modifier, init) => {
       const splitter = document.getElementById("splitter") as HTMLElement;
       splitter.focus();
+      const before = root().outerHTML;
+      const events: Event[] = [];
+      root().addEventListener("stimeo--resizable:change", (event) => events.push(event));
 
-      const event = f6(splitter, { ctrlKey: true });
+      const event = f6(splitter, init);
       expect(event.defaultPrevented).toBe(false);
       expect(document.activeElement).toBe(splitter);
+      expect(root().outerHTML).toBe(before);
+      expect(events).toEqual([]);
+      expect(primary().hasAttribute("tabindex")).toBe(false);
+      expect(secondary().hasAttribute("tabindex")).toBe(false);
+      expect(f6(splitter).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(primary());
     });
   });
 
@@ -166,7 +227,7 @@ describe("ResizableController", () => {
     await expectNoA11yViolations(root);
   });
 
-  // Speech-order regression. The separator announces its state (`role="separator"`
+  // Speech-order check. The separator announces its state (`role="separator"`
   // + aria-valuenow), so capturing the phrase before and after a keyboard step
   // pins role, accessible name, bounds, and the announced value; a lost role/name
   // or a stale value surfaces as a diff.
@@ -179,7 +240,7 @@ describe("ResizableController", () => {
     ]);
 
     splitter.focus();
-    splitter.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    pressKey(splitter, "ArrowRight", { bubbles: true });
     await tick();
 
     const after = await captureSpeech({ container: splitter, steps: 0 });
@@ -226,13 +287,8 @@ describe("ResizableController", () => {
 
     // A chorded arrow is the browser's (history back/forward and the like), so
     // the splitter neither consumes the key nor moves its value.
-    const chord = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    splitter.dispatchEvent(chord);
+    const chord = keyEvent("ArrowRight", { altKey: true, bubbles: true, cancelable: true });
+    pressKey(splitter, chord);
     await tick();
 
     expect(chord.defaultPrevented).toBe(false);
@@ -251,8 +307,8 @@ describe("ResizableController", () => {
     splitter.focus();
 
     // ArrowRight increases the vertical pane size
-    const right = new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true });
-    splitter.dispatchEvent(right);
+    const right = keyEvent("ArrowRight", { bubbles: true });
+    pressKey(splitter, right);
     await tick();
 
     expect(root.style.getPropertyValue("--stimeo--resizable-fraction")).toBe("0.51"); // step is 1%
@@ -261,21 +317,21 @@ describe("ResizableController", () => {
     expect(changeHandler.mock.calls[0]?.[0]?.detail).toEqual({ value: 51, fraction: 0.51 });
 
     // ArrowLeft decreases size
-    const left = new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true });
-    splitter.dispatchEvent(left);
+    const left = keyEvent("ArrowLeft", { bubbles: true });
+    pressKey(splitter, left);
     await tick();
 
     expect(splitter.getAttribute("aria-valuenow")).toBe("50");
 
     // End jumps to max limits (80)
-    const end = new KeyboardEvent("keydown", { key: "End", bubbles: true });
-    splitter.dispatchEvent(end);
+    const end = keyEvent("End", { bubbles: true });
+    pressKey(splitter, end);
     await tick();
     expect(splitter.getAttribute("aria-valuenow")).toBe("80");
 
     // Home jumps to min limits (20)
-    const home = new KeyboardEvent("keydown", { key: "Home", bubbles: true });
-    splitter.dispatchEvent(home);
+    const home = keyEvent("Home", { bubbles: true });
+    pressKey(splitter, home);
     await tick();
     expect(splitter.getAttribute("aria-valuenow")).toBe("20");
   });
@@ -286,13 +342,13 @@ describe("ResizableController", () => {
     // Initial value is 50.
     splitter.focus();
     // ArrowDown increases the horizontal pane size
-    const down = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true });
-    splitter.dispatchEvent(down);
+    const down = keyEvent("ArrowDown", { bubbles: true });
+    pressKey(splitter, down);
     await tick();
     expect(splitter.getAttribute("aria-valuenow")).toBe("51");
     // ArrowUp decreases size
-    const up = new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true });
-    splitter.dispatchEvent(up);
+    const up = keyEvent("ArrowUp", { bubbles: true });
+    pressKey(splitter, up);
     await tick();
     expect(splitter.getAttribute("aria-valuenow")).toBe("50");
   });
@@ -451,8 +507,8 @@ describe("ResizableController", () => {
   const splitterEl = () => document.getElementById("splitter") as HTMLElement;
   const fraction = () => rootEl().style.getPropertyValue("--stimeo--resizable-fraction");
   const press = (el: HTMLElement, key: string, init: KeyboardEventInit = {}) => {
-    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
-    el.dispatchEvent(event);
+    const event = keyEvent(key, { bubbles: true, cancelable: true, ...init });
+    pressKey(el, event);
     return event;
   };
   const startDrag = (id = 1) =>
@@ -597,8 +653,9 @@ describe("ResizableController", () => {
     const original = splitterEl();
     const successor = original.cloneNode() as HTMLElement;
     successor.id = "successor";
-    // happy-dom binds an action on an element appended at runtime unreliably, so the
-    // press is routed to the controller directly.
+    // The clone drops its `data-action` and the press reaches the controller through a
+    // listener the test adds, so the case does not depend on when Stimulus binds the
+    // action of an element appended at runtime.
     successor.removeAttribute("data-action");
     successor.addEventListener("pointerdown", (event) => controller.onPointerDown(event));
     original.after(successor);
@@ -982,7 +1039,7 @@ describe("ResizableController", () => {
 
   it("ignores a key other than F6 on the root", async () => {
     splitterEl().focus();
-    press(rootEl(), "F7");
+    press(splitterEl(), "F7");
     expect(document.activeElement).toBe(splitterEl());
   });
 

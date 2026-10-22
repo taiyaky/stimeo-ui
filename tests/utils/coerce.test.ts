@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { readNumber, toFiniteNumber } from "../../src/utils/coerce";
+import {
+  eventNumber,
+  type NumericValueEvent,
+  readNumber,
+  toFiniteNumber,
+} from "../../src/utils/coerce";
 
 /**
  * Unit tests for the numeric coercion shared by the value-bearing status
@@ -35,6 +40,31 @@ describe("toFiniteNumber", () => {
     expect(toFiniteNumber(Number.POSITIVE_INFINITY)).toBeNull();
     expect(toFiniteNumber(true as unknown as number)).toBeNull();
     expect(toFiniteNumber([1] as unknown as number)).toBeNull();
+  });
+});
+
+/** Nullish action params fall back to detail, while invalid non-nullish input never does. */
+describe("eventNumber", () => {
+  it.each([
+    [0, 50, 0],
+    [" 12.5 ", 50, 12.5],
+    [null, "60", 60],
+    [undefined, 70, 70],
+    ["", 80, null],
+    [" ", 80, null],
+    [false, 80, null],
+    [[1], 80, null],
+    [Infinity, 80, null],
+    ["Infinity", 80, null],
+    ["2_0", 80, null],
+  ])("reads amount %j before detail %j", (amount, value, expected) => {
+    expect(eventNumber({ params: { amount }, detail: { value } } as NumericValueEvent)).toBe(
+      expected,
+    );
+  });
+
+  it("rejects missing input", () => {
+    expect(eventNumber(new Event("set"))).toBeNull();
   });
 });
 

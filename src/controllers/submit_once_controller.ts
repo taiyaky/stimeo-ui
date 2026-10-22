@@ -5,6 +5,7 @@ import { DetachGate } from "../utils/detach_gate";
 import { ListenerSet } from "../utils/listener_set";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
+import { OwnedText } from "../utils/owned_text";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /** Native controls that can submit a form. */
@@ -14,19 +15,10 @@ type SubmitControl = HTMLButtonElement | HTMLInputElement;
 type CompletionReason = "canceled" | "manual" | "timeout" | "turbo";
 
 /** A text/value write that cannot be represented by an `AttributeLease`. */
-type LabelWrite =
-  | {
-      readonly channel: "text";
-      readonly control: HTMLButtonElement;
-      readonly original: string;
-      readonly written: string;
-    }
-  | {
-      readonly channel: "value";
-      readonly control: HTMLInputElement;
-      readonly original: string;
-      readonly written: string;
-    };
+type LabelWrite = {
+  readonly control: SubmitControl;
+  readonly owner: OwnedText<SubmitControl>;
+};
 
 /** One form's independent in-flight submission. */
 interface SubmissionSession {
@@ -110,7 +102,8 @@ const SUBMITTER_MARK = "submitter";
  * Attribute writes use `AttributeLease`, so a consumer mutation made
  * while busy wins over restoration, and the author's values travel with the elements.
  * A label swapped through the button's text or an input's value records the authored
- * and written labels on the control as `data-<identifier>-label`. A connection with no
+ * and written labels as `[channel, original, written]` in `data-<identifier>-label`,
+ * with channel `text` for buttons and `value` for inputs. A connection with no
  * submission of its own restores the authored label only while the written label remains,
  * so a restored copy loses busy wording without overwriting a consumer's change.
  * `DetachGate` preserves an in-flight session across an in-page move. A
@@ -122,6 +115,9 @@ const SUBMITTER_MARK = "submitter";
  * move focus.
  */
 export class SubmitOnceController extends Controller<HTMLElement> {
+  /** Restored labels are read through their text or value channel. */
+  readonly #textLabel = new OwnedText<SubmitControl>(this.#labelRecord);
+  readonly #valueLabel = new OwnedText<SubmitControl>(this.#labelRecord, "value");
   /** Numeric read boundaries share one reader for this controller instance. */
   readonly #numbers = new NumberValueReader();
 
@@ -259,22 +255,9 @@ export class SubmitOnceController extends Controller<HTMLElement> {
 
   /** Returns a recorded label while its written value remains, and drops the record. */
   #restoreLabel(control: SubmitControl): void {
-    const raw = control.getAttribute(this.#labelRecord);
-    control.removeAttribute(this.#labelRecord);
-    let record: unknown;
-    try {
-      record = JSON.parse(raw ?? "");
-    } catch {
-      return;
-    }
-    if (!Array.isArray(record) || record.length !== 2) return;
-    const [original, written]: unknown[] = record;
-    if (typeof original !== "string" || typeof written !== "string") return;
-    if (control instanceof HTMLInputElement) {
-      if (control.value === written) control.value = original;
-    } else if (control.childElementCount === 0 && control.textContent === written) {
-      control.textContent = original;
-    }
+    const owner = control instanceof HTMLInputElement ? this.#valueLabel : this.#textLabel;
+    owner.restore(control);
+    owner.forget(control);
   }
 
   /** The forms this controller owns: its own element, and the forms inside it. */
@@ -418,14 +401,9 @@ export class SubmitOnceController extends Controller<HTMLElement> {
     if (control instanceof HTMLInputElement) {
       // `input[type=image]#value` is submitted data, not a visible label.
       if (control.type !== "submit") return;
-      session.labelWrite = {
-        channel: "value",
-        control,
-        original: control.value,
-        written: label,
-      };
-      control.setAttribute(this.#labelRecord, JSON.stringify([control.value, label]));
-      control.value = label;
+      const owner = new OwnedText<SubmitControl>(this.#labelRecord, "value");
+      session.labelWrite = { control, owner };
+      owner.write(control, label, control.value);
       return;
     }
     if (control.hasAttribute("aria-label")) {
@@ -435,14 +413,9 @@ export class SubmitOnceController extends Controller<HTMLElement> {
     // A structured button needs the explicit idle/busy pair above. Replacing its
     // textContent would destroy icons, counters, and application-owned listeners.
     if (control.childElementCount > 0) return;
-    session.labelWrite = {
-      channel: "text",
-      control,
-      original: control.textContent ?? "",
-      written: label,
-    };
-    control.setAttribute(this.#labelRecord, JSON.stringify([control.textContent ?? "", label]));
-    control.textContent = label;
+    const owner = new OwnedText<SubmitControl>(this.#labelRecord);
+    session.labelWrite = { control, owner };
+    owner.write(control, label, control.textContent ?? "");
   }
 
   /**
@@ -456,16 +429,10 @@ export class SubmitOnceController extends Controller<HTMLElement> {
       session.timeoutId = null;
     }
 
-    if (session.labelWrite?.channel === "value") {
-      const { control, original, written } = session.labelWrite;
-      control.removeAttribute(this.#labelRecord);
-      if (control.value === written) control.value = original;
-    } else if (session.labelWrite?.channel === "text") {
-      const { control, original, written } = session.labelWrite;
-      control.removeAttribute(this.#labelRecord);
-      if (control.childElementCount === 0 && control.textContent === written) {
-        control.textContent = original;
-      }
+    if (session.labelWrite) {
+      const { control, owner } = session.labelWrite;
+      owner.restore(control, { source: "live" });
+      owner.forget(control);
     }
     session.labelWrite = null;
 

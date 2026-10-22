@@ -6,6 +6,7 @@ import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /**
  * Behavioral tests for {@link NetworkStatusController}: the initial
@@ -272,19 +273,15 @@ describe("NetworkStatusController", () => {
   // --- `onlineAutoHide` belongs to one recovery banner -----------------------------
 
   /**
-   * Rewrites `onlineAutoHide` and delivers its Value callback directly when the
-   * controller defines one, since happy-dom does not reliably run it for an attribute
-   * write.
+   * Rewrites the `onlineAutoHide` declaration and waits for Stimulus to deliver it, so the
+   * assertions that follow see whatever the controller does with the change.
    */
-  const declareOnlineAutoHide = (value: number) => {
-    root().setAttribute("data-stimeo--network-status-online-auto-hide-value", String(value));
-    const owner = application.getControllerForElementAndIdentifier(
+  const declareOnlineAutoHide = (value: number) =>
+    writeValueAttribute(
       root(),
-      "stimeo--network-status",
+      "data-stimeo--network-status-online-auto-hide-value",
+      String(value),
     );
-    const callback: unknown = Reflect.get(owner ?? {}, "onlineAutoHideValueChanged");
-    if (typeof callback === "function") callback.call(owner);
-  };
 
   it.each([
     { direction: "shrinks", next: 50 },
@@ -302,7 +299,7 @@ describe("NetworkStatusController", () => {
       window.dispatchEvent(new Event("online"));
       vi.advanceTimersByTime(100);
 
-      declareOnlineAutoHide(next);
+      await declareOnlineAutoHide(next);
       vi.advanceTimersByTime(899);
       expect(online().hidden).toBe(false);
       vi.advanceTimersByTime(1);
@@ -329,7 +326,7 @@ describe("NetworkStatusController", () => {
     );
     window.dispatchEvent(new Event("online")); // shown with no hide promised
 
-    declareOnlineAutoHide(20);
+    await declareOnlineAutoHide(20);
     await vi.advanceTimersByTimeAsync(1000);
     expect(online().hidden).toBe(false);
     expect(offline().hidden).toBe(true);
@@ -469,7 +466,7 @@ describe("NetworkStatusController", () => {
   it("leaves the banner's own markup untouched", async () => {
     // The banner's children and spacing are the consumer's; nothing here rewrites them.
     await startWith(
-      `<div role="alert" hidden data-stimeo--network-status-target="offline">Offline. <button type="button" id="retry">Retry</button></div>`,
+      `<div hidden data-stimeo--network-status-target="offline">Offline. <button type="button" id="retry">Retry</button></div>`,
     );
     window.dispatchEvent(new Event("offline"));
     await tick();

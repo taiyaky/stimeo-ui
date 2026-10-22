@@ -1,4 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { setAttributeIfChanged } from "../utils/attribute_write";
+import { AuthoredMutationWatcher } from "../utils/authored_mutation_watcher";
 import { ownerIndex } from "../utils/event_owner";
 import { canTakeFocus } from "../utils/focus_candidate";
 import { FormResetWatcher } from "../utils/form_reset_watcher";
@@ -100,9 +102,6 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
 
   /** Logical state last committed for each current region; rebuilt on every connect. */
   #lastVisible = new WeakMap<HTMLElement, boolean>();
-  /** Controller writes awaiting an observer callback, separated from authored morphs. */
-  #internalWrites = new WeakMap<Element, Map<string, ExpectedAttribute>>();
-  #observing = false;
   /** Elements that left the region set, held until a pass gives back what was written on them. */
   readonly #departed = new Set<HTMLElement>();
   /** Regions whose `hidden` this controller set because their declared condition is false. */
@@ -118,7 +117,7 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
   /** Provides the last-resort focus landmark without claiming an authored tabindex. */
   readonly #rootTabindex = new TabindexLoan<HTMLElement>("-1", this.identifier);
   /** Watches retained targets and controls whose declarative or reflected state changed. */
-  readonly #observer = new MutationObserver((records) => this.#onMutations(records));
+  readonly #observer = new AuthoredMutationWatcher((records) => this.#onMutations(records));
 
   /** Evaluates only events whose source is one of this instance's live trigger targets. */
   readonly #onTriggerInput = (event: Event): void => {
@@ -133,16 +132,13 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
   override connect(): void {
     this.#rootTabindex.reclaim(this.element);
     this.#lastVisible = new WeakMap();
-    this.#internalWrites = new WeakMap();
     this.#settle();
     this.#reconcile.observe(this.element);
     this.#observer.observe(this.element, {
-      attributes: true,
-      attributeFilter: OBSERVED_ATTRIBUTES,
+      attributes: OBSERVED_ATTRIBUTES,
       childList: true,
       subtree: true,
     });
-    this.#observing = true;
     this.#listeners.add(this.element, "change", this.#onTriggerInput);
     this.#listeners.add(this.element, "input", this.#onTriggerInput);
     this.#formReset.observe();
@@ -151,7 +147,6 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
   /** Releases all external resources and returns the temporary focus landmark loan. */
   override disconnect(): void {
     this.#reconcile.disconnect();
-    this.#observing = false;
     this.#observer.disconnect();
     this.#listeners.dispose();
     this.#formReset.disconnect();
@@ -385,54 +380,22 @@ export class ConditionalFieldsController extends Controller<HTMLElement> {
 
   /** Records one idempotent attribute write before MutationObserver sees it. */
   #writeAttribute(element: Element, name: string, value: ExpectedAttribute): void {
-    if (element.getAttribute(name) !== value) {
-      if (this.#observing) {
-        let writes = this.#internalWrites.get(element);
-        if (!writes) {
-          writes = new Map();
-          this.#internalWrites.set(element, writes);
-        }
-        writes.set(name, value);
-      }
-      if (value === null) element.removeAttribute(name);
-      else element.setAttribute(name, value);
-    }
+    setAttributeIfChanged(element, name, value, () => this.#observer.claim(element, name, value));
   }
 
-  /** Separates authored records from controller writes and queues one relevant repair. */
+  /** Queues one relevant repair for a batch already separated from controller writes. */
   #onMutations(records: MutationRecord[]): void {
     const triggers = this.triggerTargets;
     const regions = this.regionTargets;
-    const touchedWrites = new Map<Element, Set<string>>();
-    let needsReconcile = false;
-
-    for (const record of records) {
-      if (record.type === "attributes" && record.target instanceof Element) {
-        const name = record.attributeName;
-        const writes = this.#internalWrites.get(record.target);
-        if (name && writes?.has(name)) {
-          let names = touchedWrites.get(record.target);
-          if (!names) {
-            names = new Set();
-            touchedWrites.set(record.target, names);
-          }
-          names.add(name);
-          if (record.target.getAttribute(name) === writes.get(name)) continue;
-        }
-      }
-      if (
-        record.target instanceof Element &&
-        this.#elementAffectsState(record.target, triggers, regions)
-      ) {
-        needsReconcile = true;
-      }
+    if (
+      records.some(
+        (record) =>
+          record.target instanceof Element &&
+          this.#elementAffectsState(record.target, triggers, regions),
+      )
+    ) {
+      this.#reconcile.schedule();
     }
-
-    for (const [element, names] of touchedWrites) {
-      const writes = this.#internalWrites.get(element);
-      for (const name of names) writes?.delete(name);
-    }
-    if (needsReconcile) this.#reconcile.schedule();
   }
 
   /** Whether an authored mutation target belongs to a trigger, region, or managed control. */

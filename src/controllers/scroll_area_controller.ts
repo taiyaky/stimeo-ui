@@ -1,8 +1,10 @@
 import { Controller } from "@hotwired/stimulus";
 import { AttributeLease } from "../utils/attribute_lease";
 import { hasTabStop } from "../utils/focus_candidate";
+import { FontLoadWatcher } from "../utils/font_load_watcher";
 import { FrameCoalescer } from "../utils/frame_coalescer";
 import { LayoutObserver } from "../utils/layout_observer";
+import { ListenerSet } from "../utils/listener_set";
 import { logicalScrollMetrics } from "../utils/logical_scroll";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { StylePropertyLease } from "../utils/style_property_lease";
@@ -12,12 +14,6 @@ import { TabindexLoan } from "../utils/tabindex_loan";
 const EDGE_EPSILON = 1;
 
 type Edge = "start" | "end";
-
-/** The event surface used by `document.fonts` without requiring it in older engines. */
-interface FontEventSource {
-  addEventListener(type: string, listener: EventListener): void;
-  removeEventListener(type: string, listener: EventListener): void;
-}
 
 /**
  * Headless **Scroll Area** behavior: keyboard reachability and scroll-state hooks
@@ -80,12 +76,13 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   );
 
   #viewport: HTMLElement | null = null;
+  /** The scroll listener on the current viewport; unbinding the viewport releases it. */
+  readonly #viewportListeners = new ListenerSet();
   #content: MutationObserver | null = null;
   #nameSources: MutationObserver | null = null;
   #nameGraph: MutationObserver | null = null;
   #observedNameIds = new Set<string>();
   #observedNameSources: Element[] = [];
-  #fonts: FontEventSource | null = null;
   /** Coalesces scroll bursts into one position sync per frame. */
   readonly #frames = new FrameCoalescer();
   #overflowing = false;
@@ -99,14 +96,15 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     this.#frames.schedule(() => this.#syncPosition(viewport, this.#overflowing));
   };
 
-  readonly #onFontsSettled: EventListener = () => {
+  readonly #onFontsSettled = (): void => {
     this.#refresh();
   };
+  readonly #fonts = new FontLoadWatcher(this.#onFontsSettled);
 
   override connect(): void {
     this.#rebind.observe(this.element);
     this.#layout.observeViewport();
-    this.#bindFonts();
+    this.#fonts.observe(this.element);
     this.#syncViewport();
   }
 
@@ -114,7 +112,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     this.#rebind.disconnect();
     if (this.#viewport) this.#unbindViewport(this.#viewport);
     this.#layout.disconnect();
-    this.#unbindFonts();
+    this.#fonts.disconnect();
     this.#clearHostState();
   }
 
@@ -148,7 +146,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
       return;
     }
 
-    next.addEventListener("scroll", this.#onScroll, { passive: true });
+    this.#viewportListeners.add(next, "scroll", this.#onScroll, { passive: true });
     this.#layout.observeDescendantLoads(next);
     this.#layout.observe(next);
     this.#bindContentObserver(next);
@@ -194,7 +192,7 @@ export class ScrollAreaController extends Controller<HTMLElement> {
   /** Releases every resource and borrowed attribute owned by one former viewport. */
   #unbindViewport(viewport: HTMLElement): void {
     this.#frames.cancel();
-    viewport.removeEventListener("scroll", this.#onScroll);
+    this.#viewportListeners.dispose();
     this.#layout.unobserveDescendantLoads();
     this.#layout.unobserve(viewport);
     this.#content?.disconnect();
@@ -457,21 +455,5 @@ export class ScrollAreaController extends Controller<HTMLElement> {
     this.#nameGraph = null;
     this.#observedNameIds.clear();
     this.#observedNameSources = [];
-  }
-
-  /** Subscribes to font completion when the current engine exposes `document.fonts`. */
-  #bindFonts(): void {
-    const fonts = (this.element.ownerDocument as Document & { fonts?: FontEventSource }).fonts;
-    if (!fonts || this.#fonts === fonts) return;
-    this.#fonts = fonts;
-    fonts.addEventListener("loadingdone", this.#onFontsSettled);
-    fonts.addEventListener("loadingerror", this.#onFontsSettled);
-  }
-
-  /** Removes the font completion subscriptions. */
-  #unbindFonts(): void {
-    this.#fonts?.removeEventListener("loadingdone", this.#onFontsSettled);
-    this.#fonts?.removeEventListener("loadingerror", this.#onFontsSettled);
-    this.#fonts = null;
   }
 }

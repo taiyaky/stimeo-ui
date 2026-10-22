@@ -1,4 +1,4 @@
-import { Application } from "@hotwired/stimulus";
+import { Application, type Controller } from "@hotwired/stimulus";
 import { tick } from "./timing";
 
 /**
@@ -38,4 +38,21 @@ export const restoreFromCache = async (
   register(restored);
   await settle();
   return restored;
+};
+
+/**
+ * Reconnects `controller` within one turn, as Stimulus reconnects one whose element moved
+ * with `moveBefore`, which happy-dom lacks: the element stays where it is, so focus and an
+ * IME composition stay with it, as `moveBefore` keeps them and `append` does not.
+ *
+ * The controller disconnects and lets its targets go; `during` then makes the changes the
+ * move's mutation batch carries (Value attributes, targets); the controller takes in its
+ * Values — those that changed, and those left at their defaults — and its targets, and
+ * connects. A Value change made in `during` therefore reaches the controller before its
+ * `connect()`, as it does when the batch carries it.
+ */
+export const reconnectKeepingFocus = (controller: Controller, during = (): void => {}): void => {
+  controller.context.disconnect();
+  during();
+  controller.context.connect();
 };

@@ -1,9 +1,11 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RelativeTimeController } from "../src/controllers/relative_time_controller";
+import { MorphRenderWatcher } from "../src/utils/morph_render_watcher";
 import { MAX_TIMER_DELAY_MS, SafeTimeout } from "../src/utils/safe_timeout";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { withRuntimeTimeZone } from "./helpers/runtime_time_zone";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -54,6 +56,28 @@ describe("RelativeTimeController", () => {
     await start("2026-06-06T11:57:00Z"); // 3 minutes ago
     expect(el().textContent).toBe("3 minutes ago");
     expect(el().getAttribute("data-state")).toBe("relative");
+  });
+
+  it("repaints without rewriting its unchanged absolute-text record", async () => {
+    await start("2026-06-06T11:57:00Z");
+    const marker = "data-stimeo--relative-time-text";
+    const record = el().getAttribute(marker);
+    expect(record).toBe('"absolute"');
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((batch) => records.push(...batch));
+    observer.observe(el(), { attributes: true, attributeFilter: [marker] });
+    try {
+      // The same-value DOM assignment is the positive control for this observer.
+      el().setAttribute(marker, record ?? "");
+      expect(observer.takeRecords()).toHaveLength(1);
+      instance().localeValueChanged();
+      await vi.advanceTimersByTimeAsync(0);
+      records.push(...observer.takeRecords());
+      expect(records).toHaveLength(0);
+      expect(el().getAttribute(marker)).toBe(record);
+    } finally {
+      observer.disconnect();
+    }
   });
 
   it("renders a future time relatively", async () => {
@@ -464,6 +488,259 @@ describe("RelativeTimeController", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each(["UTC", "Asia/Tokyo", "America/New_York"])(
+    "reads timezone-less datetimes as UTC in %s",
+    async (zone) => {
+      await withRuntimeTimeZone(zone, async () => {
+        expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(zone);
+        const raw = "2026-06-06T11:57:00";
+        const native = Date.parse(raw);
+        const expected = Date.UTC(2026, 5, 6, 11, 57);
+        if (zone === "UTC") expect(native).toBe(expected);
+        else expect(native).not.toBe(expected);
+        await start(raw);
+        expect(el().textContent).toBe("3 minutes ago");
+        expect(el().getAttribute("datetime")).toBe(raw);
+      });
+    },
+  );
+
+  it.each([
+    "2026-06-06 11:57",
+    "2026-06-06 11:57:00Z",
+    "2026-06-06T20:57:00+09:00",
+    "2026-06-06 20:57:00+0900",
+    "2026-06-06T07:57:00-04:00",
+    "2026-06-06 07:57:00-0400",
+    " \t2026-06-06T11:57:00Z\n ",
+  ])("reads the same instant from %j without changing its attribute", async (raw) => {
+    await withRuntimeTimeZone("America/New_York", async () => {
+      await start(raw);
+      expect(el().textContent).toBe("3 minutes ago");
+      expect(el().getAttribute("datetime")).toBe(raw);
+      expect(vi.getTimerCount()).toBe(1);
+    });
+  });
+
+  it.each([
+    "2026-02-30T11:57:00Z",
+    "2026",
+    "2026-06",
+    "Sat, 06 Jun 2026 11:57:00 GMT",
+    "2026-06-06 11:57:00 UTC",
+    "2026-06-06  11:57:00Z",
+    "2026-06-06t11:57:00z",
+    "2026-06-06T24:00:00.0001Z",
+  ])("keeps authored text and stays inert for %j", async (raw) => {
+    await start(raw, 'title="server title"', "server fallback");
+    expect(el().textContent).toBe("server fallback");
+    expect(el().getAttribute("title")).toBe("server title");
+    expect(el().getAttribute("datetime")).toBe(raw);
+    expect(el().hasAttribute("data-state")).toBe(false);
+    expect(el().hasAttribute("data-stimeo--relative-time-text")).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("follows a live datetime change and retains only one poll", async () => {
+    await start("2026-06-06T11:57:00Z");
+    vi.advanceTimersByTime(30_000);
+    el().setAttribute("datetime", "2026-06-06T12:03:30");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(el().textContent).toBe("in 3 minutes");
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(40_000);
+    expect(el().textContent).toBe("in 3 minutes");
+    vi.advanceTimersByTime(20_000);
+    expect(el().textContent).toBe("in 2 minutes");
+  });
+
+  it("stops an invalidated poll and resumes from the preserved fallback", async () => {
+    await start(
+      "2026-06-06T11:57:00Z",
+      'data-stimeo--relative-time-threshold-value="600" title="authored title"',
+      "authored absolute",
+    );
+    const marker = "data-stimeo--relative-time-text";
+    expect(el().getAttribute(marker)).toBe('"authored absolute"');
+    el().setAttribute("datetime", "not-a-date");
+    el().textContent = "server fallback";
+    await vi.advanceTimersByTimeAsync(0);
+    expect(el().textContent).toBe("server fallback");
+    expect(vi.getTimerCount()).toBe(0);
+    expect(el().getAttribute(marker)).toBe('"authored absolute"');
+    expect(el().title).toBe("authored title");
+    vi.advanceTimersByTime(180_000);
+    expect(el().textContent).toBe("server fallback");
+    el().setAttribute("datetime", "2026-06-06T12:06:00Z");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(el().textContent).toBe("in 3 minutes");
+    expect(vi.getTimerCount()).toBe(1);
+    expect(el().getAttribute(marker)).toBe('"authored absolute"');
+    el().setAttribute("datetime", "2026-06-06T11:00:00Z");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(el().textContent).toBe("authored absolute");
+    expect(el().getAttribute("data-state")).toBe("absolute");
+    expect(el().hasAttribute(marker)).toBe(false);
+    expect(el().title).toBe("authored title");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("starts from an initially invalid datetime once the live input becomes valid", async () => {
+    await start("not-a-date", "", "authored absolute");
+    el().setAttribute("datetime", "2026-06-06 11:57:00");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(el().textContent).toBe("3 minutes ago");
+    expect(el().getAttribute("data-stimeo--relative-time-text")).toBe('"authored absolute"');
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("restarts a terminal past fallback when the live instant changes", async () => {
+    await start(
+      "2026-06-06T11:00:00Z",
+      'data-stimeo--relative-time-threshold-value="600"',
+      "authored",
+    );
+    expect(el().textContent).toBe("authored");
+    expect(vi.getTimerCount()).toBe(0);
+    el().setAttribute("datetime", "2026-06-06T12:03:00Z");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(el().textContent).toBe("in 3 minutes");
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  /** A retained-element morph brings server attributes and text, without this controller's hooks. */
+  const morphTo = async (datetime: string, text: string): Promise<void> => {
+    el().setAttribute("datetime", datetime);
+    el().removeAttribute("data-state");
+    el().removeAttribute("data-stimeo--relative-time-text");
+    el().textContent = text;
+    el().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(0);
+  };
+
+  it("falls back to the text a morph brings with a new instant past the threshold", async () => {
+    await start(
+      "2026-06-06T11:57:00Z",
+      'data-stimeo--relative-time-threshold-value="600"',
+      "June 6 11:57",
+    );
+    expect(el().textContent).toBe("3 minutes ago");
+    await morphTo("2026-06-05T08:00:00Z", "June 5 08:00");
+    expect(el().textContent).toBe("June 5 08:00");
+    expect(el().getAttribute("data-state")).toBe("absolute");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("records the text a morph brings with a new instant until it passes the threshold", async () => {
+    await start(
+      "2026-06-06T11:57:00Z",
+      'data-stimeo--relative-time-threshold-value="600"',
+      "June 6 11:57",
+    );
+    await morphTo("2026-06-06T12:03:00Z", "June 6 12:03");
+    expect(el().textContent).toBe("in 3 minutes");
+    expect(el().getAttribute("data-stimeo--relative-time-text")).toBe('"June 6 12:03"');
+    vi.advanceTimersByTime(14 * 60_000);
+    expect(el().textContent).toBe("June 6 12:03");
+    expect(el().getAttribute("data-state")).toBe("absolute");
+  });
+
+  it("keeps the poll deadline for an equivalent datetime and a repair-only morph", async () => {
+    await start("2026-06-06T11:57:00Z");
+    vi.advanceTimersByTime(30_000);
+    el().setAttribute("datetime", "2026-06-06 20:57:00+0900");
+    el().textContent = "server output";
+    el().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(el().textContent).toBe("3 minutes ago");
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(30_000);
+    expect(el().textContent).toBe("4 minutes ago");
+  });
+
+  it("coalesces datetime, Values, and morph into one render", async () => {
+    await start("2026-06-06T11:57:00Z");
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((batch) => records.push(...batch));
+    observer.observe(el(), { childList: true });
+    el().setAttribute("datetime", "2026-06-06T12:03:00Z");
+    el().setAttribute("data-stimeo--relative-time-locale-value", "ja");
+    el().setAttribute("data-stimeo--relative-time-threshold-value", "600");
+    el().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    records.push(...observer.takeRecords());
+    observer.disconnect();
+    expect(records.filter((record) => record.addedNodes.length > 0)).toHaveLength(1);
+    expect(el().textContent).toBe(
+      new Intl.RelativeTimeFormat("ja", { numeric: "auto" }).format(3, "minute"),
+    );
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("releases the datetime observer synchronously on disconnect", async () => {
+    await start("2026-06-06T11:57:00Z");
+    const scheduled = vi.spyOn(MorphRenderWatcher.prototype, "schedule");
+    try {
+      el().setAttribute("datetime", "2026-06-06T12:03Z");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduled).toHaveBeenCalledTimes(1);
+      scheduled.mockClear();
+      instance().disconnect();
+      el().setAttribute("datetime", "2026-06-06T12:05Z");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduled).not.toHaveBeenCalled();
+    } finally {
+      scheduled.mockRestore();
+    }
+  });
+
+  it("drops pending datetime observation on disconnect and rereads on reconnect", async () => {
+    await start("2026-06-06T11:57:00Z");
+    const controller = instance();
+    /** Observe callback entry before the disconnected render guard can ignore it. */
+    const scheduled = vi.spyOn(MorphRenderWatcher.prototype, "schedule");
+    try {
+      el().setAttribute("datetime", "2026-06-06T11:58:00");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduled).toHaveBeenCalledTimes(1);
+      expect(el().textContent).toBe("2 minutes ago");
+      scheduled.mockClear();
+
+      el().setAttribute("datetime", "2026-06-06T12:03:00");
+      controller.disconnect();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduled).not.toHaveBeenCalled();
+      expect(el().textContent).toBe("2 minutes ago");
+      expect(vi.getTimerCount()).toBe(0);
+
+      el().setAttribute("datetime", "2026-06-06T12:05:00");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduled).not.toHaveBeenCalled();
+      expect(el().textContent).toBe("2 minutes ago");
+      expect(vi.getTimerCount()).toBe(0);
+
+      controller.connect();
+      expect(el().textContent).toBe("in 5 minutes");
+      expect(vi.getTimerCount()).toBe(1);
+      el().setAttribute("datetime", "2026-06-06T12:07:00");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduled).toHaveBeenCalledTimes(1);
+      expect(el().textContent).toBe("in 7 minutes");
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      scheduled.mockRestore();
+    }
+  });
+
+  it("reconnects directly without retaining duplicate or invalidated polls", async () => {
+    await start("2026-06-06T11:57:00Z");
+    instance().connect();
+    expect(vi.getTimerCount()).toBe(1);
+    el().setAttribute("datetime", "not-a-date");
+    instance().connect();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("does nothing without a valid datetime", async () => {
     await start("not-a-date", "", "fallback");
     expect(el().textContent).toBe("fallback");
@@ -477,8 +754,8 @@ describe("RelativeTimeController", () => {
       node,
       "stimeo--relative-time",
     ) as RelativeTimeController;
-    // Invoke disconnect() directly for a deterministic teardown (no reliance on
-    // the async MutationObserver flush, whose timing varies by environment).
+    // Invoke disconnect() directly for a deterministic teardown, with no reliance on
+    // the async MutationObserver flush.
     controller.disconnect();
     vi.advanceTimersByTime(120_000);
     // The polling timer was cleared, so the text stays at its last value.
@@ -509,9 +786,8 @@ describe("RelativeTimeController accessibility", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // The rendered relative phrase is what a reader announces for the <time>
-  // element. A real-clock datetime keeps the assertion stable.
-  it("announces the rendered relative phrase", async () => {
+  // Cursor navigation reads the current phrase without an update live region.
+  it("exposes the current relative phrase to cursor navigation", async () => {
     const threeMinutesAgo = new Date(Date.now() - 180_000).toISOString();
     document.body.innerHTML = `
       <main>
@@ -527,8 +803,10 @@ describe("RelativeTimeController accessibility", () => {
     const node = query("[data-controller='stimeo--relative-time']");
     expect(node.textContent).toBe("3 minutes ago");
     const spoken = await captureSpeech({ container: node, steps: 1 });
-    // Freeze the whole ordered array (not a name-only `toContain`): the rendered
-    // relative phrase is what the AT announces for the time element.
+    // Freeze the entire role and text sequence for cursor navigation.
     expect(spoken).toEqual(["time", "3 minutes ago"]);
+    expect(
+      document.querySelector("[aria-live], [role='alert'], [role='status'], [role='log']"),
+    ).toBeNull();
   });
 });

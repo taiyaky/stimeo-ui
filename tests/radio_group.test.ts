@@ -2,6 +2,8 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RadioGroupController } from "../src/controllers/radio_group_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { press as pressKey, typeKey } from "./helpers/keyboard";
+import { recordListeners } from "./helpers/listeners";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -54,8 +56,270 @@ describe("RadioGroupController", () => {
     ) as HTMLInputElement;
   const checkedValues = () => radios().map((radio) => radio.getAttribute("aria-checked"));
   const tabindexes = () => radios().map((radio) => radio.tabIndex);
-  const key = (index: number, k: string) =>
-    radios()[index]?.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+
+  it("settles author selection within a bounded microtask sequence", async () => {
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--radio-group",
+    ) as RadioGroupController;
+    const queue = globalThis.queueMicrotask;
+    let scheduled = 0;
+    let cut = false;
+    vi.stubGlobal("queueMicrotask", (callback: VoidFunction) => {
+      scheduled += 1;
+      if (scheduled > 100) {
+        cut = true;
+        controller.disconnect();
+        return;
+      }
+      queue(callback);
+    });
+    try {
+      radios()[0]?.setAttribute("aria-checked", "false");
+      radios()[1]?.setAttribute("aria-checked", "true");
+      await tick();
+      expect(checkedValues()).toEqual(["false", "true", "false"]);
+      expect(tabindexes()).toEqual([-1, 0, -1]);
+      expect(field().value).toBe("pro");
+      expect(scheduled).toBeGreaterThan(0);
+      expect(cut).toBe(false);
+    } finally {
+      controller.disconnect();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns the authored tab stop written during repair before focus re-entered", async () => {
+    let armed = false;
+    let reacted = false;
+    customElements.define(
+      "repair-tabstop-radio",
+      class extends HTMLElement {
+        static observedAttributes = ["tabindex"];
+
+        attributeChangedCallback(
+          _name: string,
+          _before: string | null,
+          after: string | null,
+        ): void {
+          if (!armed || after !== "0") return;
+          armed = false;
+          reacted = true;
+          this.setAttribute("tabindex", "5");
+        }
+      },
+    );
+    const previous = radios()[2] as HTMLElement;
+    const destination = document.createElement("repair-tabstop-radio");
+    for (const attribute of previous.attributes) {
+      destination.setAttribute(attribute.name, attribute.value);
+    }
+    previous.replaceWith(destination);
+    await tick();
+    const removed = radios()[1] as HTMLElement;
+    removed.focus();
+    await tick();
+    armed = true;
+    removed.remove();
+    await tick();
+    expect(reacted).toBe(true);
+    expect(document.activeElement).toBe(destination);
+    expect(destination.getAttribute("tabindex")).toBe("0");
+    destination.removeAttribute("data-stimeo--radio-group-target");
+    await tick();
+    expect(destination.getAttribute("tabindex")).toBe("5");
+  });
+
+  it("preserves an authored tab stop written during keyboard selection", async () => {
+    let armed = false;
+    let reacted = false;
+    customElements.define(
+      "keyboard-tabstop-radio",
+      class extends HTMLElement {
+        static observedAttributes = ["tabindex"];
+
+        attributeChangedCallback(
+          _name: string,
+          _before: string | null,
+          after: string | null,
+        ): void {
+          if (!armed || after !== "0") return;
+          armed = false;
+          reacted = true;
+          this.setAttribute("tabindex", "5");
+        }
+      },
+    );
+    const previous = radios()[2] as HTMLElement;
+    const destination = document.createElement("keyboard-tabstop-radio");
+    for (const attribute of previous.attributes) {
+      destination.setAttribute(attribute.name, attribute.value);
+    }
+    previous.replaceWith(destination);
+    await tick();
+    const source = radios()[1] as HTMLElement;
+    source.focus();
+    await tick();
+    armed = true;
+    pressKey(source, "ArrowDown");
+    await tick();
+    expect(reacted).toBe(true);
+    expect(document.activeElement).toBe(destination);
+    expect(destination.getAttribute("aria-checked")).toBe("true");
+    expect(field().value).toBe("max");
+    destination.removeAttribute("data-stimeo--radio-group-target");
+    await tick();
+    expect(destination.getAttribute("tabindex")).toBe("5");
+  });
+
+  it("retains its selected default across reconnect until the radio stands down", async () => {
+    const candidate = document.createElement("button");
+    candidate.type = "button";
+    candidate.setAttribute("data-value", "bare");
+    candidate.setAttribute("data-stimeo--radio-group-target", "radio");
+    root().append(candidate);
+    await tick();
+    candidate.click();
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--radio-group",
+    ) as RadioGroupController;
+    controller.disconnect();
+    controller.connect();
+    candidate.type = "submit";
+    await tick();
+    expect(candidate.hasAttribute("aria-checked")).toBe(false);
+  });
+
+  it.each([null, "7"])(
+    "returns a disconnected author tab stop %s when a radio stands down",
+    async (value) => {
+      const candidate = radios()[1] as HTMLElement;
+      candidate.click();
+      const controller = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--radio-group",
+      ) as RadioGroupController;
+      controller.disconnect();
+      if (value === null) candidate.removeAttribute("tabindex");
+      else candidate.setAttribute("tabindex", value);
+      controller.connect();
+      candidate.setAttribute("contenteditable", "true");
+      await tick();
+      expect(candidate.getAttribute("tabindex")).toBe(value);
+    },
+  );
+
+  it("restores initial tab stops after a user move and a reconnect", async () => {
+    const candidate = radios()[1] as HTMLElement;
+    candidate.click();
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--radio-group",
+    ) as RadioGroupController;
+    controller.disconnect();
+    controller.connect();
+    candidate.setAttribute("contenteditable", "true");
+    await tick();
+    expect(candidate.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("remembers its entry drop when a returning target disconnects during that write", async () => {
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--radio-group",
+    ) as RadioGroupController;
+    let armed = false;
+    let disconnected = false;
+    customElements.define(
+      "returning-entry-radio",
+      class extends HTMLElement {
+        static observedAttributes = ["tabindex"];
+
+        attributeChangedCallback(
+          _name: string,
+          _before: string | null,
+          after: string | null,
+        ): void {
+          if (!armed || after !== "-1") return;
+          armed = false;
+          disconnected = true;
+          controller.disconnect();
+        }
+      },
+    );
+    const candidate = document.createElement("returning-entry-radio");
+    candidate.setAttribute("role", "radio");
+    candidate.setAttribute("aria-checked", "false");
+    candidate.setAttribute("tabindex", "7");
+    candidate.setAttribute("data-value", "returning");
+    candidate.setAttribute("data-stimeo--radio-group-target", "radio");
+    root().append(candidate);
+    await tick();
+    candidate.click();
+    candidate.removeAttribute("data-stimeo--radio-group-target");
+    await tick();
+    expect(candidate.getAttribute("tabindex")).toBe("7");
+    armed = true;
+    candidate.setAttribute("data-stimeo--radio-group-target", "radio");
+    await tick();
+    expect(disconnected).toBe(true);
+    expect(candidate.getAttribute("tabindex")).toBe("-1");
+    controller.connect();
+    candidate.setAttribute("contenteditable", "true");
+    await tick();
+    expect(candidate.getAttribute("tabindex")).toBe("7");
+  });
+
+  it("preserves an authored checked value written while disconnected", async () => {
+    const candidate = document.createElement("button");
+    candidate.type = "button";
+    candidate.setAttribute("data-stimeo--radio-group-target", "radio");
+    root().append(candidate);
+    await tick();
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--radio-group",
+    ) as RadioGroupController;
+    expect(candidate.getAttribute("aria-checked")).toBe("false");
+    controller.disconnect();
+    radios()[0]?.setAttribute("aria-checked", "false");
+    candidate.setAttribute("aria-checked", "true");
+    controller.connect();
+    candidate.type = "submit";
+    await tick();
+    expect(candidate.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("observes hidden field property writes as value attribute records", () => {
+    const observer = new MutationObserver(() => {});
+    observer.observe(field(), { attributes: true, attributeFilter: ["value"] });
+    try {
+      field().value = "authored";
+      expect(observer.takeRecords()).toEqual([
+        expect.objectContaining({ type: "attributes", target: field(), attributeName: "value" }),
+      ]);
+    } finally {
+      observer.disconnect();
+    }
+  });
+
+  it("excludes its hidden mirror and roving writes from another repair", async () => {
+    radios()[1]?.click();
+    const host = radios()[0] as HTMLElement;
+    const reads = vi.spyOn(host, "getAttribute");
+    try {
+      await tick();
+      expect(reads.mock.calls.filter(([name]) => name === "contenteditable")).toHaveLength(0);
+      host.setAttribute("data-value", "authored");
+      await tick();
+      expect(
+        reads.mock.calls.filter(([name]) => name === "contenteditable").length,
+      ).toBeGreaterThan(0);
+    } finally {
+      reads.mockRestore();
+    }
+  });
 
   it("settles author selection without repeated roving writes", async () => {
     let writes = 0;
@@ -86,18 +350,15 @@ describe("RadioGroupController", () => {
     // A composed widget that claims the key must not ALSO move the selection —
     // composition depends on this yield.
     radios()[0]?.focus();
+    /** A generic descendant claims the key without native-control semantics. */
     const inner = document.createElement("span");
+    inner.tabIndex = -1;
     radios()[0]?.append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
 
-    const claimed = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    const notCanceled = inner.dispatchEvent(claimed);
+    const claimed = pressKey(inner, "ArrowRight");
 
-    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(claimed.defaultPrevented).toBe(true); // the claim really took (a non-cancelable event would not)
     expect(tabindexes()).toEqual([0, -1, -1]);
     expect(checkedValues()).toEqual(["true", "false", "false"]);
   });
@@ -105,25 +366,60 @@ describe("RadioGroupController", () => {
   it("leaves a modified arrow to the browser", () => {
     // A chorded arrow belongs to the browser (history navigation and friends):
     // the group neither consumes it nor moves the selection.
-    const chord = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-      altKey: true,
-    });
-    radios()[0]?.dispatchEvent(chord);
+    const chord = pressKey(radios()[0] as HTMLElement, "ArrowRight", { altKey: true });
 
     expect(chord.defaultPrevented).toBe(false);
     expect(tabindexes()).toEqual([0, -1, -1]);
     expect(checkedValues()).toEqual(["true", "false", "false"]);
   });
 
-  it("leaves modified Home and End shortcuts to the browser", () => {
-    for (const shortcut of [
-      new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true, ctrlKey: true }),
-      new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true, metaKey: true }),
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("preserves a modified non-arrow key (%s, %s)", async (key, _modifier, init) => {
+    const current = radios()[1];
+    if (!current) throw new Error("Expected middle radio");
+    current.click();
+    current.focus();
+    const element = root();
+    const events: Event[] = [];
+    for (const name of [
+      "stimeo--radio-group:change",
+      "stimeo--radio-group:reconcile",
+      "input",
+      "change",
     ]) {
-      radios()[0]?.dispatchEvent(shortcut);
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = pressKey(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(checkedValues()).toEqual(["false", "true", "false"]);
+    expect(tabindexes()).toEqual([-1, 0, -1]);
+    expect(field().value).toBe("pro");
+    expect(pressKey(current, key).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(radios()[key === "Home" ? 0 : 2]);
+    expect(field().value).toBe(key === "Home" ? "basic" : "max");
+  });
+
+  it("leaves modified Home and End shortcuts to the browser", () => {
+    for (const [key, init] of [
+      ["Home", { ctrlKey: true }],
+      ["End", { metaKey: true }],
+    ] as const) {
+      const shortcut = pressKey(radios()[0] as HTMLElement, key, init);
       expect(shortcut.defaultPrevented).toBe(false);
     }
 
@@ -134,11 +430,11 @@ describe("RadioGroupController", () => {
   it("moves and checks with the horizontal arrows under LTR", () => {
     // The APG Radio Group pattern pairs `ArrowRight` with `ArrowDown` and
     // `ArrowLeft` with `ArrowUp`; this case covers the horizontal half.
-    key(0, "ArrowRight");
+    pressKey(radios()[0] as HTMLElement, "ArrowRight");
     expect(tabindexes()).toEqual([-1, 0, -1]);
     expect(checkedValues()).toEqual(["false", "true", "false"]);
 
-    key(1, "ArrowLeft");
+    pressKey(radios()[1] as HTMLElement, "ArrowLeft");
     expect(tabindexes()).toEqual([0, -1, -1]);
     expect(checkedValues()).toEqual(["true", "false", "false"]);
   });
@@ -150,13 +446,13 @@ describe("RadioGroupController", () => {
     // direction is set as an inline style instead.
     root().style.direction = "rtl";
 
-    key(0, "ArrowLeft"); // "next" under RTL
+    pressKey(radios()[0] as HTMLElement, "ArrowLeft"); // "next" under RTL
     expect(tabindexes()).toEqual([-1, 0, -1]);
 
-    key(1, "ArrowRight"); // "previous"
+    pressKey(radios()[1] as HTMLElement, "ArrowRight"); // "previous"
     expect(tabindexes()).toEqual([0, -1, -1]);
 
-    key(0, "ArrowDown"); // the vertical pair carries no direction
+    pressKey(radios()[0] as HTMLElement, "ArrowDown"); // the vertical pair carries no direction
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
@@ -189,7 +485,7 @@ describe("RadioGroupController", () => {
     root().append(outsider);
     await tick();
     outsider.click();
-    outsider.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    pressKey(outsider, " ");
 
     expect(checkedValues()).toEqual(["true", "false", "false"]);
     expect(field().value).toBe("basic");
@@ -200,13 +496,8 @@ describe("RadioGroupController", () => {
     const button = document.createElement("button");
     button.type = "button";
     root().append(button);
-    const event = new KeyboardEvent("keydown", {
-      key: " ",
-      bubbles: true,
-      cancelable: true,
-    });
 
-    expect(button.dispatchEvent(event)).toBe(true);
+    const event = pressKey(button, " ");
     expect(event.defaultPrevented).toBe(false);
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
@@ -241,30 +532,30 @@ describe("RadioGroupController", () => {
   });
 
   it("moves and selects with ArrowDown, wrapping at the end", () => {
-    key(0, "ArrowDown");
+    pressKey(radios()[0] as HTMLElement, "ArrowDown");
     expect(checkedValues()).toEqual(["false", "true", "false"]);
     expect(document.activeElement).toBe(radios()[1]);
 
-    key(1, "ArrowDown");
-    key(2, "ArrowDown"); // wrap back to first
+    pressKey(radios()[1] as HTMLElement, "ArrowDown");
+    pressKey(radios()[2] as HTMLElement, "ArrowDown"); // wrap back to first
     expect(checkedValues()).toEqual(["true", "false", "false"]);
     expect(document.activeElement).toBe(radios()[0]);
   });
 
   it("wraps backward with ArrowUp and jumps with Home/End", () => {
-    key(0, "ArrowUp"); // wrap to last
+    pressKey(radios()[0] as HTMLElement, "ArrowUp"); // wrap to last
     expect(document.activeElement).toBe(radios()[2]);
     expect(field().value).toBe("max");
 
-    key(2, "Home");
+    pressKey(radios()[2] as HTMLElement, "Home");
     expect(document.activeElement).toBe(radios()[0]);
-    key(0, "End");
+    pressKey(radios()[0] as HTMLElement, "End");
     expect(document.activeElement).toBe(radios()[2]);
   });
 
   it("selects the focused radio on Space", () => {
     radios()[2]?.focus();
-    key(2, " ");
+    pressKey(radios()[2] as HTMLElement, " ");
     expect(checkedValues()).toEqual(["false", "false", "true"]);
     expect(field().value).toBe("max");
   });
@@ -287,7 +578,7 @@ describe("RadioGroupController", () => {
     });
 
     radios()[0]?.click();
-    key(0, " ");
+    pressKey(radios()[0] as HTMLElement, " ");
 
     expect(details).toEqual([]);
     expect(checkedValues()).toEqual(["true", "false", "false"]);
@@ -576,7 +867,7 @@ describe("RadioGroupController", () => {
   it("reports a page move the user activates again before it is reconciled", async () => {
     const events = captureStateEvents("stimeo--radio-group", ["change", "reconcile"]);
 
-    /** The user's confirmation includes the page write that has not settled yet. */
+    // The user's confirmation includes the page write that has not settled yet.
     radios()[0]?.setAttribute("aria-checked", "false");
     radios()[2]?.setAttribute("aria-checked", "true");
     radios()[2]?.click();
@@ -632,19 +923,85 @@ describe("RadioGroupController", () => {
     events.stop();
   });
 
-  it("reports nothing once a focus listener disconnects the group during its repair", async () => {
-    const events = captureStateEvents("stimeo--radio-group", ["change", "reconcile"]);
-    radios()[1]?.focus();
-    root().addEventListener("focusin", () => application.unload("stimeo--radio-group"));
+  it.each([false, true])(
+    "reports a keyboard selection only while connected: disconnect=%s",
+    async (disconnect) => {
+      const source = radios()[0] as HTMLElement;
+      const destination = radios()[1] as HTMLElement;
+      const mirrored = field();
+      source.focus();
+      await tick();
+      const events = captureStateEvents("stimeo--radio-group", ["change", "reconcile"]);
+      const native: string[] = [];
+      let focused = false;
+      mirrored.addEventListener("change", () => native.push(mirrored.value));
+      destination.addEventListener("focusin", () => {
+        focused = true;
+        if (disconnect) application.unload("stimeo--radio-group");
+      });
 
-    // Removing the focused radio moves focus inside the repair pass, and the
-    // listener disconnects the group before the pass would report.
-    radios()[1]?.remove();
-    await tick();
+      pressKey(source, "ArrowDown");
+      await tick();
 
-    expect(events.names()).toEqual([]);
-    events.stop();
-  });
+      expect(focused).toBe(true);
+      expect(document.activeElement).toBe(destination);
+      expect(checkedValues()).toEqual(["false", "true", "false"]);
+      expect(mirrored.value).toBe("pro");
+      expect(native).toEqual(disconnect ? [] : ["pro"]);
+      expect(events.seen.map(({ name, detail }) => ({ name, detail }))).toEqual(
+        disconnect
+          ? []
+          : [{ name: "change", detail: { value: "pro", radio: destination, reason: "user" } }],
+      );
+      events.stop();
+    },
+  );
+
+  it.each([false, true])(
+    "keeps an undelivered selection report within its connected lifetime: disconnect=%s",
+    async (disconnect) => {
+      const destination = radios()[1] as HTMLElement;
+      const mirrored = field();
+      const events = captureStateEvents("stimeo--radio-group", ["change", "reconcile"]);
+      const native: string[] = [];
+      mirrored.addEventListener("change", () => {
+        native.push(mirrored.value);
+        if (disconnect) application.unload("stimeo--radio-group");
+      });
+
+      destination.click();
+      await tick();
+
+      expect(native).toEqual(["pro"]);
+      expect(checkedValues()).toEqual(["false", "true", "false"]);
+      expect(mirrored.value).toBe("pro");
+      expect(events.seen.map(({ name, detail }) => ({ name, detail }))).toEqual(
+        disconnect
+          ? []
+          : [{ name: "change", detail: { value: "pro", radio: destination, reason: "user" } }],
+      );
+      events.stop();
+    },
+  );
+
+  it.each([false, true])(
+    "reports a changed selection only while connected: disconnect=%s",
+    async (disconnect) => {
+      const events = captureStateEvents("stimeo--radio-group", ["change", "reconcile"]);
+      radios()[0]?.focus();
+      if (disconnect)
+        root().addEventListener("focusin", () => application.unload("stimeo--radio-group"));
+
+      // Removing the selected, focused radio changes selection and moves focus
+      // inside the repair pass, where a listener can disconnect before reporting.
+      radios()[0]?.remove();
+      await tick();
+
+      expect(events.names()).toEqual(disconnect ? [] : ["reconcile"]);
+      expect(field().value).toBe("");
+      events.stop();
+    },
+  );
 
   it("synchronizes a field target added or replaced at runtime", async () => {
     field().remove();
@@ -665,7 +1022,7 @@ describe("RadioGroupController", () => {
       changes.push(event as CustomEvent);
     });
 
-    key(0, "ArrowDown");
+    pressKey(radios()[0] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(radios()[1]);
     expect(tabindexes()).toEqual([-1, 0, -1]);
     expect(checkedValues()).toEqual(["true", "false", "false"]);
@@ -679,11 +1036,11 @@ describe("RadioGroupController", () => {
     expect(tabindexes()).toEqual([-1, 0, -1]);
 
     radios()[1]?.click();
-    key(1, " ");
+    pressKey(radios()[1] as HTMLElement, " ");
     expect(checkedValues()).toEqual(["true", "false", "false"]);
     expect(changes).toEqual([]);
 
-    key(1, "ArrowDown");
+    pressKey(radios()[1] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(radios()[2]);
     expect(checkedValues()).toEqual(["false", "false", "true"]);
   });
@@ -695,7 +1052,7 @@ describe("RadioGroupController", () => {
     radios()[1]?.click();
     expect(checkedValues()).toEqual(["true", "false", "false"]);
 
-    key(0, "ArrowDown");
+    pressKey(radios()[0] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(radios()[2]);
     expect(checkedValues()).toEqual(["false", "false", "true"]);
   });
@@ -703,13 +1060,13 @@ describe("RadioGroupController", () => {
   it("inherits aria-disabled activation suppression from the group", () => {
     root().setAttribute("aria-disabled", "true");
     radios()[1]?.click();
-    key(0, "ArrowDown");
+    pressKey(radios()[0] as HTMLElement, "ArrowDown");
 
     expect(checkedValues()).toEqual(["true", "false", "false"]);
     expect(document.activeElement).toBe(radios()[1]);
   });
 
-  it("isolates delegated events from a nested Radio Group", async () => {
+  it("isolates delegated events from a nested stimeo--radio-group", async () => {
     const outerRadios = radios();
     const nested = document.createElement("div");
     nested.setAttribute("data-controller", "stimeo--radio-group");
@@ -722,12 +1079,9 @@ describe("RadioGroupController", () => {
 
     const nestedRadio = nested.querySelector<HTMLElement>("[role='radio']");
     nestedRadio?.click();
-    nestedRadio?.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
-    );
-    nested.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
-    );
+    pressKey(nestedRadio as HTMLElement, "ArrowDown");
+    // The non-radio container is an intentional unfocused ownership rejection.
+    typeKey(nested, "ArrowDown");
 
     expect(nestedRadio?.getAttribute("aria-checked")).toBe("true");
     expect(outerRadios.map((radio) => radio.getAttribute("aria-checked"))).toEqual([
@@ -840,14 +1194,8 @@ describe("RadioGroupController", () => {
     button.setAttribute("data-stimeo--radio-group-target", "radio");
     root().append(button);
     await tick();
-    const repeated = new KeyboardEvent("keydown", {
-      key: " ",
-      repeat: true,
-      bubbles: true,
-      cancelable: true,
-    });
 
-    expect(button.dispatchEvent(repeated)).toBe(false);
+    const repeated = pressKey(button, " ", { repeat: true });
     expect(repeated.defaultPrevented).toBe(true);
     expect(button.getAttribute("aria-checked")).toBe("false");
   });
@@ -855,13 +1203,9 @@ describe("RadioGroupController", () => {
   it("safely consumes navigation when no radio can receive focus", async () => {
     for (const radio of radios()) radio.hidden = true;
     await tick();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      bubbles: true,
-      cancelable: true,
-    });
 
-    expect(radios()[0]?.dispatchEvent(event)).toBe(false);
+    /** All radios are hidden; the synthetic key tests the defensive empty-focus-set path. */
+    const event = typeKey(radios()[0] as HTMLElement, "ArrowDown");
     expect(event.defaultPrevented).toBe(true);
     expect(tabindexes()).toEqual([-1, -1, -1]);
   });
@@ -891,10 +1235,10 @@ describe("RadioGroupController", () => {
     disabled.addEventListener("click", reached);
     disabled.addEventListener("keydown", reached);
     const click = new MouseEvent("click", { bubbles: true, cancelable: true });
-    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
 
     expect(disabled.dispatchEvent(click)).toBe(false);
-    expect(disabled.dispatchEvent(space)).toBe(false);
+    const space = pressKey(disabled, " ");
+    expect(space.defaultPrevented).toBe(true);
     expect(reached).not.toHaveBeenCalled();
     expect(checkedValues()).toEqual(["true", "false", "false"]);
   });
@@ -908,9 +1252,9 @@ describe("RadioGroupController", () => {
     if (!(text instanceof Text)) throw new Error("Missing radio label text");
     const later = vi.fn();
     root().addEventListener("keydown", later);
-    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
 
-    text.dispatchEvent(space);
+    /** A text-node origin cannot hold focus and must reach the ownership guard unchanged. */
+    const space = typeKey(text, " ");
 
     expect(space.defaultPrevented).toBe(true);
     expect(later).not.toHaveBeenCalled();
@@ -918,9 +1262,8 @@ describe("RadioGroupController", () => {
   });
 
   it("consumes Space so that selecting a radio does not scroll the page", () => {
-    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
-
-    expect(radios()[2]?.dispatchEvent(space)).toBe(false);
+    const space = pressKey(radios()[2] as HTMLElement, " ");
+    expect(space.defaultPrevented).toBe(true);
     expect(checkedValues()).toEqual(["false", "false", "true"]);
   });
 
@@ -935,7 +1278,7 @@ describe("RadioGroupController", () => {
   it("applies the key map through a per-radio action when the key never reaches the group", () => {
     radios()[0]?.addEventListener("keydown", (event) => event.stopPropagation());
 
-    key(0, "ArrowDown");
+    pressKey(radios()[0] as HTMLElement, "ArrowDown");
 
     expect(checkedValues()).toEqual(["false", "true", "false"]);
     expect(document.activeElement).toBe(radios()[1]);
@@ -1145,7 +1488,7 @@ describe("RadioGroupController with no initial selection", () => {
     );
 
     radios[1]?.click();
-    radios[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    pressKey(radios[1] as HTMLElement, " ");
 
     expect(radios.map((radio) => radio.getAttribute("aria-checked"))).toEqual(["false", "true"]);
   });
@@ -1240,7 +1583,7 @@ describe("RadioGroupController initialization and hosts", () => {
     const radios = Array.from(document.querySelectorAll<HTMLElement>("[role='radio']"));
 
     expect(radios.map((radio) => radio.tabIndex)).toEqual([-1, 0]);
-    radios[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(radios[1] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(radios[1]);
   });
 
@@ -1273,7 +1616,7 @@ describe("RadioGroupController initialization and hosts", () => {
       ${item("selected", "true")}`);
     const radios = Array.from(document.querySelectorAll<HTMLElement>("[role='radio']"));
 
-    radios[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(radios[1] as HTMLElement, "ArrowDown");
 
     expect(document.activeElement).toBe(radios[0]);
     expect(radios.map((radio) => radio.getAttribute("aria-checked"))).toEqual(["true", "false"]);
@@ -1327,9 +1670,9 @@ describe("RadioGroupController initialization and hosts", () => {
     const button = document.querySelector<HTMLButtonElement>("button") as HTMLButtonElement;
     const reached = vi.fn();
     button.addEventListener("keydown", reached);
-    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
 
-    expect(button.dispatchEvent(enter)).toBe(false);
+    const enter = pressKey(button, "Enter");
+    expect(enter.defaultPrevented).toBe(true);
     expect(reached).not.toHaveBeenCalled();
   });
 
@@ -1341,15 +1684,11 @@ describe("RadioGroupController initialization and hosts", () => {
     instance().disconnect();
 
     const click = new MouseEvent("click", { bubbles: true, cancelable: true });
-    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
-    const arrow = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      bubbles: true,
-      cancelable: true,
-    });
     expect(b?.dispatchEvent(click)).toBe(true);
-    expect(c?.dispatchEvent(enter)).toBe(true);
-    expect(a?.dispatchEvent(arrow)).toBe(true);
+    const enter = pressKey(c as HTMLElement, "Enter");
+    expect(enter.defaultPrevented).toBe(false);
+    const arrow = pressKey(a as HTMLElement, "ArrowDown");
+    expect(arrow.defaultPrevented).toBe(false);
     b?.focus();
 
     expect([a, b, c].map((radio) => radio?.getAttribute("aria-checked"))).toEqual([
@@ -1364,19 +1703,19 @@ describe("RadioGroupController initialization and hosts", () => {
     await start(item("a", "true"));
     const group = document.querySelector<HTMLElement>("[role='radiogroup']") as HTMLElement;
     instance().disconnect();
-    const added = vi.spyOn(group, "addEventListener");
-    const removed = vi.spyOn(group, "removeEventListener");
+    const ledger = recordListeners();
+    try {
+      instance().connect();
+      expect(ledger.live(group).map(({ type }) => type)).toEqual(
+        expect.arrayContaining(["click", "keydown", "focusin", "focusout"]),
+      );
 
-    instance().connect();
-    // Listeners registered with an options object (the morph subscription) carry an
-    // abort signal and are released by aborting it rather than by a removal.
-    const delegated = added.mock.calls.filter(([, , options]) => typeof options !== "object");
-    instance().disconnect();
+      instance().disconnect();
 
-    expect(new Set(delegated.map(([type]) => type))).toEqual(
-      new Set(["click", "keydown", "focusin", "focusout"]),
-    );
-    for (const call of delegated) expect(removed).toHaveBeenCalledWith(...call);
+      expect(ledger.live(group)).toEqual([]);
+    } finally {
+      ledger.restore();
+    }
   });
 
   it("mirrors the selection into an input that gains the field target token in place", async () => {
@@ -1531,7 +1870,7 @@ describe("RadioGroupController settled reports", () => {
       spent = true;
       act(2);
     });
-    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    pressKey(items()[0] as HTMLElement, "ArrowRight");
     await tick();
     expect(seen).toEqual(["change:c"]);
     expect(native).toEqual(["c"]);
@@ -1636,7 +1975,7 @@ describe("RadioGroupController target API", () => {
     document.body.innerHTML = "";
   });
 
-  it("retains the existing DOM Event success as a positive control", () => {
+  it("selects on a DOM click and reports it once", () => {
     const reports: Array<{ reason?: string }> = [];
     element("api-root").addEventListener("stimeo--radio-group:change", (event) => {
       reports.push((event as CustomEvent<{ reason?: string }>).detail);
@@ -1647,7 +1986,7 @@ describe("RadioGroupController target API", () => {
   });
 
   it.each([false, true])(
-    "accepts an owned target or its descendant (%s) after an Event positive control",
+    "accepts an owned target or its descendant (%s) through the element API",
     (descendant) => {
       const reports: Array<{ reason?: string }> = [];
       element("api-root").addEventListener("stimeo--radio-group:change", (event) => {

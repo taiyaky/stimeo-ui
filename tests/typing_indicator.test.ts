@@ -4,6 +4,7 @@ import type { CableSubscriptionMixin } from "../src/cable/consumer";
 import { setCableConsumer } from "../src/cable/consumer";
 import { TypingIndicatorController } from "../src/cable/typing_indicator_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { recordListeners } from "./helpers/listeners";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay } from "./helpers/timing";
@@ -133,16 +134,18 @@ describe("TypingIndicatorController", () => {
 
     it("unregisters the input listener it registered", async () => {
       document.body.innerHTML = fixture;
-      const added = vi.spyOn(root(), "addEventListener");
-      const removed = vi.spyOn(root(), "removeEventListener");
-      application = Application.start();
-      application.register("stimeo--typing-indicator", TypingIndicatorController);
-      await vi.advanceTimersByTimeAsync(20);
-      const onInput = added.mock.calls.find(([type]) => type === "input")?.[1];
-      expect(onInput).toBeDefined();
+      const ledger = recordListeners();
+      try {
+        application = Application.start();
+        application.register("stimeo--typing-indicator", TypingIndicatorController);
+        await vi.advanceTimersByTimeAsync(20);
+        expect(ledger.live(root(), "input")).toHaveLength(1);
 
-      controller()?.disconnect();
-      expect(removed).toHaveBeenCalledWith("input", onInput);
+        controller()?.disconnect();
+        expect(ledger.live(root(), "input")).toEqual([]);
+      } finally {
+        ledger.restore();
+      }
     });
   });
 
@@ -284,8 +287,8 @@ describe("TypingIndicatorController", () => {
 
     it("localizes the copy via data-one / data-many templates", async () => {
       await mount();
-      status().setAttribute("data-one", "%{name} が入力中…");
-      status().setAttribute("data-many", "%{count} 人（%{names}）が入力中…");
+      status().setAttribute("data-one", "{name} が入力中…");
+      status().setAttribute("data-many", "{count} 人（{names}）が入力中…");
       receive("Bob");
       expect(status().textContent).toBe("Bob が入力中…");
       receive("Carol");
@@ -340,35 +343,55 @@ describe("TypingIndicatorController", () => {
       );
 
     it("inserts a name containing $& literally", async () => {
-      await mount(withOne("%{name} is typing…"));
+      await mount(withOne("{name} is typing…"));
       receive("$&");
       expect(status().textContent).toBe("$& is typing…");
     });
 
     it("inserts a name containing $` and $' literally", async () => {
-      await mount(withOne("[%{name}]"));
+      await mount(withOne("[{name}]"));
       receive("$`$'");
       expect(status().textContent).toBe("[$`$']");
     });
 
     it("fills every occurrence of a placeholder", async () => {
-      await mount(withOne("%{name}: %{name} is typing…"));
+      await mount(withOne("{name}: {name} is typing…"));
       receive("Bob");
       expect(status().textContent).toBe("Bob: Bob is typing…");
     });
 
     it("does not re-substitute a name that contains a token", async () => {
       await mount();
-      status().setAttribute("data-many", "%{names} (%{count})");
-      receive("%{count}");
+      status().setAttribute("data-many", "{names} ({count})");
+      receive("{count}");
       receive("Bob");
-      expect(status().textContent).toBe("%{count}, Bob (2)");
+      expect(status().textContent).toBe("{count}, Bob (2)");
     });
 
     it("leaves a placeholder it has no value for as authored", async () => {
-      await mount(withOne("%{name} / %{count}"));
+      await mount(withOne("{name} / {count}"));
       receive("Bob");
-      expect(status().textContent).toBe("Bob / %{count}");
+      expect(status().textContent).toBe("Bob / {count}");
+    });
+
+    it("leaves prototype names and other branch tokens as authored", async () => {
+      await mount(withOne("{name} / {constructor} / {toString} / {names}"));
+      receive("Bob");
+      expect(status().textContent).toBe("Bob / {constructor} / {toString} / {names}");
+    });
+
+    it("uses the same literal-safe syntax for visible and announced copy", async () => {
+      const template = "{name} / {constructor}";
+      await mount(
+        withOne(template).replace(
+          'data-stimeo--typing-indicator-name-value="Alice"',
+          `data-stimeo--typing-indicator-name-value="Alice" data-stimeo--typing-indicator-announce-one-text-value="${template}"`,
+        ),
+      );
+      expect(await announcements(() => receive("$& {count}"))).toEqual([
+        "$& {count} / {constructor}",
+      ]);
+      expect(status().textContent).toBe("$& {count} / {constructor}");
     });
   });
 
@@ -674,7 +697,7 @@ describe("TypingIndicatorController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Speech-order regression ------------------------------------------------
+  // --- Speech-order check -----------------------------------------------------
 
   it("reads the status slot as ordinary text, not as a live region", async () => {
     // The slot is visible copy; assistive tech is reached through the shared announcer
@@ -786,9 +809,9 @@ describe("TypingIndicatorController", () => {
     const typing = (index: number) => `${index}:typing:${JSON.stringify({ name: "Alice" })}`;
 
     /**
-     * Rewrites a declaration and delivers its Value callback directly, since happy-dom
-     * does not reliably run it for an attribute write. A Value without a callback is
-     * left to whatever reads it next.
+     * Rewrites a declaration and calls its Value callback directly, so the callback runs at
+     * the write instead of waiting for the MutationObserver delivery. A Value without a
+     * callback is left to whatever reads it next.
      */
     const declare = (name: string, value: string) => {
       root().setAttribute(`data-stimeo--typing-indicator-${name}-value`, value);

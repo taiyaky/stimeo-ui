@@ -134,7 +134,10 @@ export class HoverCardController extends Controller<HTMLElement> {
     this.#reporting = true;
   }
 
-  /** Clears timers, the Escape-stack membership, and scroll listeners so nothing outlives the element. */
+  /**
+   * Clears timers, the Escape-stack membership, and scroll listeners so nothing outlives
+   * the element.
+   */
   override disconnect(): void {
     this.#connected = false;
     this.#reporting = false;

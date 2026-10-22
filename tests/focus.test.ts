@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FocusController } from "../src/controllers/focus_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { keyEvent, press as pressKey } from "./helpers/keyboard";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
@@ -46,7 +47,7 @@ describe("FocusController", () => {
   const instance = () =>
     application.getControllerForElementAndIdentifier(scope(), "stimeo--focus") as FocusController;
   const tab = (shift = false) =>
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: shift }));
+    !pressKey(document.activeElement as HTMLElement, "Tab", { shiftKey: shift }).defaultPrevented;
 
   it("activates the trap and moves focus to the first focusable by default", async () => {
     await mount();
@@ -84,18 +85,13 @@ describe("FocusController", () => {
     await mount();
     instance().activate();
 
-    const forward = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-    query("#a").dispatchEvent(forward);
+    const forward = keyEvent("Tab", { bubbles: true, cancelable: true });
+    pressKey(query("#a"), forward);
     expect(forward.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(query("#b"));
 
-    const backward = new KeyboardEvent("keydown", {
-      key: "Tab",
-      shiftKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    query("#b").dispatchEvent(backward);
+    const backward = keyEvent("Tab", { shiftKey: true, bubbles: true, cancelable: true });
+    pressKey(query("#b"), backward);
     expect(backward.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(query("#a"));
   });
@@ -119,7 +115,7 @@ describe("FocusController", () => {
     scope().addEventListener("stimeo--focus:deactivate", () => events.push("deactivate"));
     instance().activate();
 
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    pressKey(document.activeElement as HTMLElement, "Escape");
     expect(scope().hasAttribute("data-focus-trapped")).toBe(false);
     expect(events).toEqual(["deactivate"]);
   });
@@ -228,9 +224,10 @@ describe("FocusController", () => {
   });
 
   /**
-   * `inert` follows while the trap runs. Stimulus delivers Value callbacks through a
-   * `MutationObserver` happy-dom may drop, so each case writes the attribute and runs
-   * the callback itself; a second delivery finds the isolation already as declared.
+   * `inert` follows while the trap runs. Each case asserts right after the write, so it
+   * writes the attribute and calls the Value callback directly instead of waiting for the
+   * `MutationObserver` delivery; that delivery, when it follows, finds the isolation
+   * already as declared.
    */
   const declareInert = (on: boolean) => {
     scope().setAttribute("data-stimeo--focus-inert-value", String(on));
@@ -353,19 +350,27 @@ describe("FocusController", () => {
   });
 
   it("tears down without yanking focus on disconnect", async () => {
-    await mount('data-stimeo--focus-trap-value="true"');
+    await mount();
     query("#outside").focus();
+    instance().activate();
+    // A soft boundary lets focus leave the scope. The opener the trap recorded is where a
+    // release that restores focus would send it, so focus sits on another control instead.
+    const elsewhere = document.createElement("button");
+    elsewhere.textContent = "elsewhere";
+    document.body.append(elsewhere);
+    elsewhere.focus();
     scope().remove();
     await tick();
+
+    expect(document.activeElement).toBe(elsewhere);
 
     // Whether the listener is gone is read from the press itself. Focus is the wrong
     // witness here: the removed scope holds no tab stops, so a surviving handler takes
     // its empty-container path — it consumes the press and moves nothing, leaving
     // `activeElement` exactly where an unhandled press would.
-    const press = new KeyboardEvent("keydown", { key: "Tab", cancelable: true });
-    document.dispatchEvent(press);
+    const press = keyEvent("Tab", { cancelable: true });
+    pressKey(query("#outside"), press);
     expect(press.defaultPrevented).toBe(false);
-    expect(document.activeElement).toBe(query("#outside"));
   });
 
   it("drops the state hook on disconnect without announcing a release", async () => {

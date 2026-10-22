@@ -33,24 +33,25 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * longer arrive. `end` would claim the frame arrived.
  *
  * @remarks
- * Behavior only — it ships no skeleton markup or styling (pair with Skeleton/CSS);
- * loading is held purely in `aria-busy` / `data-frame-loading` and the optional
- * targets' `hidden`. The `content` target is marked `inert` while loading to block
- * double-submits, and focus inside the frame is explicitly blurred then restored
- * (when `restoreFocus`) so it is testable without relying on emergent `inert`
- * focus behavior. Every one of those attributes is leased, so finishing a load gives
+ * Behavior only — it ships no skeleton markup or styling (pair with `stimeo--skeleton`
+ * or the consumer's CSS); loading is held purely in `aria-busy` / `data-frame-loading`
+ * and the optional targets' `hidden`. The `content` target is marked `inert` while
+ * loading to block double-submits, and focus inside the frame is explicitly blurred
+ * then restored (when `restoreFocus`) so it is testable without relying on emergent
+ * `inert` focus behavior. Every one of those attributes is leased, so finishing a load gives
  * back what the author wrote — an authored `aria-busy="false"` stays — and leaves a
  * value the page wrote since alone, and the author's value is recorded on the element
  * for a copy of it to find: a connection with no load of its own gives the hooks a copy
  * of the page carries back to the author, before it reports `reconcile`. Listeners are
  * torn down on `disconnect()` (Turbo navigation included) along with the
  * `MinDurationFloor` holding the finish back, kept across an in-page move and a
- * `data-turbo-permanent` frame Turbo carries to the next page by `DetachGate`. A detach that keeps the element
- * returns the frame to its idle form; a frame render that swaps the targets mid-load
- * re-arms them. A load is never abandoned on `turbo:before-cache`, which Turbo also
- * dispatches on pages that stay — among them the promotion of this very frame's
- * navigation to a page visit, dispatched after `turbo:frame-load` — so a finish held
- * back by `minDuration` still ends the load, announces it and restores focus.
+ * `data-turbo-permanent` frame Turbo carries to the next page by `DetachGate`. A
+ * detach that keeps the element returns the frame to its idle form; a frame render
+ * that swaps the targets mid-load re-arms them. A load is never abandoned on
+ * `turbo:before-cache`, which Turbo also dispatches on pages that stay — among them
+ * the promotion of this very frame's navigation to a page visit, dispatched after
+ * `turbo:frame-load` — so a finish held back by `minDuration` still ends the load,
+ * announces it and restores focus.
  */
 export class FrameLoadingController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */

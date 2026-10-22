@@ -1,8 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { ownerIndex } from "../utils/event_owner";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
+import { ListenerSet } from "../utils/listener_set";
 import { isRtl } from "../utils/logical_scroll";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { RovingTabindex, type RovingWrap, rovingMove } from "../utils/roving_tabindex";
@@ -61,10 +62,12 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  *   is the one left tabbable (`focusin` keeps the Tab stop in sync).
  *
  * Keydown is **delegated on the container**, so controls added at runtime need
- * no per-element `data-action` (Stimulus binds those asynchronously, which is
- * unreliable for appended nodes). A `data-action="keydown->stimeo--toolbar#onKeydown"`
- * on each control stays supported; it does not double-move, because the second
- * pass sees `defaultPrevented`.
+ * no per-element `data-action`: Stimulus binds an appended control's
+ * `data-action` when Stimulus's MutationObserver delivers the append, so a key event
+ * dispatched on the control in the same turn would not run that action. A
+ * `data-action="keydown->stimeo--toolbar#onKeydown"` on each control is also
+ * accepted; it does not double-move, because the second pass sees
+ * `defaultPrevented`.
  *
  * Initial Tab stop: to choose it, write `tabindex` on **every** control (exactly
  * one `0`, the rest `-1`). Natively focusable elements are `tabindex="0"`
@@ -101,11 +104,14 @@ export class ToolbarController extends Controller<HTMLElement> {
 
   readonly #morph = new MorphRenderWatcher(() => this.#ensureTabStop());
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     this.#morph.observe(this.element);
     this.#ensureTabStop();
-    this.element.addEventListener("keydown", this.#onKeydown);
-    this.element.addEventListener("focusin", this.#onFocusin);
+    this.#listeners.add(this.element, "keydown", this.#onKeydown);
+    this.#listeners.add(this.element, "focusin", this.#onFocusin);
     this.#composition.observe(this.element);
     if (typeof MutationObserver !== "undefined") {
       const observer = new MutationObserver(() => this.#morph.schedule());
@@ -134,8 +140,7 @@ export class ToolbarController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#morph.disconnect();
     this.#connected = false;
-    this.element.removeEventListener("keydown", this.#onKeydown);
-    this.element.removeEventListener("focusin", this.#onFocusin);
+    this.#listeners.dispose();
     this.#composition.disconnect();
     this.#observer?.disconnect();
     this.#observer = null;
@@ -162,8 +167,8 @@ export class ToolbarController extends Controller<HTMLElement> {
    * Arrow/Home/End move focus and the single tab stop.
    *
    * Binding this per control with `data-action` is **optional** — the same
-   * handling runs from the container's delegated listener. It stays a declared
-   * action so per-control wiring keeps working; wiring both does not
+   * handling runs from the container's delegated listener. It is a declared
+   * action, so a per-control `data-action` also works; wiring both does not
    * double-move, because the delegated pass then yields on `defaultPrevented`.
    */
   onKeydown(event: KeyboardEvent): void {
@@ -193,6 +198,7 @@ export class ToolbarController extends Controller<HTMLElement> {
     // per-control `data-action` and the delegated listener idempotent.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     // Arrow/Home/End belong to the IME while a composition is in flight.
     if (this.#composition.isComposing(event)) return;
     // Re-assert the invariant before acting: the attribute observer runs async

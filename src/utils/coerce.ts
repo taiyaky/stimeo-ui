@@ -9,6 +9,17 @@
 
 import { matchesNumberBounds, type NumberBounds } from "./number_bounds";
 
+/** Numeric update input, accepting decoded action params before CustomEvent detail. */
+export type NumericValueEvent = Event & {
+  params?: { amount?: unknown };
+  detail?: { value?: unknown };
+};
+
+/** Reads the nullish action-param/detail precedence without falling back from invalid input. */
+export function eventNumber(event: NumericValueEvent): number | null {
+  return toFiniteNumber(event.params?.amount ?? event.detail?.value);
+}
+
 /**
  * Reads a finite number or nonblank numeric string; other input returns `null`.
  * Blank strings cannot silently reset a value to zero.

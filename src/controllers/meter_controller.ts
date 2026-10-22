@@ -1,36 +1,17 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
-import { toFiniteNumber } from "../utils/coerce";
+import { eventNumber, type NumericValueEvent } from "../utils/coerce";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
-import { rangeFraction } from "../utils/range";
-
-/**
- * Event shape `setValue` accepts: an action param `amount` or a `detail.value`.
- * Both are typed `number | string` because, while Stimulus coerces numeric action
- * params to numbers, a `meter:set` CustomEvent (or a non-numeric-looking param)
- * may carry a string; {@link MeterController.setValue} normalizes either form.
- */
-type SetValueEvent = Event & {
-  params?: { amount?: number | string };
-  detail?: { value?: number | string };
-};
+import { clampRange, rangeFraction } from "../utils/range";
+import { TemplateAttributeLease } from "../utils/template_attribute_lease";
 
 /** Threshold segment a value falls into, reflected on `data-state`. */
 type MeterState = "low" | "medium" | "high";
 
 /** One point-in-time reading: the clamped value with the ratio and segment it implies. */
 type MeterReading = { value: number; ratio: number; state: MeterState };
-
-/**
- * Suffix of the marker on an `aria-valuetext` this controller wrote, so a render
- * takes back only its own text. `aria-valuetext` is shared: a consumer may author
- * it instead of supplying a template, and that text is what carries the threshold
- * segment to readers who cannot see the colour — clearing it would take the segment
- * with it.
- */
-const OWNED_VALUE_TEXT = "owns-valuetext";
 
 /**
  * Headless meter behavior backed by the WAI-ARIA `meter` role.
@@ -44,7 +25,7 @@ const OWNED_VALUE_TEXT = "owns-valuetext";
  *   </div>
  *
  * A `meter` is a *point-in-time* scalar within a known range (disk usage,
- * battery, score) — distinct from {@link ProgressController}'s task progress.
+ * battery, score) — distinct from `stimeo--progress`'s task progress.
  * The controller syncs the ARIA value attributes and, when `low`/`high`
  * thresholds are present, classifies the value into a `low`/`medium`/`high`
  * segment on `data-state` so the consumer can color the bar.
@@ -54,18 +35,18 @@ const OWNED_VALUE_TEXT = "owns-valuetext";
  * @remarks
  * Behavior only. Because state must not be conveyed by color alone (WCAG 1.4.1),
  * a consumer-provided `valueText` template feeds `aria-valuetext` so the segment
- * is also available as text; a consumer that authors `aria-valuetext` itself keeps
- * it instead: only text this controller marked as its own is ever taken back. Threshold presence is read from the
- * *attributes* (an absent attribute means "no threshold"), not from a sentinel value.
+ * is also available as text; with no template, a consumer that authors `aria-valuetext`
+ * itself keeps it across renders. While a `valueText` template is set its text replaces an
+ * authored `aria-valuetext`; clearing the template or disconnecting puts the authored value
+ * back unless the page wrote its own meanwhile, which then stays. A changed template takes
+ * the attribute over again. Threshold presence is read from the *attributes* (an absent
+ * attribute means "no threshold"), not from a sentinel value.
  */
 export class MeterController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
   readonly #numbers = new NumberValueReader();
 
-  /** The marker above, in the namespace this controller is registered under. */
-  get #ownedValueText(): string {
-    return `data-${this.identifier}-${OWNED_VALUE_TEXT}`;
-  }
+  readonly #valueText = new TemplateAttributeLease<HTMLElement>("aria-valuetext", this.identifier);
 
   static override targets = ["bar"];
   static override values = {
@@ -119,9 +100,13 @@ export class MeterController extends Controller<HTMLElement> {
     this.#render();
   }
 
-  /** Closes the window in which a queued repaint may still run. */
+  /**
+   * Closes the window in which a queued repaint may still run, and returns
+   * `aria-valuetext` to the authored value unless the page wrote its own meanwhile.
+   */
   override disconnect(): void {
     this.#repaint.disconnect();
+    this.#valueText.release(this.element);
   }
 
   /**
@@ -129,8 +114,8 @@ export class MeterController extends Controller<HTMLElement> {
    * `detail.value` CustomEvent, syncs ARIA and `data-state`, and dispatches
    * `change` with the value, ratio, and computed segment.
    */
-  setValue(event: SetValueEvent): void {
-    const next = toFiniteNumber(event.params?.amount ?? event.detail?.value);
+  setValue(event: NumericValueEvent): void {
+    const next = eventNumber(event);
     if (next === null) return;
     this.valueValue = this.#clamp(next);
     const shown = this.#shownState;
@@ -177,7 +162,7 @@ export class MeterController extends Controller<HTMLElement> {
 
   /** Clamps `raw` into the configured `[min, max]` range. */
   #clamp(raw: number): number {
-    return Math.min(this.#safeMax, Math.max(this.#safeMin, raw));
+    return clampRange(raw, this.#safeMin, this.#safeMax);
   }
 
   /** Whether a threshold attribute is present (absent = no threshold). */
@@ -220,28 +205,15 @@ export class MeterController extends Controller<HTMLElement> {
     return reading;
   }
 
-  /**
-   * Sets `aria-valuetext` from the consumer-provided template, substituting
-   * `{value}`, `{percent}`, and `{state}`. Kept i18n-neutral in the library.
-   * With no template the attribute belongs to the consumer, so only a text this
-   * controller wrote is taken back ({@link OWNED_VALUE_TEXT}).
-   */
+  /** Renders the template-derived reading while preserving the author's attribute ownership. */
   #applyValueText({ value, ratio, state }: MeterReading): void {
-    if (this.valueTextValue.length === 0) {
-      if (this.element.hasAttribute(this.#ownedValueText)) {
-        this.element.removeAttribute("aria-valuetext");
-        this.element.removeAttribute(this.#ownedValueText);
-      }
-      return;
-    }
-    const percent = Math.round(ratio * 100);
-    const text = this.valueTextValue
-      .replaceAll("{value}", String(value))
-      .replaceAll("{percent}", String(percent))
-      .replaceAll("{state}", state);
-    this.element.setAttribute("aria-valuetext", text);
-    this.element.setAttribute(this.#ownedValueText, "");
+    this.#valueText.render(
+      this.element,
+      this.valueTextValue,
+      fillTemplate(this.valueTextValue, { value, percent: Math.round(ratio * 100), state }),
+    );
   }
+
   /** Current `value` declaration resolved against its numeric contract. */
   get #safeValue(): number {
     return this.#numbers.read(

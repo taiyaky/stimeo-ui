@@ -3,10 +3,12 @@
     With the opt-in follow value it also moves the card itself — translate on
     move, committed on drop, restored on cancel — so the consumer JS below only
     mirrors the signal into the status line. The card can travel out of the
-    dashed area, which the area clips; the reset action brings it back, since
-    follow's committed offset is internal state a consumer cannot clear. The
-    button sits outside the controller element, so its click reaches the action
-    as a custom event the element's own data-action maps. %>
+    dashed area, which the area clips; the reset action brings it back, ending
+    any drag in flight and clearing the inline translate follow moved it with.
+    With follow on, a translate the page writes itself in the <x>px <y>px form
+    works too, since the next drag reads its start back from the inline
+    translate. The button sits outside the controller element, so its click
+    reaches the action as a custom event the element's own data-action maps. %>
 <div class="pointer-drag-demo">
   <p class="pointer-drag-demo__hint"><%= t("components.pointer_drag.demo.hint") %></p>
   <div class="pointer-drag-demo__area">

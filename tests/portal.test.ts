@@ -375,12 +375,10 @@ describe("PortalController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  /**
-   * `to` and `position` describe where the node lives while the controller is connected.
-   * Stimulus delivers Value callbacks through a `MutationObserver` happy-dom may drop, so
-   * each case writes the attribute and then runs the callback itself; a pass Stimulus
-   * adds on top finds the node already in place and moves nothing.
-   */
+  // `to` and `position` describe where the node lives while the controller is connected.
+  // Each case writes the attribute and then runs the Value callback itself rather than
+  // depending on when the MutationObserver delivers it; a pass Stimulus adds on top finds
+  // the node already in place and moves nothing.
   describe("following the destination declaration", () => {
     const controller = () =>
       application.getControllerForElementAndIdentifier(src(), "stimeo--portal") as PortalController;
@@ -777,7 +775,8 @@ describe("PortalController", () => {
     };
     /**
      * Delivers `contentTargetConnected` the way Stimulus would when the controller
-     * declares it, since happy-dom does not reliably run target callbacks.
+     * declares it, so each case schedules the placement pass itself rather than depending
+     * on when the MutationObserver delivers the callback.
      */
     const deliverContent = (element: HTMLElement, instance = controller()) => {
       const run: unknown = Reflect.get(instance, "contentTargetConnected");
@@ -1316,7 +1315,7 @@ describe("PortalController", () => {
       expect(src().querySelector("#c")).toBeNull();
       expect(placeholders(src())).toEqual([]);
       expect(log).toEqual(["mount:dest1", "unmount:{}"]);
-      // A node the page left in place goes home as before.
+      // The node the page left in place goes back to its recorded spot.
       expect(query("#k").parentElement?.id).toBe("kept");
       expect(placeholders(query("#kept"))).toEqual([]);
       expect(keptLog).toEqual(["mount:dest1", "unmount:{}"]);

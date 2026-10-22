@@ -9,6 +9,110 @@ change between releases.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-22
+
+Minor release with no new components. IME composition, Turbo morphs, and form
+submission now behave consistently across the input components, and several
+contracts change, so read Changed before upgrading. The Inspector manifest moves
+to schema v16; update `stimeo check` and the VS Code extension together and run
+`stimeo check` before deploying.
+
+### Added
+
+- time-picker: `amLabel` and `pmLabel` Values set the meridiem text and its
+  speech, and `hour12ZeroBased` shows and enters a twelve-hour clock's hours as
+  0–11, as `午前` / `午後` time is written. The submitted value stays on the
+  24-hour clock.
+
+### Changed
+
+- **Breaking** input-mask: a synchronized hidden field carries a unique internal
+  DOM name; native FormData and native / Turbo submission restore the original
+  name, and removing the source submits an empty entry. Find managed fields by id
+  or the pairing attribute, use native FormData, and call
+  `prepareInputMaskForm(form)` before reading FormData from a new detached form.
+  input-mask clears only the raw value it wrote.
+- **Breaking** otp: a pattern drop held for a composition is reported as
+  `reconcile` before the edit's own `change` / `complete` / `invalid`, and a
+  reconnect under another `pattern` drops what it rejects as `reconcile`. Use the
+  edit events for submission.
+- **Breaking** number-input: a range or step change made during IME composition
+  applies when the user confirms, reported as `change`; a morph that changes
+  neither holds nothing.
+- **Breaking** currency-input: actions and events act only on the first `display`
+  target, and a display already focused when the controller connects starts
+  formatting at its next ordinary edit or composition end. Render the initial
+  hidden and accessible values on the server. `stimeo check` warns about extra
+  displays.
+- **Breaking** tabs, calendar, date-range-picker, slider, range-slider,
+  color-picker, multi-select, and tags-input read the writing direction from their
+  layout targets instead of the root; carousel gains a `pickerList` and
+  navigation-menu a `list` target.
+- **Breaking** dirty-form and optimistic accept only the terminal event matching
+  the latest start's source and token, and only `success: true` succeeds. For a
+  custom save, call `markClean` or dispatch the paired events with `success`.
+- **Breaking** local-time and relative-time read `datetime` strictly: a clock
+  without a zone is UTC (relative-time read it as local time), and an incomplete
+  or invalid value keeps the current display.
+- **Breaking** presence and typing-indicator templates use `{count}`, `{name}`,
+  and `{names}` instead of `%{…}`.
+- **Breaking** modified `Home` / `End` / `PageUp` / `PageDown` go to the browser
+  in widgets without a dedicated binding; pointer-drag cancels a keyboard grab
+  when focus leaves the handle; time-picker accepts digits typed with `Shift`.
+- **Breaking** progress, meter, pointer-drag, countdown, overflow-menu, listbox,
+  submit-once, clipboard, announcer, and currency-input change their ownership
+  markers (pointer-drag: `data-stimeo--pointer-drag-tabindex-loan`, listbox:
+  `owns-label`); re-render persisted HTML from authored markup. progress and meter
+  restore the authored `aria-valuetext` when the template is cleared or the
+  controller disconnects.
+- **Breaking** menubar, navigation-menu, menu, and context-menu treat an entry
+  inside an `aria-disabled="true"` ancestor as disabled (it stays reachable with
+  the arrow keys), and with nested entries refuse an action when any entry holding
+  its target is disabled. A click is judged when it reaches the component, so a
+  handler inside the component that disables its entry during the click keeps the
+  open or close it started; a menubar top it leaves natively `disabled` then has
+  its menu closed again, without a `close` event.
+- **Breaking** pointer-drag: `reset()` returns the inline `translate` to the
+  origin only when `follow` is on; otherwise it cancels the gesture in flight and
+  leaves the author's `translate` alone.
+- toggle-group writes `aria-pressed`, time-picker `aria-valuenow`, and radio-group
+  its arrival and release `tabindex` only when the value changes.
+- context-menu: the region contract drops `aria-haspopup`; give the region a role
+  and name that fit its content and advertise the key with
+  `aria-keyshortcuts="Shift+F10"`.
+- `stimeo check` reports `missing-announcer` for the `stimeo-ui/cable`
+  controllers (live-counter, presence, typing-indicator), and the
+  `stimeo:install` generator writes commented-out pins and registrations for the
+  opt-in `stimeo-ui/cable` and `stimeo-ui/positioning` entry points.
+
+### Removed
+
+- character-counter: the `announceTextValueChanged()` callback is gone from the
+  shipped types; pending announcements still read the current `announceText`.
+
+### Fixed
+
+- IME composition no longer sticks after a page write, a move, or a Turbo morph
+  in auto-submit, character-counter, combobox, command-palette, currency-input,
+  editable, input-mask, multi-select, number-input, otp, tags-input, and toolbar.
+  A morph leaves a field mid-composition alone, and a focused draft survives
+  morphs and reconnection.
+- switch, otp, currency-input, and input-mask keep their hidden form values right
+  across Turbo morphs and removal.
+- State events and reconciliation stay right when a `change` listener disconnects
+  the controller or the page edits state during a repair.
+- Components release what an earlier connection registered when connected twice,
+  and keep authored text, ARIA, and tab stops through restores.
+- relative-time follows live `datetime` changes; template substitution leaves
+  inherited names such as `{constructor}` unchanged.
+- menubar, navigation-menu, menu, and context-menu refuse a `hidden`, natively
+  `disabled`, or `aria-disabled` entry on every route — an explicit element, any
+  event, or hover — as a click on it already was; `context-menu#activate` takes
+  the optional event.
+- The MCP server accepts JSON-RPC batches in sessions that negotiated protocol
+  version 2025-03-26; other versions, and batches before `initialize`, are still
+  rejected.
+
 ## [0.17.0] - 2026-10-04
 
 ### Changed
@@ -1307,7 +1411,8 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
-[Unreleased]: https://github.com/taiyaky/stimeo-ui/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/taiyaky/stimeo-ui/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.18.0
 [0.17.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.17.0
 [0.16.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.16.0
 [0.15.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.15.0

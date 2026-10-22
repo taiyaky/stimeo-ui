@@ -1,6 +1,6 @@
 import { Application, Controller } from "@hotwired/stimulus";
 import { afterEach, describe, expect, it } from "vitest";
-import { disconnectAndStopApplication } from "./stimulus";
+import { disconnectAndStopApplication, reconnectKeepingFocus } from "./stimulus";
 import { tick } from "./timing";
 
 class TrackingController extends Controller {
@@ -115,5 +115,85 @@ describe("disconnectAndStopApplication", () => {
 
     expect(instance.disconnectCount).toBe(1);
     expect(application.controllers).toEqual([]);
+  });
+});
+
+class ReconnectLogController extends Controller {
+  static override targets = ["item"];
+  static override values = { state: String, mode: { type: String, default: "plain" } };
+
+  declare stateValue: string;
+  declare modeValue: string;
+  readonly log: string[] = [];
+
+  override connect(): void {
+    this.log.push("connect");
+  }
+
+  override disconnect(): void {
+    this.log.push("disconnect");
+  }
+
+  stateValueChanged(value: string): void {
+    this.log.push(`state:${value}`);
+  }
+
+  modeValueChanged(value: string): void {
+    this.log.push(`mode:${value}`);
+  }
+
+  itemTargetConnected(element: Element): void {
+    this.log.push(`+${element.id}`);
+  }
+
+  itemTargetDisconnected(element: Element): void {
+    this.log.push(`-${element.id}`);
+  }
+}
+
+describe("reconnectKeepingFocus", () => {
+  let application: Application | undefined;
+
+  afterEach(() => {
+    if (application) disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it("reconnects the same instance in one turn, with the batch's Values ahead of connect", async () => {
+    document.body.innerHTML = `
+      <div data-controller="log" data-log-state-value="before">
+        <input id="kept" data-log-target="item">
+      </div>`;
+    application = Application.start();
+    application.register("log", ReconnectLogController);
+    await tick();
+    const element = document.querySelector<HTMLElement>("[data-controller='log']");
+    const kept = document.getElementById("kept");
+    if (!element || !kept) throw new Error("log fixture missing");
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "log",
+    ) as ReconnectLogController;
+    kept.focus();
+    instance.log.length = 0;
+
+    reconnectKeepingFocus(instance, () => {
+      element.setAttribute("data-log-state-value", "after");
+      element.insertAdjacentHTML("afterbegin", `<input id="added" data-log-target="item">`);
+    });
+
+    expect(instance.log).toEqual([
+      "disconnect",
+      "-kept",
+      "state:after",
+      "mode:plain",
+      "+added",
+      "+kept",
+      "connect",
+    ]);
+    expect(document.activeElement).toBe(kept);
+    await tick();
+    expect(instance.log).toHaveLength(7);
+    expect(application.getControllerForElementAndIdentifier(element, "log")).toBe(instance);
   });
 });

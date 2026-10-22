@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { ownerIndex } from "../utils/event_owner";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -135,8 +136,8 @@ export class ResizableController extends Controller<HTMLElement> {
   /** `tabindex` lent to a pane so `F6` can put focus on it; panes carry none. */
   readonly #paneTabindex = new TabindexLoan("-1", this.identifier);
 
-  /** Releases the pane cycle listener bound in {@link connect}. */
-  #cycleAbort: AbortController | null = null;
+  /** The pane cycle listener of one connection, released on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
 
   /** Folds the range and position inputs of one morph batch into a single paint. */
   readonly #repaint = new MorphRenderWatcher(() => this.#render());
@@ -153,17 +154,13 @@ export class ResizableController extends Controller<HTMLElement> {
     // Bound on the root rather than the panes so the cycle continues once focus
     // has left the separator — the panes hold consumer markup and the next F6
     // arrives from inside one of them.
-    this.#cycleAbort = new AbortController();
-    this.element.addEventListener("keydown", this.#onCycleKeydown, {
-      signal: this.#cycleAbort.signal,
-    });
+    this.#listeners.add(this.element, "keydown", this.#onCycleKeydown);
   }
 
   /** Cancels any active pointer drag so listeners never leak past disconnect. */
   override disconnect(): void {
     this.#endDrag();
-    this.#cycleAbort?.abort();
-    this.#cycleAbort = null;
+    this.#listeners.dispose();
     this.#repaint.disconnect();
     this.#paneTabindex.returnAll();
   }
@@ -179,7 +176,7 @@ export class ResizableController extends Controller<HTMLElement> {
     if (event.defaultPrevented) return;
     // The pattern binds a bare F6 only. A chorded one is the browser's or the
     // OS's (Ctrl+F6 cycles frames in several browsers).
-    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (hasModifierChord(event)) return;
 
     const panes: HTMLElement[] = [];
     if (this.hasPrimaryTarget) panes.push(this.primaryTarget);
@@ -232,6 +229,9 @@ export class ResizableController extends Controller<HTMLElement> {
    * Starts active pointer drag tracking and locks capture on the separator pressed, so
    * a separator that coexists behind an earlier one drags itself. A press that lands on
    * no separator drags the first one.
+   *
+   * @stimeoListenerLifetime operation the drag's own signal is aborted when the drag
+   *   ends, before the next drag starts, and on disconnect.
    */
   onPointerDown(event: PointerEvent): void {
     if (!this.hasSeparatorTarget || event.button !== 0) return;
@@ -259,6 +259,7 @@ export class ResizableController extends Controller<HTMLElement> {
   /** Keydown adjustments for ArrowUp/Down/Left/Right and Home/End. */
   onKeydown(event: KeyboardEvent): void {
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     if (!this.hasSeparatorTarget) return;
 
     const { min, max } = this.#range;

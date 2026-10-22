@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SwitchController } from "../src/controllers/switch_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -50,22 +51,113 @@ describe("SwitchController", () => {
   const instance = (): SwitchController =>
     application.getControllerForElementAndIdentifier(sw(), "stimeo--switch") as SwitchController;
 
-  const key = (value: string, options: { repeat?: boolean } = {}): KeyboardEvent => {
-    const event = new KeyboardEvent("keydown", {
-      key: value,
-      repeat: options.repeat,
-      bubbles: true,
-      cancelable: true,
-    });
-    sw().dispatchEvent(event);
-    return event;
-  };
-
   const click = (): MouseEvent => {
     const event = new MouseEvent("click", { bubbles: true, cancelable: true });
     sw().dispatchEvent(event);
     return event;
   };
+
+  it("releases a queued author's same-value default before a requested repair", async () => {
+    await mount(genericMarkup());
+    instance().fieldTargetConnected();
+    sw().setAttribute("aria-checked", "false");
+    sw().setAttribute("contenteditable", "true");
+    await tick();
+    expect(sw().getAttribute("aria-checked")).toBe("false");
+    expect(sw().hasAttribute("role")).toBe(false);
+  });
+
+  it("releases a queued author default before a user commit and synchronous reconnect", async () => {
+    await mount(`<div data-controller="stimeo--switch">
+      <input type="hidden" data-stimeo--switch-target="field"></div>`);
+    sw().setAttribute("aria-checked", "false");
+    sw()
+      .querySelector("input")
+      ?.addEventListener(
+        "change",
+        () => {
+          sw().setAttribute("contenteditable", "true");
+          instance().disconnect();
+          instance().connect();
+        },
+        { once: true },
+      );
+    instance().toggle();
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+    await tick();
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("repairs a default removed by a synchronous custom-element reaction", async () => {
+    let armed = false;
+    let reacted = false;
+    customElements.define(
+      "reactive-switch-default",
+      class extends HTMLElement {
+        static observedAttributes = ["role"];
+
+        attributeChangedCallback(
+          _name: string,
+          _before: string | null,
+          after: string | null,
+        ): void {
+          if (!armed || after !== "switch") return;
+          armed = false;
+          reacted = true;
+          this.removeAttribute("role");
+        }
+      },
+    );
+    await mount(
+      '<reactive-switch-default data-controller="stimeo--switch"></reactive-switch-default>',
+    );
+    armed = true;
+    sw().removeAttribute("role");
+    await tick();
+    expect(reacted).toBe(true);
+    expect(sw().getAttribute("role")).toBe("switch");
+  });
+
+  it("releases a custom element's repeated default before notifying listeners", async () => {
+    let armed = false;
+    let reacted = false;
+    customElements.define(
+      "reactive-switch-ownership",
+      class extends HTMLElement {
+        static observedAttributes = ["role"];
+
+        attributeChangedCallback(
+          _name: string,
+          _before: string | null,
+          after: string | null,
+        ): void {
+          if (!armed || after !== "switch") return;
+          armed = false;
+          reacted = true;
+          this.setAttribute("role", "switch");
+        }
+      },
+    );
+    await mount(
+      '<reactive-switch-ownership data-controller="stimeo--switch"></reactive-switch-ownership>',
+    );
+    sw().addEventListener(
+      "stimeo--switch:reconcile",
+      () => {
+        sw().setAttribute("contenteditable", "true");
+        instance().disconnect();
+        instance().connect();
+      },
+      { once: true },
+    );
+    armed = true;
+    sw().removeAttribute("role");
+    sw().setAttribute("aria-checked", "true");
+    await tick();
+    expect(reacted).toBe(true);
+    expect(sw().getAttribute("role")).toBe("switch");
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+  });
 
   it("adds role, checked state, and a Tab stop to a bare generic host", async () => {
     await mount(genericMarkup());
@@ -81,6 +173,41 @@ describe("SwitchController", () => {
     expect(sw().getAttribute("role")).toBe("checkbox");
     expect(sw().getAttribute("aria-checked")).toBe("true");
     expect(sw().getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("releases a checked default when the author repeats the user's value", async () => {
+    await mount(genericMarkup());
+    instance().toggle();
+    sw().setAttribute("aria-checked", "true");
+    await tick();
+    sw().setAttribute("contenteditable", "true");
+    await tick();
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+    expect(sw().hasAttribute("role")).toBe(false);
+  });
+
+  it("does not schedule repairs for its own checked write", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe");
+    const read = vi.spyOn(sw(), "getAttribute");
+    instance().toggle();
+    read.mockClear();
+    await tick();
+    expect(observe).not.toHaveBeenCalled();
+    expect(read.mock.calls.filter(([name]) => name === "role")).toEqual([]);
+    sw().setAttribute("role", "checkbox");
+    await tick();
+    expect(read.mock.calls.some(([name]) => name === "role")).toBe(true);
+    read.mockRestore();
+    observe.mockRestore();
+  });
+
+  it("repairs a pending authored default removal after a user toggle", async () => {
+    await mount(genericMarkup());
+    sw().removeAttribute("role");
+    instance().toggle();
+    await tick();
+    expect(sw().getAttribute("role")).toBe("switch");
+    expect(sw().getAttribute("aria-checked")).toBe("true");
   });
 
   it("does not add tabindex to a native button host", async () => {
@@ -132,39 +259,36 @@ describe("SwitchController", () => {
   });
 
   it.each([" ", "Enter"])("toggles on %s and prevents its native default", (value) => {
-    const event = key(value);
+    const event = pressKey(sw(), value);
 
     expect(sw().getAttribute("aria-checked")).toBe("true");
     expect(event.defaultPrevented).toBe(true);
   });
 
   it("prevents repeated Space without toggling", () => {
-    const event = key(" ", { repeat: true });
+    const event = pressKey(sw(), " ", { repeat: true });
 
     expect(event.defaultPrevented).toBe(true);
     expect(sw().getAttribute("aria-checked")).toBe("false");
   });
 
   it("leaves an unrelated key untouched", () => {
-    const event = key("ArrowRight");
+    const event = pressKey(sw(), "ArrowRight");
 
     expect(event.defaultPrevented).toBe(false);
     expect(sw().getAttribute("aria-checked")).toBe("false");
   });
 
   it("yields a key a descendant widget already consumed", () => {
+    /** A generic descendant claims the key without native-control semantics. */
     const inner = document.createElement("span");
+    inner.tabIndex = -1;
     sw().append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
 
-    const claimed = new KeyboardEvent("keydown", {
-      key: " ",
-      bubbles: true,
-      cancelable: true,
-    });
-    const notCanceled = inner.dispatchEvent(claimed);
+    const claimed = pressKey(inner, " ");
 
-    expect(notCanceled).toBe(false);
+    expect(claimed.defaultPrevented).toBe(true);
     expect(sw().getAttribute("aria-checked")).toBe("false");
   });
 
@@ -174,9 +298,9 @@ describe("SwitchController", () => {
               data-action="click->stimeo--switch#toggle keydown->stimeo--switch#onKeydown"
               role="switch" aria-checked="false">Notifications</button>`);
 
-    const initial = key("Enter");
-    const repeatedEnter = key("Enter", { repeat: true });
-    const repeatedSpace = key(" ", { repeat: true });
+    const initial = pressKey(sw(), "Enter");
+    const repeatedEnter = pressKey(sw(), "Enter", { repeat: true });
+    const repeatedSpace = pressKey(sw(), " ", { repeat: true });
 
     expect(initial.defaultPrevented).toBe(false);
     expect(repeatedEnter.defaultPrevented).toBe(true);
@@ -205,8 +329,8 @@ describe("SwitchController", () => {
     });
 
     expect(click().defaultPrevented).toBe(true);
-    expect(key(" ").defaultPrevented).toBe(true);
-    expect(key("Enter").defaultPrevented).toBe(true);
+    expect(pressKey(sw(), " ").defaultPrevented).toBe(true);
+    expect(pressKey(sw(), "Enter").defaultPrevented).toBe(true);
     instance().toggle();
 
     expect(sw().getAttribute("aria-checked")).toBe("false");
@@ -225,7 +349,7 @@ describe("SwitchController", () => {
     );
 
     expect(click().defaultPrevented).toBe(true);
-    expect(key(" ").defaultPrevented).toBe(true);
+    expect(pressKey(sw(), " ").defaultPrevented).toBe(true);
     expect(sw().getAttribute("aria-checked")).toBe("false");
   });
 
@@ -238,7 +362,8 @@ describe("SwitchController", () => {
     // A disabled native button does not dispatch click in a real browser; the
     // direct action call pins the controller's own defensive boundary as well.
     instance().toggle();
-    expect(key("Enter").defaultPrevented).toBe(true);
+    // A native disabled button receives this synthetic key without acquiring focus.
+    expect(typeKey(sw(), "Enter").defaultPrevented).toBe(true);
     expect(sw().getAttribute("aria-checked")).toBe("false");
   });
 
@@ -251,7 +376,8 @@ describe("SwitchController", () => {
       </fieldset>`);
 
     expect(click().defaultPrevented).toBe(true);
-    expect(key("Enter").defaultPrevented).toBe(true);
+    // A native disabled button receives this synthetic key without acquiring focus.
+    expect(typeKey(sw(), "Enter").defaultPrevented).toBe(true);
     expect(sw().getAttribute("aria-checked")).toBe("false");
   });
 
@@ -308,7 +434,7 @@ describe("SwitchController", () => {
     await mount(markup);
 
     expect(click().defaultPrevented).toBe(false);
-    expect(key("Enter").defaultPrevented).toBe(false);
+    expect(pressKey(sw(), "Enter").defaultPrevented).toBe(false);
     expect(sw().getAttribute("aria-checked")).toBe("false");
   });
 
@@ -821,6 +947,21 @@ describe("SwitchController", () => {
       expect(commits.seen).toEqual([]);
     });
 
+    it("rewrites a retained field a Turbo morph emptied while the state stayed, reporting nothing", async () => {
+      await withField("true");
+
+      // Idiomorph empties a retained input whose new markup carries no value and
+      // leaves aria-checked as it was, so only the morph event can bring the pass.
+      field().removeAttribute("value");
+      field().value = "";
+      field().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+      await tick();
+
+      expect(field().value).toBe("true");
+      expect(heard()).toEqual([]);
+      expect(commits.seen).toEqual([]);
+    });
+
     it("fills a field added after connect without reporting", async () => {
       await withField("true");
       field().remove();
@@ -1045,7 +1186,7 @@ describe("SwitchController settled reports", () => {
     expect(seen).toEqual(["change:true"]);
     expect(submitted()).toBe("true");
   });
-  it("publishes nothing when the action returns to the last settled selection", async () => {
+  it("publishes nothing when a toggle returns to the last published state", async () => {
     const seen = record();
     let native = 0;
     root().addEventListener("change", () => {
@@ -1058,7 +1199,7 @@ describe("SwitchController settled reports", () => {
     expect(native).toBe(0);
     expect(submitted()).toBe("false");
   });
-  it("mirrors a replacement field before an unchanged selection returns", async () => {
+  it("mirrors an unchanged state into a replacement field at once and reports nothing", async () => {
     const seen = record();
     const field = root().querySelector('[data-stimeo--switch-target="field"]');
     const replacement = document.createElement("input");
@@ -1079,7 +1220,7 @@ describe("SwitchController settled reports", () => {
     expect(native).toBe(0);
     expect(seen).toEqual([]);
   });
-  it("drops the outer report after a native subscriber commits a newer selection", async () => {
+  it("drops the outer report after a native subscriber commits a newer state", async () => {
     const seen = record();
     let spent = false;
     root().addEventListener("change", () => {
@@ -1092,7 +1233,7 @@ describe("SwitchController settled reports", () => {
     expect(seen).toEqual(["change:false"]);
     expect(submitted()).toBe("false");
   });
-  it("keeps the outer report when a native subscriber only reads the selection", async () => {
+  it("keeps the outer report when a native subscriber only reads the state", async () => {
     const seen = record();
     const reads: string[] = [];
     root().addEventListener("change", () => reads.push(submitted()));
@@ -1101,7 +1242,7 @@ describe("SwitchController settled reports", () => {
     expect(reads).toEqual(["true"]);
     expect(seen).toEqual(["change:true"]);
   });
-  it("keeps the outer report when a native subscriber confirms the same selection", async () => {
+  it("keeps the outer report when a native subscriber confirms the same state", async () => {
     const seen = record();
     let spent = false;
     root().addEventListener("change", () => {

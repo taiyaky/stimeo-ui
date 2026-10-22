@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DirtyFormController } from "../src/controllers/dirty_form_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { recordListeners } from "./helpers/listeners";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -56,6 +57,9 @@ describe("DirtyFormController", () => {
         detail: formSubmission === undefined ? { success } : { success, formSubmission },
       }),
     );
+
+  const turboSubmit = (type: "start" | "end", detail: unknown, target: HTMLElement = form()) =>
+    target.dispatchEvent(new CustomEvent(`turbo:submit-${type}`, { bubbles: true, detail }));
 
   beforeEach(() => {
     document.body.innerHTML = "";
@@ -242,6 +246,257 @@ describe("DirtyFormController", () => {
     submitEnd(true, {});
 
     expect(form().getAttribute("data-dirty")).toBe("true");
+  });
+
+  it.each([
+    { label: "absent", token: undefined },
+    { label: "null", token: null },
+  ])("ignores a $label synthetic completion without submit-start", async ({ token }) => {
+    setConfirm(false);
+    await mount('<input name="title" value="a">');
+    edit("b");
+
+    turboSubmit("end", { success: true, formSubmission: token });
+
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    expect(beforeVisit().defaultPrevented).toBe(true);
+  });
+
+  it.each([
+    { label: "omitted", success: undefined },
+    { label: "null", success: null },
+    { label: "false", success: false },
+    { label: "a number", success: 1 },
+    { label: "a string", success: "true" },
+  ])("re-arms the guard when matched success is $label", async ({ success }) => {
+    setConfirm(false);
+    await mount('<input name="title" value="a">');
+    edit("b");
+    const formSubmission = {};
+    submitStart(formSubmission);
+
+    turboSubmit("end", { success, formSubmission });
+
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    expect(beforeVisit().defaultPrevented).toBe(true);
+    const unload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+    edit("a");
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+  });
+
+  it.each([
+    { label: "absent", token: undefined },
+    { label: "null", token: null },
+  ])("keeps real ownership after a $label synthetic completion", async ({ token }) => {
+    setConfirm(false);
+    await mount('<input name="title" value="a">');
+    edit("b");
+    const formSubmission = {};
+    submitStart(formSubmission);
+
+    turboSubmit("end", { success: true, formSubmission: token });
+
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    expect(beforeVisit().defaultPrevented).toBe(false);
+    submitEnd(true, formSubmission);
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+  });
+
+  it.each([
+    { startToken: undefined, endToken: undefined },
+    { startToken: undefined, endToken: null },
+    { startToken: null, endToken: undefined },
+    { startToken: null, endToken: null },
+  ])("pairs nullish synthetic tokens once: %j", async ({ startToken, endToken }) => {
+    setConfirm(false);
+    await mount('<input name="title" value="a">');
+    edit("b");
+    turboSubmit("start", { formSubmission: startToken });
+
+    turboSubmit("end", { success: true, formSubmission: {} });
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    expect(beforeVisit().defaultPrevented).toBe(false);
+
+    turboSubmit("end", { success: true, formSubmission: endToken });
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+    edit("new unsaved value");
+    turboSubmit("end", { success: true, formSubmission: endToken });
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    expect(beforeVisit().defaultPrevented).toBe(true);
+  });
+
+  it("keeps post-submit edits dirty after a synthetic success", async () => {
+    await mount('<input name="title" value="a">');
+    edit("submitted value");
+    submit();
+    form().dispatchEvent(new Event("formdata"));
+    turboSubmit("start", null);
+    edit("new unsaved value");
+
+    turboSubmit("end", { success: true });
+
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    edit("submitted value");
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+  });
+
+  it("lets a synthetic start supersede a real submission", async () => {
+    setConfirm(false);
+    await mount('<input name="title" value="a">');
+    edit("real submission");
+    const formSubmission = {};
+    submitStart(formSubmission);
+    edit("synthetic submission");
+    turboSubmit("start", {});
+
+    submitEnd(true, formSubmission);
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    expect(beforeVisit().defaultPrevented).toBe(false);
+
+    turboSubmit("end", { success: true });
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+    edit("real submission");
+    expect(form().getAttribute("data-dirty")).toBe("true");
+  });
+
+  it("lets a real start supersede a synthetic submission", async () => {
+    setConfirm(false);
+    await mount('<input name="title" value="a">');
+    edit("synthetic submission");
+    turboSubmit("start", {});
+    edit("real submission");
+    const formSubmission = {};
+    submitStart(formSubmission);
+
+    turboSubmit("end", { success: true });
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    expect(beforeVisit().defaultPrevented).toBe(false);
+
+    submitEnd(true, formSubmission);
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+  });
+
+  it("ignores a start from a nested form", async () => {
+    await mount('<input name="title" value="a">');
+    edit("submitted value");
+    const formSubmission = {};
+    submitStart(formSubmission);
+    edit("new unsaved value");
+    const nested = document.createElement("form");
+    form().append(nested);
+
+    turboSubmit("start", { formSubmission }, nested);
+    submitEnd(true, formSubmission);
+
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    edit("submitted value");
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+  });
+
+  it("ignores a start from a control inside a nested form", async () => {
+    await mount('<input name="title" value="a">');
+    edit("submitted value");
+    const formSubmission = {};
+    submitStart(formSubmission);
+    edit("new unsaved value");
+    const nested = document.createElement("form");
+    const control = document.createElement("button");
+    nested.append(control);
+    form().append(nested);
+
+    turboSubmit("start", { formSubmission }, control);
+    submitEnd(true, formSubmission);
+
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    edit("submitted value");
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+  });
+
+  it.each([
+    ["field", "input[name='title']"],
+    ["button", "form > button"],
+    ["fieldset button", "fieldset button"],
+  ])("follows a lifecycle pair dispatched on a %s inside the form", async (_source, selector) => {
+    await mount(
+      '<input name="title" value="a"><button type="submit">Save</button>' +
+        '<fieldset><button type="submit">Send</button></fieldset>',
+    );
+    const target = query(selector);
+    edit("submitted value");
+    const formSubmission = {};
+    turboSubmit("start", { formSubmission }, target);
+
+    // An end from the form itself is another source, so it must not pair.
+    turboSubmit("end", { success: true, formSubmission }, form());
+    expect(form().getAttribute("data-dirty")).toBe("true");
+
+    edit("new unsaved value");
+    turboSubmit("end", { success: true, formSubmission }, target);
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    edit("submitted value");
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+  });
+
+  it.each(["child", "form"])("ignores an end from a descendant %s", async (source) => {
+    setConfirm(false);
+    await mount('<input name="title" value="a">');
+    edit("submitted value");
+    const formSubmission = {};
+    submitStart(formSubmission);
+    const target = source === "child" ? field() : document.createElement("form");
+    if (source === "form") form().append(target);
+
+    turboSubmit("end", { success: true, formSubmission }, target);
+
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    expect(beforeVisit().defaultPrevented).toBe(false);
+    submitEnd(true, formSubmission);
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+  });
+
+  it("drops the previous ownership at disconnect before reconnect", async () => {
+    setConfirm(false);
+    await mount('<input name="title" value="a">');
+    edit("submitted value");
+    const formSubmission = {};
+    submitStart(formSubmission);
+    const controller = instance();
+    controller.disconnect();
+    controller.connect();
+    edit("new unsaved value");
+
+    submitEnd(true, formSubmission);
+    turboSubmit("end", { success: true });
+
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    expect(beforeVisit().defaultPrevented).toBe(true);
+    edit("submitted value");
+    expect(form().hasAttribute("data-dirty")).toBe(false);
+  });
+
+  it("keeps a new native submit attempt suppressed when an abandoned terminal arrives", async () => {
+    setConfirm(false);
+    await mount('<input name="title" value="a">');
+    edit("earlier submitted value");
+    const abandoned = {};
+    submitStart(abandoned);
+    const controller = instance();
+    controller.disconnect();
+    controller.connect();
+    edit("new submitted value");
+    submit();
+    expect(beforeVisit().defaultPrevented).toBe(false);
+
+    submitEnd(true, abandoned);
+
+    expect(form().getAttribute("data-dirty")).toBe("true");
+    expect(beforeVisit().defaultPrevented).toBe(false);
+    const current = {};
+    submitStart(current);
+    submitEnd(true, current);
+    expect(form().hasAttribute("data-dirty")).toBe(false);
   });
 
   it("captures the revision Turbo turns into FormData after submit consumers run", async () => {
@@ -491,22 +746,42 @@ describe("DirtyFormController", () => {
 
   it("unwires beforeunload once the form is clean again", async () => {
     await mount('<input name="title" value="a">');
-    const additions = vi.spyOn(window, "addEventListener");
-    const removals = vi.spyOn(window, "removeEventListener");
-    edit("b");
-    const guards = additions.mock.calls
-      .filter(([type]) => type === "beforeunload")
-      .map(([, listener]) => listener);
-    expect(guards.length).toBeGreaterThan(0);
+    const ledger = recordListeners();
+    try {
+      edit("b");
+      expect(ledger.live(window, "beforeunload")).toHaveLength(1);
 
-    edit("a");
+      edit("a");
 
-    for (const guard of guards) expect(removals).toHaveBeenCalledWith("beforeunload", guard);
+      expect(ledger.live(window, "beforeunload")).toHaveLength(0);
+    } finally {
+      ledger.restore();
+    }
   });
 
-  it("clears dirty on a successful turbo:submit-end", async () => {
+  it("leaves the visit coordinator after connecting twice without a disconnect", async () => {
+    const ledger = recordListeners();
+    try {
+      await mount('<input name="title" value="a">');
+      const instance = application.getControllerForElementAndIdentifier(
+        form(),
+        "stimeo--dirty-form",
+      ) as DirtyFormController;
+      instance.connect();
+      expect(ledger.live(document, "turbo:before-visit")).toHaveLength(1);
+
+      instance.disconnect();
+
+      expect(ledger.live(document, "turbo:before-visit")).toEqual([]);
+    } finally {
+      ledger.restore();
+    }
+  });
+
+  it("clears dirty on a successful synthetic submit-start and submit-end pair", async () => {
     await mount('<input name="title" value="a">');
     edit("b");
+    form().dispatchEvent(new CustomEvent("turbo:submit-start"));
     form().dispatchEvent(new CustomEvent("turbo:submit-end", { detail: { success: true } }));
     expect(form().hasAttribute("data-dirty")).toBe(false);
   });
@@ -751,7 +1026,7 @@ describe("DirtyFormController", () => {
       expect(confirmMock).not.toHaveBeenCalled();
     });
 
-    it("suppresses native confirmation when any form delegates to a Confirm Bridge", async () => {
+    it("suppresses native confirmation when any form sets confirmBridge", async () => {
       const confirmMock = setConfirm(true);
       await mountSeveral(markup("", 'data-stimeo--dirty-form-confirm-bridge-value="true"'));
       dirtyBoth();
@@ -884,10 +1159,11 @@ describe("DirtyFormController", () => {
     controller.disconnect();
 
     // A submission the controller no longer follows must not re-baseline it.
-    submitStart();
+    const formSubmission = {};
+    submitStart(formSubmission);
     form().dispatchEvent(new Event("formdata"));
     submit();
-    submitEnd(true);
+    submitEnd(true, formSubmission);
     expect(form().getAttribute("data-dirty")).toBe("true");
 
     // Nor may a later edit write the hook back once the state was cleared.

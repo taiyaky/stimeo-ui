@@ -1,21 +1,24 @@
 /**
  * Pins {@link WeakRef} to a strong reference for the duration of the test process.
  *
- * happy-dom holds each MutationObserver's callback through a `WeakRef` and, when it
- * dispatches mutations, only delivers them while `callback.deref()` is still live
- * (its Node mutation path bails out otherwise). Nothing else strongly references
- * that callback, so under GC pressure — which the parallel, istanbul-instrumented
- * coverage run produces in abundance — the `WeakRef` is reclaimed and mutation
- * records are silently dropped. Every test that depends on a MutationObserver then
- * flakes: Stimulus's disconnect-on-removal never fires (leaking window/document
- * guards, timers, and the controllers' own observers), and controllers that watch
- * the DOM for dynamic inserts miss them. The drop is non-recoverable, so extra
- * flushing cannot recover it — only deterministic delivery can.
+ * happy-dom registers a MutationObserver on every node it watches as a `WeakRef` to the
+ * observer's internal listener callback, and the node passes a mutation on only while
+ * `callback.deref()` returns that callback (it drops the registration otherwise). In
+ * happy-dom 20.14.6 the callback stays strongly reachable for as long as the observer
+ * observes: the window lists every observing MutationObserver until its `disconnect()`,
+ * the observer holds its listeners, and each listener holds its callback. A collection
+ * therefore does not drop the records of an observer that is still observing, whether
+ * or not a test or a Stimulus application keeps a reference to it, and delivery does
+ * not need this file. With the swap, `deref()` always returns the callback, so delivery
+ * does not depend on the collector. The swap reaches every `WeakRef` happy-dom creates
+ * once this file has run, so its selector-query and computed-style caches hold their
+ * results strongly as well.
  *
- * Neither `src/` nor the tests use `WeakRef`, so swapping it for a strong-holding
- * shim is side-effect free here and simply makes MutationObserver delivery
- * deterministic. Test processes are short-lived and each file tears its observers
- * down, so the strong refs are reclaimed at process exit rather than accumulating.
+ * `src/` does not use `WeakRef`. A test that needs a collectable reference takes the
+ * native constructor from a fresh `node:vm` context or runs in a separate process, so
+ * swapping the global for a strong-holding shim leaves both alone. Test processes are
+ * short-lived and each file tears its observers down, so the strong refs are reclaimed
+ * at process exit rather than accumulating.
  */
 class StrongRef<T extends object> {
   readonly #value: T;

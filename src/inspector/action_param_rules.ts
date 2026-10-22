@@ -15,9 +15,10 @@ import type { ActionParamRules } from "./types";
  * required would report working markup.
  *
  * `allowedValues` is for a reader that accepts a fixed set, `numeric` for one
- * that takes a finite number, and `integer` for one that takes a whole number. Declaring either also names the values that are
- * silently normalized away, which is the other shape of the same defect: the author
- * wrote something, the widget did something else, and nothing said so.
+ * that takes a finite number, and `integer` for one that takes a whole number.
+ * Declaring any of them also names the values that are silently normalized away,
+ * which is the other shape of the same defect: the author wrote something, the
+ * widget did something else, and nothing said so.
  */
 export const actionParamRules: ActionParamRules = {
   // The direction decides which way the page scrolls and is read nowhere else:

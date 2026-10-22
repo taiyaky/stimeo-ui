@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MultiSelectController } from "../src/controllers/multi_select_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { composeDraft } from "./helpers/ime";
+import { keyEvent, press as pressKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
@@ -138,15 +140,36 @@ describe("MultiSelectController", () => {
       ),
     );
   const selected = () => options().map((o) => o.getAttribute("aria-selected"));
+
+  it("retains a chip name without rewriting it when a morph keeps its label", async () => {
+    await mountFields("", "apple");
+    const button = buttons()[0];
+    if (!button) throw new Error("Missing chip button");
+    expect(button.getAttribute("aria-label")).toBe("Remove Apple");
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((batch) => records.push(...batch));
+    observer.observe(button, { attributes: true, attributeFilter: ["aria-label"] });
+    try {
+      root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await tick();
+      records.push(...observer.takeRecords());
+      expect(records).toHaveLength(0);
+      expect(buttons()[0]).toBe(button);
+
+      const option = document.getElementById("ms2-apple");
+      if (!option) throw new Error("Missing selected option");
+      option.textContent = "Green Apple";
+      root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await tick();
+      records.push(...observer.takeRecords());
+      expect(button.getAttribute("aria-label")).toBe("Remove Green Apple");
+      expect(records).toHaveLength(1);
+      expect(buttons()[0]).toBe(button);
+    } finally {
+      observer.disconnect();
+    }
+  });
   const active = () => input().getAttribute("aria-activedescendant");
-  const key = (k: string) =>
-    input().dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
-  /** Dispatches a cancelable keydown on the input and returns it. */
-  const press = (k: string) => {
-    const event = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true });
-    input().dispatchEvent(event);
-    return event;
-  };
   const filterTo = (value: string) => {
     input().value = value;
     input().dispatchEvent(new Event("input", { bubbles: true }));
@@ -436,7 +459,7 @@ describe("MultiSelectController", () => {
     }
   });
 
-  it("stops pending reports after a replacement from a announcement listener", async () => {
+  it("stops pending reports after a replacement from an announcement listener", async () => {
     await mountFields('data-stimeo--multi-select-announce-text-value="{label} added"');
     const seen: string[][] = [];
     root().addEventListener("stimeo--multi-select:change", (event) =>
@@ -501,58 +524,116 @@ describe("MultiSelectController", () => {
     expect(seen).toEqual([]);
   });
 
-  it("reverses the horizontal arrows under RTL, in the input and across the chips", async () => {
-    // Logical direction: the chips are an ordered row, so which one is "next"
-    // follows the writing direction — and the input sits at the row's logical end,
-    // so the key that reaches back into the chips reverses too. `dir="rtl"` is the
-    // authoring contract, but happy-dom does not resolve it into the computed
-    // style, so the direction is set on the style directly. Both handlers read the
-    // same element on purpose: probing the focused child would let the input and
-    // the chips disagree at the boundary between them.
+  it.each([
+    ["rtl", "ltr", "ArrowRight", "ArrowLeft"],
+    ["ltr", "rtl", "ArrowLeft", "ArrowRight"],
+  ])(
+    "uses the %s tags row when the root and focused controls are %s",
+    async (direction, opposite, previous, next) => {
+      await mount();
+      options()[0]?.click();
+      options()[1]?.click();
+      const row = root().querySelector<HTMLElement>(
+        "[data-stimeo--multi-select-target='tags']",
+      ) as HTMLElement;
+      row.style.direction = direction;
+      root().style.direction = opposite;
+      input().style.direction = opposite;
+      for (const button of buttons()) button.style.direction = opposite;
+      expect(buttons()).toHaveLength(2);
+
+      input().value = "editing";
+      expect(pressKey(input(), previous).defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(input());
+      input().value = "";
+      expect(pressKey(input(), next).defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(input());
+      expect(pressKey(input(), previous).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(buttons()[1]);
+      expect(buttons().map((button) => button.tabIndex)).toEqual([-1, 0]);
+
+      expect(pressKey(buttons()[1] as HTMLElement, previous).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(buttons()[0]);
+      expect(pressKey(buttons()[0] as HTMLElement, previous).defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(buttons()[0]);
+      expect(pressKey(buttons()[0] as HTMLElement, next).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(buttons()[1]);
+      expect(pressKey(buttons()[1] as HTMLElement, next).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(input());
+    },
+  );
+
+  it("reads live tags direction for both chip keys and the empty-input boundary", async () => {
     await mount();
-    const root = document.querySelector("[data-controller='stimeo--multi-select']") as HTMLElement;
-    root.style.direction = "rtl";
-    filterTo("");
-    key("ArrowDown");
     options()[0]?.click();
     options()[1]?.click();
+    const row = root().querySelector<HTMLElement>(
+      "[data-stimeo--multi-select-target='tags']",
+    ) as HTMLElement;
+    row.style.direction = "ltr";
+    root().style.direction = "ltr";
     input().value = "";
-    expect(buttons().length).toBe(2);
 
-    key("ArrowRight"); // reaches back into the chips under RTL
+    pressKey(input(), "ArrowLeft");
     expect(document.activeElement).toBe(buttons()[1]);
-
-    buttons()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    expect(document.activeElement).toBe(buttons()[0]); // "previous chip"
-
-    buttons()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    expect(document.activeElement).toBe(buttons()[0]); // guarded at the first chip
+    row.style.direction = "rtl";
+    pressKey(buttons()[1] as HTMLElement, "ArrowRight");
+    expect(document.activeElement).toBe(buttons()[0]);
+    pressKey(buttons()[1] as HTMLElement, "ArrowLeft");
+    expect(document.activeElement).toBe(input());
+    pressKey(input(), "ArrowRight");
+    expect(document.activeElement).toBe(buttons()[1]);
   });
 
-  it("reads the direction from the widget, not from the focused input", async () => {
-    // The rule this pins: both handlers read the same element, so an input carrying
-    // its own `dir` cannot make the two disagree. That shape is ordinary authoring —
-    // an LTR field inside an RTL form — and it is the only one that tells
-    // `isRtl(this.element)` apart from `isRtl(event.target)`: an inline `direction`
-    // on the root otherwise inherits to every child, so both answer the same and the
-    // rule goes unpinned.
+  it("reads the replacement tags target's direction at the next input or chip operation", async () => {
     await mount();
-    const root = document.querySelector("[data-controller='stimeo--multi-select']") as HTMLElement;
-    root.style.direction = "rtl";
-    input().style.direction = "ltr"; // the input disagrees with its container
-    filterTo("");
-    key("ArrowDown");
     options()[0]?.click();
+    options()[1]?.click();
+    const old = root().querySelector<HTMLElement>(
+      "[data-stimeo--multi-select-target='tags']",
+    ) as HTMLElement;
+    old.style.direction = "ltr";
+    const replacement = old.cloneNode(true) as HTMLElement;
+    replacement.style.direction = "rtl";
+    old.replaceWith(replacement);
     input().value = "";
-    expect(buttons().length).toBe(1);
 
-    key("ArrowRight"); // still reaches the chips: the widget decides, not the input
+    pressKey(input(), "ArrowRight");
+    expect(document.activeElement).toBe(buttons()[1]);
+    const instance = controller();
+    instance.tagsTargetConnected(replacement);
+    instance.tagsTargetDisconnected(old);
+    await tick();
+
+    pressKey(buttons()[1] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(buttons()[0]);
+    pressKey(buttons()[1] as HTMLElement, "ArrowLeft");
+    expect(document.activeElement).toBe(input());
+  });
+
+  it("uses the root direction for the empty-input boundary while the tags target is absent", async () => {
+    await mount();
+    options()[0]?.click();
+    options()[1]?.click();
+    const row = root().querySelector<HTMLElement>(
+      "[data-stimeo--multi-select-target='tags']",
+    ) as HTMLElement;
+    row.style.direction = "ltr";
+    root().style.direction = "rtl";
+    input().style.direction = "ltr";
+    row.removeAttribute("data-stimeo--multi-select-target");
+    input().value = "";
+
+    expect(pressKey(input(), "ArrowRight").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(row.querySelectorAll("button")[1]);
   });
 
   it("follows the active option by scrolling the LIST only", async () => {
     await mount();
-    key("ArrowDown"); // open + first option active
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
+    pressKey(input(), "ArrowDown"); // open + first option active
     // happy-dom has no layout: the rect/size INPUTS of the scroll math are
     // modeled here as an 80px viewport over the options.
     Object.defineProperties(list(), {
@@ -562,9 +643,9 @@ describe("MultiSelectController", () => {
     vi.spyOn(list(), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 100, 80));
     const third = options()[2] as HTMLElement;
     vi.spyOn(third, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 100, 100, 40));
-    key("ArrowDown"); // second (zero-rect mock -> visible, no scroll)
+    pressKey(input(), "ArrowDown"); // second (zero-rect mock -> visible, no scroll)
     expect(list().scrollTop).toBe(0);
-    key("ArrowDown"); // third: bottom 140 > list bottom 80 -> +60
+    pressKey(input(), "ArrowDown"); // third: bottom 140 > list bottom 80 -> +60
     expect(list().scrollTop).toBe(60);
   });
 
@@ -612,24 +693,30 @@ describe("MultiSelectController", () => {
 
   it("opens and moves the active option with arrows (wrapping)", async () => {
     await mount();
-    key("ArrowDown"); // open, active apple
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
+    pressKey(input(), "ArrowDown"); // open, active apple
     expect(active()).toBe("ms-apple");
-    key("ArrowDown");
+    pressKey(input(), "ArrowDown");
     expect(active()).toBe("ms-banana");
-    key("ArrowUp");
+    pressKey(input(), "ArrowUp");
     expect(active()).toBe("ms-apple");
-    key("ArrowUp"); // wrap to last
+    pressKey(input(), "ArrowUp"); // wrap to last
     expect(active()).toBe("ms-cherry");
-    key("Home");
+    pressKey(input(), "Home");
     expect(active()).toBe("ms-apple");
-    key("End");
+    pressKey(input(), "End");
     expect(active()).toBe("ms-cherry");
   });
 
   it("opens a closed list on ArrowUp and consumes the press", async () => {
     await mount();
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
 
-    expect(press("ArrowUp").defaultPrevented).toBe(true);
+    expect(pressKey(input(), "ArrowUp").defaultPrevented).toBe(true);
 
     expect(list().hidden).toBe(false);
     expect(input().getAttribute("aria-expanded")).toBe("true");
@@ -641,41 +728,51 @@ describe("MultiSelectController", () => {
   // reach the shared Escape resolver and close an enclosing dialog.
   it("consumes the ArrowDown, Home, End, Enter and Escape it acts on", async () => {
     await mount();
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
 
-    expect(press("ArrowDown").defaultPrevented).toBe(true); // opens
-    expect(press("ArrowDown").defaultPrevented).toBe(true); // moves
+    expect(pressKey(input(), "ArrowDown").defaultPrevented).toBe(true); // opens
+    expect(pressKey(input(), "ArrowDown").defaultPrevented).toBe(true); // moves
     expect(active()).toBe("ms-banana");
-    expect(press("End").defaultPrevented).toBe(true);
+    expect(pressKey(input(), "End").defaultPrevented).toBe(true);
     expect(active()).toBe("ms-cherry");
-    expect(press("Home").defaultPrevented).toBe(true);
+    expect(pressKey(input(), "Home").defaultPrevented).toBe(true);
     expect(active()).toBe("ms-apple");
-    expect(press("Enter").defaultPrevented).toBe(true);
+    expect(pressKey(input(), "Enter").defaultPrevented).toBe(true);
     expect(selected()).toEqual(["true", "false", "false"]);
-    expect(press("Escape").defaultPrevented).toBe(true);
+    expect(pressKey(input(), "Escape").defaultPrevented).toBe(true);
     expect(list().hidden).toBe(true);
   });
 
   it("chooses the directional edge when an open list has no active option", async () => {
     await mount();
+    // Focusing opens the list; close it so the lines below can open it by hand with no
+    // active option.
+    input().focus();
+    controller().close();
 
     list().hidden = false;
     input().setAttribute("aria-expanded", "true");
-    key("ArrowUp");
+    pressKey(input(), "ArrowUp");
     expect(active()).toBe("ms-cherry");
 
     controller().close();
     list().hidden = false;
     input().setAttribute("aria-expanded", "true");
-    key("ArrowDown");
+    pressKey(input(), "ArrowDown");
     expect(active()).toBe("ms-apple");
   });
 
   it("does not rewrite virtual-focus attributes for an unrelated key with no active option", async () => {
     await mount();
+    // Focus is established before measuring the unrelated key's attribute writes.
+    input().focus();
+    controller().close();
     const toggle = vi.spyOn(options()[0] as HTMLElement, "toggleAttribute");
     const remove = vi.spyOn(input(), "removeAttribute");
 
-    key("a");
+    pressKey(input(), "a");
 
     expect(toggle).not.toHaveBeenCalled();
     expect(remove).not.toHaveBeenCalledWith("aria-activedescendant");
@@ -683,18 +780,21 @@ describe("MultiSelectController", () => {
 
   it("toggles selection with Enter and keeps the list open, adding a chip", async () => {
     await mount();
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
     const changes: string[][] = [];
     root().addEventListener("stimeo--multi-select:change", (event) => {
       changes.push((event as CustomEvent).detail.values);
     });
-    key("ArrowDown"); // active apple
-    key("Enter"); // select apple
+    pressKey(input(), "ArrowDown"); // active apple
+    pressKey(input(), "Enter"); // select apple
     expect(selected()).toEqual(["true", "false", "false"]);
     expect(list().hidden).toBe(false);
     expect(tags().map((t) => t.dataset.value)).toEqual(["apple"]);
     expect(buttons()[0]?.getAttribute("aria-label")).toBe("Remove Apple");
     expect(buttons().map((button) => button.tabIndex)).toEqual([0]);
-    key("Enter"); // toggle apple off
+    pressKey(input(), "Enter"); // toggle apple off
     expect(selected()).toEqual(["false", "false", "false"]);
     expect(tags()).toHaveLength(0);
     expect(changes).toEqual([["apple"], []]);
@@ -744,16 +844,17 @@ describe("MultiSelectController", () => {
 
   it("honors the standard per-event IME signal", async () => {
     await mount();
-    key("ArrowDown"); // open, active apple
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
+    pressKey(input(), "ArrowDown"); // open, active apple
     // The Enter confirming an IME candidate carries isComposing=true: it must
     // not toggle the active option.
-    input().dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }),
-    );
+    pressKey(input(), "Enter", { isComposing: true });
     expect(selected()).toEqual(["false", "false", "false"]);
     expect(tags()).toHaveLength(0);
     // A real Enter still selects.
-    key("Enter");
+    pressKey(input(), "Enter");
     expect(selected()).toEqual(["true", "false", "false"]);
   });
 
@@ -766,9 +867,8 @@ describe("MultiSelectController", () => {
     });
 
     input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    input().value = "ch";
-    input().dispatchEvent(new InputEvent("input", { bubbles: true }));
-    key("Enter");
+    composeDraft(input(), "ch");
+    pressKey(input(), "Enter");
 
     expect(selected()).toEqual(["false", "false", "false"]);
     expect(options().map((option) => option.hidden)).toEqual([false, false, true]);
@@ -780,7 +880,7 @@ describe("MultiSelectController", () => {
     expect(active()).toBe("ms-cherry");
     expect(queries).toEqual(["ch"]);
 
-    key("Enter");
+    pressKey(input(), "Enter");
     expect(selected()).toEqual(["false", "false", "true"]);
   });
 
@@ -795,8 +895,7 @@ describe("MultiSelectController", () => {
     });
 
     input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    input().value = "ch";
-    input().dispatchEvent(new InputEvent("input", { bubbles: true }));
+    composeDraft(input(), "ch");
     input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
 
     input().value = "che";
@@ -807,14 +906,24 @@ describe("MultiSelectController", () => {
 
   it("clears composition state across disconnect and reconnect", async () => {
     await mount();
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
     input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
 
+    // Moving the controller element without moveBefore takes focus from the field; in
+    // Chromium the move ends the conversion with no compositionend. The controller disconnects
+    // and connects again.
+    const part = controller().element;
+    part.parentElement?.append(part);
     controller().disconnect();
     controller().connect();
-    key("ArrowDown");
+    input().focus();
+    controller().close();
+    pressKey(input(), "ArrowDown");
 
     expect(active()).toBe("ms-apple");
-    key("Enter");
+    pressKey(input(), "Enter");
     expect(selected()).toEqual(["true", "false", "false"]);
   });
 
@@ -827,7 +936,7 @@ describe("MultiSelectController", () => {
     controller().inputTargetDisconnected(original);
     controller().inputTargetConnected(replacement);
 
-    controller().onKeydown(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    controller().onKeydown(keyEvent("ArrowDown"));
 
     expect(list().hidden).toBe(false);
     expect(replacement.getAttribute("aria-expanded")).toBe("true");
@@ -884,13 +993,7 @@ describe("MultiSelectController", () => {
     expect(buttons().length).toBe(2);
     buttons()[0]?.focus();
 
-    const chord = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    buttons()[0]?.dispatchEvent(chord);
+    const chord = pressKey(buttons()[0] as HTMLElement, "ArrowRight", { altKey: true });
 
     expect(chord.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(buttons()[0]);
@@ -900,26 +1003,26 @@ describe("MultiSelectController", () => {
     // Chips render from the consumer's template, so an arbitrary widget can live
     // inside one. A key it claimed must not ALSO move the chip focus.
     await mount();
-    key("ArrowDown"); // open + active first
-    key("Enter");
-    key("ArrowDown");
-    key("Enter");
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
+    pressKey(input(), "ArrowDown"); // open + active first
+    pressKey(input(), "Enter");
+    pressKey(input(), "ArrowDown");
+    pressKey(input(), "Enter");
     input().value = "";
     expect(buttons().length).toBe(2);
+    /** A generic descendant claims the key without native-control semantics. */
     const inner = document.createElement("span");
+    inner.tabIndex = -1;
     buttons()[0]?.append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
     buttons()[0]?.focus();
 
-    const claimed = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    const notCanceled = inner.dispatchEvent(claimed);
+    const claimed = pressKey(inner, "ArrowRight");
 
-    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
-    expect(document.activeElement).toBe(buttons()[0]);
+    expect(claimed.defaultPrevented).toBe(true); // the claim really took (a non-cancelable event would not)
+    expect(document.activeElement).toBe(inner);
   });
 
   it("leaves a modified arrow to the browser at the input", async () => {
@@ -927,14 +1030,11 @@ describe("MultiSelectController", () => {
     // widget's binding), so the press must be left alone: the list must not open
     // and no option may become active.
     await mount();
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
 
-    const chord = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    input().dispatchEvent(chord);
+    const chord = pressKey(input(), "ArrowDown", { altKey: true });
 
     expect(chord.defaultPrevented).toBe(false);
     expect(list().hidden).toBe(true);
@@ -945,17 +1045,15 @@ describe("MultiSelectController", () => {
     // The claim comes from a capture-phase handler because the binding is on the
     // INPUT, which has no children.
     await mount();
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
     const root = document.querySelector("[data-controller='stimeo--multi-select']") as HTMLElement;
     root.addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
 
-    const claimed = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      bubbles: true,
-      cancelable: true,
-    });
-    const notCanceled = input().dispatchEvent(claimed);
+    const claimed = pressKey(input(), "ArrowDown");
 
-    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(claimed.defaultPrevented).toBe(true); // the claim really took (a non-cancelable event would not)
     expect(list().hidden).toBe(true);
     expect(active()).toBe(null);
   });
@@ -1286,7 +1384,7 @@ describe("MultiSelectController", () => {
 
     controller().disconnect();
     remove.click();
-    remove.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+    pressKey(remove, "Delete");
 
     expect(options()[0]?.getAttribute("aria-selected")).toBe("true");
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
@@ -1336,12 +1434,7 @@ describe("MultiSelectController", () => {
     options()[0]?.click();
 
     clear.click();
-    const keydown = new KeyboardEvent("keydown", {
-      key: "Delete",
-      bubbles: true,
-      cancelable: true,
-    });
-    clear.dispatchEvent(keydown);
+    const keydown = pressKey(clear, "Delete");
 
     expect(keydown.defaultPrevented).toBe(false);
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
@@ -1354,7 +1447,7 @@ describe("MultiSelectController", () => {
     options()[1]?.click();
     input().value = "";
     input().focus();
-    key("Backspace");
+    pressKey(input(), "Backspace");
     expect(selected()).toEqual(["true", "false", "false"]);
     expect(tags().map((t) => t.dataset.value)).toEqual(["apple"]);
     expect(document.activeElement).toBe(input());
@@ -1366,9 +1459,9 @@ describe("MultiSelectController", () => {
     options()[1]?.click();
     input().value = "";
 
-    expect(press("Backspace").defaultPrevented).toBe(true);
+    expect(pressKey(input(), "Backspace").defaultPrevented).toBe(true);
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
-    expect(press("ArrowLeft").defaultPrevented).toBe(true);
+    expect(pressKey(input(), "ArrowLeft").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(buttons()[0]);
   });
 
@@ -1377,12 +1470,12 @@ describe("MultiSelectController", () => {
     options()[0]?.click();
     options()[1]?.click();
     input().value = "";
-    key("ArrowLeft"); // the last chip takes the tab stop
-    buttons()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    pressKey(input(), "ArrowLeft"); // the last chip takes the tab stop
+    pressKey(buttons()[1] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(input());
     expect(buttons().map((button) => button.tabIndex)).toEqual([-1, 0]);
 
-    key("Backspace");
+    pressKey(input(), "Backspace");
 
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
     expect(buttons().map((button) => button.tabIndex)).toEqual([0]);
@@ -1396,7 +1489,7 @@ describe("MultiSelectController", () => {
     input().value = "";
     input().focus();
 
-    key("Backspace");
+    pressKey(input(), "Backspace");
 
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
     expect(document.activeElement).toBe(input());
@@ -1425,7 +1518,7 @@ describe("MultiSelectController", () => {
     const button = buttons()[0] as HTMLButtonElement;
     button.focus();
 
-    button.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+    pressKey(button as HTMLElement, "Delete");
 
     expect(tags()).toEqual([]);
     expect(document.activeElement).toBe(input());
@@ -1706,20 +1799,23 @@ describe("MultiSelectController", () => {
     options()[0]?.click();
     options()[1]?.click();
     input().value = "";
-    key("ArrowLeft"); // focus last chip
+    pressKey(input(), "ArrowLeft"); // focus last chip
     expect(document.activeElement).toBe(buttons()[1]);
-    buttons()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    pressKey(buttons()[1] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(input());
   });
 
   it("closes on Escape and on outside click", async () => {
     await mount();
-    key("ArrowDown");
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
+    pressKey(input(), "ArrowDown");
     expect(list().hidden).toBe(false);
-    key("Escape");
+    pressKey(input(), "Escape");
     expect(list().hidden).toBe(true);
     expect(input().getAttribute("aria-expanded")).toBe("false");
-    key("ArrowDown");
+    pressKey(input(), "ArrowDown");
     document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(list().hidden).toBe(true);
     expect(input().getAttribute("aria-expanded")).toBe("false");
@@ -1740,7 +1836,7 @@ describe("MultiSelectController", () => {
     const lists = Array.from(
       document.querySelectorAll<HTMLElement>("[data-stimeo--multi-select-target='list']"),
     );
-    inputs[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(inputs[0] as HTMLElement, "ArrowDown");
     expect(lists[0]?.hidden).toBe(false);
 
     inputs[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1757,7 +1853,10 @@ describe("MultiSelectController", () => {
     // what was an *inside* click. On capture the document observes it first, against
     // the tree the user actually clicked.
     await mount();
-    key("ArrowDown");
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
+    pressKey(input(), "ArrowDown");
     expect(list().hidden).toBe(false);
     const item = document.createElement("button");
     list().append(item);
@@ -1770,39 +1869,50 @@ describe("MultiSelectController", () => {
 
   it("leaves Escape unconsumed while the list is closed", async () => {
     await mount();
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
     // With nothing to close the widget owns no dismissable state, so the press
     // stays free for the shared Escape resolver (an enclosing dialog etc.).
     expect(list().hidden).toBe(true);
-    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    input().dispatchEvent(event);
+    const event = pressKey(input(), "Escape");
     expect(event.defaultPrevented).toBe(false);
   });
 
   it("removes aria-activedescendant when closed", async () => {
     await mount();
-    key("ArrowDown");
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
+    pressKey(input(), "ArrowDown");
     expect(input().hasAttribute("aria-activedescendant")).toBe(true);
-    key("Escape");
+    pressKey(input(), "Escape");
     expect(input().hasAttribute("aria-activedescendant")).toBe(false);
   });
 
   it("releases the outside-click listener on disconnect", async () => {
     await mount();
-    key("ArrowDown");
-    const controller = application.getControllerForElementAndIdentifier(
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
+    pressKey(input(), "ArrowDown");
+    const instance = application.getControllerForElementAndIdentifier(
       root(),
       "stimeo--multi-select",
     );
-    controller?.disconnect();
+    instance?.disconnect();
     document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(list().hidden).toBe(false); // a surviving listener would have closed it
   });
 
   it("has no machine-detectable a11y violations (closed, open, selected)", async () => {
     await mount();
+    // Focusing opens the list; close it so the key reaches the closed-state handler.
+    input().focus();
+    controller().close();
     await expectNoA11yViolations(root());
-    key("ArrowDown");
-    key("Enter");
+    pressKey(input(), "ArrowDown");
+    pressKey(input(), "Enter");
     await expectNoA11yViolations(root());
   });
 
@@ -1880,22 +1990,108 @@ describe("MultiSelectController", () => {
     ]);
   });
 
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+        key,
+        modifier,
+      })),
+    ),
+  )(
+    "yields modified boundary key $modifier+$key without changing popup or input state",
+    async ({ key, modifier }) => {
+      await mountFields("", "apple");
+      input().focus();
+      pressKey(input(), "ArrowDown");
+      expect(input().getAttribute("aria-activedescendant")).toBe("ms2-banana");
+      input().value = "sample text";
+      input().setSelectionRange(3, 7);
+      const seen: string[] = [];
+      for (const name of [
+        "stimeo--multi-select:change",
+        "stimeo--multi-select:filter",
+        "input",
+        "change",
+      ]) {
+        root().addEventListener(name, () => seen.push(name));
+      }
+      const before = root().innerHTML;
+      const values = fields().map((field) => field.value);
+      const event = pressKey(input(), key, { [modifier]: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(input());
+      expect(root().innerHTML).toBe(before);
+      expect(fields().map((field) => field.value)).toEqual(values);
+      expect(input().value).toBe("sample text");
+      expect(input().selectionStart).toBe(3);
+      expect(input().selectionEnd).toBe(7);
+      expect(input().getAttribute("aria-activedescendant")).toBe("ms2-banana");
+      expect(seen).toEqual([]);
+    },
+  );
+
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+        key,
+        modifier,
+      })),
+    ),
+  )(
+    "yields modified boundary key $modifier+$key before reconciling a replaced active option",
+    async ({ key, modifier }) => {
+      await mountFields("", "apple");
+      input().focus();
+      pressKey(input(), "ArrowDown");
+      expect(input().getAttribute("aria-activedescendant")).toBe("ms2-banana");
+      input().value = "sample text";
+      input().setSelectionRange(3, 7);
+      const active = options()[1];
+      if (!active) throw new Error("Missing active option");
+      const replacement = active.cloneNode(true) as HTMLElement;
+      replacement.removeAttribute("data-active");
+      replacement.setAttribute("aria-selected", "false");
+      active.replaceWith(replacement);
+      const seen: string[] = [];
+      for (const name of [
+        "stimeo--multi-select:change",
+        "stimeo--multi-select:filter",
+        "input",
+        "change",
+      ]) {
+        root().addEventListener(name, () => seen.push(name));
+      }
+      const before = root().innerHTML;
+      const values = fields().map((field) => field.value);
+      const event = pressKey(input(), key, { [modifier]: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(input());
+      expect(root().innerHTML).toBe(before);
+      expect(fields().map((field) => field.value)).toEqual(values);
+      expect(input().value).toBe("sample text");
+      expect(input().selectionStart).toBe(3);
+      expect(input().selectionEnd).toBe(7);
+      expect(input().getAttribute("aria-activedescendant")).toBe("ms2-banana");
+      expect(seen).toEqual([]);
+    },
+  );
+
   it("jumps the active option to the first on Home and the last on End", async () => {
     await mount();
     input().focus();
-    key("ArrowDown"); // open, active first
-    key("End");
+    pressKey(input(), "ArrowDown"); // open, active first
+    pressKey(input(), "End");
     expect(active()).toBe("ms-cherry");
-    key("Home");
+    pressKey(input(), "Home");
     expect(active()).toBe("ms-apple");
   });
 
   it("closes the list on Tab", async () => {
     await mount();
     input().focus();
-    key("ArrowDown");
+    pressKey(input(), "ArrowDown");
     expect(list().hidden).toBe(false);
-    key("Tab");
+    pressKey(input(), "Tab");
     expect(list().hidden).toBe(true);
   });
 
@@ -1908,7 +2104,7 @@ describe("MultiSelectController", () => {
     const lastButton = buttons()[buttons().length - 1];
     lastButton?.focus();
     // Delete on the focused chip button bubbles to the tags-container listener.
-    lastButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+    pressKey(lastButton as HTMLElement, "Delete");
     expect(tags().length).toBe(1);
   });
 
@@ -1919,7 +2115,7 @@ describe("MultiSelectController", () => {
     expect(tags().length).toBe(2);
     const lastButton = buttons()[buttons().length - 1];
     lastButton?.focus();
-    lastButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+    pressKey(lastButton as HTMLElement, "Backspace");
     expect(tags().length).toBe(1);
   });
 
@@ -1937,9 +2133,9 @@ describe("MultiSelectController", () => {
   it("clears the active option when Escape closes the list", async () => {
     await mount();
     input().focus();
-    key("ArrowDown"); // open + move active onto an option
+    pressKey(input(), "ArrowDown"); // open + move active onto an option
     expect(active()).toBeTruthy();
-    key("Escape");
+    pressKey(input(), "Escape");
     expect(list().hidden).toBe(true);
     expect(input().hasAttribute("aria-activedescendant")).toBe(false);
   });
@@ -2023,7 +2219,7 @@ describe("MultiSelectController", () => {
       const button = buttons()[0];
       button?.focus();
 
-      button?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+      pressKey(button as HTMLElement, "Delete");
 
       expect(tags().length).toBe(0);
       expect(options()[0]?.getAttribute("aria-selected")).toBe("false");
@@ -2039,7 +2235,7 @@ describe("MultiSelectController", () => {
       const button = buttons()[0];
       button?.focus();
 
-      button?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+      pressKey(button as HTMLElement, "Delete");
 
       expect(tags().length).toBe(0);
       expect(document.activeElement).toBe(root());
@@ -2068,7 +2264,7 @@ describe("MultiSelectController", () => {
       await mountLate();
       const button = buttons()[0];
       button?.focus();
-      button?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+      pressKey(button as HTMLElement, "Delete");
       expect(root().getAttribute("tabindex")).toBe("-1");
 
       application = await restoreFromCache(application, (restored) =>
@@ -2087,7 +2283,7 @@ describe("MultiSelectController", () => {
       await mountLate();
       const button = buttons()[0];
       button?.focus();
-      button?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+      pressKey(button as HTMLElement, "Delete");
       expect(root().getAttribute("tabindex")).toBe("-1");
 
       disconnectAndStopApplication(application);
@@ -2099,7 +2295,7 @@ describe("MultiSelectController", () => {
       await mountLate();
       const button = buttons()[0];
       button?.focus();
-      button?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+      pressKey(button as HTMLElement, "Delete");
       expect(root().getAttribute("tabindex")).toBe("-1");
 
       document.dispatchEvent(new Event("turbo:before-cache"));
@@ -2118,7 +2314,7 @@ describe("MultiSelectController", () => {
       const button = buttons()[0];
       button?.focus();
 
-      button?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+      pressKey(button as HTMLElement, "Delete");
       expect(document.activeElement).toBe(root());
 
       disconnectAndStopApplication(application);
@@ -2133,7 +2329,7 @@ describe("MultiSelectController", () => {
       await mountLate();
       const button = buttons()[0];
       button?.focus();
-      button?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+      pressKey(button as HTMLElement, "Delete");
       expect(root().getAttribute("tabindex")).toBe("-1");
 
       root().setAttribute("tabindex", "0");
@@ -2151,7 +2347,7 @@ describe("MultiSelectController", () => {
       const button = buttons()[0];
       button?.focus();
 
-      button?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+      pressKey(button as HTMLElement, "Delete");
 
       expect(document.activeElement).toBe(root());
       expect(root().getAttribute("tabindex")).toBe("0");
@@ -2196,7 +2392,7 @@ describe("MultiSelectController", () => {
       const last = buttons()[buttons().length - 1];
       last?.focus();
 
-      last?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      pressKey(last as HTMLElement, "ArrowRight");
 
       expect(document.activeElement).toBe(last);
       expect(tags().length).toBe(2);
@@ -2213,11 +2409,7 @@ describe("MultiSelectController", () => {
 
     it("does not throw from filtering or keyboard actions without an input", async () => {
       await mountLate();
-      const event = new KeyboardEvent("keydown", {
-        key: "ArrowDown",
-        bubbles: true,
-        cancelable: true,
-      });
+      const event = keyEvent("ArrowDown");
 
       expect(() => controller().filter()).not.toThrow();
       expect(() => controller().onKeydown(event)).not.toThrow();
@@ -2231,7 +2423,7 @@ describe("MultiSelectController", () => {
     // two methods, one target over.
     await mount();
     input().focus();
-    key("ArrowDown");
+    pressKey(input(), "ArrowDown");
     list().remove();
 
     expect(() => controller().close()).not.toThrow();
@@ -2246,7 +2438,7 @@ describe("MultiSelectController", () => {
     // *whole* of it would stop the popup closing once the input is removed.
     await mount();
     input().focus();
-    key("ArrowDown");
+    pressKey(input(), "ArrowDown");
     expect(list().hidden).toBe(false);
 
     input().remove();
@@ -2261,7 +2453,7 @@ describe("MultiSelectController", () => {
     // `#activeOption` is what breaks the re-open below.
     await mount();
     input().focus();
-    key("ArrowDown");
+    pressKey(input(), "ArrowDown");
     expect(options().filter((o) => o.hasAttribute("data-active")).length).toBe(1);
 
     input().remove();
@@ -2278,7 +2470,7 @@ describe("MultiSelectController", () => {
     // `data-active`, invisible to assistive technology.
     await mount();
     input().focus();
-    key("ArrowDown");
+    pressKey(input(), "ArrowDown");
     input().remove();
     document.body.click();
 
@@ -2309,7 +2501,7 @@ describe("MultiSelectController", () => {
     // is why the close-then-reopen case above does not cover this.
     await mount();
     input().focus();
-    key("ArrowDown");
+    pressKey(input(), "ArrowDown");
     const activeId = active();
     expect(list().hidden).toBe(false);
     expect(activeId).toBeTruthy();
@@ -2333,8 +2525,8 @@ describe("MultiSelectController", () => {
     // node claiming an active option the widget does not have.
     await mount();
     input().focus();
-    key("ArrowDown");
-    key("Escape");
+    pressKey(input(), "ArrowDown");
+    pressKey(input(), "Escape");
     expect(list().hidden).toBe(true);
 
     const replacement = document.createElement("input");
@@ -2514,10 +2706,10 @@ describe("MultiSelectController", () => {
   });
 
   describe("a list target that is replaced or stays after an earlier one leaves", () => {
-    it("keeps a list swapped in while open open, with its active option", async () => {
+    it("keeps a list swapped in while open, with its active option", async () => {
       await mount();
       input().focus();
-      key("ArrowDown");
+      pressKey(input(), "ArrowDown");
       const activeId = active();
       expect(activeId).toBeTruthy();
       const successor = list().cloneNode(true) as HTMLElement;
@@ -2944,8 +3136,11 @@ describe("MultiSelectController", () => {
 
     it("keeps the surviving active option when an earlier option is removed", async () => {
       await mount();
-      key("ArrowDown"); // Apple
-      key("ArrowDown"); // Banana
+      // Focusing opens the list; close it so the key reaches the closed-state handler.
+      input().focus();
+      controller().close();
+      pressKey(input(), "ArrowDown"); // Apple
+      pressKey(input(), "ArrowDown"); // Banana
       const apple = options()[0] as HTMLElement;
       const banana = options()[1] as HTMLElement;
 
@@ -2958,20 +3153,23 @@ describe("MultiSelectController", () => {
         banana,
       ]);
 
-      key("Enter");
+      pressKey(input(), "Enter");
       expect(tags().map((tag) => tag.dataset.value)).toEqual(["banana"]);
     });
 
     it("does not commit a detached active option and falls back to the first visible target", async () => {
       await mount();
-      key("ArrowDown"); // Apple
-      key("ArrowDown"); // Banana
+      // Focusing opens the list; close it so the key reaches the closed-state handler.
+      input().focus();
+      controller().close();
+      pressKey(input(), "ArrowDown"); // Apple
+      pressKey(input(), "ArrowDown"); // Banana
       const banana = options()[1] as HTMLElement;
 
       banana.removeAttribute("data-stimeo--multi-select-target");
       // Target callbacks run from MutationObserver. Even before that callback, a
       // synchronously dispatched Enter must not commit the no-longer-current node.
-      key("Enter");
+      pressKey(input(), "Enter");
       expect(tags()).toEqual([]);
 
       await tick();
@@ -2985,13 +3183,16 @@ describe("MultiSelectController", () => {
         apple,
       ]);
 
-      key("Enter");
+      pressKey(input(), "Enter");
       expect(tags().map((tag) => tag.dataset.value)).toEqual(["apple"]);
     });
 
     it("ignores a click from an option after its target token is removed", async () => {
       await mount();
-      key("ArrowDown");
+      // Focusing opens the list; close it so the key reaches the closed-state handler.
+      input().focus();
+      controller().close();
+      pressKey(input(), "ArrowDown");
       const removed = options()[0] as HTMLElement;
 
       removed.removeAttribute("data-stimeo--multi-select-target");
@@ -3004,8 +3205,11 @@ describe("MultiSelectController", () => {
 
     it("transfers active state and commit ownership to a same-id replacement", async () => {
       await mount();
-      key("ArrowDown"); // Apple
-      key("ArrowDown"); // Banana
+      // Focusing opens the list; close it so the key reaches the closed-state handler.
+      input().focus();
+      controller().close();
+      pressKey(input(), "ArrowDown"); // Apple
+      pressKey(input(), "ArrowDown"); // Banana
       const previous = options()[1] as HTMLElement;
       const replacement = document.createElement("li");
       replacement.id = previous.id;
@@ -3023,14 +3227,17 @@ describe("MultiSelectController", () => {
       expect(document.getElementById(active() ?? "")).toBe(replacement);
       expect(replacement.hasAttribute("data-active")).toBe(true);
 
-      key("Enter");
+      pressKey(input(), "Enter");
       expect(tags().map((tag) => tag.dataset.value)).toEqual(["blueberry"]);
       expect(replacement.getAttribute("aria-selected")).toBe("true");
     });
 
     it("does not synchronously commit a hidden same-id replacement", async () => {
       await mount();
-      key("ArrowDown"); // Apple
+      // Focusing opens the list; close it so the key reaches the closed-state handler.
+      input().focus();
+      controller().close();
+      pressKey(input(), "ArrowDown"); // Apple
       const previous = options()[0] as HTMLElement;
       const replacement = document.createElement("li");
       replacement.id = previous.id;
@@ -3042,7 +3249,7 @@ describe("MultiSelectController", () => {
       replacement.textContent = "Hidden Apple";
 
       previous.replaceWith(replacement);
-      key("Enter");
+      pressKey(input(), "Enter");
 
       expect(tags()).toEqual([]);
       await tick();
@@ -3055,14 +3262,17 @@ describe("MultiSelectController", () => {
 
     it("never commits a removed node before its target-disconnected callback runs", async () => {
       await mount();
-      key("ArrowDown"); // Apple
-      key("ArrowDown"); // Banana
+      // Focusing opens the list; close it so the key reaches the closed-state handler.
+      input().focus();
+      controller().close();
+      pressKey(input(), "ArrowDown"); // Apple
+      pressKey(input(), "ArrowDown"); // Banana
       const banana = options()[1] as HTMLElement;
 
       banana.remove();
       // Stimulus observes this removal asynchronously. The key path still has to
       // resolve against the current DOM rather than the detached stored node.
-      key("Enter");
+      pressKey(input(), "Enter");
 
       expect(tags()).toEqual([]);
       await tick();
@@ -3074,9 +3284,12 @@ describe("MultiSelectController", () => {
 
     it("clears virtual focus when the last option is removed", async () => {
       await mount();
+      // Focusing opens the list; close it so the key reaches the closed-state handler.
+      input().focus();
+      controller().close();
       for (const candidate of options().slice(1)) candidate.remove();
       await tick();
-      key("ArrowDown");
+      pressKey(input(), "ArrowDown");
       const last = options()[0] as HTMLElement;
       expect(active()).toBe(last.id);
 
@@ -3086,12 +3299,7 @@ describe("MultiSelectController", () => {
       expect(active()).toBeNull();
       expect(last.hasAttribute("data-active")).toBe(false);
       expect(options().some((candidate) => candidate.hasAttribute("data-active"))).toBe(false);
-      const enter = new KeyboardEvent("keydown", {
-        key: "Enter",
-        bubbles: true,
-        cancelable: true,
-      });
-      input().dispatchEvent(enter);
+      const enter = pressKey(input(), "Enter");
       expect(enter.defaultPrevented).toBe(false);
       expect(tags()).toEqual([]);
     });
@@ -3099,8 +3307,9 @@ describe("MultiSelectController", () => {
 
   describe("the authored option baseline", () => {
     it("gives every option an explicit value without dropping any selection", async () => {
-      // Absent means "not selectable" in ARIA. Several `true` is normal here, so
-      // only the missing ones are filled.
+      // APG has every selectable but unselected option carry `aria-selected="false"`;
+      // the controller writes it rather than relying on the role's implicit default.
+      // Several `true` is normal here, so only the missing ones are filled.
       document.body.innerHTML = `
         <div data-controller="stimeo--multi-select">
           <ul data-stimeo--multi-select-target="tags" aria-label="Selected"></ul>
@@ -3522,7 +3731,10 @@ describe("MultiSelectController", () => {
       // Option churn writes the state through the reconciliation pass, which is a
       // sync point of its own.
       await mountEmpty();
-      key("ArrowDown"); // opens the list over the authored candidates
+      // Focusing opens the list; close it so the key reaches the closed-state handler.
+      input().focus();
+      controller().close();
+      pressKey(input(), "ArrowDown"); // opens the list over the authored candidates
       expect(emptyRegion().hidden).toBe(true);
 
       (document.getElementById("ms-empty-list") as HTMLElement).innerHTML = "";

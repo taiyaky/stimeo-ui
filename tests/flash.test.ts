@@ -9,7 +9,7 @@ import { tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link FlashController}, driven by a mocked clock: type → role
- * mapping, the Announcer bridge for initial flashes (but not dynamic inserts),
+ * mapping, the `stimeo--announcer` bridge for initial flashes (but not dynamic inserts),
  * auto-dismiss with pause-on-hover, the `max` stacking cap and the messages hover or
  * focus keeps out of its reach, manual dismiss, dynamic detection via the
  * MutationObserver, observer / timer teardown, and the messages a page restored from
@@ -227,7 +227,7 @@ describe("FlashController", () => {
     expect(second.isConnected).toBe(true);
   });
 
-  it("maps a notice to role=status and bridges it to the Announcer (polite)", async () => {
+  it("maps a notice to role=status and bridges it to stimeo--announcer (polite)", async () => {
     await mount(region(message("notice", "Saved")));
     const el = regionEl().firstElementChild as HTMLElement;
     expect(el.getAttribute("role")).toBe("status");
@@ -237,7 +237,7 @@ describe("FlashController", () => {
 
   it("leaves the region without aria-live so a dynamic flash is announced once", async () => {
     await mount(region(message("notice", "Saved")));
-    // Announcing is the message's own `role` (plus the Announcer bridge for initial
+    // Announcing is the message's own `role` (plus the `stimeo--announcer` bridge for initial
     // flashes); a live region here would read every dynamic insert a second time.
     expect(regionEl().hasAttribute("aria-live")).toBe(false);
     regionEl().insertAdjacentHTML("beforeend", message("alert", "Failed"));
@@ -358,7 +358,7 @@ describe("FlashController", () => {
     const el = regionEl().firstElementChild as HTMLElement;
     expect(el.getAttribute("role")).toBe("alert");
     expect(el.getAttribute("data-flash-state")).toBe("visible");
-    // Dynamic inserts are announced by their own role, so no Announcer bridge.
+    // Dynamic inserts are announced by their own role, so no `stimeo--announcer` bridge.
     expect(announces).toEqual([]);
   });
 
@@ -825,7 +825,7 @@ describe("FlashController", () => {
     const button = query("button") as HTMLButtonElement;
 
     // Same lapsed-deadline window as above, entered by focus instead of the pointer.
-    // Removing the message here would take the focused control with it (WCAG 2.2 4.1.3).
+    // Removing the message here would take the focused control with it.
     vi.setSystemTime(Date.now() + 1500);
     button.focus();
     button.dispatchEvent(new Event("focusin", { bubbles: true }));
@@ -2126,7 +2126,7 @@ describe("FlashController", () => {
 
   // --- a message that moves within the region -------------------------------
 
-  /** The connected controller, for the target callbacks a DOM-only environment may not deliver. */
+  /** The connected controller, for calling its callbacks and actions directly. */
   const flashController = (): FlashController => {
     const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--flash");
     if (!(instance instanceof FlashController)) throw new Error("Flash controller not connected");

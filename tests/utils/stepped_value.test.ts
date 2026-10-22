@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { effectiveStep, snapSteppedValue, stepSteppedValue } from "../../src/utils/stepped_value";
 
 /**
- * Locks the endpoint-plus-grid contract shared by Slider, Range Slider, and
- * Number Input so each controller advertises the same values it can reach.
+ * Locks the endpoint-plus-grid contract the stepping controllers share, so each
+ * advertises the same values it can reach.
  */
 describe("stepped values", () => {
   it("keeps an off-grid maximum reachable", () => {

@@ -1,5 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
+import { FontLoadWatcher } from "../utils/font_load_watcher";
 import { LayoutObserver } from "../utils/layout_observer";
+import { ListenerSet } from "../utils/listener_set";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
 
@@ -7,12 +9,6 @@ import { NumberValueReader } from "../utils/number_value";
 function px(value: string): number {
   const n = Number.parseFloat(value);
   return Number.isNaN(n) ? 0 : n;
-}
-
-/** The event surface used by `document.fonts` without requiring it in older engines. */
-interface FontEventSource {
-  addEventListener(type: string, listener: EventListener): void;
-  removeEventListener(type: string, listener: EventListener): void;
 }
 
 /**
@@ -35,7 +31,7 @@ interface FontEventSource {
  * event, the convention Stimeo's own field-writing controllers follow); element
  * size reports via the shared `LayoutObserver` — width changes
  * (re-wrapping) and the applied inline height being stripped (a Turbo morph
- * syncing attributes); font loading settling on `document.fonts`; runtime
+ * syncing attributes); font loading settling on `ownerDocument.fonts`; runtime
  * `minRows` / `maxRows` changes; and the explicit `resize` action. A silent
  * `.value` assignment produces no DOM signal, so callers follow it with
  * `resize` or dispatch `input` / `change`.
@@ -78,7 +74,6 @@ export class TextareaAutosizeController extends Controller<HTMLTextAreaElement> 
   #lastWidth = -1;
   #started = false;
   #pending = false;
-  #fonts: FontEventSource | null = null;
 
   /**
    * Content triggers arriving while the box is collapsed (`display: none`
@@ -93,6 +88,7 @@ export class TextareaAutosizeController extends Controller<HTMLTextAreaElement> 
     }
     this.resize();
   };
+  readonly #fonts = new FontLoadWatcher(this.#remeasure);
 
   /**
    * Re-measures when the content width changed (re-wrapping, including a
@@ -113,25 +109,27 @@ export class TextareaAutosizeController extends Controller<HTMLTextAreaElement> 
     this.resize();
   });
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     // Adopt a height applied by a previous connection (kept by Turbo restore /
     // morph) so re-measuring an unchanged element does not re-dispatch `resize`.
     this.#lastHeight = Math.round(px(this.element.style.height));
     this.#lastWidth = this.#contentWidth();
-    this.element.addEventListener("input", this.#remeasure);
-    this.element.addEventListener("change", this.#remeasure);
+    this.#listeners.add(this.element, "input", this.#remeasure);
+    this.#listeners.add(this.element, "change", this.#remeasure);
     this.#layout.observe(this.element);
-    this.#bindFonts();
+    this.#fonts.observe(this.element);
     this.#started = true;
     this.resize();
   }
 
   override disconnect(): void {
     this.#started = false;
-    this.element.removeEventListener("input", this.#remeasure);
-    this.element.removeEventListener("change", this.#remeasure);
+    this.#listeners.dispose();
     this.#layout.disconnect();
-    this.#unbindFonts();
+    this.#fonts.disconnect();
   }
 
   /** Re-clamps when application code or a Turbo morph changes `minRows`. */
@@ -201,21 +199,6 @@ export class TextareaAutosizeController extends Controller<HTMLTextAreaElement> 
     return fontSize > 0 ? fontSize * 1.2 : 16;
   }
 
-  /** Subscribes to font completion when the current engine exposes `document.fonts`. */
-  #bindFonts(): void {
-    const fonts = (this.element.ownerDocument as Document & { fonts?: FontEventSource }).fonts;
-    if (!fonts) return;
-    this.#fonts = fonts;
-    fonts.addEventListener("loadingdone", this.#remeasure);
-    fonts.addEventListener("loadingerror", this.#remeasure);
-  }
-
-  /** Removes the font completion subscriptions. */
-  #unbindFonts(): void {
-    this.#fonts?.removeEventListener("loadingdone", this.#remeasure);
-    this.#fonts?.removeEventListener("loadingerror", this.#remeasure);
-    this.#fonts = null;
-  }
   /** Current `minRows` declaration resolved against its numeric contract. */
   get #safeMinRows(): number {
     return this.#numbers.read(

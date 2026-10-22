@@ -166,8 +166,8 @@ describe("MasonryController", () => {
 
   it("stops observing on disconnect (no relayout after teardown)", async () => {
     await start(3, 800);
-    // Invoke disconnect() directly rather than racing the document MutationObserver
-    // that normally drives context teardown.
+    // The case calls disconnect() directly, so it checks the controller's own teardown
+    // rather than the removal Stimulus observes.
     const controller = application.getControllerForElementAndIdentifier(
       root(),
       "stimeo--masonry",

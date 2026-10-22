@@ -562,7 +562,7 @@ describe("ScrollVisibilityController", () => {
 
   // --- Value declarations ------------------------------------------------------
 
-  it("falls back to the documented defaults when no value is declared", async () => {
+  it("falls back to the declared defaults (offset 400, offset mode) when no value is set", async () => {
     await start(`
       <div data-controller="stimeo--scroll-visibility">
         <button type="button" hidden
@@ -894,7 +894,8 @@ describe("ScrollVisibilityController", () => {
       const only = element();
       only.remove();
 
-      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      // Drive the callback directly, so a throw from it fails this case instead of surfacing
+      // outside the test.
       expect(() => controller.elementTargetDisconnected(only)).not.toThrow();
       expect(root().getAttribute("data-state")).toBe("visible");
     });
@@ -1034,7 +1035,7 @@ describe("ScrollVisibilityController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // --- Speech-order regression ------------------------------------------------
+  // --- Speech-order check -----------------------------------------------------
 
   it("removes the control from the announcement order while hidden, and restores it when shown", async () => {
     await start(offsetMarkup);

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeController } from "../src/controllers/theme_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { press as keyboardPress, keyEvent } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -15,32 +16,45 @@ import { tick } from "./helpers/timing";
  */
 
 let mediaMatches = false;
-let mediaListeners: Array<() => void> = [];
+/** The listeners of every list `matchMedia` has returned, one set per list. */
+let mediaLists: Set<() => void>[] = [];
 
-/** Installs a controllable matchMedia whose `matches` is a live getter. */
+/**
+ * Installs a controllable matchMedia whose `matches` is a live getter. Each call
+ * returns a list of its own, as a browser's does, and a listener added with a
+ * signal leaves its list when the signal aborts.
+ */
 const installMatchMedia = () => {
   mediaMatches = false;
-  mediaListeners = [];
-  window.matchMedia = ((queryString: string) => ({
-    media: queryString,
-    get matches() {
-      return mediaMatches;
-    },
-    addEventListener: (_: string, cb: () => void) => mediaListeners.push(cb),
-    removeEventListener: (_: string, cb: () => void) => {
-      mediaListeners = mediaListeners.filter((l) => l !== cb);
-    },
-    addListener: () => {},
-    removeListener: () => {},
-    dispatchEvent: () => false,
-    onchange: null,
-  })) as unknown as typeof window.matchMedia;
+  mediaLists = [];
+  window.matchMedia = ((queryString: string) => {
+    const listeners = new Set<() => void>();
+    mediaLists.push(listeners);
+    return {
+      media: queryString,
+      get matches() {
+        return mediaMatches;
+      },
+      addEventListener: (_: string, cb: () => void, options?: AddEventListenerOptions) => {
+        if (options?.signal?.aborted) return;
+        listeners.add(cb);
+        options?.signal?.addEventListener("abort", () => listeners.delete(cb));
+      },
+      removeEventListener: (_: string, cb: () => void) => {
+        listeners.delete(cb);
+      },
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+      onchange: null,
+    };
+  }) as unknown as typeof window.matchMedia;
 };
 
 /** Flips the simulated OS preference and notifies listeners. */
 const setSystemDark = (dark: boolean) => {
   mediaMatches = dark;
-  for (const cb of [...mediaListeners]) cb();
+  for (const listeners of mediaLists) for (const cb of [...listeners]) cb();
 };
 
 const root = () => document.documentElement;
@@ -204,12 +218,8 @@ describe("ThemeController", () => {
     // listener on the container sees the same bubbling event.
     first.addEventListener("keydown", (event) => event.preventDefault());
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    const notCanceled = first.dispatchEvent(event);
+    const event = keyEvent("ArrowRight");
+    const notCanceled = !keyboardPress(first, event).defaultPrevented;
 
     // Without the guard this wraps from the last option to the first, focuses it
     // and commits the mode — so the yield has to hold both.
@@ -241,7 +251,7 @@ describe("ThemeController", () => {
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
     const light = optionByMode("light");
     light.focus();
-    light.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    keyboardPress(light, "ArrowRight");
     expect(document.activeElement).toBe(optionByMode("dark"));
     expect(optionByMode("dark").getAttribute("aria-checked")).toBe("true");
     expect(root().getAttribute("data-theme")).toBe("dark");
@@ -251,12 +261,8 @@ describe("ThemeController", () => {
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
     const light = optionByMode("light");
     light.focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      bubbles: true,
-      cancelable: true,
-    });
-    light.dispatchEvent(event);
+    const event = keyEvent("ArrowDown");
+    keyboardPress(light, event);
 
     expect(document.activeElement).toBe(optionByMode("dark"));
     expect(event.defaultPrevented).toBe(true);
@@ -270,8 +276,7 @@ describe("ThemeController", () => {
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
     const group = optionByMode("light").closest("[role='radiogroup']") as HTMLElement;
     group.style.direction = "rtl";
-    const press = (mode: string, key: string) =>
-      optionByMode(mode).dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    const press = (mode: string, key: string) => keyboardPress(optionByMode(mode), key);
     optionByMode("light").focus();
 
     press("light", "ArrowRight"); // "previous" under RTL: wraps to the last
@@ -286,8 +291,7 @@ describe("ThemeController", () => {
 
   it("navigates with ArrowLeft/ArrowUp and wraps to the last option", async () => {
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
-    const press = (mode: string, key: string) =>
-      optionByMode(mode).dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    const press = (mode: string, key: string) => keyboardPress(optionByMode(mode), key);
     optionByMode("light").focus();
     press("light", "ArrowLeft"); // wraps from first → last
     expect(document.activeElement).toBe(optionByMode("system"));
@@ -299,16 +303,13 @@ describe("ThemeController", () => {
   it("wraps from the last option to the first with ArrowRight", async () => {
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="system"`));
     optionByMode("system").focus();
-    optionByMode("system").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
-    );
+    keyboardPress(optionByMode("system"), "ArrowRight");
     expect(document.activeElement).toBe(optionByMode("light"));
   });
 
   it("jumps to the first/last option with Home/End", async () => {
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="dark"`));
-    const press = (mode: string, key: string) =>
-      optionByMode(mode).dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    const press = (mode: string, key: string) => keyboardPress(optionByMode(mode), key);
     optionByMode("dark").focus();
     press("dark", "End");
     expect(document.activeElement).toBe(optionByMode("system"));
@@ -324,13 +325,8 @@ describe("ThemeController", () => {
     const light = optionByMode("light");
     light.focus();
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    light.dispatchEvent(event);
+    const event = keyEvent("ArrowRight", { altKey: true });
+    keyboardPress(light, event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(light);
@@ -341,7 +337,7 @@ describe("ThemeController", () => {
   it("ignores non-navigation keys without selecting", async () => {
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
     optionByMode("light").focus();
-    optionByMode("light").dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    keyboardPress(optionByMode("light"), "a");
     expect(optionByMode("light").getAttribute("aria-checked")).toBe("true");
   });
 
@@ -363,15 +359,14 @@ describe("ThemeController", () => {
     expect(root().hasAttribute("data-theme")).toBe(false);
   });
 
-  it("ignores an invalid mode from the set action", async () => {
+  it("ignores an owned option whose data-value is outside the three modes", async () => {
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
-    const controller = application.getControllerForElementAndIdentifier(
-      query("[data-controller='stimeo--theme']"),
-      "stimeo--theme",
-    ) as ThemeController;
-    controller.set({ params: { mode: "bogus" } } as unknown as Event);
+    const bogus = appendOption("bogus");
+    await tick();
+    controller().set(bogus);
     expect(optionByMode("light").getAttribute("aria-checked")).toBe("true");
     expect(root().getAttribute("data-theme")).toBe("light");
+    expect(window.localStorage.getItem("stimeo-theme")).toBeNull();
   });
 
   it("dispatches change with mode and resolved", async () => {
@@ -442,6 +437,18 @@ describe("ThemeController", () => {
     expect(root().getAttribute("data-theme")).toBe("light");
   });
 
+  it("stops following the OS after connecting twice without a disconnect", async () => {
+    await start(RADIOGROUP());
+    const controller = application.getControllerForElementAndIdentifier(
+      query("[data-controller='stimeo--theme']"),
+      "stimeo--theme",
+    ) as ThemeController;
+    controller.connect();
+    controller.disconnect();
+    setSystemDark(true);
+    expect(root().getAttribute("data-theme")).toBe("light");
+  });
+
   it("stops answering the arrow keys after disconnect", async () => {
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
     const controller = application.getControllerForElementAndIdentifier(
@@ -452,12 +459,8 @@ describe("ThemeController", () => {
     light.focus();
     controller.disconnect();
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    light.dispatchEvent(event);
+    const event = keyEvent("ArrowRight");
+    keyboardPress(light, event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(light);
@@ -512,9 +515,7 @@ describe("ThemeController", () => {
     const seen = changeLog();
 
     optionByMode("light").focus();
-    optionByMode("light").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true }),
-    );
+    keyboardPress(optionByMode("light"), "Home");
 
     expect(seen).toEqual([]);
   });
@@ -666,9 +667,7 @@ describe("ThemeController", () => {
     await tick();
 
     optionByMode("light").focus();
-    optionByMode("light").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }),
-    );
+    keyboardPress(optionByMode("light"), "ArrowRight");
 
     expect(document.activeElement).toBe(optionByMode("dark"));
     expect(optionByMode("dark").getAttribute("aria-checked")).toBe("true");
@@ -703,8 +702,8 @@ describe("ThemeController", () => {
   });
 
   it("never lets an option outside the three modes become the selection", async () => {
-    // The click path already refused it; the keyboard path has to agree, or the
-    // group ends up with two checked radios.
+    // The click path refuses it too, and the keyboard path agrees; otherwise the group
+    // would end up with two checked radios.
     await start(`
       <div data-controller="stimeo--theme" data-stimeo--theme-mode-value="light"
            role="radiogroup" aria-label="Theme">
@@ -724,9 +723,7 @@ describe("ThemeController", () => {
     expect(root().getAttribute("data-theme")).toBe("light");
 
     optionByMode("light").focus();
-    optionByMode("light").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }),
-    );
+    keyboardPress(optionByMode("light"), "ArrowRight");
 
     expect(document.activeElement).toBe(typo);
     expect(
@@ -750,12 +747,8 @@ describe("ThemeController", () => {
                 data-value="dark">Dark</button>
       </div>`);
     const link = query<HTMLElement>("#inside");
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    link.dispatchEvent(event);
+    const event = keyEvent("ArrowRight");
+    keyboardPress(link, event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(options().map((option) => option.getAttribute("aria-checked"))).toEqual([
@@ -771,14 +764,9 @@ describe("ThemeController", () => {
     const seen = changeLog();
 
     for (const key of ["Home", "End"]) {
-      const event = new KeyboardEvent("keydown", {
-        key,
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
+      const event = keyEvent(key, { ctrlKey: true });
       optionByMode("dark").focus();
-      optionByMode("dark").dispatchEvent(event);
+      keyboardPress(optionByMode("dark"), event);
       expect(event.defaultPrevented).toBe(false);
     }
 
@@ -1263,11 +1251,11 @@ describe("ThemeController", () => {
   it("has no machine-detectable a11y violations", async () => {
     await start(`<main>${RADIOGROUP()}</main>`);
     await expectNoA11yViolations(document.body);
-    // touch options() so the helper is exercised and lint stays clean
+    // The fixture renders all three options.
     expect(options().length).toBe(3);
   });
 
-  // Speech-order regression: the radiogroup announces its label and the three
+  // Speech-order check: the radiogroup announces its label and the three
   // radios, with the resolved mode (light) checked.
   it("announces the radiogroup with the checked option", async () => {
     await start(RADIOGROUP(`data-stimeo--theme-mode-value="light"`));
@@ -1308,7 +1296,7 @@ describe("ThemeController target API", () => {
     document.body.innerHTML = "";
   });
 
-  it("retains the existing DOM Event success as a positive control", () => {
+  it("sets the mode through the DOM Event action as a positive control", () => {
     const reports: Array<{ reason?: string }> = [];
     element("api-root").addEventListener("stimeo--theme:change", (event) => {
       reports.push((event as CustomEvent<{ reason?: string }>).detail);
@@ -1319,7 +1307,7 @@ describe("ThemeController target API", () => {
   });
 
   it.each([false, true])(
-    "accepts an owned target or its descendant (%s) after an Event positive control",
+    "accepts an owned target or its descendant (%s) through the element API",
     (descendant) => {
       const reports: Array<{ reason?: string }> = [];
       element("api-root").addEventListener("stimeo--theme:change", (event) => {

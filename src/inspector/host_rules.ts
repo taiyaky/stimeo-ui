@@ -25,10 +25,10 @@ export const hostRules: HostRules = {
     },
   ],
 
-  // Radio Group owns checked state, activation, and roving focus on every
-  // custom radio. A non-submitting button is the only native interactive host
-  // whose activation model it deliberately composes with; native radios and
-  // links should keep their own semantics instead of being repurposed.
+  // `stimeo--radio-group` owns checked state, activation, and roving focus on
+  // every custom radio. A non-submitting button is the only native interactive
+  // host whose activation model it deliberately composes with; native radios
+  // and links should keep their own semantics instead of being repurposed.
   "stimeo--radio-group": [
     {
       target: "radio",
@@ -39,10 +39,10 @@ export const hostRules: HostRules = {
     },
   ],
 
-  // Toggle Group owns pressed state, activation, and roving focus on every
-  // item. A non-submitting button supplies the one native activation model the
-  // controller deliberately composes with; other interactive hosts would add a
-  // conflicting navigation, form, or editing behavior.
+  // `stimeo--toggle-group` owns pressed state, activation, and roving focus on
+  // every item. A non-submitting button supplies the one native activation
+  // model the controller deliberately composes with; other interactive hosts
+  // would add a conflicting navigation, form, or editing behavior.
   "stimeo--toggle-group": [
     {
       target: "item",
@@ -53,9 +53,10 @@ export const hostRules: HostRules = {
     },
   ],
 
-  // Tree-view owns selection, expansion, and the roving key map on every item.
-  // Nest a link or button inside the item when it needs a secondary action;
-  // making that control the treeitem itself combines incompatible interactions.
+  // `stimeo--tree-view` owns selection, expansion, and the roving key map on
+  // every item. Nest a link or button inside the item when it needs a secondary
+  // action; making that control the treeitem itself combines incompatible
+  // interactions.
   "stimeo--tree-view": [
     {
       target: "item",

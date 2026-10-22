@@ -6,6 +6,7 @@ import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /**
  * Behavioral tests for {@link SkeletonController}: the initial loading state,
@@ -82,8 +83,8 @@ describe("SkeletonController", () => {
 
   it("dispatches a ready event carrying an empty detail", async () => {
     await start();
-    // Freeze the whole ordered array (not a name-only flag): the events table
-    // declares an empty detail, so a leaked payload must fail here.
+    // Freeze the whole ordered array (not a name-only flag): `ready` dispatches `{}`,
+    // so a leaked payload must fail here.
     const events: { type: string; detail: unknown }[] = [];
     root().addEventListener("stimeo--skeleton:ready", (event) => {
       events.push({ type: event.type, detail: (event as CustomEvent<unknown>).detail });
@@ -155,15 +156,11 @@ describe("SkeletonController", () => {
   // --- `minDuration` belongs to one held reveal --------------------------------------
 
   /**
-   * Rewrites `minDuration` and delivers its Value callback directly when the
-   * controller defines one, since happy-dom does not reliably run it for an attribute
-   * write.
+   * Rewrites the `minDuration` declaration and waits for Stimulus to deliver it, so the
+   * assertions that follow see whatever the controller does with the change.
    */
-  const declareMinDuration = (value: number) => {
-    root().setAttribute("data-stimeo--skeleton-min-duration-value", String(value));
-    const callback: unknown = Reflect.get(instance(), "minDurationValueChanged");
-    if (typeof callback === "function") callback.call(instance());
-  };
+  const declareMinDuration = (value: number) =>
+    writeValueAttribute(root(), "data-stimeo--skeleton-min-duration-value", String(value));
 
   it.each([
     { direction: "shrinks", next: 50 },
@@ -175,7 +172,7 @@ describe("SkeletonController", () => {
       vi.advanceTimersByTime(100);
       instance().ready(); // held back until t=300
 
-      declareMinDuration(next);
+      await declareMinDuration(next);
       vi.advanceTimersByTime(199);
       expect(root().getAttribute("data-state")).toBe("loading");
       vi.advanceTimersByTime(1);
@@ -193,7 +190,7 @@ describe("SkeletonController", () => {
   it("measures the floor from when the placeholder appeared when minDuration changes before ready", async () => {
     await start('data-stimeo--skeleton-min-duration-value="300"');
     vi.advanceTimersByTime(100);
-    declareMinDuration(150);
+    await declareMinDuration(150);
     instance().ready(); // 50 ms of the new floor are left, counted from the loading start
     vi.advanceTimersByTime(49);
     expect(content().hidden).toBe(true);
@@ -205,7 +202,7 @@ describe("SkeletonController", () => {
     await start('data-stimeo--skeleton-min-duration-value="300"');
     const events: string[] = [];
     root().addEventListener("stimeo--skeleton:ready", (event) => events.push(event.type));
-    declareMinDuration(0);
+    await declareMinDuration(0);
     await vi.advanceTimersByTimeAsync(1000);
     expect(root().getAttribute("data-state")).toBe("loading");
     expect(root().getAttribute("aria-busy")).toBe("true");
@@ -319,8 +316,7 @@ describe("SkeletonController", () => {
     controller.ready();
     // Remove the element first, then invoke disconnect() directly: that is the
     // definite-detach path, so teardown runs synchronously and the test does not
-    // wait on Stimulus' MutationObserver, whose flush timing varies by
-    // environment (especially under coverage).
+    // wait on the MutationObserver delivery of Stimulus' own disconnect.
     el.remove();
     controller.disconnect();
     parent.appendChild(el);

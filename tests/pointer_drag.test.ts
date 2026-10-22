@@ -1,8 +1,9 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DataGridController } from "../src/controllers/data_grid_controller";
 import { PointerDragController } from "../src/controllers/pointer_drag_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
-import { press } from "./helpers/keyboard";
+import { keyEvent, press, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay, flushMicrotasks, tick } from "./helpers/timing";
@@ -93,9 +94,7 @@ describe("PointerDragController", () => {
    */
   const key = (k: string) => {
     handle().focus();
-    return handle().dispatchEvent(
-      new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }),
-    );
+    return !press(handle(), k, { bubbles: true, cancelable: true }).defaultPrevented;
   };
 
   describe("pointer lifecycle", () => {
@@ -263,9 +262,7 @@ describe("PointerDragController", () => {
       pointerMove(110, 100);
       // Widget-local half of the shared layered-Escape contract: a composing
       // press steers the IME conversion and never cancels the session.
-      handle().dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, isComposing: true }),
-      );
+      press(handle(), "Escape", { bubbles: true, isComposing: true });
       expect(events.cancel).toEqual([]);
       expect(root().hasAttribute("data-dragging")).toBe(true);
 
@@ -346,6 +343,563 @@ describe("PointerDragController", () => {
     });
   });
 
+  describe("keyboard focus ownership", () => {
+    const focusFixture = `
+      <div data-controller="stimeo--pointer-drag" data-stimeo--pointer-drag-follow-value="true"
+           style="translate: 20px 30px">
+        <div id="first-handle" data-stimeo--pointer-drag-target="handle">
+          <span id="surface" tabindex="-1">Handle surface</span>
+          <input id="field" aria-label="Rename">
+        </div>
+        <button id="second-handle" data-stimeo--pointer-drag-target="handle">Second handle</button>
+      </div>
+      <button id="outside">Outside</button>`;
+    const outside = () => document.getElementById("outside") as HTMLElement;
+
+    it.each([false, true])(
+      "yields Tab (shift=%s) and cancels after actual focus departure",
+      async (shiftKey) => {
+        const events = await mount(focusFixture);
+        press(handle(), " ");
+        press(handle(), "ArrowRight");
+        expect(root().style.translate).toBe("30px 30px");
+        const focusout = vi.fn();
+        handle().addEventListener("focusout", focusout);
+        expect(press(handle(), "Tab", { shiftKey }).defaultPrevented).toBe(false);
+        // happy-dom has no Tab default; focus() supplies the actual departure.
+        outside().focus();
+        expect(focusout).toHaveBeenCalledOnce();
+        expect(events.cancel).toEqual([]);
+        await flushMicrotasks();
+        expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+        expect(events.end).toEqual([]);
+        expect(root().hasAttribute("data-grabbed")).toBe(false);
+        expect(handle().hasAttribute("data-grabbed")).toBe(false);
+        expect(root().style.translate).toBe("20px 30px");
+        expect(document.activeElement).toBe(outside());
+        expect(handle().style.touchAction).toBe("none");
+        expect(handle().tabIndex).toBe(0);
+        press(handle(), " ");
+        expect(events.start).toHaveLength(2);
+      },
+    );
+
+    it("cancels when blur leaves the body focused and relatedTarget is null", async () => {
+      const events = await mount(focusFixture);
+      press(handle(), " ");
+      const departures: FocusEvent[] = [];
+      handle().addEventListener("focusout", (event) => departures.push(event as FocusEvent));
+      handle().blur();
+      expect(document.activeElement).toBe(document.body);
+      expect(departures).toHaveLength(1);
+      expect(departures[0]?.relatedTarget).toBeNull();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+      expect(document.activeElement).toBe(document.body);
+    });
+
+    it.each(["second-handle", "field"])(
+      "cancels after focus moves to %s inside the root",
+      async (id) => {
+        const events = await mount(focusFixture);
+        press(handle(), " ");
+        const destination = document.getElementById(id) as HTMLElement;
+        destination.focus();
+        await flushMicrotasks();
+        expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+        expect(document.activeElement).toBe(destination);
+        expect(root().hasAttribute("data-grabbed")).toBe(false);
+        if (id === "field") {
+          expect(press(destination, " ").defaultPrevented).toBe(false);
+          expect(press(destination, "ArrowRight").defaultPrevented).toBe(false);
+        }
+      },
+    );
+
+    it("keeps the same handle's non-native surface, then cancels when that surface leaves", async () => {
+      const events = await mount(focusFixture);
+      press(handle(), " ");
+      const surface = document.getElementById("surface") as HTMLElement;
+      surface.focus();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([]);
+      press(surface, "ArrowRight");
+      expect(events.move).toHaveLength(1);
+      outside().focus();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+    });
+
+    it.each(["input", "surface"])(
+      "resolves a focused open shadow %s within the handle",
+      async (kind) => {
+        const events = await mount(focusFixture);
+        const host = document.createElement("span");
+        handle().append(host);
+        const shadow = host.attachShadow({ mode: "open" });
+        shadow.innerHTML =
+          kind === "input" ? '<input aria-label="Rename" />' : '<span tabindex="0">Surface</span>';
+        const child = shadow.firstElementChild as HTMLElement;
+        press(handle(), " ");
+        press(handle(), "ArrowRight");
+        child.focus();
+        await flushMicrotasks();
+        expect(shadow.activeElement).toBe(child);
+        expect(root().hasAttribute("data-grabbed")).toBe(kind !== "input");
+        if (kind === "input") {
+          expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+          expect(root().style.translate).toBe("20px 30px");
+          expect(press(child, "ArrowRight", { composed: true }).defaultPrevented).toBe(false);
+          expect(press(child, " ", { composed: true }).defaultPrevented).toBe(false);
+          expect(events.start).toHaveLength(1);
+          expect(events.move).toHaveLength(1);
+        } else {
+          expect(events.cancel).toEqual([]);
+          // The browser retargets an internal shadow key to its host at the root listener.
+          expect(typeKey(host, "ArrowRight").defaultPrevented).toBe(true);
+          expect(events.move).toHaveLength(2);
+        }
+      },
+    );
+
+    it.each([false, true])(
+      "observes a native focus move within one open shadow root (grab inside: %s)",
+      async (grabInside) => {
+        const events = await mount(focusFixture);
+        const host = document.createElement("span");
+        handle().append(host);
+        const shadow = host.attachShadow({ mode: "open" });
+        shadow.innerHTML = '<span tabindex="0">Surface</span><input aria-label="Rename" />';
+        const surface = shadow.firstElementChild as HTMLElement;
+        const input = shadow.lastElementChild as HTMLInputElement;
+        const outerFocus = vi.fn();
+        root().addEventListener("focusin", outerFocus);
+        if (!grabInside) press(handle(), " ");
+        surface.focus();
+        await flushMicrotasks();
+        expect(outerFocus).toHaveBeenCalled();
+        if (grabInside) typeKey(host, " ");
+        expect(root().getAttribute("data-grabbed")).toBe("true");
+        outerFocus.mockClear();
+        // Retargeting trims a same-root focus pair before it reaches the host's ancestors.
+        host.addEventListener("focusin", (event) => event.stopPropagation());
+        host.addEventListener("focusout", (event) => event.stopPropagation());
+        input.focus();
+        await flushMicrotasks();
+        expect(shadow.activeElement).toBe(input);
+        expect(outerFocus).not.toHaveBeenCalled();
+        expect(root().hasAttribute("data-grabbed")).toBe(false);
+        expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+        expect(press(input, "ArrowRight", { composed: true }).defaultPrevented).toBe(false);
+        expect(events.move).toEqual([]);
+      },
+    );
+
+    it("releases shadow focus subscriptions on cancel and reconnects a preserved grab", async () => {
+      const events = await mount(focusFixture);
+      const host = document.createElement("span");
+      handle().append(host);
+      const shadow = host.attachShadow({ mode: "open" });
+      shadow.innerHTML = '<span tabindex="0">Surface</span><input aria-label="Rename" />';
+      const surface = shadow.firstElementChild as HTMLElement;
+      const input = shadow.lastElementChild as HTMLInputElement;
+      const subscribe = vi.spyOn(shadow, "addEventListener");
+      surface.focus();
+      typeKey(host, " ");
+      const focusSignal = () => {
+        const registration = subscribe.mock.calls
+          .slice()
+          .reverse()
+          .find(([type]) => type === "focusin");
+        const signal = (registration?.[2] as AddEventListenerOptions | undefined)?.signal;
+        if (!signal) throw new Error("shadow focus subscription missing");
+        return signal;
+      };
+      const initial = focusSignal();
+      expect(initial.aborted).toBe(false);
+      typeKey(host, "Escape");
+      expect(initial.aborted).toBe(true);
+      expect(events.cancel).toHaveLength(1);
+      typeKey(host, " ");
+      const carried = focusSignal();
+      expect(carried.aborted).toBe(false);
+      const instance = controller();
+      instance?.disconnect();
+      expect(carried.aborted).toBe(true);
+      instance?.connect();
+      const reconnected = focusSignal();
+      expect(reconnected).not.toBe(carried);
+      expect(reconnected.aborted).toBe(false);
+      // Only the shadow-local subscription sees a focus pair trimmed at the host.
+      host.addEventListener("focusin", (event) => event.stopPropagation());
+      host.addEventListener("focusout", (event) => event.stopPropagation());
+      input.focus();
+      await flushMicrotasks();
+      expect(events.cancel).toHaveLength(2);
+      expect(root().hasAttribute("data-grabbed")).toBe(false);
+      expect(reconnected.aborted).toBe(true);
+    });
+
+    it("keeps a grab after synchronous blur and refocus of the same handle", async () => {
+      const events = await mount(focusFixture);
+      press(handle(), " ");
+      handle().blur();
+      expect(document.activeElement).toBe(document.body);
+      handle().focus();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([]);
+      expect(root().getAttribute("data-grabbed")).toBe("true");
+      press(handle(), "ArrowRight");
+      expect(events.move).toHaveLength(1);
+    });
+
+    it("keeps a same-handle relatedTarget before the destination receives focus", async () => {
+      const events = await mount(focusFixture);
+      press(handle(), " ");
+      const grabbed = handle();
+      const surface = document.getElementById("surface") as HTMLElement;
+      // The focusout checkpoint precedes focusin during a browser-driven focus move.
+      grabbed.addEventListener("focusout", (event) => event.stopPropagation(), { once: true });
+      grabbed.blur();
+      expect(document.activeElement).toBe(document.body);
+      grabbed.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: surface }));
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([]);
+      expect(root().getAttribute("data-grabbed")).toBe("true");
+      surface.focus();
+      press(surface, "ArrowRight");
+      expect(events.move).toHaveLength(1);
+      outside().focus();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+      expect(document.activeElement).toBe(outside());
+    });
+
+    it.each(["open", "closed"] as const)(
+      "reads settled focus inside a %s shadow tree where the controller is mounted",
+      async (mode) => {
+        await mount(`<div id="shadow-host"></div><button id="outside">Outside</button>`);
+        disconnectAndStopApplication(application);
+        const host = document.getElementById("shadow-host") as HTMLElement;
+        const shadow = host.attachShadow({ mode });
+        shadow.innerHTML = `<div id="scope">
+          <div data-controller="stimeo--pointer-drag">
+            <button data-stimeo--pointer-drag-target="handle">Handle</button>
+          </div>
+        </div>`;
+        const scope = shadow.getElementById("scope");
+        const element = shadow.querySelector<HTMLElement>("[data-controller]");
+        const grabbed = shadow.querySelector<HTMLElement>("button");
+        if (!scope || !element || !grabbed) throw new Error("shadow fixture not mounted");
+        application = Application.start(scope);
+        application.register("stimeo--pointer-drag", PointerDragController);
+        await tick();
+        const cancellations = vi.fn();
+        const moves = vi.fn();
+        element.addEventListener("stimeo--pointer-drag:cancel", cancellations);
+        element.addEventListener("stimeo--pointer-drag:move", moves);
+        press(grabbed, " ");
+        grabbed.blur();
+        grabbed.focus();
+        expect(document.activeElement).toBe(host);
+        expect(shadow.activeElement).toBe(grabbed);
+        await flushMicrotasks();
+        expect(cancellations).not.toHaveBeenCalled();
+        expect(element.getAttribute("data-grabbed")).toBe("true");
+        press(grabbed, "ArrowRight");
+        expect(moves).toHaveBeenCalledOnce();
+        outside().focus();
+        await flushMicrotasks();
+        expect(cancellations).toHaveBeenCalledOnce();
+        expect(element.hasAttribute("data-grabbed")).toBe(false);
+        expect(document.activeElement).toBe(outside());
+      },
+    );
+
+    it("does not cancel from an artificial focusout while the handle still holds focus", async () => {
+      const events = await mount(focusFixture);
+      press(handle(), " ");
+      handle().dispatchEvent(
+        new FocusEvent("focusout", { bubbles: true, relatedTarget: outside() }),
+      );
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([]);
+      expect(root().getAttribute("data-grabbed")).toBe("true");
+    });
+
+    it("cancels a new grab after an idle descendant focus change in the same turn", async () => {
+      const events = await mount(focusFixture);
+      const second = document.getElementById("second-handle") as HTMLElement;
+      second.focus();
+      handle().focus();
+      press(handle(), " ");
+      press(handle(), "ArrowRight");
+      outside().focus();
+      expect(document.activeElement).toBe(outside());
+      expect(events.cancel).toEqual([]);
+      await flushMicrotasks();
+      expect(events.start).toHaveLength(1);
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+      expect(events.end).toEqual([]);
+      expect(root().hasAttribute("data-grabbed")).toBe(false);
+      expect(root().style.translate).toBe("20px 30px");
+      expect(document.activeElement).toBe(outside());
+    });
+
+    it("keeps a grab across synchronous descendant focus changes that return to its handle", async () => {
+      const events = await mount(focusFixture);
+      press(handle(), " ");
+      const second = document.getElementById("second-handle") as HTMLElement;
+      const field = document.getElementById("field") as HTMLElement;
+      second.focus();
+      field.focus();
+      handle().focus();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([]);
+      expect(root().getAttribute("data-grabbed")).toBe("true");
+      expect(document.activeElement).toBe(handle());
+      press(handle(), "ArrowRight");
+      expect(events.move).toHaveLength(1);
+      expect(root().style.translate).toBe("30px 30px");
+      outside().focus();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+      expect(root().style.translate).toBe("20px 30px");
+      expect(document.activeElement).toBe(outside());
+    });
+
+    it("does not let a completed session's focus probe end a newly created session", async () => {
+      const events = await mount(focusFixture);
+      press(handle(), " ");
+      outside().focus();
+      // Unfocused delivery isolates the stale probe from any new focusout.
+      typeKey(handle(), "Enter");
+      typeKey(handle(), " ");
+      await flushMicrotasks();
+      expect(events.end).toHaveLength(1);
+      expect(events.start).toHaveLength(2);
+      expect(events.cancel).toEqual([]);
+      expect(root().getAttribute("data-grabbed")).toBe("true");
+      handle().focus();
+      outside().focus();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+    });
+
+    it("checks a new session's own departure while an old session's probe is queued", async () => {
+      const events = await mount(focusFixture);
+      press(handle(), " ");
+      outside().focus();
+      press(handle(), "Enter");
+      press(handle(), " ");
+      outside().focus();
+      expect(events.cancel).toEqual([]);
+      await flushMicrotasks();
+      expect(events.start).toHaveLength(2);
+      expect(events.end).toHaveLength(1);
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+      expect(root().hasAttribute("data-grabbed")).toBe(false);
+      expect(document.activeElement).toBe(outside());
+    });
+
+    it.each(["drop", "Escape", "disabled", "disconnect", "removed handle"])(
+      "ends once when a queued departure competes with %s",
+      async (outcome) => {
+        const events = await mount(focusFixture);
+        press(handle(), " ");
+        outside().focus();
+        const instance = controller();
+        if (!instance) throw new Error("controller not connected");
+        if (outcome === "drop") {
+          // End the unfocused old session before its departure probe runs.
+          typeKey(handle(), "Enter");
+        } else if (outcome === "Escape") {
+          // The cancellation is deliberately delivered before the focus probe.
+          typeKey(handle(), "Escape");
+        } else if (outcome === "disabled") {
+          instance.disabledValue = true;
+          instance.disabledValueChanged();
+        } else if (outcome === "disconnect") {
+          instance.disconnect();
+        } else {
+          const departed = handle();
+          departed.remove();
+          instance.handleTargetDisconnected(departed);
+        }
+        await flushMicrotasks();
+        expect(events.cancel).toEqual(outcome === "drop" ? [] : [{ pointerType: "keyboard" }]);
+        expect(events.end).toHaveLength(outcome === "drop" ? 1 : 0);
+        expect(root().hasAttribute("data-grabbed")).toBe(false);
+        expect(document.activeElement).toBe(outside());
+      },
+    );
+
+    it("rechecks a preserved session's focus on reconnect without reviving an old probe", async () => {
+      const events = await mount(focusFixture);
+      press(handle(), " ");
+      outside().focus();
+      const instance = controller();
+      instance?.disconnect();
+      instance?.connect();
+      expect(events.cancel).toEqual([]);
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+      expect(document.activeElement).toBe(outside());
+    });
+
+    it("discards the old connection's probe before a queued focus restoration on reconnect", async () => {
+      const events = await mount(focusFixture);
+      press(handle(), " ");
+      press(handle(), "ArrowRight");
+      const grabbed = handle();
+      const instance = controller();
+      if (!instance) throw new Error("controller not connected");
+      outside().focus();
+      instance.disconnect();
+      // The carried handle regains focus between the old and reconnected checks.
+      queueMicrotask(() => grabbed.focus());
+      instance.connect();
+      expect(document.activeElement).toBe(outside());
+      await flushMicrotasks();
+      expect(document.activeElement).toBe(grabbed);
+      expect(events.cancel).toEqual([]);
+      expect(root().getAttribute("data-grabbed")).toBe("true");
+      expect(root().style.translate).toBe("30px 30px");
+      press(grabbed, "ArrowRight");
+      expect(events.move).toHaveLength(2);
+      expect(root().style.translate).toBe("40px 30px");
+      press(grabbed, "Enter");
+      expect(events.end).toEqual([{ dx: 20, dy: 0, pointerType: "keyboard" }]);
+    });
+
+    it("keeps one input listener across repeated connect and releases it on disconnect", async () => {
+      const events = await mount(focusFixture);
+      const instance = controller();
+      if (!instance) throw new Error("controller not connected");
+      instance.connect();
+      instance.connect();
+      press(handle(), " ");
+      press(handle(), "ArrowRight");
+      expect(events.start).toHaveLength(1);
+      expect(events.move).toHaveLength(1);
+      instance.disconnect();
+      instance.connect();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([]);
+      press(handle(), "Enter");
+      expect(events.end).toHaveLength(1);
+      pointerDown(0, 0);
+      pointerMove(10, 0);
+      expect(events.start).toHaveLength(2);
+      pointerUp();
+      instance.disconnect();
+      press(handle(), " ");
+      pointerDown(0, 0);
+      pointerMove(20, 0);
+      outside().focus();
+      await flushMicrotasks();
+      expect(events.start).toHaveLength(2);
+      expect(events.move).toHaveLength(2);
+      expect(events.cancel).toEqual([]);
+    });
+
+    it("cancels after the element itself loses focus when no handle target is declared", async () => {
+      const events = await mount(`
+        <div data-controller="stimeo--pointer-drag">Handle</div>
+        <button id="outside">Outside</button>`);
+      press(root(), " ");
+      outside().focus();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+      expect(root().hasAttribute("data-grabbed")).toBe(false);
+      expect(document.activeElement).toBe(outside());
+    });
+
+    it("keeps a queued focus departure silent when the tree detaches", async () => {
+      const events = await mount(focusFixture);
+      press(handle(), " ");
+      press(handle(), "ArrowRight");
+      const element = root();
+      const grabbed = handle();
+      const cancellations = vi.fn();
+      element.addEventListener("stimeo--pointer-drag:cancel", cancellations);
+      await flushMicrotasks();
+      outside().focus();
+      element.remove();
+      await flushMicrotasks();
+      expect(cancellations).not.toHaveBeenCalled();
+      expect(events.cancel).toEqual([]);
+      expect(events.end).toEqual([]);
+      expect(element.hasAttribute("data-grabbed")).toBe(false);
+      expect(grabbed.hasAttribute("data-grabbed")).toBe(false);
+      expect(element.style.translate).toBe("20px 30px");
+    });
+
+    it("clears the departing session before a cancel listener starts another gesture", async () => {
+      const events = await mount(focusFixture);
+      let restarted = false;
+      root().addEventListener("stimeo--pointer-drag:cancel", () => {
+        if (restarted) return;
+        restarted = true;
+        press(handle(), " ");
+      });
+      press(handle(), " ");
+      outside().focus();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+      expect(events.start).toHaveLength(2);
+      expect(root().getAttribute("data-grabbed")).toBe("true");
+      press(handle(), "ArrowRight");
+      expect(events.move).toHaveLength(1);
+    });
+
+    it("keeps pointer capture and document tracking when focus leaves a pointer drag", async () => {
+      const events = await mount(focusFixture);
+      pointerDown(0, 0);
+      pointerMove(10, 0);
+      outside().focus();
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([]);
+      expect(handle().hasPointerCapture(1)).toBe(true);
+      document.dispatchEvent(new PointerEvent("pointermove", { clientX: 20, pointerId: 1 }));
+      expect(events.move).toHaveLength(2);
+      pointerUp();
+      expect(events.end).toEqual([{ dx: 20, dy: 0, pointerType: "mouse" }]);
+      expect(handle().hasPointerCapture(1)).toBe(false);
+      expect(document.activeElement).toBe(outside());
+    });
+
+    it("yields Ctrl+Home to an ancestor Grid and cancels after its focus move", async () => {
+      const events = await mount(`
+        <div data-controller="stimeo--data-grid" role="grid" aria-label="Cards">
+          <div role="row" data-stimeo--data-grid-target="row">
+            <div id="first-cell" role="gridcell" tabindex="0" data-stimeo--data-grid-target="cell"
+                 data-action="keydown->stimeo--data-grid#onKeydown">First</div>
+          </div>
+          <div role="row" data-stimeo--data-grid-target="row">
+            <div role="gridcell" tabindex="-1" data-stimeo--data-grid-target="cell"
+                 data-action="keydown->stimeo--data-grid#onKeydown">
+              <div data-controller="stimeo--pointer-drag">
+                <div data-stimeo--pointer-drag-target="handle">Last handle</div>
+              </div>
+            </div>
+          </div>
+        </div>`);
+      application.register("stimeo--data-grid", DataGridController);
+      await tick();
+      press(handle(), " ");
+      const jump = press(handle(), "Home", { ctrlKey: true });
+      expect(jump.defaultPrevented).toBe(true);
+      const first = document.getElementById("first-cell");
+      expect(document.activeElement).toBe(first);
+      expect(events.cancel).toEqual([]);
+      await flushMicrotasks();
+      expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+      expect(document.activeElement).toBe(first);
+      expect(root().hasAttribute("data-grabbed")).toBe(false);
+    });
+  });
+
   describe("axis locking", () => {
     const axisFixture = (axis: string) => `
       <ul>
@@ -415,14 +969,11 @@ describe("PointerDragController", () => {
       expect(events.start).toHaveLength(1);
 
       const inner = document.createElement("span");
+      inner.tabIndex = -1;
       handle().append(inner);
       inner.addEventListener("keydown", (event) => event.preventDefault());
-      const claimed = new KeyboardEvent("keydown", {
-        key: "ArrowRight",
-        bubbles: true,
-        cancelable: true,
-      });
-      const notCanceled = inner.dispatchEvent(claimed);
+      const claimed = keyEvent("ArrowRight", { bubbles: true, cancelable: true });
+      const notCanceled = !press(inner, claimed).defaultPrevented;
 
       expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
       expect(events.move).toHaveLength(0);
@@ -435,13 +986,8 @@ describe("PointerDragController", () => {
       key(" ");
       expect(events.start).toHaveLength(1);
 
-      const chord = new KeyboardEvent("keydown", {
-        key: "ArrowRight",
-        bubbles: true,
-        cancelable: true,
-        altKey: true,
-      });
-      handle().dispatchEvent(chord);
+      const chord = keyEvent("ArrowRight", { bubbles: true, cancelable: true, altKey: true });
+      press(handle(), chord);
 
       expect(chord.defaultPrevented).toBe(false);
       expect(events.move).toHaveLength(0);
@@ -451,12 +997,8 @@ describe("PointerDragController", () => {
       expect(events.move).toHaveLength(1);
     });
 
-    it("consumes Home and End while grabbed so nothing else can take focus", async () => {
-      // The grab lives on the focused handle: every key that reaches it while
-      // grabbed is answered here, including the two this primitive does not act
-      // on. A composition partner (a roving group's Home/End jump) would
-      // otherwise move focus away, and the arrows and Escape that end the grab
-      // are delivered to whatever holds focus — the grab would be unreachable.
+    it("consumes bare Home and End while grabbed so nothing else can take focus", async () => {
+      // Bare jumps preserve the grabbed handle's focus without emitting a move.
       const events = await mount(defaultFixture);
       press(handle(), " ");
       expect(events.start).toHaveLength(1);
@@ -475,8 +1017,31 @@ describe("PointerDragController", () => {
 
     it("leaves Home and End alone when nothing is grabbed", async () => {
       await mount(defaultFixture);
-      const event = press(handle(), "End");
-      expect(event.defaultPrevented).toBe(false);
+      for (const jump of ["Home", "End"]) {
+        expect(press(handle(), jump).defaultPrevented).toBe(false);
+      }
+    });
+
+    it.each([
+      { altKey: true },
+      { ctrlKey: true },
+      { metaKey: true },
+      { shiftKey: true },
+      { ctrlKey: true, shiftKey: true },
+      { altKey: true, ctrlKey: true, metaKey: true, shiftKey: true },
+    ])("yields modified Home and End without ending a focused grab (%j)", async (modifiers) => {
+      const events = await mount(defaultFixture);
+      press(handle(), " ");
+      for (const jump of ["Home", "End"]) {
+        expect(press(handle(), jump, modifiers).defaultPrevented).toBe(false);
+        await flushMicrotasks();
+        expect(document.activeElement).toBe(handle());
+        expect(root().getAttribute("data-grabbed")).toBe("true");
+      }
+      expect(events.move).toEqual([]);
+      expect(events.cancel).toEqual([]);
+      press(handle(), "ArrowRight");
+      expect(events.move).toHaveLength(1);
     });
 
     it("grabs and drops with Enter too", async () => {
@@ -596,6 +1161,44 @@ describe("PointerDragController", () => {
       expect(handle().getAttribute("tabindex")).toBe("0");
     });
 
+    it("returns a formerly focused handle after it leaves the target set", async () => {
+      await mount(nonFocusableFixture());
+      const former = handle();
+      former.focus();
+      former.removeAttribute("data-stimeo--pointer-drag-target");
+      controller()?.handleTargetDisconnected(former);
+      expect(former.getAttribute("tabindex")).toBe("0");
+      root().setAttribute("tabindex", "-1");
+      root().focus();
+      controller()?.disconnect();
+      expect(former.hasAttribute("tabindex")).toBe(false);
+    });
+
+    it("takes over a restored loan record without treating it as authored tabindex", async () => {
+      await mount(nonFocusableFixture('tabindex="0" data-stimeo--pointer-drag-tabindex-loan="0"'));
+      controller()?.disconnect();
+      expect(handle().hasAttribute("tabindex")).toBe(false);
+      expect(handle().hasAttribute("data-stimeo--pointer-drag-tabindex-loan")).toBe(false);
+    });
+
+    it("protects a focused handle inside an open shadow root", async () => {
+      await mount(nonFocusableFixture());
+      const host = document.createElement("div");
+      root().append(host);
+      const shadow = host.attachShadow({ mode: "open" });
+      const inner = document.createElement("div");
+      shadow.append(inner);
+      controller()?.handleTargetConnected(inner);
+      inner.focus();
+      expect(shadow.activeElement).toBe(inner);
+      controller()?.handleTargetDisconnected(inner);
+      expect(inner.getAttribute("tabindex")).toBe("0");
+      expect(shadow.activeElement).toBe(inner);
+      handle().focus();
+      controller()?.disconnect();
+      expect(inner.hasAttribute("tabindex")).toBe(false);
+    });
+
     it("leaves a natively focusable handle untouched", async () => {
       await mount(defaultFixture);
       expect(handle().hasAttribute("tabindex")).toBe(false);
@@ -604,16 +1207,16 @@ describe("PointerDragController", () => {
     it("marks and restores a controller-owned tabindex on disconnect", async () => {
       await mount(nonFocusableFixture());
       expect(handle().getAttribute("tabindex")).toBe("0");
-      expect(handle().hasAttribute("data-pointer-drag-tabindex")).toBe(true);
+      expect(handle().hasAttribute("data-stimeo--pointer-drag-tabindex-loan")).toBe(true);
 
       controller()?.disconnect();
       expect(handle().hasAttribute("tabindex")).toBe(false);
-      expect(handle().hasAttribute("data-pointer-drag-tabindex")).toBe(false);
+      expect(handle().hasAttribute("data-stimeo--pointer-drag-tabindex-loan")).toBe(false);
     });
 
     it("never removes an authored tabindex on disconnect", async () => {
       await mount(nonFocusableFixture('tabindex="0"'));
-      expect(handle().hasAttribute("data-pointer-drag-tabindex")).toBe(false);
+      expect(handle().hasAttribute("data-stimeo--pointer-drag-tabindex-loan")).toBe(false);
 
       controller()?.disconnect();
       expect(handle().getAttribute("tabindex")).toBe("0");
@@ -631,18 +1234,18 @@ describe("PointerDragController", () => {
       expect(document.activeElement).toBe(handle());
       // The loan stays recorded: the value is still ours and only the focus kept
       // us from returning it, so a later teardown can still give it back.
-      expect(handle().hasAttribute("data-pointer-drag-tabindex")).toBe(true);
+      expect(handle().hasAttribute("data-stimeo--pointer-drag-tabindex-loan")).toBe(true);
     });
 
     it("leaves a tabindex another owner rewrote (e.g. roving) in place", async () => {
       await mount(nonFocusableFixture());
-      expect(handle().hasAttribute("data-pointer-drag-tabindex")).toBe(true);
+      expect(handle().hasAttribute("data-stimeo--pointer-drag-tabindex-loan")).toBe(true);
       // A composed roving list rewrites the value while the marker survives.
       handle().setAttribute("tabindex", "-1");
 
       controller()?.disconnect();
       expect(handle().getAttribute("tabindex")).toBe("-1");
-      expect(handle().hasAttribute("data-pointer-drag-tabindex")).toBe(false);
+      expect(handle().hasAttribute("data-stimeo--pointer-drag-tabindex-loan")).toBe(false);
     });
 
     it("uses the element itself as the handle when no target is given", async () => {
@@ -850,9 +1453,7 @@ describe("PointerDragController", () => {
                     data-stimeo--pointer-drag-target="handle">⠿</button>
           </li>
         </ul>`);
-      document
-        .querySelector("#h1")
-        ?.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+      press(document.querySelector<HTMLElement>("#h1") as HTMLElement, " ", { bubbles: true });
       expect(events.start).toHaveLength(1);
       expect(root().getAttribute("data-grabbed")).toBe("true");
 
@@ -860,9 +1461,7 @@ describe("PointerDragController", () => {
       await delay(20);
       expect(root().hasAttribute("data-grabbed")).toBe(false);
 
-      document
-        .querySelector("#h2")
-        ?.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+      press(document.querySelector<HTMLElement>("#h2") as HTMLElement, " ", { bubbles: true });
       expect(events.start).toHaveLength(2); // a fresh grab is possible — no lockout
     });
 
@@ -903,6 +1502,8 @@ describe("PointerDragController", () => {
         </li>
       </ul>`;
     const translate = () => root().style.getPropertyValue("translate");
+    const declareFollow = (on: boolean) =>
+      root().setAttribute("data-stimeo--pointer-drag-follow-value", String(on));
 
     it("moves the element with the drag and accumulates committed offsets", async () => {
       await mount(followFixture);
@@ -1102,9 +1703,6 @@ describe("PointerDragController", () => {
      * and the next read sees it.
      */
     describe("read when a gesture starts", () => {
-      const declareFollow = (on: boolean) =>
-        root().setAttribute("data-stimeo--pointer-drag-follow-value", String(on));
-
       it("continues from the element's translate when follow is switched on after connect", async () => {
         await mount(`
           <ul>
@@ -1200,20 +1798,103 @@ describe("PointerDragController", () => {
         expect(li.style.getPropertyValue("translate")).toBe("7px 7px");
       });
     });
+
+    /**
+     * `reset()` always ends the gesture in flight, and returns the inline `translate` to
+     * the origin only under `follow`: the value the gesture in flight started with, or the
+     * current declaration when none is in flight. Every case starts from the same
+     * `translate: 7px 9px`, so the translate a case ends with shows which `follow`
+     * `reset()` answered to.
+     */
+    describe("reset() and the follow declaration", () => {
+      const resettable = (follow: boolean) => `
+        <ul>
+          <li data-controller="stimeo--pointer-drag" style="translate: 7px 9px"
+              data-stimeo--pointer-drag-follow-value="${follow}"
+              data-action="demo:reset->stimeo--pointer-drag#reset">
+            <button type="button" data-stimeo--pointer-drag-target="handle"
+                    aria-label="Reorder">⠿</button>
+          </li>
+        </ul>`;
+      const requestReset = () => root().dispatchEvent(new CustomEvent("demo:reset"));
+
+      it("cancels a grab and keeps the author's translate when follow is off", async () => {
+        const events = await mount(resettable(false));
+        key(" ");
+        key("ArrowRight");
+        expect(root().dataset.grabbed).toBe("true");
+
+        requestReset();
+        expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+        expect(root().hasAttribute("data-grabbed")).toBe(false);
+        expect(handle().hasAttribute("data-grabbed")).toBe(false);
+        expect(translate()).toBe("7px 9px");
+
+        // Idle, there is nothing to cancel, and the translate stays the author's.
+        requestReset();
+        expect(events.cancel).toHaveLength(1);
+        expect(translate()).toBe("7px 9px");
+      });
+
+      it("returns to the origin when follow is on, idle or mid-grab", async () => {
+        const events = await mount(resettable(true));
+        requestReset();
+        expect(translate()).toBe("");
+        expect(events.cancel).toHaveLength(0);
+
+        root().style.setProperty("translate", "7px 9px");
+        key(" ");
+        key("ArrowRight");
+        expect(translate()).toBe("17px 9px");
+        requestReset();
+        expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+        expect(root().hasAttribute("data-grabbed")).toBe(false);
+        expect(translate()).toBe("");
+      });
+
+      it("returns a drag to the origin although its follow was switched off mid-gesture", async () => {
+        const events = await mount(resettable(true));
+        pointerDown(100, 100);
+        pointerMove(110, 100);
+        expect(translate()).toBe("17px 9px");
+        declareFollow(false);
+
+        requestReset();
+        expect(events.cancel).toEqual([{ pointerType: "mouse" }]);
+        expect(translate()).toBe("");
+      });
+
+      it("keeps the translate of a grab that started without follow", async () => {
+        const events = await mount(resettable(false));
+        key(" ");
+        declareFollow(true);
+        key("ArrowRight");
+
+        requestReset();
+        expect(events.cancel).toEqual([{ pointerType: "keyboard" }]);
+        expect(translate()).toBe("7px 9px");
+      });
+
+      it("keeps the translate a follow drag committed once follow is switched off", async () => {
+        const events = await mount(resettable(true));
+        pointerDown(0, 0);
+        pointerMove(20, 0);
+        pointerUp();
+        expect(translate()).toBe("27px 9px");
+        declareFollow(false);
+
+        requestReset();
+        expect(events.cancel).toHaveLength(0);
+        expect(translate()).toBe("27px 9px");
+      });
+    });
   });
 
   it("ignores Space / Enter / arrows raised during an IME composition", async () => {
     // A press that steers a conversion belongs to the composition, not to the drag.
     const events = await mount(defaultFixture);
     const composing = (k: string) =>
-      handle().dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: k,
-          bubbles: true,
-          cancelable: true,
-          isComposing: true,
-        }),
-      );
+      !press(handle(), k, { bubbles: true, cancelable: true, isComposing: true }).defaultPrevented;
 
     composing(" ");
     composing("Enter");
@@ -1258,7 +1939,7 @@ describe("PointerDragController", () => {
       </ul>`);
     const h = document.getElementById("h") as HTMLElement;
     expect(h.getAttribute("tabindex")).toBe("0");
-    expect(h.hasAttribute("data-pointer-drag-tabindex")).toBe(true);
+    expect(h.hasAttribute("data-stimeo--pointer-drag-tabindex-loan")).toBe(true);
     h.focus();
 
     const li = document.getElementById("src") as HTMLElement;
@@ -1266,7 +1947,7 @@ describe("PointerDragController", () => {
     h.focus(); // the composer re-focuses synchronously, as sortable does
     await delay(20);
     // The loan must survive the move, or the borrowed tabindex is never returned.
-    expect(h.hasAttribute("data-pointer-drag-tabindex")).toBe(true);
+    expect(h.hasAttribute("data-stimeo--pointer-drag-tabindex-loan")).toBe(true);
   });
 
   it("returns an in-flight follow offset before a dead-tree teardown", async () => {
@@ -1330,7 +2011,7 @@ describe("PointerDragController", () => {
     root().removeAttribute("data-controller");
     await delay(20);
     expect(h.hasAttribute("tabindex")).toBe(false);
-    expect(h.hasAttribute("data-pointer-drag-tabindex")).toBe(false);
+    expect(h.hasAttribute("data-stimeo--pointer-drag-tabindex-loan")).toBe(false);
     expect(h.style.touchAction).toBe("");
     expect(h.hasAttribute("data-pointer-drag-touch-action")).toBe(false);
   });
@@ -1351,7 +2032,7 @@ describe("PointerDragController", () => {
     ex.removeAttribute("data-stimeo--pointer-drag-target");
     await delay(20);
     expect(ex.hasAttribute("tabindex")).toBe(false);
-    expect(ex.hasAttribute("data-pointer-drag-tabindex")).toBe(false);
+    expect(ex.hasAttribute("data-stimeo--pointer-drag-tabindex-loan")).toBe(false);
     expect(ex.style.touchAction).toBe("");
     expect(ex.hasAttribute("data-pointer-drag-touch-action")).toBe(false);
   });
@@ -1453,8 +2134,8 @@ describe("PointerDragController", () => {
         </li>
       </ul>`);
     const field = document.getElementById("field") as HTMLElement;
-    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
-    field.dispatchEvent(space);
+    const space = keyEvent(" ", { bubbles: true, cancelable: true });
+    press(field, space);
     expect(space.defaultPrevented).toBe(false);
     expect(events.start).toHaveLength(0);
   });
@@ -1523,9 +2204,8 @@ describe("PointerDragController", () => {
 
   it("ignores keys raised outside every handle", async () => {
     const events = await mount(defaultFixture);
-    root().dispatchEvent(
-      new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }),
-    );
+    // The nonfocusable root probes keys that originate outside every handle.
+    typeKey(root(), " ");
     expect(events.start).toHaveLength(0);
   });
 
@@ -1607,7 +2287,7 @@ describe("PointerDragController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Speech-order regression ------------------------------------------------
+  // --- Speech-order check -----------------------------------------------------
 
   it("keeps the announcement stable across a keyboard grab (data hooks only)", async () => {
     await mount(defaultFixture);

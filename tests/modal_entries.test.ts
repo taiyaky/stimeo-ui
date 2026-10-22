@@ -3,6 +3,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DialogController } from "../src/controllers/dialog_controller";
 import { DrawerController } from "../src/controllers/drawer_controller";
 import { byId } from "./helpers/dom";
+import { press as keyboardPress } from "./helpers/keyboard";
 import { separateCopy } from "./helpers/separate_copy";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay, tick } from "./helpers/timing";
@@ -73,9 +74,7 @@ describe.each(SOURCES)("a dialog inside an open drawer, %s", (_, load) => {
     await delay(30);
   };
   const press = async (key: string) => {
-    (document.activeElement ?? document.body).dispatchEvent(
-      new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
-    );
+    keyboardPress(document.activeElement as HTMLElement, key);
     await settle();
   };
   const openBoth = async () => {

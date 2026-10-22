@@ -2,8 +2,14 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CurrencyInputController } from "../src/controllers/currency_input_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { composeDraft } from "./helpers/ime";
+import { keyEvent } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
+import {
+  disconnectAndStopApplication,
+  reconnectKeepingFocus,
+  restoreFromCache,
+} from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
 // Grouping and decimal marks come from the resolved locale, so a case that
@@ -115,6 +121,72 @@ describe("CurrencyInputController", () => {
     for (const ch of text) press(ch);
   };
   const blur = () => display().dispatchEvent(new Event("blur", { bubbles: true }));
+
+  it("parses an identical replacement display under its newly authored locale", async () => {
+    await mount();
+    type("1.23");
+    blur();
+    const owner = controller();
+    owner.disconnect();
+    const replacement = display().cloneNode(true) as HTMLInputElement;
+    display().replaceWith(replacement);
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    owner.connect();
+    await tick();
+    expect(field().value).toBe("123");
+    expect(replacement.value).toBe("123,00");
+  });
+
+  it("parses a cloned display under its current locale rather than an unknown held number", async () => {
+    await mount({ value: "1.23" });
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--currency-input", CurrencyInputController),
+    );
+    expect(field().value).toBe("123");
+    expect(display().value).toBe("123,00");
+  });
+
+  it("reads an earlier display when it returns after another display was committed", async () => {
+    await mount({ value: "1.23" });
+    const owner = controller();
+    const first = display();
+    owner.disconnect();
+    const second = first.cloneNode(true) as HTMLInputElement;
+    second.value = "4.56";
+    first.replaceWith(second);
+    await tick();
+    owner.connect();
+    await tick();
+    expect(field().value).toBe("4.56");
+    owner.disconnect();
+    second.replaceWith(first);
+    await tick();
+    owner.connect();
+    await tick();
+    expect(first.value).toBe("1.23");
+    expect(field().value).toBe("1.23");
+    expect(srValue().textContent).toBe("1.23");
+  });
+
+  it("reads a returning display with its newly authored locale", async () => {
+    await mount({ value: "1.23" });
+    const first = display();
+    const second = first.cloneNode(true) as HTMLInputElement;
+    second.value = "4,56";
+    first.replaceWith(second);
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().displayTargetConnected(second);
+    await tick();
+    expect(field().value).toBe("4.56");
+    second.replaceWith(first);
+    root().setAttribute("data-stimeo--currency-input-locale-value", "en-US");
+    controller().displayTargetConnected(first);
+    await tick();
+    expect(first.value).toBe("1.23");
+    expect(field().value).toBe("1.23");
+    expect(srValue().textContent).toBe("1.23");
+  });
 
   const controller = () =>
     application.getControllerForElementAndIdentifier(
@@ -252,8 +324,7 @@ describe("CurrencyInputController", () => {
   it("holds mid-composition input and formats the confirmed text once", async () => {
     await mount();
     display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    display().value = "1234ｋ";
-    display().dispatchEvent(new Event("input", { bubbles: true }));
+    composeDraft(display(), "1234ｋ");
     // The IME still owns the text: nothing may rewrite it mid-composition.
     expect(display().value).toBe("1234ｋ");
     display().value = "１２３４";
@@ -268,8 +339,7 @@ describe("CurrencyInputController", () => {
     display().focus();
     const events = record();
     display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    display().value = "1234ｋ";
-    display().dispatchEvent(new Event("input", { bubbles: true }));
+    composeDraft(display(), "1234ｋ");
     root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
     controller().localeValueChanged();
     // Stimulus delivers its own callback too; both land mid-composition.
@@ -287,6 +357,257 @@ describe("CurrencyInputController", () => {
     expect(display().value).toBe("12.345");
     expect(field().value).toBe("12345");
     expect(events).toEqual([{ type: "change", detail: { value: 12345, formatted: "12,345" } }]);
+  });
+
+  it("applies a held declaration change once a script ends the composition without compositionend", async () => {
+    await mount({ value: "1234" });
+    display().focus();
+    const events = record();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1234ｋ");
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    await tick();
+    expect(events).toEqual([]);
+
+    // A script writes the display for the declarations the page now carries, and the
+    // engine drops the conversion without compositionend.
+    display().value = "1,5";
+    display().dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "5",
+      }),
+    );
+    await tick();
+
+    // The text is the page's, so the held change reads it with those declarations.
+    expect(field().value).toBe("1.5");
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["reconcile", 1.5]]);
+
+    display().value = "1,55";
+    display().dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(field().value).toBe("1.55");
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([
+      ["reconcile", 1.5],
+      ["change", 1.55],
+    ]);
+  });
+
+  it("applies a held declaration change before the input a script sends after its write", async () => {
+    await mount({ value: "1234" });
+    display().focus();
+    const events = record();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1234ｋ");
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    await tick();
+
+    // A script writes the display for the declarations the page now carries and tells
+    // listeners; the engine drops the conversion without compositionend.
+    display().value = "1,5";
+    display().dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(field().value).toBe("1.5");
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["reconcile", 1.5]]);
+  });
+
+  it("applies a held declaration change before the blur after a write is formatted", async () => {
+    await mount({ value: "1234" });
+    const elsewhere = document.createElement("button");
+    document.body.append(elsewhere);
+    display().focus();
+    const events = record();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1234ｋ");
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    await tick();
+
+    // A script writes the display, and the engine drops the conversion without compositionend.
+    display().value = "1,5";
+    elsewhere.focus();
+
+    expect(field().value).toBe("1.5");
+    expect(display().value).toBe("1,50");
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["reconcile", 1.5]]);
+  });
+
+  it("reads text a composition left in place with the separators it was typed against, then applies a held change", async () => {
+    await mount();
+    display().focus();
+    typeKeys("1234");
+    const events = record();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1,2345");
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    await tick();
+
+    // The engine stops composing with the text in place: its next key and edit say so.
+    display().dispatchEvent(keyEvent("6", { isComposing: false }));
+    display().dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "6",
+      }),
+    );
+
+    expect(field().value).toBe("12345");
+    expect(display().value).toBe("12.345");
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["reconcile", 12345]]);
+  });
+
+  it("leaves text a composition left in place to the user's next edit when nothing was held", async () => {
+    await mount();
+    display().focus();
+    typeKeys("1234");
+    const events = record();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1,2345");
+
+    // The engine stops composing with its text in place: its next key and edit say so.
+    display().dispatchEvent(keyEvent("6", { isComposing: false }));
+    display().dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "6",
+      }),
+    );
+    expect(display().value).toBe("1,2345");
+    expect(events).toEqual([]);
+
+    display().value = "1,23456";
+    display().dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+
+    expect(display().value).toBe("123,456");
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["change", 123456]]);
+  });
+
+  it("keeps a held change, and the text a composition left in place, for the composition that starts on it", async () => {
+    await mount();
+    display().focus();
+    typeKeys("1234");
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1,2345");
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    await tick();
+
+    // A new conversion starts on the same display: its text is the IME's again.
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    expect(display().value).toBe("1,2345");
+
+    composeDraft(display(), "1,23456");
+    display().dispatchEvent(new Event("compositionend", { bubbles: true }));
+    // Read with the separators it was typed against, then shown under the held change.
+    expect(field().value).toBe("123456");
+    expect(display().value).toBe("123.456");
+  });
+
+  it("keeps the caret where the user put it when a held change applies right before their edit", async () => {
+    await mount({ value: "1234" });
+    display().focus();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    await tick();
+    display().value = "1234,5";
+    display().setSelectionRange(3, 3); // after the 3
+
+    display().dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "9",
+      }),
+    );
+    await tick();
+
+    expect(display().value).toBe("1.234,5");
+    // Still after the 3: "1.23|4,5".
+    expect(display().selectionStart).toBe(4);
+  });
+
+  it("keeps the caret by significant characters when a declaration change re-renders the focused display", async () => {
+    await mount();
+    display().focus();
+    typeKeys("1234.5");
+    expect(display().value).toBe("1,234.5");
+    display().setSelectionRange(4, 4); // after the 3, read with the separators it was typed in
+
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+
+    expect(display().value).toBe("1.234,5");
+    expect(display().selectionStart).toBe(4);
+  });
+
+  it("leaves the page's text to the next edit when a write ends a composition that held nothing", async () => {
+    await mount({ value: "1234" });
+    display().focus();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1234ｋ");
+    const events = record();
+
+    // A script writes the display, and the engine drops the conversion without compositionend.
+    display().value = "5";
+    display().dispatchEvent(keyEvent("ArrowLeft"));
+    await tick();
+
+    expect(display().value).toBe("5");
+    expect(events).toEqual([]);
+  });
+
+  it("stops hearing compositions on the display once it disconnects", async () => {
+    await mount({ value: "1234" });
+    const instance = controller();
+    instance.disconnect();
+    const events = record();
+
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    display().value = "56";
+    display().dispatchEvent(new Event("compositionend", { bubbles: true }));
+    await tick();
+
+    expect(display().value).toBe("56");
+    expect(events).toEqual([]);
+    instance.connect();
+  });
+
+  it("leaves no composition for a later disconnect to end once one ended without compositionend", async () => {
+    await mount({ value: "1234" });
+    display().focus();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1234ｋ");
+    display().value = "5";
+    display().dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "6",
+      }),
+    );
+    display().value = "56";
+    display().dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+    const events = record();
+
+    display().value = "777";
+    controller().disconnect();
+
+    expect(display().value).toBe("777");
+    expect(events).toEqual([]);
   });
 
   it("applies a held declaration change once the composing display leaves", async () => {
@@ -564,13 +885,36 @@ describe("CurrencyInputController", () => {
       },
     );
 
+    it("reads the successor once the turn ends after the composing display drops its target and keeps focus", async () => {
+      await mount({ value: "1234.5" });
+      const events = record();
+      const composing = display();
+      composing.focus();
+      composing.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      composeDraft(composing, "1,234.5６");
+      const successor = pageDisplay("9876.5");
+      composing.after(successor);
+      await tick();
+
+      // The page drops the target; the field keeps focus and goes on composing.
+      composing.removeAttribute("data-stimeo--currency-input-target");
+      controller().displayTargetDisconnected(composing);
+      await tick();
+
+      expect(display()).toBe(successor);
+      expect(composing.value).toBe("1,234.5６");
+      expect(successor.value).toBe("9,876.50");
+      expect(events).toEqual([
+        { type: "reconcile", detail: { value: 9876.5, formatted: "9,876.50" } },
+      ]);
+    });
+
     it("leaves the composing display's text alone while a successor waits behind it", async () => {
       await mount({ value: "1234.5" });
       const events = record();
       await holdChange("locale", "de-DE");
       const composing = display();
-      composing.value = "1,234.5６";
-      composing.dispatchEvent(new Event("input", { bubbles: true }));
+      composeDraft(composing, "1,234.5６");
       composing.after(pageDisplay("9.876,5"));
       await tick();
 
@@ -585,8 +929,7 @@ describe("CurrencyInputController", () => {
       const composing = display();
       composing.focus();
       composing.dispatchEvent(new Event("compositionstart", { bubbles: true }));
-      composing.value = "1,234.5６";
-      composing.dispatchEvent(new Event("input", { bubbles: true }));
+      composeDraft(composing, "1,234.5６");
       const behind = pageDisplay("9876.5");
       composing.after(behind);
       await tick();
@@ -612,8 +955,7 @@ describe("CurrencyInputController", () => {
       const events = record();
       await holdChange("locale", "de-DE");
       const composing = display();
-      composing.value = "1,234.5６";
-      composing.dispatchEvent(new Event("input", { bubbles: true }));
+      composeDraft(composing, "1,234.5６");
       const behind = pageDisplay("9.876,5");
       composing.after(behind);
       await tick();
@@ -679,6 +1021,10 @@ describe("CurrencyInputController", () => {
     root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
     controller().localeValueChanged();
     const instance = controller();
+    // Moving the controller element without moveBefore takes focus from the field; in
+    // Chromium the move ends the conversion with no compositionend. The controller disconnects
+    // and connects again.
+    root().parentElement?.append(root());
     instance.disconnect();
     instance.connect();
 
@@ -692,7 +1038,7 @@ describe("CurrencyInputController", () => {
     display().focus();
     typeKeys("1234");
     display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    press("５");
+    composeDraft(display(), "1,234５");
     root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
     controller().localeValueChanged();
     await tick();
@@ -703,7 +1049,10 @@ describe("CurrencyInputController", () => {
     await composeWhileHeld();
     const events = record();
     const instance = controller();
-    // The composition listeners leave with the controller: no compositionend follows.
+    // Moving the controller element without moveBefore takes focus from the field; in
+    // Chromium the move ends the conversion with no compositionend. The controller disconnects
+    // and connects again.
+    root().parentElement?.append(root());
     instance.disconnect();
     instance.connect();
     await tick();
@@ -728,21 +1077,432 @@ describe("CurrencyInputController", () => {
     expect(events).toEqual([{ type: "reconcile", detail: { value: 12345, formatted: "12,345" } }]);
   });
 
-  it("reads its own rendering on a display that moves within the controller before a held change applies", async () => {
+  it.each([
+    [
+      "the display",
+      (instance: CurrencyInputController, moving: HTMLInputElement) => {
+        instance.displayTargetDisconnected(moving);
+        instance.displayTargetConnected(moving);
+      },
+    ],
+    [
+      "the controller element",
+      // Stimulus disconnects a controller before its targets, and connects it after them.
+      (instance: CurrencyInputController, moving: HTMLInputElement) => {
+        instance.disconnect();
+        instance.displayTargetDisconnected(moving);
+        instance.displayTargetConnected(moving);
+        instance.connect();
+      },
+    ],
+  ])(
+    "leaves the conversion alone when %s moves keeping focus, and reads its commit",
+    async (_name, move) => {
+      await mount();
+      await composeWhileHeld();
+      const events = record();
+
+      // A move that keeps focus and the conversion still lets Stimulus release the targets
+      // and take them back.
+      move(controller(), display());
+      await tick();
+      expect(display().value).toBe("1,234５");
+      expect(events).toEqual([]);
+
+      display().value = "1,2345";
+      display().dispatchEvent(new Event("compositionend", { bubbles: true }));
+
+      expect(field().value).toBe("12345");
+      expect(display().value).toBe("12.345");
+      expect(events).toEqual([{ type: "change", detail: { value: 12345, formatted: "12,345" } }]);
+    },
+  );
+
+  it.each([
+    [
+      "the display",
+      (instance: CurrencyInputController, moving: HTMLInputElement) => {
+        instance.displayTargetDisconnected(moving);
+        instance.displayTargetConnected(moving);
+      },
+    ],
+    [
+      "the controller element",
+      (instance: CurrencyInputController, moving: HTMLInputElement) => {
+        instance.disconnect();
+        instance.displayTargetDisconnected(moving);
+        instance.displayTargetConnected(moving);
+        instance.connect();
+      },
+    ],
+  ])(
+    "holds nothing when %s moves keeping focus, so later edits report as with no move",
+    async (_name, move) => {
+      await mount();
+      display().focus();
+      typeKeys("1234");
+      const events = record();
+      display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      composeDraft(display(), "1,2345");
+      move(controller(), display());
+      await tick();
+
+      // The engine stops composing with its text in place: nothing was held to apply.
+      display().dispatchEvent(keyEvent("6", { isComposing: false }));
+      display().dispatchEvent(
+        new InputEvent("beforeinput", {
+          bubbles: true,
+          inputType: "insertText",
+          isComposing: false,
+          data: "6",
+        }),
+      );
+      expect(events).toEqual([]);
+      // A script writes the display and tells listeners: an edit, as with no move.
+      display().value = "5";
+      display().dispatchEvent(new Event("input", { bubbles: true }));
+
+      expect(events.map((event) => [event.type, event.detail.value])).toEqual([["change", 5]]);
+    },
+  );
+
+  it("holds nothing for a locale changed and changed back mid-composition", async () => {
+    await mount();
+    display().focus();
+    typeKeys("1234");
+    const events = record();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1,234５");
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    await tick();
+    root().setAttribute("data-stimeo--currency-input-locale-value", "en-US");
+    await tick();
+
+    type("5");
+
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["change", 5]]);
+  });
+
+  for (const pass of ["morph", "reconnect"] as const) {
+    it.each(["1234", ""])(
+      `restores committed derived output for %s in the declarations in force while a composing ${pass} holds a change`,
+      async (value) => {
+        await mount({ currency: "USD", value });
+        display().focus();
+        const committed = display().value;
+        const spoken = srValue().textContent;
+        const events = record();
+        display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+        composeDraft(display(), `${committed}５`);
+        display().setSelectionRange(1, 1);
+        root().setAttribute("data-stimeo--currency-input-currency-value", "EUR");
+        controller().currencyValueChanged();
+        field().value = "";
+        srValue().textContent = "";
+        root().toggleAttribute("data-stimeo--currency-input-empty", value !== "");
+
+        if (pass === "morph") {
+          root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+        } else reconnectKeepingFocus(controller());
+        await tick();
+
+        expect(field().value).toBe(value);
+        expect(srValue().textContent).toBe(spoken);
+        expect(root().hasAttribute("data-stimeo--currency-input-empty")).toBe(value === "");
+        expect(display().value).toBe(`${committed}５`);
+        expect([display().selectionStart, display().selectionEnd]).toEqual([1, 1]);
+        expect(events).toEqual([]);
+
+        display().value = "5";
+        display().dispatchEvent(new Event("compositionend", { bubbles: true }));
+        expect(field().value).toBe("5");
+        expect(srValue().textContent).toBe("€5.00");
+        expect(events.map((event) => [event.type, event.detail.value])).toEqual([["change", 5]]);
+      },
+    );
+  }
+
+  it("reads a display that arrives ahead of the composing one as the page's once that composition ends", async () => {
+    await mount({ currency: "USD", value: "1234" });
+    const composing = display();
+    composing.focus();
+    const events = record();
+    composing.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(composing, "1,234.00５");
+    const ahead = document.createElement("input");
+    ahead.value = "42";
+    ahead.setAttribute("data-stimeo--currency-input-target", "display");
+    composing.before(ahead);
+    await tick();
+
+    expect(display()).toBe(ahead);
+    expect(ahead.value).toBe("42");
+    expect(field().value).toBe("1234");
+    expect(srValue().textContent).toBe("$1,234.00");
+    expect(composing.value).toBe("1,234.00５");
+    expect(events).toEqual([]);
+
+    // The composition ended on a display no longer in charge, so it confirmed nothing.
+    composing.value = "1,234.005";
+    composing.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    expect(ahead.value).toBe("42.00");
+    expect(field().value).toBe("42");
+    expect(srValue().textContent).toBe("$42.00");
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["reconcile", 42]]);
+  });
+
+  for (const end of ["in place", "by a write"] as const) {
+    it(`reads a display that arrived ahead of a composition the engine ends ${end} as the page's`, async () => {
+      await mount({ currency: "USD", value: "1234" });
+      const composing = display();
+      composing.focus();
+      const events = record();
+      composing.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      composeDraft(composing, "1,234.00５");
+      const ahead = document.createElement("input");
+      ahead.value = "42";
+      ahead.setAttribute("data-stimeo--currency-input-target", "display");
+      composing.before(ahead);
+      await tick();
+      expect(events).toEqual([]);
+
+      // The engine stops composing without compositionend: its next key and edit say so.
+      if (end === "by a write") composing.value = "999";
+      composing.dispatchEvent(keyEvent("6", { isComposing: false }));
+      composing.dispatchEvent(
+        new InputEvent("beforeinput", {
+          bubbles: true,
+          inputType: "insertText",
+          isComposing: false,
+          data: "6",
+        }),
+      );
+      await tick();
+
+      expect(ahead.value).toBe("42.00");
+      expect(field().value).toBe("42");
+      expect(srValue().textContent).toBe("$42.00");
+      expect(events.map((event) => [event.type, event.detail.value])).toEqual([["reconcile", 42]]);
+    });
+  }
+
+  it("keeps the change a display leaving held when it comes back ahead of a composition the engine ends", async () => {
+    await mount({ currency: "USD", value: "1234" });
+    const charge = display();
+    const behind = document.createElement("input");
+    behind.setAttribute("data-stimeo--currency-input-target", "display");
+    charge.after(behind);
+    await tick();
+    const events = record();
+    behind.focus();
+    behind.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(behind, "５");
+    charge.remove();
+    await tick();
+    charge.value = "77";
+    behind.before(charge);
+    await tick();
+
+    // The engine stops composing without compositionend: its next key and edit say so.
+    behind.dispatchEvent(keyEvent("6", { isComposing: false }));
+    behind.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "6",
+      }),
+    );
+    await tick();
+
+    expect(charge.value).toBe("77.00");
+    expect(field().value).toBe("77");
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["reconcile", 77]]);
+  });
+
+  it("reads the display in charge as the page's when a display behind it ends a composition", async () => {
+    await mount({ currency: "USD", value: "1234" });
+    const behind = document.createElement("input");
+    behind.setAttribute("data-stimeo--currency-input-target", "display");
+    display().after(behind);
+    await tick();
+    const events = record();
+    behind.focus();
+    behind.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(behind, "５");
+    display().value = "77";
+    behind.value = "5";
+    behind.dispatchEvent(new Event("compositionend", { bubbles: true }));
+
+    expect(display().value).toBe("77.00");
+    expect(field().value).toBe("77");
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["reconcile", 77]]);
+  });
+
+  it("reads the commit with the separators in force after a display ahead came and went mid-composition", async () => {
+    await mount({ locale: "en-US" });
+    const composing = display();
+    composing.focus();
+    const events = record();
+    composing.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(composing, "1,234.5");
+    root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+    controller().localeValueChanged();
+    const ahead = document.createElement("input");
+    ahead.setAttribute("data-stimeo--currency-input-target", "display");
+    composing.before(ahead);
+    await tick();
+    ahead.remove();
+    await tick();
+
+    composing.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["change", 1234.5]]);
+  });
+
+  for (const pass of ["morph", "reconnect"] as const) {
+    it.each(["1234", ""])(
+      `restores committed derived output for %s during an unchanged composing ${pass}`,
+      async (value) => {
+        await mount({ currency: "USD", value });
+        display().focus();
+        const committed = display().value;
+        const spoken = srValue().textContent;
+        const events = record();
+        display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+        composeDraft(display(), `${committed}５`);
+        display().setSelectionRange(1, 1);
+        field().value = "";
+        srValue().textContent = "";
+        root().toggleAttribute("data-stimeo--currency-input-empty", value !== "");
+
+        if (pass === "morph") {
+          root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+        } else reconnectKeepingFocus(controller());
+        await tick();
+
+        expect(field().value).toBe(value);
+        expect(srValue().textContent).toBe(spoken);
+        expect(root().hasAttribute("data-stimeo--currency-input-empty")).toBe(value === "");
+        expect(display().value).toBe(`${committed}５`);
+        expect([display().selectionStart, display().selectionEnd]).toEqual([1, 1]);
+        expect(events).toEqual([]);
+
+        display().value = "5";
+        display().dispatchEvent(new Event("compositionend", { bubbles: true }));
+        expect(field().value).toBe("5");
+        expect(events.map((event) => [event.type, event.detail.value])).toEqual([["change", 5]]);
+      },
+    );
+  }
+
+  it("holds nothing for a morph that changes nothing mid-composition, so a script's write reports as an edit", async () => {
+    await mount();
+    display().focus();
+    typeKeys("1234");
+    const events = record();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1,234５");
+
+    root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+    expect(display().value).toBe("1,234５");
+    // A script writes the display and tells listeners: an edit, as with no composition.
+    type("5");
+
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["change", 5]]);
+  });
+
+  it("holds nothing for Values left at their defaults when the controller element moves keeping focus", async () => {
+    await mountBare();
+    display().focus();
+    typeKeys("1234");
+    const events = record();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1,234５");
+
+    // Stimulus calls the callback of every Value left at its default as the controller reconnects.
+    reconnectKeepingFocus(controller());
+    await tick();
+    expect(display().value).toBe("1,234５");
+
+    // A script writes the display and tells listeners: an edit, as with no move.
+    type("5");
+
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["change", 5]]);
+  });
+
+  it.each([
+    ["locale", "data-stimeo--currency-input-locale-value", "de-DE"],
+    ["currency", "data-stimeo--currency-input-currency-value", "EUR"],
+    ["precision", "data-stimeo--currency-input-precision-value", "0"],
+  ])(
+    "holds a %s that changed with a move keeping focus, as it does with no move",
+    async (_name, attribute, value) => {
+      await mount();
+      display().focus();
+      typeKeys("1234");
+      const events = record();
+      display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      composeDraft(display(), "1,234５");
+
+      // The morph that moves the controller element also changes its declarations.
+      reconnectKeepingFocus(controller(), () => root().setAttribute(attribute, value));
+      await tick();
+      expect(display().value).toBe("1,234５");
+
+      type("5");
+
+      expect(events.map((event) => [event.type, event.detail.value])).toEqual([["reconcile", 5]]);
+    },
+  );
+
+  it("takes in the language around a controller element that moved keeping focus once the composition ends", async () => {
+    await mount({ locale: "" });
+    const section = document.createElement("section");
+    section.lang = "en-US";
+    document.body.append(section);
+    section.append(root());
+    await tick();
+    display().focus();
+    typeKeys("1234");
+    const events = record();
+    display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(display(), "1,2345");
+
+    // The controller element moves into a German section; an empty locale follows the
+    // language around it.
+    reconnectKeepingFocus(controller(), () => {
+      section.lang = "de-DE";
+    });
+    await tick();
+    display().dispatchEvent(new Event("compositionend", { bubbles: true }));
+
+    expect(display().value).toBe("12.345");
+    expect(field().value).toBe("12345");
+    expect(events.map((event) => [event.type, event.detail.value])).toEqual([["change", 12345]]);
+  });
+
+  it("holds a blur during the composition and rounds what a move within the controller leaves before a held change applies", async () => {
     await mount();
     await composeWhileHeld();
     const events = record();
-    // A blur formats the text under the declarations it was typed against.
+    // The blur is held: the draft is the IME's until the composition ends.
     blur();
+    expect(display().value).toBe("1,234５");
+    expect(events).toEqual([]);
     const moving = display();
     root().append(moving);
     controller().displayTargetDisconnected(moving);
     controller().displayTargetConnected(moving);
     await tick();
 
+    // The move ends the composition: its text is read and rounded once under the
+    // declarations it was typed against, as the page's, and the held change applies.
     expect(moving.value).toBe("12.345,00");
     expect(field().value).toBe("12345");
-    expect(events).toEqual([{ type: "change", detail: { value: 12345, formatted: "12,345.00" } }]);
+    expect(events).toEqual([
+      { type: "reconcile", detail: { value: 12345, formatted: "12,345.00" } },
+    ]);
   });
 
   it("re-renders in the language around it when it connects again with an empty locale", async () => {
@@ -778,8 +1538,7 @@ describe("CurrencyInputController", () => {
     await mount();
     typeKeys("12");
     display().dispatchEvent(new Event("compositionstart", { bubbles: true }));
-    display().value = "12３";
-    display().dispatchEvent(new Event("input", { bubbles: true }));
+    composeDraft(display(), "12３");
     field().remove();
     const lateField = document.createElement("input");
     lateField.type = "hidden";
@@ -897,7 +1656,7 @@ describe("CurrencyInputController", () => {
     expect(events).toEqual([]);
   });
 
-  it("leaves the entry unrounded on a focused display that stays after an earlier one leaves", async () => {
+  it("keeps the confirmed amount until a focused successor supplies an ordinary input", async () => {
     await mount({ value: "1234.5" });
     const events = record();
     const original = display();
@@ -910,8 +1669,11 @@ describe("CurrencyInputController", () => {
     await tick();
 
     expect(successor.value).toBe("12.3");
+    expect(field().value).toBe("1234.5");
+    expect(events).toEqual([]);
+    successor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
     expect(field().value).toBe("12.3");
-    expect(events).toEqual([{ type: "reconcile", detail: { value: 12.3, formatted: "12.3" } }]);
+    expect(events).toEqual([{ type: "change", detail: { value: 12.3, formatted: "12.3" } }]);
   });
 
   it("reads nothing for an arrival delivered once no display is left", async () => {
@@ -1646,7 +2408,7 @@ describe("CurrencyInputController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Speech-order regression. The grouped display string is for sighted users;
+  // Speech-order check. The grouped display string is for sighted users;
   // assistive tech must hear the *normalized* value via the srValue span
   // referenced by aria-describedby. Capturing the field's announcement pins the
   // textbox role, its accessible name, and that the described value rides along.
@@ -1685,5 +2447,1832 @@ describe("CurrencyInputController", () => {
     type("10");
     expect(field().value).toBe("10");
     expect(changes).toEqual([]);
+  });
+});
+
+describe("CurrencyInputController — the display in charge", () => {
+  let application: Application;
+
+  afterEach(() => {
+    if (application) disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const ACTION = "input->stimeo--currency-input#onInput blur->stimeo--currency-input#format";
+
+  /** Mounts a form whose currency-input has display `#a` and, unless `second` is null, `#b` behind it. */
+  const mountForm = async ({
+    value = "1234",
+    second = "" as string | null,
+    locale = "en-US",
+    lang = "",
+    actionOnRoot = false,
+  } = {}) => {
+    const action = actionOnRoot ? "" : ACTION;
+    const behind =
+      second === null
+        ? ""
+        : `<input id="b" type="text" value="${second}" data-stimeo--currency-input-target="display" data-action="${action}">`;
+    document.body.innerHTML = `
+      <form id="f" lang="${lang}">
+        <div data-controller="stimeo--currency-input"
+             data-action="${actionOnRoot ? "input->stimeo--currency-input#onInput focusout->stimeo--currency-input#format" : ""}"
+             data-stimeo--currency-input-locale-value="${locale}"
+             data-stimeo--currency-input-currency-value="USD">
+          <input id="a" type="text" aria-describedby="sr" value="${value}"
+                 data-stimeo--currency-input-target="display" data-action="${action}">
+          ${behind}
+          <span id="sr" data-stimeo--currency-input-target="srValue"></span>
+          <input type="hidden" name="amount" data-stimeo--currency-input-target="field">
+        </div>
+      </form>`;
+    application = Application.start();
+    application.register("stimeo--currency-input", CurrencyInputController);
+    await tick();
+  };
+
+  const input = (id: string) => document.getElementById(id) as HTMLInputElement;
+  const root = () => document.querySelector<HTMLElement>("[data-controller]") as HTMLElement;
+  const field = () =>
+    document.querySelector<HTMLInputElement>("input[name='amount']") as HTMLInputElement;
+  const controller = () =>
+    application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--currency-input",
+    ) as CurrencyInputController;
+
+  /** The outputs a form submission and a screen reader read, apart from what the display shows. */
+  const outputs = () => ({
+    field: field().value,
+    submitted: new FormData(document.getElementById("f") as HTMLFormElement).get("amount"),
+    spoken: document.getElementById("sr")?.textContent,
+    empty: root().hasAttribute("data-stimeo--currency-input-empty"),
+  });
+
+  /** Records the native `input` and `change` the hidden field hears. */
+  const nativeOnField = () => {
+    const heard: string[] = [];
+    for (const type of ["input", "change"]) field().addEventListener(type, () => heard.push(type));
+    return heard;
+  };
+
+  /** Records every `change` and `reconcile` as `[type, value]`, in dispatch order. */
+  const record = () => {
+    const events: Array<[string, number | null]> = [];
+    for (const type of ["change", "reconcile"]) {
+      root().addEventListener(`stimeo--currency-input:${type}`, (event) => {
+        events.push([type, (event as CustomEvent).detail.value]);
+      });
+    }
+    return events;
+  };
+
+  const startComposing = (element: HTMLInputElement, draft: string) => {
+    element.focus();
+    element.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(element, draft);
+  };
+
+  /** The engine stops composing without compositionend; its next key and edit say so. */
+  const endWithoutCompositionend = (element: HTMLInputElement, written?: string) => {
+    if (written !== undefined) element.value = written;
+    element.dispatchEvent(keyEvent("6", { isComposing: false }));
+    element.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "6",
+      }),
+    );
+  };
+
+  const commit = (element: HTMLInputElement, text: string) => {
+    element.value = text;
+    element.dispatchEvent(new Event("compositionend", { bubbles: true }));
+  };
+
+  /** Detaches `element`, lets the page write `text` into it, and puts it back before `before`. */
+  const writeWhileAway = async (element: HTMLInputElement, text: string, before: HTMLElement) => {
+    element.remove();
+    await tick();
+    element.value = text;
+    before.before(element);
+    await tick();
+  };
+
+  const morphUnchanged = async () => {
+    root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+  };
+
+  describe("a single display", () => {
+    it("reads its own input, blur and commit as the user's", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      input("a").focus();
+      input("a").value = "56";
+      input("a").dispatchEvent(new Event("input", { bubbles: true }));
+      input("a").dispatchEvent(new Event("blur"));
+      startComposing(input("a"), "56.00５");
+      commit(input("a"), "56.005");
+
+      expect(events).toEqual([
+        ["change", 56],
+        ["change", 56.005],
+      ]);
+      expect(outputs()).toEqual({
+        field: "56.005",
+        submitted: "56.005",
+        spoken: "$56.01",
+        empty: false,
+      });
+    });
+
+    it("rounds the display in charge on a call without an event", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      input("a").value = "5.555";
+      controller().format();
+
+      expect(input("a").value).toBe("5.56");
+      expect(events).toEqual([["change", 5.56]]);
+      expect(outputs().submitted).toBe("5.56");
+    });
+
+    it("re-groups the display in charge on an onInput call without an event", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      input("a").value = "56789";
+      controller().onInput();
+
+      expect(input("a").value).toBe("56,789");
+      expect(events).toEqual([["change", 56789]]);
+      expect(outputs().submitted).toBe("56789");
+    });
+  });
+
+  describe("a display behind the one in charge", () => {
+    it("leaves a page write in charge unread when another display arrives behind it", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      const native = nativeOnField();
+      input("a").value = "77";
+      const arriving = document.createElement("input");
+      arriving.value = "999";
+      arriving.setAttribute("data-stimeo--currency-input-target", "display");
+      root().append(arriving);
+      controller().displayTargetConnected(arriving);
+      await tick();
+
+      expect(input("a").value).toBe("77");
+      expect(arriving.value).toBe("999");
+      expect(outputs()).toEqual({
+        field: "1234",
+        submitted: "1234",
+        spoken: "$1,234.00",
+        empty: false,
+      });
+      expect(events).toEqual([]);
+      expect(native).toEqual([]);
+
+      root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+      await tick();
+      expect(input("a").value).toBe("77.00");
+      expect(outputs()).toEqual({
+        field: "77",
+        submitted: "77",
+        spoken: "$77.00",
+        empty: false,
+      });
+      expect(events).toEqual([["reconcile", 77]]);
+      expect(native).toEqual([]);
+    });
+
+    it("does not read the display in charge as the user's edit on an input in the display behind it", async () => {
+      await mountForm();
+      const events = record();
+      input("a").value = "77";
+      input("b").focus();
+      input("b").value = "34567";
+      input("b").setSelectionRange(2, 2);
+      input("b").dispatchEvent(new Event("input", { bubbles: true }));
+
+      expect(events).toEqual([]);
+      expect(outputs()).toEqual({
+        field: "1234",
+        submitted: "1234",
+        spoken: "$1,234.00",
+        empty: false,
+      });
+      expect([input("a").value, input("b").value]).toEqual(["77", "34567"]);
+      expect(document.activeElement).toBe(input("b"));
+      expect([input("b").selectionStart, input("b").selectionEnd]).toEqual([2, 2]);
+    });
+
+    it("does not read the display in charge as the user's edit on a blur of the display behind it", async () => {
+      await mountForm();
+      const events = record();
+      input("a").value = "77";
+      input("b").dispatchEvent(new Event("blur"));
+
+      expect(events).toEqual([]);
+      expect(outputs().submitted).toBe("1234");
+      expect(input("a").value).toBe("77");
+    });
+
+    it("leaves the display in charge alone when a composition in the display behind it commits", async () => {
+      await mountForm();
+      const events = record();
+      startComposing(input("b"), "５");
+      commit(input("b"), "5");
+
+      expect(events).toEqual([]);
+      expect(outputs()).toEqual({
+        field: "1234",
+        submitted: "1234",
+        spoken: "$1,234.00",
+        empty: false,
+      });
+      expect([input("a").value, input("b").value]).toEqual(["1,234.00", "5"]);
+    });
+
+    for (const written of [undefined, "999"] as const) {
+      it(`reads a page write into the display in charge once a composition behind it ends without compositionend (${written === undefined ? "in place" : "by a write"})`, async () => {
+        await mountForm();
+        const events = record();
+        startComposing(input("b"), "５");
+        input("b").setSelectionRange(1, 1);
+        input("a").value = "77";
+        endWithoutCompositionend(input("b"), written);
+        await tick();
+
+        expect(events).toEqual([["reconcile", 77]]);
+        expect(outputs()).toEqual({
+          field: "77",
+          submitted: "77",
+          spoken: "$77.00",
+          empty: false,
+        });
+        expect(input("a").value).toBe("77.00");
+        expect(document.activeElement).toBe(input("b"));
+      });
+
+      it(`stays quiet when a composition behind an untouched display in charge ends without compositionend (${written === undefined ? "in place" : "by a write"})`, async () => {
+        await mountForm();
+        const events = record();
+        startComposing(input("b"), "５");
+        endWithoutCompositionend(input("b"), written);
+        await tick();
+        input("b").dispatchEvent(new Event("input", { bubbles: true }));
+        input("b").dispatchEvent(new Event("blur"));
+
+        expect(events).toEqual([]);
+        expect(outputs().submitted).toBe("1234");
+        expect(input("a").value).toBe("1,234.00");
+      });
+    }
+
+    it("reads a display in charge rewritten while away once a composition behind it ends, after a morph that changes nothing", async () => {
+      await mountForm();
+      const events = record();
+      startComposing(input("b"), "５");
+      await writeWhileAway(input("a"), "77", input("b"));
+      await morphUnchanged();
+      expect(events).toEqual([]);
+      expect(outputs().submitted).toBe("1234");
+
+      endWithoutCompositionend(input("b"));
+      await tick();
+      input("b").dispatchEvent(new Event("input", { bubbles: true }));
+
+      expect(events).toEqual([["reconcile", 77]]);
+      expect(outputs()).toEqual({
+        field: "77",
+        submitted: "77",
+        spoken: "$77.00",
+        empty: false,
+      });
+    });
+  });
+
+  describe("a display that comes ahead of a composing one and goes", () => {
+    for (const end of ["compositionend", "without compositionend"] as const) {
+      it(`reports the user's commit once after a morph that changes nothing (${end})`, async () => {
+        await mountForm({ second: null });
+        const events = record();
+        startComposing(input("a"), "1,234.00５");
+        input("a").setSelectionRange(9, 9);
+        const ahead = document.createElement("input");
+        ahead.value = "42";
+        ahead.setAttribute("data-stimeo--currency-input-target", "display");
+        input("a").before(ahead);
+        await tick();
+        ahead.remove();
+        await tick();
+        await morphUnchanged();
+
+        expect(events).toEqual([]);
+        expect(outputs().submitted).toBe("1234");
+        expect(document.activeElement).toBe(input("a"));
+        expect([input("a").selectionStart, input("a").selectionEnd]).toEqual([9, 9]);
+
+        if (end === "compositionend") {
+          commit(input("a"), "1,234.005");
+        } else {
+          endWithoutCompositionend(input("a"));
+          await tick();
+          expect(events).toEqual([]);
+          input("a").value = "1,234.005";
+          input("a").dispatchEvent(new Event("input", { bubbles: true }));
+        }
+
+        expect(events).toEqual([["change", 1234.005]]);
+        expect(outputs()).toEqual({
+          field: "1234.005",
+          submitted: "1234.005",
+          spoken: "$1,234.01",
+          empty: false,
+        });
+      });
+    }
+
+    it("reads the commit with the separators in force while a locale change waits and a display came and went", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      startComposing(input("a"), "1,234.5");
+      root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+      controller().localeValueChanged();
+      const ahead = document.createElement("input");
+      ahead.setAttribute("data-stimeo--currency-input-target", "display");
+      input("a").before(ahead);
+      await tick();
+      ahead.remove();
+      await tick();
+      await morphUnchanged();
+      commit(input("a"), "1,234.5");
+
+      expect(events).toEqual([["change", 1234.5]]);
+      expect(outputs().submitted).toBe("1234.5");
+      expect(input("a").value).toBe("1.234,5");
+    });
+
+    it("applies nothing after a locale change that was taken back mid-composition", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+      controller().localeValueChanged();
+      root().setAttribute("data-stimeo--currency-input-locale-value", "en-US");
+      controller().localeValueChanged();
+      await morphUnchanged();
+      endWithoutCompositionend(input("a"));
+      await tick();
+
+      expect(events).toEqual([]);
+      expect(input("a").value).toBe("1,234.00５");
+      expect(outputs().submitted).toBe("1234");
+    });
+  });
+  describe("reads of the display in charge as displays, compositions and declarations change", () => {
+    it("reads a morph's write into the display in charge once a composition behind it ends without compositionend", async () => {
+      await mountForm();
+      const events = record();
+      const native = nativeOnField();
+      startComposing(input("b"), "５");
+      input("a").value = "77";
+      await morphUnchanged();
+      expect(events).toEqual([]);
+      expect(outputs().submitted).toBe("1234");
+
+      endWithoutCompositionend(input("b"));
+      await tick();
+
+      expect(events).toEqual([["reconcile", 77]]);
+      expect(outputs()).toEqual({
+        field: "77",
+        submitted: "77",
+        spoken: "$77.00",
+        empty: false,
+      });
+      expect(native).toEqual([]);
+    });
+
+    it("does not read the display in charge as the user's edit on an input in a display that left its target", async () => {
+      await mountForm();
+      const events = record();
+      input("b").removeAttribute("data-stimeo--currency-input-target");
+      await tick();
+      input("a").value = "77";
+      input("b").value = "5";
+      input("b").dispatchEvent(new Event("input", { bubbles: true }));
+
+      expect(events).toEqual([]);
+      expect(outputs().submitted).toBe("1234");
+      expect(input("a").value).toBe("77");
+    });
+
+    it("keeps what a rewritten display in charge owes through a reconnect that keeps the composition", async () => {
+      await mountForm();
+      const events = record();
+      startComposing(input("b"), "５");
+      await writeWhileAway(input("a"), "77", input("b"));
+      reconnectKeepingFocus(controller());
+      await tick();
+      await morphUnchanged();
+      expect(events).toEqual([]);
+
+      endWithoutCompositionend(input("b"));
+      await tick();
+
+      expect(events).toEqual([["reconcile", 77]]);
+      expect(outputs().submitted).toBe("77");
+      expect(document.activeElement).toBe(input("b"));
+    });
+
+    it("reads the display in charge through actions bound on the controller element", async () => {
+      await mountForm({ actionOnRoot: true });
+      const events = record();
+      input("a").focus();
+      input("a").value = "5678";
+      input("a").dispatchEvent(new Event("input", { bubbles: true }));
+      input("b").value = "9";
+      input("b").dispatchEvent(new Event("input", { bubbles: true }));
+      input("b").dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+
+      expect(input("a").value).toBe("5,678");
+      expect(events).toEqual([["change", 5678]]);
+      expect(outputs().submitted).toBe("5678");
+    });
+
+    it("reads an unfocused display behind as the page's once the display in charge leaves", async () => {
+      await mountForm();
+      const events = record();
+      input("b").value = "42";
+      input("b").dispatchEvent(new Event("input", { bubbles: true }));
+      expect(events).toEqual([]);
+
+      input("a").remove();
+      await tick();
+
+      expect(events).toEqual([["reconcile", 42]]);
+      expect(outputs().submitted).toBe("42");
+    });
+
+    for (const written of [undefined, "999"] as const) {
+      it(`reads a commit left ${written === undefined ? "in place" : "overwritten"} with the right separators after a locale change waited and a display came and went`, async () => {
+        await mountForm({ second: null });
+        const events = record();
+        startComposing(input("a"), "1,234.5");
+        root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+        controller().localeValueChanged();
+        const ahead = document.createElement("input");
+        ahead.setAttribute("data-stimeo--currency-input-target", "display");
+        input("a").before(ahead);
+        await tick();
+        ahead.remove();
+        await tick();
+        await morphUnchanged();
+        endWithoutCompositionend(input("a"), written);
+        await tick();
+
+        // Text the composition left was typed in en-US; text a write left is the page's.
+        const value = written === undefined ? 1234.5 : 999;
+        expect(events).toEqual([["reconcile", value]]);
+        expect(outputs().submitted).toBe(String(value));
+        expect(input("a").value).toBe(written === undefined ? "1.234,5" : "999");
+      });
+    }
+
+    it("leaves no change behind once a display came and went, so a script's write reports as an edit", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      const ahead = document.createElement("input");
+      ahead.setAttribute("data-stimeo--currency-input-target", "display");
+      input("a").before(ahead);
+      await tick();
+      ahead.remove();
+      await tick();
+      await morphUnchanged();
+
+      endWithoutCompositionend(input("a"), "5");
+      await tick();
+      expect(events).toEqual([]);
+      input("a").dispatchEvent(new Event("input", { bubbles: true }));
+
+      expect(events).toEqual([["change", 5]]);
+      expect(outputs().submitted).toBe("5");
+    });
+
+    it("applies a declaration change once after a display came and went and a morph changed nothing", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      root().setAttribute("data-stimeo--currency-input-currency-value", "EUR");
+      await morphUnchanged();
+      const ahead = document.createElement("input");
+      ahead.setAttribute("data-stimeo--currency-input-target", "display");
+      input("a").before(ahead);
+      await tick();
+      ahead.remove();
+      await tick();
+      await morphUnchanged();
+      expect(outputs().spoken).toBe("$1,234.00");
+
+      endWithoutCompositionend(input("a"));
+      await tick();
+
+      expect(events).toEqual([["reconcile", 1234.005]]);
+      expect(outputs().spoken).toBe("€1,234.01");
+    });
+
+    it("does not re-read the display at the end of a composition when only the language around an empty locale changed", async () => {
+      await mountForm({ second: null, locale: "", lang: "en-US" });
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      document.getElementById("f")?.setAttribute("lang", "de-DE");
+      commit(input("a"), "1,234.005");
+
+      expect(events).toEqual([["change", 1234.005]]);
+      expect(input("a").value).toBe("1,234.005");
+      expect(outputs().spoken).toBe("$1,234.01");
+    });
+
+    it("reads a composition the engine ends in place once the display ahead of it left", async () => {
+      await mountForm();
+      const events = record();
+      startComposing(input("b"), "５");
+      input("a").remove();
+      await tick();
+      expect(events).toEqual([]);
+
+      endWithoutCompositionend(input("b"));
+      await tick();
+
+      expect(events).toEqual([["reconcile", 5]]);
+      expect(outputs()).toEqual({
+        field: "5",
+        submitted: "5",
+        spoken: "$5.00",
+        empty: false,
+      });
+      expect(document.activeElement).toBe(input("b"));
+    });
+
+    it("owes a later composition nothing once a held change was applied", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      root().setAttribute("data-stimeo--currency-input-precision-value", "3");
+      await tick();
+      commit(input("a"), "1,234.005");
+      expect(events).toEqual([["change", 1234.005]]);
+
+      startComposing(input("a"), "1,234.0057");
+      endWithoutCompositionend(input("a"));
+      await tick();
+
+      expect(events).toEqual([["change", 1234.005]]);
+      expect(input("a").value).toBe("1,234.0057");
+      expect(outputs().submitted).toBe("1234.005");
+    });
+
+    it("restores the outputs a morph cleared as soon as it brings a display ahead of a composing one", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      const native = nativeOnField();
+      startComposing(input("a"), "1,234.00５");
+      input("a").setSelectionRange(9, 9);
+      field().value = "";
+      const sr = document.getElementById("sr") as HTMLElement;
+      sr.textContent = "";
+      const ahead = document.createElement("input");
+      ahead.value = "42";
+      ahead.setAttribute("data-stimeo--currency-input-target", "display");
+      input("a").before(ahead);
+      await tick();
+
+      expect(outputs()).toEqual({
+        field: "1234",
+        submitted: "1234",
+        spoken: "$1,234.00",
+        empty: false,
+      });
+      expect(events).toEqual([]);
+      expect(native).toEqual([]);
+      expect(ahead.value).toBe("42");
+      expect(input("a").value).toBe("1,234.00５");
+      expect(document.activeElement).toBe(input("a"));
+      expect([input("a").selectionStart, input("a").selectionEnd]).toEqual([9, 9]);
+    });
+
+    it("lets its only display leave the target mid-composition without an error, and keeps the committed outputs", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      // Collects what the deferred end of the composition throws; an error thrown
+      // from a microtask would otherwise reach no assertion.
+      const thrown: unknown[] = [];
+      const native = globalThis.queueMicrotask;
+      const queue = vi.spyOn(globalThis, "queueMicrotask").mockImplementation((callback) => {
+        native(() => {
+          try {
+            callback();
+          } catch (error) {
+            thrown.push(error);
+          }
+        });
+      });
+      try {
+        startComposing(input("a"), "1,234.00５");
+        input("a").removeAttribute("data-stimeo--currency-input-target");
+        await tick();
+      } finally {
+        queue.mockRestore();
+      }
+
+      expect(thrown).toEqual([]);
+      expect(events).toEqual([]);
+      expect(outputs()).toEqual({
+        field: "1234",
+        submitted: "1234",
+        spoken: "$1,234.00",
+        empty: false,
+      });
+    });
+  });
+
+  describe("a request made while a composition runs", () => {
+    /** Types `text` into `#a` as the user's own edit, outside any composition. */
+    const typeInto = (text: string) => {
+      input("a").focus();
+      input("a").value = text;
+      input("a").dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+    };
+
+    /** Starts a composition that appends `draft` to the text `#a` shows, caret after it. */
+    const composeAtEnd = (draft: string) => {
+      const text = input("a").value + draft;
+      startComposing(input("a"), text);
+      input("a").setSelectionRange(text.length, text.length);
+      return text;
+    };
+
+    const caret = () => [input("a").selectionStart, input("a").selectionEnd];
+
+    for (const call of ["format()", "blur"] as const) {
+      it(`leaves the draft, caret and committed outputs alone on ${call} and rounds once with the commit`, async () => {
+        await mountForm({ second: null });
+        const events = record();
+        typeInto("5.555");
+        expect(events).toEqual([["change", 5.555]]);
+        const draft = composeAtEnd("５");
+
+        if (call === "format()") controller().format();
+        else input("a").dispatchEvent(new FocusEvent("blur"));
+
+        expect(input("a").value).toBe(draft);
+        expect(caret()).toEqual([draft.length, draft.length]);
+        expect(events).toEqual([["change", 5.555]]);
+        expect(outputs()).toEqual({
+          field: "5.555",
+          submitted: "5.555",
+          spoken: "$5.56",
+          empty: false,
+        });
+
+        commit(input("a"), "5.5555");
+
+        expect(events).toEqual([
+          ["change", 5.555],
+          ["change", 5.56],
+        ]);
+        expect(input("a").value).toBe("5.56");
+        expect(outputs().submitted).toBe("5.56");
+
+        // The next conversion's commit is not rounded: nothing stays held.
+        startComposing(input("a"), "5.56５");
+        commit(input("a"), "5.565");
+        expect(events.at(-1)).toEqual(["change", 5.565]);
+        expect(input("a").value).toBe("5.565");
+      });
+    }
+
+    it("rounds the commit with the precision it was typed against before a held change applies", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      root().setAttribute("data-stimeo--currency-input-precision-value", "0");
+      controller().precisionValueChanged();
+      controller().format();
+
+      commit(input("a"), "5.5555");
+
+      // The focused display is re-rendered under the new precision without rounding again.
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["change", 5.56],
+      ]);
+      expect(input("a").value).toBe("5.56");
+    });
+
+    it("rounds once when a composition a format() call waited on is cancelled", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      controller().format();
+      commit(input("a"), "5.555");
+
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["change", 5.56],
+      ]);
+      expect(input("a").value).toBe("5.56");
+    });
+
+    it("holds a format call with an event that has no target as it holds one with none", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      const draft = composeAtEnd("５");
+      controller().format(new Event("blur"));
+      expect(input("a").value).toBe(draft);
+
+      commit(input("a"), "5.5555");
+
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["change", 5.56],
+      ]);
+    });
+
+    for (const isComposing of [true, false]) {
+      it(`${isComposing ? "holds" : "applies at once"} a format bound to a key that ${isComposing ? "reports" : "does not report"} a composition the tracker never heard start`, async () => {
+        await mountForm({ second: null });
+        const events = record();
+        typeInto("5.555");
+        input("a").value = "5.555５";
+        input("a").setSelectionRange(6, 6);
+        input("a").addEventListener("keydown", (event) => controller().format(event), {
+          once: true,
+        });
+        input("a").dispatchEvent(keyEvent("Enter", { isComposing }));
+
+        if (isComposing) {
+          expect(input("a").value).toBe("5.555５");
+          expect(caret()).toEqual([6, 6]);
+          expect(events).toEqual([["change", 5.555]]);
+          commit(input("a"), "5.5555");
+        }
+
+        expect(events).toEqual([
+          ["change", 5.555],
+          ["change", 5.56],
+        ]);
+        expect(input("a").value).toBe("5.56");
+      });
+    }
+
+    describe("a rounding asked for during a composition the tracker never heard start", () => {
+      const KEY_ACTION = `${ACTION} keydown->stimeo--currency-input#format`;
+
+      /**
+       * Types `5.555` and asks for the rounding through the declared `keydown` action with
+       * a key that reports a composition no `compositionstart` announced.
+       */
+      const hold = async () => {
+        await mountForm({ second: null });
+        root().setAttribute("data-stimeo--currency-input-precision-value", "2");
+        input("a").setAttribute("data-action", KEY_ACTION);
+        await tick();
+        const events = record();
+        typeInto("5.555");
+        input("a").dispatchEvent(keyEvent("Enter", { isComposing: true }));
+        expect(input("a").value).toBe("5.555");
+        expect(events).toEqual([["change", 5.555]]);
+        return events;
+      };
+
+      /** An ordinary edit settles an unheard conversion before the following blur rounds. */
+      const holdThenEditAndBlur = async () => {
+        const events = await hold();
+
+        input("a").dispatchEvent(new FocusEvent("blur"));
+        expect(input("a").value).toBe("5.555");
+        expect(events).toEqual([["change", 5.555]]);
+        input("a").dispatchEvent(
+          new InputEvent("input", { bubbles: true, inputType: "insertText" }),
+        );
+        input("a").dispatchEvent(new FocusEvent("blur"));
+        expect(input("a").value).toBe("5.56");
+        expect(outputs()).toEqual({
+          field: "5.56",
+          submitted: "5.56",
+          spoken: "$5.56",
+          empty: false,
+        });
+        expect(events).toEqual([
+          ["change", 5.555],
+          ["change", 5.56],
+        ]);
+        return events;
+      };
+
+      type Recorded = Array<[string, number | null]>;
+
+      /**
+       * After the commit of `1.234`, following the events `before`, the next blur is the first
+       * to round it.
+       */
+      const expectUnroundedUntilBlur = (events: Recorded, before: Recorded) => {
+        expect(input("a").value).toBe("1.234");
+        expect([input("a").selectionStart, input("a").selectionEnd]).toEqual([5, 5]);
+        expect(outputs()).toEqual({
+          field: "1.234",
+          submitted: "1.234",
+          spoken: "$1.23",
+          empty: false,
+        });
+        expect(events).toEqual([...before, ["change", 1.234]]);
+
+        input("a").dispatchEvent(new FocusEvent("blur"));
+
+        expect(input("a").value).toBe("1.23");
+        expect(outputs()).toEqual({
+          field: "1.23",
+          submitted: "1.23",
+          spoken: "$1.23",
+          empty: false,
+        });
+        expect(events).toEqual([...before, ["change", 1.234], ["change", 1.23]]);
+      };
+
+      const roundedByBlur: Recorded = [
+        ["change", 5.555],
+        ["change", 5.56],
+      ];
+
+      it("does not round the next composition the user confirms after an ordinary edit and blur rounded the entry", async () => {
+        const events = await holdThenEditAndBlur();
+
+        startComposing(input("a"), "1.234");
+        input("a").setSelectionRange(5, 5);
+        commit(input("a"), "1.234");
+
+        expectUnroundedUntilBlur(events, roundedByBlur);
+      });
+
+      it("does not round a later commit whose start it never heard either, once an ordinary edit and blur rounded the entry", async () => {
+        const events = await holdThenEditAndBlur();
+
+        input("a").focus();
+        composeDraft(input("a"), "1.234");
+        input("a").setSelectionRange(5, 5);
+        commit(input("a"), "1.234");
+
+        expectUnroundedUntilBlur(events, roundedByBlur);
+      });
+
+      it("does not round the next composition the user confirms when it starts with no blur in between", async () => {
+        const events = await hold();
+
+        // The start the tracker hears shows the composition the key reported is over.
+        startComposing(input("a"), "1.234");
+        expect(input("a").value).toBe("1.234");
+        expect(events).toEqual([["change", 5.555]]);
+        input("a").setSelectionRange(5, 5);
+        commit(input("a"), "1.234");
+
+        expectUnroundedUntilBlur(events, [["change", 5.555]]);
+      });
+
+      it("rounds once when the composition the key reported ends, with no blur and no start in between", async () => {
+        const events = await hold();
+
+        // Only that composition's own end arrives: the rounding asked of it applies once.
+        input("a").setSelectionRange(5, 5);
+        commit(input("a"), "5.5555");
+
+        expect(input("a").value).toBe("5.56");
+        expect(outputs()).toEqual({
+          field: "5.56",
+          submitted: "5.56",
+          spoken: "$5.56",
+          empty: false,
+        });
+        expect(events).toEqual([
+          ["change", 5.555],
+          ["change", 5.56],
+        ]);
+
+        input("a").dispatchEvent(new FocusEvent("blur"));
+        expect(events).toHaveLength(2);
+      });
+
+      it("holds a rounding asked through an event with no target for the display in charge", async () => {
+        await mountForm({ second: null });
+        root().setAttribute("data-stimeo--currency-input-precision-value", "2");
+        await tick();
+        const events = record();
+        typeInto("5.555");
+
+        // A script asks with an event it built: it reports a composition and has no target.
+        controller().format(keyEvent("Enter", { isComposing: true }));
+        expect(input("a").value).toBe("5.555");
+        expect(events).toEqual([["change", 5.555]]);
+
+        input("a").setSelectionRange(5, 5);
+        commit(input("a"), "5.5555");
+
+        expect(input("a").value).toBe("5.56");
+        expect(outputs()).toEqual({
+          field: "5.56",
+          submitted: "5.56",
+          spoken: "$5.56",
+          empty: false,
+        });
+        expect(events).toEqual([
+          ["change", 5.555],
+          ["change", 5.56],
+        ]);
+      });
+
+      it("holds nothing for such a request while no display is connected", async () => {
+        await mountForm({ second: null });
+        input("a").remove();
+        await tick();
+        const events = record();
+
+        expect(() => controller().format(keyEvent("Enter", { isComposing: true }))).not.toThrow();
+        expect(events).toEqual([]);
+      });
+
+      /** A display `#b` as the page renders one, showing `value`, with the same actions. */
+      const pageDisplay = (value: string) => {
+        const display = document.createElement("input");
+        display.id = "b";
+        display.type = "text";
+        display.setAttribute("aria-describedby", "sr");
+        display.setAttribute("value", value);
+        display.setAttribute("data-stimeo--currency-input-target", "display");
+        display.setAttribute("data-action", KEY_ACTION);
+        return display;
+      };
+
+      /** Confirms `1.234` in `#b` through a composition the tracker never heard start. */
+      const commitUnheardInB = () => {
+        input("b").focus();
+        composeDraft(input("b"), "1.234");
+        input("b").setSelectionRange(5, 5);
+        commit(input("b"), "1.234");
+      };
+
+      /** The commit of `1.234` in `#b` stays as confirmed, after `before`, until `#b` blurs. */
+      const expectBUnroundedUntilBlur = (events: Recorded, before: Recorded) => {
+        expect(input("b").value).toBe("1.234");
+        expect([input("b").selectionStart, input("b").selectionEnd]).toEqual([5, 5]);
+        expect(outputs()).toEqual({
+          field: "1.234",
+          submitted: "1.234",
+          spoken: "$1.23",
+          empty: false,
+        });
+        expect(events).toEqual([...before, ["change", 1.234]]);
+
+        input("b").dispatchEvent(new FocusEvent("blur"));
+
+        expect(input("b").value).toBe("1.23");
+        expect(outputs().submitted).toBe("1.23");
+        expect(events).toEqual([...before, ["change", 1.234], ["change", 1.23]]);
+      };
+
+      it("does not round a commit in a display that replaced the one it was held for", async () => {
+        const events = await hold();
+
+        // The page swaps the display for another element, as a Turbo render does.
+        input("a").replaceWith(pageDisplay("5.555"));
+        await tick();
+        expect(input("b").value).toBe("5.56");
+        expect(events).toEqual([
+          ["change", 5.555],
+          ["reconcile", 5.56],
+        ]);
+
+        commitUnheardInB();
+
+        expectBUnroundedUntilBlur(events, [
+          ["change", 5.555],
+          ["reconcile", 5.56],
+        ]);
+      });
+
+      it("does not round a commit in a display that was behind the one it was held for once that one leaves", async () => {
+        const events = await hold();
+        input("a").after(pageDisplay("5.555"));
+        await tick();
+
+        // The display it was held for leaves; the one behind it comes in charge.
+        input("a").remove();
+        await tick();
+        expect(input("b").value).toBe("5.56");
+        expect(events).toEqual([
+          ["change", 5.555],
+          ["reconcile", 5.56],
+        ]);
+
+        commitUnheardInB();
+
+        expectBUnroundedUntilBlur(events, [
+          ["change", 5.555],
+          ["reconcile", 5.56],
+        ]);
+      });
+
+      it("keeps an unknown entry pending after its display returns without carrying its old rounding", async () => {
+        const events = await hold();
+        const display = input("a");
+        const sr = document.getElementById("sr") as HTMLElement;
+
+        // The display leaves with its composition, and the page puts the same element back.
+        display.remove();
+        await tick();
+        sr.before(display);
+        await tick();
+        expect(display.value).toBe("5.555");
+        expect(events).toEqual([["change", 5.555]]);
+
+        display.focus();
+        composeDraft(display, "1.234");
+        display.setSelectionRange(5, 5);
+        commit(display, "1.234");
+
+        expectUnroundedUntilBlur(events, [["change", 5.555]]);
+      });
+
+      it("does not round the display in charge when a composition ends in a display behind it", async () => {
+        const events = await hold();
+        // The page binds the rounding to the key alone, so leaving the display does not round.
+        input("a").setAttribute(
+          "data-action",
+          "input->stimeo--currency-input#onInput keydown->stimeo--currency-input#format",
+        );
+        input("a").after(pageDisplay("9"));
+        await tick();
+
+        // Another composition ends in the display behind: the one the key reported is over.
+        input("b").focus();
+        composeDraft(input("b"), "9５");
+        commit(input("b"), "95");
+
+        expect(input("a").value).toBe("5.555");
+        expect(outputs()).toEqual({
+          field: "5.555",
+          submitted: "5.555",
+          spoken: "$5.56",
+          empty: false,
+        });
+        expect(events).toEqual([["change", 5.555]]);
+
+        // The rounding lapsed with that end: a later commit in the display it was held for,
+        // whose start the tracker never heard either, stays as confirmed.
+        input("a").focus();
+        composeDraft(input("a"), "1.234");
+        input("a").setSelectionRange(5, 5);
+        commit(input("a"), "1.234");
+
+        expect(input("a").value).toBe("1.234");
+        expect([input("a").selectionStart, input("a").selectionEnd]).toEqual([5, 5]);
+        expect(outputs()).toEqual({
+          field: "1.234",
+          submitted: "1.234",
+          spoken: "$1.23",
+          empty: false,
+        });
+        expect(events).toEqual([
+          ["change", 5.555],
+          ["change", 1.234],
+        ]);
+      });
+
+      it("keeps the rounding for the display it was held for when another display leaves", async () => {
+        const events = await hold();
+        input("a").after(pageDisplay("9"));
+        await tick();
+
+        // A display behind leaves; the display the rounding was held for stays in charge.
+        input("b").remove();
+        await tick();
+        expect(input("a").value).toBe("5.555");
+        expect(events).toEqual([["change", 5.555]]);
+
+        composeDraft(input("a"), "5.555５");
+        input("a").setSelectionRange(6, 6);
+        commit(input("a"), "5.5555");
+
+        expect(input("a").value).toBe("5.56");
+        expect(outputs()).toEqual({
+          field: "5.56",
+          submitted: "5.56",
+          spoken: "$5.56",
+          empty: false,
+        });
+        expect(events).toEqual([
+          ["change", 5.555],
+          ["change", 5.56],
+        ]);
+      });
+    });
+
+    for (const between of ["a blur", "an edit", "nothing"] as const) {
+      it(`drops a rounding held for a composition the tracker never heard when the next one starts, after ${between}`, async () => {
+        await mountForm({ second: null });
+        const events = record();
+        typeInto("5.555");
+        input("a").addEventListener("keydown", (event) => controller().format(event), {
+          once: true,
+        });
+        input("a").dispatchEvent(keyEvent("Enter", { isComposing: true }));
+        expect(input("a").value).toBe("5.555");
+        if (between === "a blur") input("a").dispatchEvent(new FocusEvent("blur"));
+        if (between === "an edit") typeInto("7.123");
+
+        const confirmed = `${input("a").value}55`;
+        startComposing(input("a"), `${input("a").value}５５`);
+        commit(input("a"), confirmed);
+
+        expect(events.at(-1)).toEqual(["change", Number(confirmed)]);
+        expect(input("a").value).toBe(confirmed);
+      });
+    }
+
+    it("reads what a composition left in place without the held rounding before a held change applies", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+      controller().localeValueChanged();
+      controller().format();
+
+      endWithoutCompositionend(input("a"));
+      await tick();
+
+      // The user may go on typing in place: the text is read as typed, not rounded.
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["reconcile", 5.5555],
+      ]);
+      expect(input("a").value).toBe("5,5555");
+    });
+
+    it("drops a held rounding when the composition ends in place, so the next keys land on the text as typed", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      controller().format();
+
+      endWithoutCompositionend(input("a"));
+      await tick();
+      expect(events).toEqual([["change", 5.555]]);
+      expect(input("a").value).toBe("5.555５");
+
+      // The user goes on composing in place; that conversion's commit is not rounded.
+      startComposing(input("a"), "5.555５６");
+      commit(input("a"), "5.55556");
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["change", 5.55556],
+      ]);
+      expect(input("a").value).toBe("5.55556");
+
+      input("a").dispatchEvent(new FocusEvent("blur"));
+      expect(events.at(-1)).toEqual(["change", 5.56]);
+    });
+
+    it("drops a held rounding when a write ends the composition, and the next blur reads the page's text once", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      controller().format();
+
+      endWithoutCompositionend(input("a"), "7.777");
+      await tick();
+      expect(events).toEqual([["change", 5.555]]);
+      expect(input("a").value).toBe("7.777");
+
+      input("a").dispatchEvent(new FocusEvent("blur"));
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["change", 7.78],
+      ]);
+      expect(input("a").value).toBe("7.78");
+    });
+
+    it("drops a held rounding when a composition starts before the first one ends", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      controller().format();
+      // The engine starts a new conversion without ending the first one.
+      input("a").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      composeDraft(input("a"), "5.555５６");
+      expect(events).toEqual([["change", 5.555]]);
+      expect(input("a").value).toBe("5.555５６");
+
+      commit(input("a"), "5.55556");
+
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["change", 5.55556],
+      ]);
+      expect(input("a").value).toBe("5.55556");
+    });
+
+    it("keeps a held rounding for a composition that goes on through a move", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      controller().format();
+      reconnectKeepingFocus(controller());
+      await tick();
+      expect(events).toEqual([["change", 5.555]]);
+      expect(input("a").value).toBe("5.555５");
+
+      commit(input("a"), "5.5555");
+
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["change", 5.56],
+      ]);
+    });
+
+    it("keeps a held rounding when the composing display moves keeping focus", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      controller().format();
+      // A move that keeps focus, as `moveBefore` does (happy-dom has none): the display
+      // leaves the targets and comes back as the same element, still composing.
+      controller().displayTargetDisconnected(input("a"));
+      controller().displayTargetConnected(input("a"));
+      await tick();
+      expect(events).toEqual([["change", 5.555]]);
+      expect(input("a").value).toBe("5.555５");
+
+      commit(input("a"), "5.5555");
+
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["change", 5.56],
+      ]);
+      expect(input("a").value).toBe("5.56");
+    });
+
+    it("keeps a held rounding when a display behind the composing one leaves", async () => {
+      await mountForm();
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      controller().format();
+
+      // Another display leaves; the composition the rounding was held for goes on.
+      input("b").remove();
+      await tick();
+      expect(events).toEqual([["change", 5.555]]);
+      expect(input("a").value).toBe("5.555５");
+
+      commit(input("a"), "5.5555");
+
+      expect(input("a").value).toBe("5.56");
+      expect(outputs()).toEqual({
+        field: "5.56",
+        submitted: "5.56",
+        spoken: "$5.56",
+        empty: false,
+      });
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["change", 5.56],
+      ]);
+    });
+
+    it("keeps a held rounding through an onInput() call during the composition", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      controller().format();
+      controller().onInput();
+
+      commit(input("a"), "5.555");
+
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["change", 5.56],
+      ]);
+      expect(input("a").value).toBe("5.56");
+    });
+
+    it("leaves the draft alone on an onInput() call and reads the commit once", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5678");
+      const draft = composeAtEnd("９");
+      controller().onInput();
+
+      expect(input("a").value).toBe(draft);
+      expect(caret()).toEqual([draft.length, draft.length]);
+      expect(events).toEqual([["change", 5678]]);
+
+      commit(input("a"), "56789");
+
+      expect(events).toEqual([
+        ["change", 5678],
+        ["change", 56789],
+      ]);
+      expect(input("a").value).toBe("56,789");
+    });
+
+    for (const called of [false, true]) {
+      it(`leaves text a composition left in place to the next edit${called ? " after an onInput() call" : ""}`, async () => {
+        await mountForm({ second: null });
+        const events = record();
+        typeInto("5678");
+        composeAtEnd("９");
+        if (called) controller().onInput();
+
+        endWithoutCompositionend(input("a"));
+        await tick();
+
+        expect(events).toEqual([["change", 5678]]);
+        expect(input("a").value).toBe("5,678９");
+      });
+    }
+
+    for (const request of ["format()", "a script's blur"] as const) {
+      it(`rounds the display in charge after what a composition behind owes, asked through ${request}`, async () => {
+        await mountForm();
+        const events = record();
+        startComposing(input("b"), "５");
+        input("a").value = "42.555";
+        await morphUnchanged();
+        input("a").focus();
+        // The rounding belongs to the composition running behind, wherever the request came from.
+        if (request === "format()") controller().format();
+        else input("a").dispatchEvent(new FocusEvent("blur"));
+        expect(events).toEqual([]);
+
+        commit(input("b"), "５");
+
+        expect(events).toEqual([
+          ["reconcile", 42.555],
+          ["change", 42.56],
+        ]);
+        expect(input("a").value).toBe("42.56");
+      });
+    }
+
+    it("holds nothing for a blur in a display behind while it composes", async () => {
+      await mountForm();
+      const events = record();
+      typeInto("5.555");
+      input("b").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      input("b").dispatchEvent(new FocusEvent("blur"));
+
+      commit(input("b"), "５");
+
+      expect(events).toEqual([["change", 5.555]]);
+      expect(input("a").value).toBe("5.555");
+    });
+
+    it("drops a held rounding when the composing display leaves", async () => {
+      await mountForm({ second: "1,234.00" });
+      const events = record();
+      composeAtEnd("５");
+      controller().format();
+      input("a").remove();
+      await tick();
+      expect(events).toEqual([]);
+
+      // Nothing is left held for the next composition.
+      startComposing(input("b"), `${input("b").value}５`);
+      commit(input("b"), "1,234.005");
+
+      expect(events).toEqual([["change", 1234.005]]);
+      expect(input("b").value).toBe("1,234.005");
+    });
+
+    it("drops a held rounding across an unknown focused reconnect without adopting its draft", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      controller().format();
+      const instance = controller();
+      // A focused reconnect cannot infer that an unheard conversion ended.
+      instance.context.disconnect();
+      await tick();
+      instance.context.connect();
+      await tick();
+      expect(input("a").value).toBe("5.555５");
+      expect(outputs().submitted).toBe("5.555");
+
+      startComposing(input("a"), "5.56５");
+      commit(input("a"), "5.565");
+
+      expect(events.at(-1)).toEqual(["change", 5.565]);
+      expect(input("a").value).toBe("5.565");
+    });
+
+    it("rounds what a composition left once, as the page's, when the controller element leaves", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      typeInto("5.555");
+      composeAtEnd("５");
+      controller().format();
+      const part = root();
+      const parent = part.parentElement as HTMLElement;
+      part.remove();
+      await tick();
+      // Leaving ends the composition: its text is read and rounded once, as the page's.
+      expect(events).toEqual([
+        ["change", 5.555],
+        ["reconcile", 5.56],
+      ]);
+
+      parent.append(part);
+      await tick();
+      expect(input("a").value).toBe("5.56");
+      expect(events).toHaveLength(2);
+
+      startComposing(input("a"), "5.56５");
+      commit(input("a"), "5.565");
+
+      expect(events.at(-1)).toEqual(["change", 5.565]);
+      expect(input("a").value).toBe("5.565");
+    });
+  });
+
+  describe("an input that reports a composition", () => {
+    for (const isComposing of [true, false]) {
+      it(`${isComposing ? "is not read" : "is read"} when it ${isComposing ? "says" : "does not say"} it is composing, with no compositionstart heard`, async () => {
+        await mountForm({ second: null });
+        const events = record();
+        input("a").focus();
+        input("a").value = "56789";
+        input("a").setSelectionRange(5, 5);
+        input("a").dispatchEvent(
+          new InputEvent("input", {
+            bubbles: true,
+            isComposing,
+            inputType: isComposing ? "insertCompositionText" : "insertText",
+          }),
+        );
+
+        if (isComposing) {
+          expect(input("a").value).toBe("56789");
+          expect([input("a").selectionStart, input("a").selectionEnd]).toEqual([5, 5]);
+          expect(events).toEqual([]);
+          expect(outputs()).toEqual({
+            field: "1234",
+            submitted: "1234",
+            spoken: "$1,234.00",
+            empty: false,
+          });
+        } else {
+          expect(input("a").value).toBe("56,789");
+          expect(events).toEqual([["change", 56789]]);
+          expect(outputs().submitted).toBe("56789");
+        }
+      });
+    }
+  });
+
+  describe("a composition that starts before the one it ends was heard ending", () => {
+    it("keeps a rounding the page asks for from the reconcile a new composition's start reports", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      const ahead = document.createElement("input");
+      ahead.value = "42.555";
+      ahead.setAttribute("data-stimeo--currency-input-target", "display");
+      input("a").before(ahead);
+      await tick();
+      root().addEventListener("stimeo--currency-input:reconcile", () => controller().format(), {
+        once: true,
+      });
+
+      ahead.focus();
+      ahead.setSelectionRange(6, 6);
+      ahead.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      expect(events).toEqual([["reconcile", 42.555]]);
+      expect(ahead.value).toBe("42.555");
+
+      composeDraft(ahead, "42.555５");
+      ahead.value = "42.5555";
+      ahead.dispatchEvent(new Event("compositionend", { bubbles: true }));
+
+      expect(events).toEqual([
+        ["reconcile", 42.555],
+        ["change", 42.56],
+      ]);
+      expect(ahead.value).toBe("42.56");
+    });
+
+    it("reports the page's value in a display that came ahead before the user's commit in it", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      const ahead = document.createElement("input");
+      ahead.value = "42";
+      ahead.setAttribute("data-stimeo--currency-input-target", "display");
+      input("a").before(ahead);
+      await tick();
+      expect(events).toEqual([]);
+
+      // The user moves on to the display ahead and composes there; the first
+      // composition's end was never heard.
+      ahead.focus();
+      ahead.setSelectionRange(2, 2);
+      ahead.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+
+      expect(events).toEqual([["reconcile", 42]]);
+      expect(ahead.value).toBe("42");
+      expect([ahead.selectionStart, ahead.selectionEnd]).toEqual([2, 2]);
+      expect(outputs()).toEqual({
+        field: "42",
+        submitted: "42",
+        spoken: "$42.00",
+        empty: false,
+      });
+
+      composeDraft(ahead, "42５");
+      expect(events).toEqual([["reconcile", 42]]);
+      ahead.value = "425";
+      ahead.dispatchEvent(new Event("compositionend", { bubbles: true }));
+
+      expect(events).toEqual([
+        ["reconcile", 42],
+        ["change", 425],
+      ]);
+      expect(ahead.value).toBe("425");
+      expect(outputs().submitted).toBe("425");
+    });
+
+    it("leaves what a composition left in place to the next edit once the page's text it started on was read", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      const ahead = document.createElement("input");
+      ahead.value = "42";
+      ahead.setAttribute("data-stimeo--currency-input-target", "display");
+      ahead.setAttribute("data-action", ACTION);
+      input("a").before(ahead);
+      await tick();
+      ahead.focus();
+      ahead.setSelectionRange(2, 2);
+      ahead.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      composeDraft(ahead, "42５");
+
+      endWithoutCompositionend(ahead);
+      await tick();
+      expect(events).toEqual([["reconcile", 42]]);
+      expect(ahead.value).toBe("42５");
+
+      ahead.value = "42５6";
+      ahead.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+
+      expect(events).toEqual([
+        ["reconcile", 42],
+        ["change", 4256],
+      ]);
+    });
+
+    it("reports the page's write into the display in charge before the user's commit in it", async () => {
+      await mountForm();
+      const events = record();
+      startComposing(input("b"), "５");
+      input("a").value = "42";
+      await morphUnchanged();
+      expect(events).toEqual([]);
+
+      input("a").focus();
+      input("a").setSelectionRange(2, 2);
+      input("a").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+
+      expect(events).toEqual([["reconcile", 42]]);
+      expect(input("a").value).toBe("42");
+
+      composeDraft(input("a"), "42５");
+      commit(input("a"), "425");
+
+      expect(events).toEqual([
+        ["reconcile", 42],
+        ["change", 425],
+      ]);
+      expect(outputs().submitted).toBe("425");
+    });
+
+    /** Composes in `#a`, holds a switch to de-DE, and lets the page write `text` into `#a`. */
+    const writeWhileHeld = async (text: string) => {
+      startComposing(input("a"), "1,234.00５");
+      root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+      controller().localeValueChanged();
+      await tick();
+      input("a").value = text;
+      input("a").setSelectionRange(text.length, text.length);
+    };
+
+    it("reads a page's write with the declarations it carries when the user composes again in the same display", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      await writeWhileHeld("1.234,5");
+
+      input("a").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+
+      expect(events).toEqual([["reconcile", 1234.5]]);
+      expect(input("a").value).toBe("1.234,5");
+      expect(outputs().submitted).toBe("1234.5");
+
+      composeDraft(input("a"), "1.234,5６");
+      commit(input("a"), "1.234,56");
+
+      expect(events).toEqual([
+        ["reconcile", 1234.5],
+        ["change", 1234.56],
+      ]);
+      expect(input("a").value).toBe("1.234,56");
+    });
+
+    it("reads the page's text it read at the start with those declarations after that composition ends in place", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      await writeWhileHeld("1.234,5");
+      input("a").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      endWithoutCompositionend(input("a"));
+      await tick();
+
+      root().setAttribute("data-stimeo--currency-input-locale-value", "en-US");
+      controller().localeValueChanged();
+
+      expect(events).toEqual([["reconcile", 1234.5]]);
+      expect(input("a").value).toBe("1,234.5");
+    });
+
+    it("leaves a page's write into the display it composed in to the commit when nothing is owed", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      input("a").value = "42";
+      input("a").setSelectionRange(2, 2);
+
+      input("a").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      expect(events).toEqual([]);
+
+      commit(input("a"), "425");
+      expect(events).toEqual([["change", 425]]);
+    });
+
+    it("reads what a composition left in the display in charge with the separators it was typed against when one starts behind it", async () => {
+      await mountForm();
+      const events = record();
+      startComposing(input("a"), "1,234.5");
+      root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+      controller().localeValueChanged();
+      await tick();
+
+      input("b").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      expect(events).toEqual([["reconcile", 1234.5]]);
+      expect(input("a").value).toBe("1,234.5");
+
+      commit(input("b"), "５");
+
+      expect(events).toEqual([["reconcile", 1234.5]]);
+      expect(input("a").value).toBe("1.234,5");
+    });
+
+    it("leaves a page's write into the display in charge to the end of a composition that starts behind it", async () => {
+      await mountForm();
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+      controller().localeValueChanged();
+      await tick();
+      input("a").value = "42";
+
+      input("b").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      expect(events).toEqual([]);
+
+      commit(input("b"), "５");
+
+      expect(events).toEqual([["reconcile", 42]]);
+      expect(input("a").value).toBe("42");
+    });
+
+    it("keeps a rounding the page asks for from the reconcile of what a composition left when one starts behind it", async () => {
+      await mountForm();
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      root().addEventListener("stimeo--currency-input:reconcile", () => controller().format(), {
+        once: true,
+      });
+
+      input("b").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      expect(events).toEqual([["reconcile", 1234.005]]);
+
+      commit(input("b"), "５");
+
+      expect(events).toEqual([
+        ["reconcile", 1234.005],
+        ["change", 1234.01],
+      ]);
+      expect(input("a").value).toBe("1,234.01");
+    });
+
+    it("reads the text a composition left in the display in charge when one starts behind it", async () => {
+      await mountForm();
+      const events = record();
+      startComposing(input("a"), "1,234.00５");
+      input("b").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      expect(events).toEqual([["reconcile", 1234.005]]);
+      expect(input("a").value).toBe("1,234.005");
+
+      commit(input("b"), "５");
+
+      expect(events).toEqual([["reconcile", 1234.005]]);
+    });
+
+    for (const blurFormats of [true, false]) {
+      it(`reads what the user left in the display in charge with its own separators when the locale changes during a composition behind it${blurFormats ? ", rounding as its blur asked" : ""}`, async () => {
+        await mountForm();
+        if (!blurFormats) {
+          input("a").setAttribute("data-action", "input->stimeo--currency-input#onInput");
+          await tick();
+        }
+        const events = record();
+        startComposing(input("a"), "1,234.00５");
+        // The user moves to the display behind; the first conversion's end goes unheard.
+        startComposing(input("b"), "５");
+        root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+        controller().localeValueChanged();
+        await tick();
+
+        commit(input("b"), "５");
+
+        expect(input("a").value).toBe("1.234,01");
+        expect(outputs().submitted).toBe("1234.01");
+        expect(events).toEqual(
+          blurFormats
+            ? [["reconcile", 1234.01]]
+            : [
+                ["reconcile", 1234.005],
+                ["reconcile", 1234.01],
+              ],
+        );
+      });
+    }
+
+    it("keeps a held locale change for a composition that starts again in the same display", async () => {
+      await mountForm({ second: null });
+      const events = record();
+      startComposing(input("a"), "1,234.5");
+      root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+      controller().localeValueChanged();
+      // A new conversion starts in the same display without the first one ending.
+      input("a").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      composeDraft(input("a"), "1,234.56");
+      expect(events).toEqual([]);
+
+      commit(input("a"), "1,234.56");
+
+      expect(events).toEqual([["change", 1234.56]]);
+      expect(input("a").value).toBe("1.234,56");
+    });
+
+    it("keeps a held locale change for a composition in the display in charge that still shows its own rendering", async () => {
+      await mountForm();
+      const events = record();
+      startComposing(input("b"), "５");
+      root().setAttribute("data-stimeo--currency-input-locale-value", "de-DE");
+      controller().localeValueChanged();
+
+      input("a").focus();
+      input("a").dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      expect(events).toEqual([]);
+      expect(input("a").value).toBe("1,234.00");
+
+      composeDraft(input("a"), "1,234.005");
+      commit(input("a"), "1,234.005");
+
+      expect(events).toEqual([["change", 1234.005]]);
+      expect(input("a").value).toBe("1.234,005");
+    });
   });
 });

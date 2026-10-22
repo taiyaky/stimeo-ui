@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { setAttributeIfChanged } from "../utils/attribute_write";
 import { LayoutObserver } from "../utils/layout_observer";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
@@ -204,10 +205,7 @@ export class MasonryController extends Controller<HTMLElement> {
       // Writing a value the item already carries would publish a change that did
       // not happen, and the same comparison is what tells the event whether the
       // published layout actually moved.
-      if (item.getAttribute("data-column") !== assigned) {
-        item.setAttribute("data-column", assigned);
-        changed = true;
-      }
+      if (setAttributeIfChanged(item, "data-column", assigned)) changed = true;
       heights[shortest] = (heights[shortest] ?? 0) + (boxes[index] ?? 0) + this.#gap;
     });
 

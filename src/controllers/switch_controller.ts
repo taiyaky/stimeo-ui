@@ -1,9 +1,12 @@
 import { Controller } from "@hotwired/stimulus";
+import { setAttributeIfChanged } from "../utils/attribute_write";
+import { AuthoredMutationWatcher } from "../utils/authored_mutation_watcher";
 import { setDefaultAttribute } from "../utils/default_attribute";
 import { commitField, writeField } from "../utils/field_mirror";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { isInteractiveHost } from "../utils/interactive_host";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { ListenerSet } from "../utils/listener_set";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { MoveCounter } from "../utils/move_counter";
 
 /** Attributes whose in-place changes can alter the host or its required defaults. */
@@ -42,7 +45,8 @@ const OBSERVED_ANCESTOR_ATTRIBUTES = ["contenteditable"];
  *
  * A synchronous subscriber that confirms another state replaces reports still
  * pending for the outer confirmation. Reading state or confirming it unchanged
- * does not replace them. An event already being dispatched cannot be recalled.
+ * does not replace them. A listener that disconnects the controller ends the
+ * reports still pending. An event already being dispatched cannot be recalled.
  *
  * @remarks
  * Behavior only — the consumer owns all styling (typically keyed off the
@@ -66,12 +70,15 @@ const OBSERVED_ANCESTOR_ATTRIBUTES = ["contenteditable"];
  *   switch can be submitted and read server-side. A toggle the user made emits
  *   a native bubbling `change` from that field, the way a form control does, so
  *   `stimeo--auto-submit` and form-level validation hear it. The mirror is
- *   refreshed silently on connect, on a replacement field, and whenever the
- *   defaults are re-derived after an attribute change. A hidden input is not
+ *   refreshed silently on connect, on a replacement field, whenever the
+ *   defaults are re-derived after an attribute change, and after a Turbo morph
+ *   of the switch or its subtree, which can empty a retained field whose new
+ *   markup carries no value while `aria-checked` stays. A hidden input is not
  *   interactive content, so it is valid inside the `<button>` host.
  */
 export class SwitchController extends Controller<HTMLElement> {
   readonly #moves = new MoveCounter();
+  #connectionGeneration = 0;
   static override targets = ["field"];
   static actions = ["onKeydown", "toggle"] as const;
   static events = ["change", "reconcile"] as const;
@@ -81,14 +88,12 @@ export class SwitchController extends Controller<HTMLElement> {
 
   /** Defaults this instance introduced, with the value it last wrote, so it may remove them. */
   readonly #ownedDefaults = new Map<string, string>();
-  /** Controller writes that must not be mistaken for authored morph changes. */
-  readonly #internalAttributeValues = new Map<string, string>();
-  /** One pass per batch of retained-element changes and field arrivals. */
-  readonly #pass = new MicrotaskCoalescer(() => this.#reconcile());
+  /** One pass per batch of retained-element changes, field arrivals and Turbo morphs. */
+  readonly #pass = new MorphRenderWatcher(() => this.#reconcile());
   /** The checked state last published: read on connect, then committed or reported. */
   #committedChecked = false;
 
-  readonly #attributeObserver = new MutationObserver((records) => {
+  readonly #attributeObserver = new AuthoredMutationWatcher((records) => {
     this.#releaseAuthoredDefaults(records);
     this.#pass.schedule();
   });
@@ -100,6 +105,9 @@ export class SwitchController extends Controller<HTMLElement> {
     event.stopImmediatePropagation();
   };
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /**
    * Ensures the switch exposes a role and is keyboard-reachable, and takes the
    * state it finds as the one a later move is measured from, reporting nothing.
@@ -109,8 +117,8 @@ export class SwitchController extends Controller<HTMLElement> {
     this.#reconcileDefaults();
     this.#mirrorField(false);
     this.#committedChecked = this.#checked;
-    this.element.addEventListener("click", this.#onClickCapture, true);
-    this.#pass.activate();
+    this.#listeners.add(this.element, "click", this.#onClickCapture, { capture: true });
+    this.#pass.observe(this.element);
     this.#observeAttributes();
   }
 
@@ -124,12 +132,12 @@ export class SwitchController extends Controller<HTMLElement> {
     this.#pass.schedule();
   }
 
-  /** Releases the click guard, the attribute observer, and a pass still queued. */
+  /** Releases the click guard, the attribute observer, the morph listener and a queued pass. */
   override disconnect(): void {
-    this.#pass.cancel();
-    this.element.removeEventListener("click", this.#onClickCapture, true);
+    this.#connectionGeneration += 1;
+    this.#pass.disconnect();
+    this.#listeners.dispose();
     this.#attributeObserver.disconnect();
-    this.#internalAttributeValues.clear();
   }
 
   /** Toggles the checked state. Bound via `data-action` (click). */
@@ -164,19 +172,14 @@ export class SwitchController extends Controller<HTMLElement> {
     this.toggle();
   }
 
-  /**
-   * Re-derives the defaults and the field after the page changed the host, then
-   * reports a checked state that moved. Records still queued are read first, so
-   * an author's write is not lost when observation is suspended for this pass's
-   * own writes; observation resumes before the report, so an edit a listener
-   * makes is seen by the next pass.
-   */
+  /** Repairs defaults from authored records while keeping subscriber changes observable. */
   #reconcile(): void {
-    this.#releaseAuthoredDefaults(this.#attributeObserver.takeRecords());
-    this.#attributeObserver.disconnect();
+    this.#releaseAuthoredDefaults(this.#attributeObserver.take());
     this.#reconcileDefaults();
     this.#mirrorField(false);
-    this.#observeAttributes();
+    const authored = this.#attributeObserver.take();
+    this.#releaseAuthoredDefaults(authored);
+    if (authored.length > 0) this.#pass.schedule();
     this.#reportMove();
   }
 
@@ -212,7 +215,10 @@ export class SwitchController extends Controller<HTMLElement> {
 
   /** Records a newly introduced default without claiming authored markup. */
   #setOwnedDefault(name: string, value: string): void {
-    if (setDefaultAttribute(this.element, name, value)) this.#ownedDefaults.set(name, value);
+    if (setDefaultAttribute(this.element, name, value)) {
+      this.#ownedDefaults.set(name, value);
+      this.#attributeObserver.claimCurrent(this.element, name);
+    }
   }
 
   /**
@@ -237,35 +243,26 @@ export class SwitchController extends Controller<HTMLElement> {
         const name = record.attributeName;
         if (name && this.#ownedDefaults.has(name)) {
           const value = this.element.getAttribute(name);
-          if (value !== null && this.#internalAttributeValues.get(name) !== value) {
+          if (value !== null) {
             this.#ownedDefaults.delete(name);
           }
         }
       }
     }
-    this.#internalAttributeValues.clear();
   }
 
   /** Removes only defaults introduced by this instance when a host becomes invalid. */
   #removeOwnedDefaults(): void {
-    for (const name of this.#ownedDefaults.keys()) this.element.removeAttribute(name);
+    for (const name of this.#ownedDefaults.keys()) this.#writeAttribute(name, null);
     this.#ownedDefaults.clear();
   }
 
   /** Watches retained host attributes that Turbo can morph without reconnecting. */
   #observeAttributes(): void {
     this.#attributeObserver.observe(this.element, {
-      attributes: true,
-      attributeFilter: OBSERVED_ATTRIBUTES,
+      attributes: OBSERVED_ATTRIBUTES,
+      ancestorAttributes: OBSERVED_ANCESTOR_ATTRIBUTES,
     });
-    let ancestor = this.element.parentElement;
-    while (ancestor) {
-      this.#attributeObserver.observe(ancestor, {
-        attributes: true,
-        attributeFilter: OBSERVED_ANCESTOR_ATTRIBUTES,
-      });
-      ancestor = ancestor.parentElement;
-    }
   }
 
   /** Whether the host has one activation model that this controller can own. */
@@ -296,10 +293,13 @@ export class SwitchController extends Controller<HTMLElement> {
    * attribute is measured from it.
    */
   #commit(value: boolean): void {
+    const generation = this.#connectionGeneration;
     const reflected = value ? "true" : "false";
-    this.#internalAttributeValues.set("aria-checked", reflected);
+    const authored = this.#attributeObserver.take();
+    this.#releaseAuthoredDefaults(authored);
+    if (authored.length > 0) this.#pass.schedule();
     if (this.#ownedDefaults.has("aria-checked")) this.#ownedDefaults.set("aria-checked", reflected);
-    this.element.setAttribute("aria-checked", reflected);
+    this.#writeAttribute("aria-checked", reflected);
     const changed = value !== this.#committedChecked;
     this.#committedChecked = value;
     if (!changed) {
@@ -308,7 +308,13 @@ export class SwitchController extends Controller<HTMLElement> {
     }
     const token = this.#moves.record();
     this.#mirrorField(true);
-    if (!this.#moves.isLatest(token)) return;
+    if (generation !== this.#connectionGeneration || !this.#moves.isLatest(token)) return;
     this.dispatch("change", { detail: { checked: value } });
+  }
+  /** Claims only actual writes to the host's observed defaults. */
+  #writeAttribute(name: string, value: string | null): void {
+    setAttributeIfChanged(this.element, name, value, () => {
+      this.#attributeObserver.claim(this.element, name, value);
+    });
   }
 }

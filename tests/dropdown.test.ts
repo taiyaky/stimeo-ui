@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DropdownController } from "../src/controllers/dropdown_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { byId, query } from "./helpers/dom";
+import { press as keyboardPress, keyEvent, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -141,7 +142,7 @@ describe("DropdownController", () => {
     const item = query<HTMLAnchorElement>("a", menu());
     item.focus();
 
-    item.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    keyboardPress(item, "Escape");
 
     expect(menu().hidden).toBe(true);
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
@@ -153,12 +154,8 @@ describe("DropdownController", () => {
     const item = query<HTMLAnchorElement>("a", menu());
     item.focus();
 
-    const event = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
-    item.dispatchEvent(event);
+    const event = keyEvent("Escape");
+    keyboardPress(item, event);
 
     // Owning the press marks it handled so outer layers skip the same Escape.
     expect(event.defaultPrevented).toBe(true);
@@ -170,13 +167,9 @@ describe("DropdownController", () => {
     const item = query<HTMLAnchorElement>("a", menu());
     item.focus();
 
-    const handled = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
+    const handled = keyEvent("Escape");
     handled.preventDefault();
-    item.dispatchEvent(handled);
+    keyboardPress(item, handled);
 
     expect(menu().hidden).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
@@ -190,8 +183,8 @@ describe("DropdownController", () => {
     // Bubbles like a real keypress: the event must actually travel to the
     // document (past every registered listener) and still go unconsumed —
     // a non-bubbling dispatch would reach no handler and prove nothing.
-    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    outside.dispatchEvent(event);
+    const event = keyEvent("Escape");
+    keyboardPress(outside, event);
 
     // A press aimed at another layer neither closes the menu nor yanks focus.
     expect(event.defaultPrevented).toBe(false);
@@ -205,8 +198,9 @@ describe("DropdownController", () => {
 
     // A synthetic press dispatched from inside the root still fails the
     // focus-containment guard when the active element sits elsewhere.
-    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    menu().dispatchEvent(event);
+    const event = keyEvent("Escape");
+    // The synthetic target stays inside the root while focus remains outside it.
+    typeKey(menu(), event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(menu().hidden).toBe(false);
@@ -220,8 +214,9 @@ describe("DropdownController", () => {
     (document.activeElement as HTMLElement | null)?.blur();
     expect(document.activeElement).toBe(document.body);
 
-    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    document.body.dispatchEvent(event);
+    const event = keyEvent("Escape");
+    // Body focus must remain untouched while the document fallback handles Escape.
+    typeKey(document, event);
 
     expect(event.defaultPrevented).toBe(true);
     expect(menu().hidden).toBe(true);
@@ -304,7 +299,7 @@ describe("DropdownController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // --- Speech-order regression ---
+  // --- Speech-order check --------
 
   it("announces trigger and disclosed content in order when open", async () => {
     trigger().click();
@@ -312,7 +307,7 @@ describe("DropdownController", () => {
     expect(phrases).toEqual(["button, Menu, 1 control, expanded", "link, Item"]);
   });
 
-  // --- Disconnect teardown regression ---
+  // --- Disconnect teardown check --------
 
   it("properly disconnects without errors even when the menu is open", () => {
     trigger().click();
@@ -324,12 +319,11 @@ describe("DropdownController", () => {
     document.body.click();
     expect(menu().hidden).toBe(false);
 
-    query<HTMLAnchorElement>("a", menu()).dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-    );
+    keyboardPress(query<HTMLAnchorElement>("a", menu()), "Escape");
     expect(menu().hidden).toBe(false);
   });
-  // --- A trigger or a menu that takes over ---
+
+  // --- A morph that keeps the elements ---
 
   describe("a morph that keeps the elements", () => {
     /** Puts the server's markup back on the trigger and the menu, as Turbo's morph does. */
@@ -371,7 +365,7 @@ describe("DropdownController", () => {
       expect(trigger().getAttribute("aria-expanded")).toBe("true");
       expect(events.seen).toEqual([]);
       events.stop();
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      keyboardPress(document.activeElement as HTMLElement, "Escape");
       expect(menu().hidden).toBe(true);
     });
 
@@ -414,6 +408,8 @@ describe("DropdownController", () => {
       expect(menu().hidden).toBe(false);
     });
   });
+
+  // --- A trigger or a menu that takes over ---
 
   /**
    * The open state lives on the trigger (`aria-expanded`) and the menu (`hidden`).
@@ -519,12 +515,8 @@ describe("DropdownController", () => {
       const outside = byId("outside");
       outside.focus();
       trigger().focus();
-      const press = new KeyboardEvent("keydown", {
-        key: "Escape",
-        bubbles: true,
-        cancelable: true,
-      });
-      document.body.dispatchEvent(press);
+      const press = keyEvent("Escape");
+      keyboardPress(document.activeElement as HTMLElement, press);
       expect(press.defaultPrevented).toBe(false);
     });
 
@@ -639,7 +631,8 @@ describe("DropdownController", () => {
       onlyTrigger.remove();
       onlyMenu.remove();
 
-      // Drive the callbacks directly: happy-dom delivers target callbacks unreliably.
+      // The test stays synchronous, so it calls the target callbacks directly instead of
+      // waiting for the MutationObserver delivery.
       expect(() => controller().triggerTargetDisconnected(onlyTrigger)).not.toThrow();
       expect(() => controller().menuTargetDisconnected(onlyMenu)).not.toThrow();
     });
@@ -895,9 +888,7 @@ describe("DropdownController", () => {
       trigger().click();
       capture.clear();
 
-      query<HTMLAnchorElement>("a", menu()).dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-      );
+      keyboardPress(query<HTMLAnchorElement>("a", menu()), "Escape");
 
       expect(capture.names()).toEqual(["close"]);
       expect(capture.reasons()).toEqual(["escape"]);

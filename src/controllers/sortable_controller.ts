@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
+import { ListenerSet } from "../utils/listener_set";
 import { isRtl } from "../utils/logical_scroll";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { TransientHooks } from "../utils/transient_hooks";
@@ -81,10 +82,10 @@ interface SortSession {
  * broadcast makes the board collaborative). The DOM order is the single source
  * of truth: items are read live on every event, so rows appended by Turbo need
  * no rewiring, and a Turbo cache restore reconnects idempotently (`connect()`
- * clears the transient root hook; a drag cannot survive a navigation). Only the
- * event listeners are held, and they are removed on `disconnect()`. Multi-list
- * / kanban, nested DnD, auto-scroll at the edges, and virtualized lists are
- * deliberately out of this single-list scope.
+ * clears the transient root hook; a drag cannot survive a navigation). The event
+ * listeners and a pending lost-item check are all it holds, and `disconnect()`
+ * releases both. Multi-list / kanban, nested DnD, auto-scroll at the edges, and
+ * virtualized lists are deliberately out of this single-list scope.
  */
 export class SortableController extends Controller<HTMLElement> {
   static override targets = ["list", "item"];
@@ -110,22 +111,22 @@ export class SortableController extends Controller<HTMLElement> {
   /** Defers the lost-item check to after the mutation batch (see below). */
   readonly #settle = new MicrotaskCoalescer(() => this.#dropLostSession());
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     // A drag cannot survive a navigation: drop the hook a Turbo cache snapshot
     // may have preserved mid-drag (idempotent reconnect).
     TRANSIENT.reset(this.element);
     this.#settle.activate();
-    this.element.addEventListener("stimeo--pointer-drag:start", this.#onDragStart);
-    this.element.addEventListener("stimeo--pointer-drag:move", this.#onDragMove);
-    this.element.addEventListener("stimeo--pointer-drag:end", this.#onDragEnd);
-    this.element.addEventListener("stimeo--pointer-drag:cancel", this.#onDragCancel);
+    this.#listeners.add(this.element, "stimeo--pointer-drag:start", this.#onDragStart);
+    this.#listeners.add(this.element, "stimeo--pointer-drag:move", this.#onDragMove);
+    this.#listeners.add(this.element, "stimeo--pointer-drag:end", this.#onDragEnd);
+    this.#listeners.add(this.element, "stimeo--pointer-drag:cancel", this.#onDragCancel);
   }
 
   override disconnect(): void {
-    this.element.removeEventListener("stimeo--pointer-drag:start", this.#onDragStart);
-    this.element.removeEventListener("stimeo--pointer-drag:move", this.#onDragMove);
-    this.element.removeEventListener("stimeo--pointer-drag:end", this.#onDragEnd);
-    this.element.removeEventListener("stimeo--pointer-drag:cancel", this.#onDragCancel);
+    this.#listeners.dispose();
     this.#settle.cancel();
     this.#session = null;
     this.element.removeAttribute("data-sortable-dragging");
@@ -434,7 +435,7 @@ export class SortableController extends Controller<HTMLElement> {
     return this.itemTargets;
   }
 
-  /** The reorder container: the `list` target when present, else the element. */
+  /** The element that lays the items out: the `list` target when present, else the element. */
   get #list(): HTMLElement {
     return this.hasListTarget ? this.listTarget : this.element;
   }

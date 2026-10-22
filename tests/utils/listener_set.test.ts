@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ListenerSet } from "../../src/utils/listener_set";
+import { typeKey } from "../helpers/keyboard";
 
 /**
  * Behavioral tests for {@link ListenerSet}: that a generation releases together,
@@ -244,5 +245,30 @@ describe("ListenerSet", () => {
     set.dispose();
     fire(target);
     expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it("takes a handler typed for the event the target's map names", () => {
+    // The overloads mirror the target's own `addEventListener`: the handler
+    // written for its event is passed as it is, and one written for another
+    // event is a type error, so no consumer has to widen or wrap it.
+    const set = listenerSet();
+    const target = element();
+    const keys: string[] = [];
+    const seen: string[] = [];
+
+    set.add(target, "keydown", (event: KeyboardEvent) => keys.push(event.key));
+    set.add(window, "blur", (event: FocusEvent) => seen.push(event.type));
+    set.add(document, "visibilitychange", (event: Event) => seen.push(event.type));
+    set.add(target, "stimeo--custom:ping", (event: Event) => seen.push(event.type));
+    // @ts-expect-error a click delivers a MouseEvent, not a KeyboardEvent
+    set.add(target, "click", (event: KeyboardEvent) => keys.push(event.key));
+    // @ts-expect-error a type the map does not name takes an EventListener
+    set.add(target, "stimeo--custom:pong", (event: KeyboardEvent) => keys.push(event.key));
+
+    typeKey(target, "a");
+    window.dispatchEvent(new FocusEvent("blur"));
+    fire(target, "stimeo--custom:ping");
+    expect(keys).toEqual(["a"]);
+    expect(seen).toEqual(["blur", "stimeo--custom:ping"]);
   });
 });

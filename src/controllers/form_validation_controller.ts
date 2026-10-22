@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { setDefaultAttribute } from "../utils/default_attribute";
 import { canTakeFocus, firstTabStop, isTabStop } from "../utils/focus_candidate";
+import { ListenerSet } from "../utils/listener_set";
 import type { FormFieldController } from "./form_field_controller";
 
 /** Native form controls that participate in constraint validation. */
@@ -80,7 +81,7 @@ interface ValidationSnapshot {
  * constraints: `required`, `type`, `pattern`, `min`/`max`, …) or in the consumer's
  * own `setCustomValidity()` calls, which `checkValidity()` surfaces transparently.
  * It sets the form's `novalidate` so it can replace the browser's default error
- * bubbles with accessible in-page visual errors plus the shared Announcer, and
+ * bubbles with accessible in-page visual errors plus the shared `stimeo--announcer`, and
  * restores the attribute on disconnect.
  *
  * Two declarative escape hatches let a field **exceed** native validation with no
@@ -89,8 +90,8 @@ interface ValidationSnapshot {
  *   (`value-missing`, `too-short`, `too-long`, `pattern-mismatch`, `type-mismatch`,
  *   `range-overflow`, `range-underflow`, `step-mismatch`, `bad-input`), or a generic
  *   `data-stimeo--form-validation-message` fallback, override the shown text per failing
- *   `ValidityState` flag — controlled, localizable wording that also fixes headless
- *   browsers returning an empty native `validationMessage`. Falls back to native.
+ *   `ValidityState` flag — controlled, localizable wording that also covers an engine
+ *   whose native `validationMessage` is empty or generic. Falls back to native.
  * - **`data-stimeo--form-validation-disallow="whitespace"`** — a built-in custom rule
  *   rejecting a value that is blank after trimming (which slips past `required` /
  *   `minlength`), wired through `setCustomValidity` so it blocks submit like any
@@ -181,8 +182,11 @@ export class FormValidationController extends Controller<HTMLFormElement> {
   /** Last invalid message routed to each field, suppressing duplicate reports. */
   readonly #reportedErrors = new WeakMap<FormFieldController, string>();
 
-  /** Exact document that owns the delegated listeners for this connection. */
-  #listenerDocument: Document | null = null;
+  /**
+   * The delegated listeners of one connection, on the document that owned the form
+   * when it connected; `disconnect()` releases them from that document.
+   */
+  readonly #listeners = new ListenerSet();
 
   readonly #onSubmit = (event: SubmitEvent): void => {
     if (event.target !== this.element) return;
@@ -242,20 +246,16 @@ export class FormValidationController extends Controller<HTMLFormElement> {
     // Capture submit before form-bound actions. The other bubbling events live on
     // the same document so controls associated through `form="id"` participate too;
     // #controlFrom rejects every control owned by a different form.
-    this.#listenerDocument = this.element.ownerDocument;
-    this.#listenerDocument.addEventListener("submit", this.#onSubmit, true);
-    this.#listenerDocument.addEventListener("focusout", this.#onFocusOut);
-    this.#listenerDocument.addEventListener("input", this.#onInput);
-    this.#listenerDocument.addEventListener("change", this.#onChange);
+    const { ownerDocument } = this.element;
+    this.#listeners.add(ownerDocument, "submit", this.#onSubmit, { capture: true });
+    this.#listeners.add(ownerDocument, "focusout", this.#onFocusOut);
+    this.#listeners.add(ownerDocument, "input", this.#onInput);
+    this.#listeners.add(ownerDocument, "change", this.#onChange);
   }
 
   /** Tears down listeners and restores `novalidate` if we added it. */
   override disconnect(): void {
-    this.#listenerDocument?.removeEventListener("submit", this.#onSubmit, true);
-    this.#listenerDocument?.removeEventListener("focusout", this.#onFocusOut);
-    this.#listenerDocument?.removeEventListener("input", this.#onInput);
-    this.#listenerDocument?.removeEventListener("change", this.#onChange);
-    this.#listenerDocument = null;
+    this.#listeners.dispose();
     for (const [control, message] of this.#ownedCustomErrors) {
       if (control.validationMessage === message) control.setCustomValidity("");
     }
@@ -366,7 +366,7 @@ export class FormValidationController extends Controller<HTMLFormElement> {
    * `ValidityState` flag, then a generic `data-stimeo--form-validation-message`
    * override, then the browser's native `validationMessage`. Authoring an override
    * gives controlled, localizable, theme-able wording with **no consumer JS** —
-   * and sidesteps headless browsers that return an empty native message.
+   * and a message where the engine's native one is empty or generic.
    */
   #messageFor(control: ValidatableControl): string {
     // `setCustomValidity()` owns its wording. In particular, a consumer's custom

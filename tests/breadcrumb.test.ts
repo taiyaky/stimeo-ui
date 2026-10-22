@@ -78,8 +78,10 @@ class FakeResizeObserver implements ResizeObserver {
   /** Every element passed to `observe`, in call order. */
   readonly observeCalls: Element[] = [];
   disconnected = false;
+  readonly #callback: ResizeObserverCallback;
 
-  constructor(private readonly callback: ResizeObserverCallback) {
+  constructor(callback: ResizeObserverCallback) {
+    this.#callback = callback;
     FakeResizeObserver.instances.push(this);
   }
 
@@ -100,7 +102,7 @@ class FakeResizeObserver implements ResizeObserver {
   /** Test helper: simulate a notification for an element still being observed. */
   trigger(element?: Element): void {
     if (element && !this.observed.has(element)) return;
-    this.callback([], this);
+    this.#callback([], this);
   }
 }
 
@@ -848,8 +850,8 @@ describe("BreadcrumbController", () => {
     it("stops reacting to resizes after disconnect", async () => {
       await start();
       resizeTo(80, 500); // fits
-      // Invoke disconnect() directly to avoid happy-dom's flaky async controller
-      // teardown lifecycle.
+      // The check stays synchronous, so it calls disconnect() directly instead of
+      // removing the element and waiting for Stimulus to disconnect the controller.
       const controller = application.getControllerForElementAndIdentifier(
         root(),
         "stimeo--breadcrumb",

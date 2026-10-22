@@ -5,6 +5,7 @@ import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /**
  * Behavioral tests for {@link FrameLoadingController}, driven by simulated Turbo
@@ -42,9 +43,11 @@ describe("FrameLoadingController", () => {
   const fire = (type: string, on: Element = frame()) =>
     on.dispatchEvent(new Event(type, { bubbles: true }));
   /**
-   * Turbo dispatches it on the document, not at the frame, and also on pages that stay.
+   * Turbo dispatches it on `document.documentElement`, bubbling to `document` — never at
+   * the frame — and also on pages that stay.
    */
-  const cacheSnapshot = () => document.dispatchEvent(new Event("turbo:before-cache"));
+  const cacheSnapshot = () =>
+    document.documentElement.dispatchEvent(new Event("turbo:before-cache", { bubbles: true }));
   /**
    * What Turbo's frame renderer does: empty the frame, then insert the response's
    * children. The frame element itself survives, so the controller is not
@@ -199,19 +202,11 @@ describe("FrameLoadingController", () => {
   // --- `minDuration` belongs to one held finish --------------------------------------
 
   /**
-   * Rewrites `minDuration` and delivers its Value callback directly when the
-   * controller defines one, since happy-dom does not reliably run it for an attribute
-   * write.
+   * Rewrites the `minDuration` declaration and waits for Stimulus to deliver it, so the
+   * assertions that follow see whatever the controller does with the change.
    */
-  const declareMinDuration = (value: number) => {
-    frame().setAttribute("data-stimeo--frame-loading-min-duration-value", String(value));
-    const owner = application.getControllerForElementAndIdentifier(
-      frame(),
-      "stimeo--frame-loading",
-    );
-    const callback: unknown = Reflect.get(owner ?? {}, "minDurationValueChanged");
-    if (typeof callback === "function") callback.call(owner);
-  };
+  const declareMinDuration = (value: number) =>
+    writeValueAttribute(frame(), "data-stimeo--frame-loading-min-duration-value", String(value));
 
   it.each([
     { direction: "shrinks", next: 50 },
@@ -226,7 +221,7 @@ describe("FrameLoadingController", () => {
       vi.advanceTimersByTime(300);
       fire("turbo:frame-load"); // held back until t=1000
 
-      declareMinDuration(next);
+      await declareMinDuration(next);
       vi.advanceTimersByTime(699);
       expect(frame().getAttribute("aria-busy")).toBe("true");
       vi.advanceTimersByTime(1);
@@ -247,7 +242,7 @@ describe("FrameLoadingController", () => {
     await mount('data-stimeo--frame-loading-min-duration-value="1000"');
     fire("turbo:before-fetch-request");
     vi.advanceTimersByTime(300);
-    declareMinDuration(400);
+    await declareMinDuration(400);
     fire("turbo:frame-load"); // 100 ms of the new floor are left, counted from the fetch start
     vi.advanceTimersByTime(99);
     expect(frame().getAttribute("aria-busy")).toBe("true");
@@ -262,7 +257,7 @@ describe("FrameLoadingController", () => {
       frame().addEventListener(`stimeo--frame-loading:${type}`, () => events.push(type));
     }
     fire("turbo:before-fetch-request");
-    declareMinDuration(0);
+    await declareMinDuration(0);
     await vi.advanceTimersByTimeAsync(5000);
     expect(frame().getAttribute("aria-busy")).toBe("true");
     expect(skeleton().hidden).toBe(false);

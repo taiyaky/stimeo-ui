@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { FrameCoalescer } from "../utils/frame_coalescer";
 import { LayoutObserver } from "../utils/layout_observer";
+import { ListenerSet } from "../utils/listener_set";
 import { StylePropertyLease } from "../utils/style_property_lease";
 
 /** Name of the CSS custom property exposing the reading progress (0..1). */
@@ -65,13 +66,16 @@ export class ReadingProgressController extends Controller<HTMLElement> {
 
   readonly #onScroll = (): void => this.#frames.schedule(() => this.#measure());
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     this.#progress = -1;
     this.#baselined = false;
     // Capture phase: element scrolls do not bubble, but they ARE observable at
     // the window in capture — so an article inside an overflow container still
     // drives the progress.
-    window.addEventListener("scroll", this.#onScroll, { passive: true, capture: true });
+    this.#listeners.add(window, "scroll", this.#onScroll, { passive: true, capture: true });
     this.#layout.observe(this.element);
     this.#layout.observeViewport();
     this.#measure();
@@ -86,7 +90,7 @@ export class ReadingProgressController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
-    window.removeEventListener("scroll", this.#onScroll, { capture: true });
+    this.#listeners.dispose();
     this.#layout.disconnect();
     this.#frames.cancel();
     this.#lease.return(this.element);

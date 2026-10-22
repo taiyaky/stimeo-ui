@@ -1,5 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { leasedAuthorValue } from "../utils/attribute_lease";
+import { projectedFieldName } from "../utils/form_data_projection";
+import { ListenerSet } from "../utils/listener_set";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -48,7 +50,7 @@ const DEFAULT_EXCLUDE = ["authenticity_token", "_method", "utf8"];
 const STORAGE_PREFIX = "stimeo--persist:";
 /** Separator for disambiguating repeated same-name fields. */
 const OCCURRENCE_SEP = "\u0000";
-/** The one observed attribute that can move fields between nested Persist hosts. */
+/** The one observed attribute that can move fields between nested `stimeo--persist` hosts. */
 const OWNERSHIP_ATTRIBUTE = "data-controller";
 const DEFAULT_DEBOUNCE = 400;
 
@@ -85,7 +87,7 @@ const parsePayload = (raw: string): PersistPayload | null => {
   return { version: 1, fields };
 };
 
-/** Whether a node is one of the native controls supported by Persist. */
+/** Whether a node is one of the native controls supported by `stimeo--persist`. */
 const isPersistField = (node: unknown): node is PersistField =>
   node instanceof HTMLInputElement ||
   node instanceof HTMLTextAreaElement ||
@@ -159,6 +161,8 @@ export class PersistController extends Controller<HTMLElement> {
   #logicalKey: string | null = null;
   #payload: PersistPayload | null = null;
   #registeredClearOn: string | null = null;
+  /** The listener for the event `clearOn` names; a new name releases it first. */
+  readonly #clearOnListeners = new ListenerSet();
   #excluded: readonly string[] = DEFAULT_EXCLUDE;
   #knownFields = new WeakSet<PersistField>();
   #forcedRestore = new Set<PersistField>();
@@ -175,14 +179,17 @@ export class PersistController extends Controller<HTMLElement> {
     this.clear();
   };
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     if (this.#connected) return;
     this.#connected = true;
     this.#logicalKey = this.#resolveLogicalKey();
     this.#excluded = parseStringList(this.excludeValue, DEFAULT_EXCLUDE);
 
-    this.element.addEventListener("input", this.#onInput);
-    this.element.addEventListener("change", this.#onInput);
+    this.#listeners.add(this.element, "input", this.#onInput);
+    this.#listeners.add(this.element, "change", this.#onInput);
     this.#syncClearOn();
     this.#restoreDynamic.activate();
     this.#observer.observe(this.element, {
@@ -208,8 +215,7 @@ export class PersistController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#flushPendingSave();
     this.#connected = false;
-    this.element.removeEventListener("input", this.#onInput);
-    this.element.removeEventListener("change", this.#onInput);
+    this.#listeners.dispose();
     this.#unbindClearOn();
     this.#observer.disconnect();
     this.#restoreDynamic.cancel();
@@ -499,16 +505,17 @@ export class PersistController extends Controller<HTMLElement> {
     if (NON_VALUE_TYPES.has(field.type) || SENSITIVE_TYPES.has(field.type)) return false;
     if (SENSITIVE_TYPES.has(leasedAuthorValue(field, "type") ?? "")) return false;
     if (excluded.includes(field.type)) return false;
-    if (field.name.length > 0 && excluded.includes(field.name)) return false;
+    const name = projectedFieldName(field.name);
+    if (name.length > 0 && excluded.includes(name)) return false;
     return true;
   }
 
-  /** A stable storage sub-key for a field (its name, else id). */
+  /** A stable storage sub-key for a field (its logical submission name, else id). */
   #keyOf(field: PersistField): string | null {
-    return field.name || field.id || null;
+    return projectedFieldName(field.name) || field.id || null;
   }
 
-  /** Whether this instance, rather than a nested Persist host, owns a field. */
+  /** Whether this instance, rather than a nested `stimeo--persist` host, owns a field. */
   #ownsField(field: PersistField): boolean {
     return field.closest(`[data-controller~="${this.identifier}"]`) === this.element;
   }
@@ -533,14 +540,14 @@ export class PersistController extends Controller<HTMLElement> {
     if (next === this.#registeredClearOn) return;
     this.#unbindClearOn();
     if (next === null) return;
-    this.element.addEventListener(next, this.#onClearEvent);
+    this.#clearOnListeners.add(this.element, next, this.#onClearEvent);
     this.#registeredClearOn = next;
   }
 
-  /** Removes the event listener using the name that was actually registered. */
+  /** Releases the listener for the name that was actually registered. */
   #unbindClearOn(): void {
     if (this.#registeredClearOn === null) return;
-    this.element.removeEventListener(this.#registeredClearOn, this.#onClearEvent);
+    this.#clearOnListeners.dispose();
     this.#registeredClearOn = null;
   }
 
@@ -586,9 +593,9 @@ export class PersistController extends Controller<HTMLElement> {
   /**
    * Adds the controls under an element whose `data-controller` gained or lost this
    * identifier across the batch. That is the only attribute change that moves fields
-   * between Persist hosts, so it is the single case worth a subtree sweep; any other
-   * `data-controller` change leaves ownership where it was, and sweeping for it would
-   * re-apply the stored draft over edits still being debounced.
+   * between `stimeo--persist` hosts, so it is the single case worth a subtree sweep;
+   * any other `data-controller` change leaves ownership where it was, and sweeping for
+   * it would re-apply the stored draft over edits still being debounced.
    */
   #collectOwnershipCandidate(element: Element, before: string | null): void {
     const after = element.getAttribute(OWNERSHIP_ATTRIBUTE);

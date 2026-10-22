@@ -165,10 +165,10 @@ describe("checkSource", () => {
     });
 
     describe("literal Value constraints", () => {
-      it("preserves legacy greaterThan and infinity semantics", () => {
+      it("honors greaterThan and infinity from a schema-14 manifest", () => {
         const slider = manifest.controllers["stimeo--slider"];
         if (!slider) throw new Error("Missing slider manifest");
-        const legacy: Manifest = {
+        const older: Manifest = {
           ...manifest,
           schemaVersion: 14,
           controllers: {
@@ -193,7 +193,7 @@ describe("checkSource", () => {
           ["NaN", true],
         ] as const) {
           expect(
-            checkSource(`<div data-stimeo--slider-step-value="${raw}"></div>`, legacy).some(
+            checkSource(`<div data-stimeo--slider-step-value="${raw}"></div>`, older).some(
               (diagnostic) => diagnostic.code === "invalid-value",
             ),
           ).toBe(invalid);
@@ -244,7 +244,7 @@ describe("checkSource", () => {
       it.each([
         ["max", "max"],
         ["warn-at", "warnAt"],
-      ])("rejects invalid Character Counter %s counts", (token, value) => {
+      ])("rejects invalid stimeo--character-counter %s counts", (token, value) => {
         for (const authored of ["-1", "Infinity", "NaN"]) {
           const diagnostic = checkSource(
             `<div data-stimeo--character-counter-${token}-value="${authored}"></div>`,
@@ -279,7 +279,7 @@ describe("checkSource", () => {
         ["{broken", "text that is not JSON"],
         ["null", "JSON that is not an object"],
         ['{"9":1}', "a value that is not a string"],
-      ])("rejects an Input Mask tokens declaration holding %s", (authored) => {
+      ])("rejects a stimeo--input-mask tokens declaration holding %s", (authored) => {
         const diagnostic = checkSource(
           `<div data-stimeo--input-mask-tokens-value='${authored}'></div>`,
           manifest,
@@ -318,7 +318,7 @@ describe("checkSource", () => {
         );
       });
 
-      it("accepts an Input Mask tokens declaration whose sources all compile", () => {
+      it("accepts a stimeo--input-mask tokens declaration whose sources all compile", () => {
         expect(
           codes(`<div data-stimeo--input-mask-tokens-value='{"H":"[0-9A-Fa-f]"}'></div>`),
         ).not.toContain("invalid-value");
@@ -333,7 +333,7 @@ describe("checkSource", () => {
       });
 
       it("words a plain JSON-object contract without the regex refinement", () => {
-        // No shipped controller declares `json-object` on its own yet, so the
+        // The shipped rules declare `json-object` only with the regexp refinement, so the
         // base contract — an object whose values are strings — is pinned against
         // a manifest built for it.
         const host = manifest.controllers["stimeo--input-mask"] as NonNullable<
@@ -372,7 +372,7 @@ describe("checkSource", () => {
         ).not.toContain("invalid-value");
       });
 
-      it("accepts zero and positive Character Counter counts", () => {
+      it("accepts zero and positive stimeo--character-counter counts", () => {
         expect(
           codes(
             '<div data-stimeo--character-counter-max-value="0" data-stimeo--character-counter-warn-at-value="20"></div>',
@@ -396,19 +396,22 @@ describe("checkSource", () => {
         },
       );
 
-      it.each(["0", "-1", "Infinity", "NaN"])("rejects the invalid Time Picker step %s", (step) => {
-        const diagnostic = checkSource(
-          `<div data-stimeo--time-picker-step-value="${step}"></div>`,
-          manifest,
-        ).find((candidate) => candidate.code === "invalid-value");
+      it.each(["0", "-1", "Infinity", "NaN"])(
+        "rejects the invalid stimeo--time-picker step %s",
+        (step) => {
+          const diagnostic = checkSource(
+            `<div data-stimeo--time-picker-step-value="${step}"></div>`,
+            manifest,
+          ).find((candidate) => candidate.code === "invalid-value");
 
-        expect(diagnostic).toMatchObject({
-          severity: "error",
-          suggestion: "Set step to a finite number greater than 0.",
-        });
-      });
+          expect(diagnostic).toMatchObject({
+            severity: "error",
+            suggestion: "Set step to a finite number greater than 0.",
+          });
+        },
+      );
 
-      it("names the positive requirement in the Time Picker step message", () => {
+      it("names the positive requirement in the stimeo--time-picker step message", () => {
         const diagnostic = checkSource(
           `<div data-stimeo--time-picker-step-value="0"></div>`,
           manifest,
@@ -472,19 +475,22 @@ describe("checkSource", () => {
         },
       );
 
-      it.each(["min", "max", "start", "end"])("rejects a non-finite Range Slider %s", (value) => {
-        const diagnostic = checkSource(
-          `<div data-stimeo--range-slider-${value}-value="NaN"></div>`,
-          manifest,
-        ).find((candidate) => candidate.code === "invalid-value");
+      it.each(["min", "max", "start", "end"])(
+        "rejects a non-finite stimeo--range-slider %s",
+        (value) => {
+          const diagnostic = checkSource(
+            `<div data-stimeo--range-slider-${value}-value="NaN"></div>`,
+            manifest,
+          ).find((candidate) => candidate.code === "invalid-value");
 
-        expect(diagnostic).toMatchObject({
-          severity: "error",
-          suggestion: `Set ${value} to a finite number.`,
-        });
-      });
+          expect(diagnostic).toMatchObject({
+            severity: "error",
+            suggestion: `Set ${value} to a finite number.`,
+          });
+        },
+      );
 
-      it("rejects a Range Slider minimum greater than its maximum", () => {
+      it("rejects a stimeo--range-slider minimum greater than its maximum", () => {
         const diagnostics = checkSource(
           `<div data-stimeo--range-slider-min-value="80" data-stimeo--range-slider-max-value="20"></div>`,
           manifest,
@@ -508,7 +514,7 @@ describe("checkSource", () => {
         );
       });
 
-      it("accepts equal Range Slider bounds and skips a dynamic peer", () => {
+      it("accepts equal stimeo--range-slider bounds and skips a dynamic peer", () => {
         expect(
           codes(
             `<div data-stimeo--range-slider-min-value="20" data-stimeo--range-slider-max-value="20"></div>`,
@@ -685,14 +691,14 @@ describe("checkSource", () => {
     // The receiving half of a declarative wire is already checked; the emitting
     // half is as easy to misspell, and a listener for a name nothing dispatches
     // binds cleanly and simply never fires.
-    it("accepts an event a part declares", () => {
+    it("accepts an event a controller declares", () => {
       const codeList = codes(
         `<ol data-controller="stimeo--step-indicator" data-action="stimeo--stepper:change->stimeo--step-indicator#setIndex"><li data-stimeo--step-indicator-target="step"></li></ol>`,
       );
       expect(codeList).not.toContain("unknown-action-event");
     });
 
-    it("flags an event the emitting part does not declare", () => {
+    it("flags an event the emitting controller does not declare", () => {
       const diagnostic = checkSource(
         `<ol data-controller="stimeo--step-indicator" data-action="stimeo--stepper:changed->stimeo--step-indicator#setIndex"><li data-stimeo--step-indicator-target="step"></li></ol>`,
         manifest,
@@ -863,7 +869,7 @@ describe("checkSource", () => {
       expect(missing[0]?.message).toContain('inside its "tagTemplate"');
     });
 
-    it("accepts a Time Picker without its optional field target", () => {
+    it("accepts a stimeo--time-picker without its optional field target", () => {
       const codeList = codes(`
         <div data-controller="stimeo--time-picker" role="group" aria-label="Time">
           <span role="spinbutton" aria-label="Hours" tabindex="0"
@@ -1324,8 +1330,9 @@ describe("checkSource", () => {
 
     describe("fragment declarations (data-stimeo-fragment)", () => {
       it("suppresses orphan-target inside a declared fragment of that controller", () => {
-        // A server-rendered fragment (Turbo Stream / feed page) is appended inside
-        // its controller at runtime, so its own file has no data-controller.
+        // A server-rendered fragment (a Turbo Stream, or the next page of a
+        // paginated list) is appended inside its controller at runtime, so its
+        // own file has no data-controller.
         expect(
           codes(`
             <li data-stimeo-fragment="stimeo--menu">
@@ -1848,7 +1855,7 @@ describe("checkSource", () => {
       expect(codes(labelled)).not.toContain("missing-aria");
     });
 
-    it("checks the authored Toggle Group roles and contextual name", () => {
+    it("checks the authored stimeo--toggle-group roles and contextual name", () => {
       const complete = `
         <div data-controller="stimeo--toggle-group" role="group" aria-label="View">
           <button type="button" data-stimeo--toggle-group-target="item">Grid</button>
@@ -2045,7 +2052,7 @@ describe("checkSource", () => {
 
       describe("same attribute across groups (value union)", () => {
         // A synthetic manifest whose rule lists `role` in BOTH the base group
-        // (values a/b) and an `or` group (value c). No real rule needs this yet,
+        // (values a/b) and an `or` group (value c). No shipped rule needs this,
         // but the engine must union the allowed values so a value valid in one
         // group is never flagged just because another group omits it.
         const overlapManifest: Manifest = {
@@ -2258,7 +2265,7 @@ describe("checkSource", () => {
         '<div role="button" data-stimeo--toggle-group-target="item"></div>',
         '<a role="button" data-stimeo--toggle-group-target="item"></a>',
         '<div contenteditable="false" role="button" data-stimeo--toggle-group-target="item"></div>',
-      ])("accepts a supported Toggle Group item host: %s", (candidate) => {
+      ])("accepts a supported stimeo--toggle-group item host: %s", (candidate) => {
         const source = `<div role="group" aria-label="View" data-controller="stimeo--toggle-group">
           ${candidate}
         </div>`;
@@ -2272,7 +2279,7 @@ describe("checkSource", () => {
         '<a href="/view" data-stimeo--toggle-group-target="item"></a>',
         '<input type="checkbox" data-stimeo--toggle-group-target="item">',
         '<div contenteditable role="button" data-stimeo--toggle-group-target="item"></div>',
-      ])("rejects a conflicting Toggle Group item host: %s", (candidate) => {
+      ])("rejects a conflicting stimeo--toggle-group item host: %s", (candidate) => {
         const source = `<div role="group" aria-label="View" data-controller="stimeo--toggle-group">
           ${candidate}
         </div>`;
@@ -2283,7 +2290,7 @@ describe("checkSource", () => {
         expect(diagnostic?.suggestion).toContain('<button type="button">');
       });
 
-      it("skips an undecidable Toggle Group item host", () => {
+      it("skips an undecidable stimeo--toggle-group item host", () => {
         const source = `<div role="group" aria-label="View" data-controller="stimeo--toggle-group">
           <button type="<%= button_type %>" data-stimeo--toggle-group-target="item"></button>
         </div>`;
@@ -2295,7 +2302,7 @@ describe("checkSource", () => {
         '<div role="radio" data-stimeo--radio-group-target="radio"></div>',
         '<a role="radio" data-stimeo--radio-group-target="radio"></a>',
         '<div contenteditable="false" role="radio" data-stimeo--radio-group-target="radio"></div>',
-      ])("accepts a supported Radio Group item host: %s", (candidate) => {
+      ])("accepts a supported stimeo--radio-group item host: %s", (candidate) => {
         const source = `<div role="radiogroup" aria-label="Plan" data-controller="stimeo--radio-group">
           ${candidate}
         </div>`;
@@ -2309,7 +2316,7 @@ describe("checkSource", () => {
         '<a href="/plan" role="radio" data-stimeo--radio-group-target="radio"></a>',
         '<input type="radio" data-stimeo--radio-group-target="radio">',
         '<div contenteditable role="radio" data-stimeo--radio-group-target="radio"></div>',
-      ])("rejects a conflicting Radio Group item host: %s", (candidate) => {
+      ])("rejects a conflicting stimeo--radio-group item host: %s", (candidate) => {
         const source = `<div role="radiogroup" aria-label="Plan" data-controller="stimeo--radio-group">
           ${candidate}
         </div>`;
@@ -2320,7 +2327,7 @@ describe("checkSource", () => {
         expect(diagnostic?.suggestion).toContain('<button type="button">');
       });
 
-      it("skips an undecidable Radio Group item host", () => {
+      it("skips an undecidable stimeo--radio-group item host", () => {
         const source = `<div role="radiogroup" aria-label="Plan" data-controller="stimeo--radio-group">
           <button type="<%= button_type %>" role="radio" data-stimeo--radio-group-target="radio"></button>
         </div>`;

@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ToolbarController } from "../src/controllers/toolbar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -83,12 +84,80 @@ describe("ToolbarController", () => {
       root(index).querySelectorAll<HTMLElement>("[data-stimeo--toolbar-target='control']"),
     );
   const tabindexes = (index = 0) => controls(index).map((control) => control.tabIndex);
-  /** Dispatches a cancelable keydown and returns it so `defaultPrevented` is assertable. */
-  const key = (index: number, k: string, toolbar = 0): KeyboardEvent => {
-    const event = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true });
-    controls(toolbar)[index]?.dispatchEvent(event);
-    return event;
-  };
+
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Home/End chord (%s, %s)", async (key, _modifier, init) => {
+    await start({ tabindexes: ["-1", "0", "-1"] });
+    const current = controls()[1];
+    if (!current) throw new Error("Expected middle control");
+    current.focus();
+    const element = root();
+    const events: Event[] = [];
+    for (const name of ["input", "change"]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = pressKey(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(tabindexes()).toEqual([-1, 0, -1]);
+    expect(pressKey(current, key).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(controls()[key === "Home" ? 0 : 2]);
+    expect(tabindexes()).toEqual(key === "Home" ? [0, -1, -1] : [-1, -1, 0]);
+  });
+
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )(
+    "yields an unassigned Home/End chord (%s, %s) before Tab-stop repair",
+    async (key, _modifier, init) => {
+      await start({ tabindexes: ["-1", "0", "-1"] });
+      const current = controls()[1];
+      if (!current) throw new Error("Expected middle control");
+      current.focus();
+      current.tabIndex = -1;
+      const element = root();
+      const events: Event[] = [];
+      for (const name of ["input", "change"]) {
+        element.addEventListener(name, (event) => events.push(event));
+      }
+      const before = element.outerHTML;
+      // Dispatch to the focused control without a focus call; only the key handler could
+      // touch the authored Tab stops.
+      const rejected = typeKey(current, key, init);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(current);
+      expect(element.outerHTML).toBe(before);
+      expect(events).toEqual([]);
+      expect(tabindexes()).toEqual([-1, -1, -1]);
+      expect(typeKey(current, key).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(controls()[key === "Home" ? 0 : 2]);
+      expect(tabindexes()).toEqual(key === "Home" ? [0, -1, -1] : [-1, -1, 0]);
+    },
+  );
 
   it("leaves disconnected target changes untouched until reconnect", async () => {
     await start();
@@ -122,23 +191,18 @@ describe("ToolbarController", () => {
     const auxiliary = document.createElement("button");
     root().appendChild(auxiliary);
     auxiliary.focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "Home",
-      bubbles: true,
-      cancelable: true,
-    });
-    auxiliary.dispatchEvent(event);
+    const event = pressKey(auxiliary, "Home");
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(auxiliary);
     expect(tabindexes()).toEqual([0, -1, -1]);
-    key(1, "Home");
+    pressKey(controls()[1] as HTMLElement, "Home");
     expect(document.activeElement).toBe(controls()[0]);
   });
 
   it("moves backward with ArrowUp in a vertical toolbar", async () => {
     await start({ attrs: 'data-stimeo--toolbar-orientation-value="vertical"' });
     controls()[1]?.focus();
-    expect(key(1, "ArrowUp").defaultPrevented).toBe(true);
+    expect(pressKey(controls()[1] as HTMLElement, "ArrowUp").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(controls()[0]);
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
@@ -150,7 +214,7 @@ describe("ToolbarController", () => {
     last.focus();
     expect(tabindexes()).toEqual([-1, -1, 0]);
     last.hidden = true;
-    expect(key(2, "ArrowRight").defaultPrevented).toBe(true);
+    expect(pressKey(controls()[2] as HTMLElement, "ArrowRight").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(controls()[0]);
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
@@ -163,10 +227,10 @@ describe("ToolbarController", () => {
     await start();
     root().style.direction = "rtl";
 
-    key(0, "ArrowLeft"); // "next" under RTL
+    pressKey(controls()[0] as HTMLElement, "ArrowLeft"); // "next" under RTL
     expect(document.activeElement).toBe(controls()[1]);
 
-    key(1, "ArrowRight"); // "previous"
+    pressKey(controls()[1] as HTMLElement, "ArrowRight"); // "previous"
     expect(document.activeElement).toBe(controls()[0]);
   });
 
@@ -176,7 +240,7 @@ describe("ToolbarController", () => {
     await start({ attrs: 'data-stimeo--toolbar-orientation-value="vertical"' });
     root().style.direction = "rtl";
 
-    key(0, "ArrowDown");
+    pressKey(controls()[0] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(controls()[1]);
   });
 
@@ -201,35 +265,35 @@ describe("ToolbarController", () => {
 
   it("moves focus and the tab stop with horizontal arrows, wrapping", async () => {
     await start();
-    expect(key(0, "ArrowRight").defaultPrevented).toBe(true);
+    expect(pressKey(controls()[0] as HTMLElement, "ArrowRight").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(controls()[1]);
     expect(tabindexes()).toEqual([-1, 0, -1]);
 
-    key(1, "ArrowRight"); // -> last
-    key(2, "ArrowRight"); // wrap -> first
+    pressKey(controls()[1] as HTMLElement, "ArrowRight"); // -> last
+    pressKey(controls()[2] as HTMLElement, "ArrowRight"); // wrap -> first
     expect(document.activeElement).toBe(controls()[0]);
 
-    key(0, "ArrowLeft"); // wrap back -> last
+    pressKey(controls()[0] as HTMLElement, "ArrowLeft"); // wrap back -> last
     expect(document.activeElement).toBe(controls()[2]);
     expect(tabindexes()).toEqual([-1, -1, 0]);
   });
 
   it("jumps to first/last with Home/End", async () => {
     await start();
-    expect(key(0, "End").defaultPrevented).toBe(true);
+    expect(pressKey(controls()[0] as HTMLElement, "End").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(controls()[2]);
     expect(tabindexes()).toEqual([-1, -1, 0]);
-    expect(key(2, "Home").defaultPrevented).toBe(true);
+    expect(pressKey(controls()[2] as HTMLElement, "Home").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(controls()[0]);
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
 
   it("uses vertical arrows when orientation is vertical", async () => {
     await start({ attrs: 'data-stimeo--toolbar-orientation-value="vertical"' });
-    key(0, "ArrowDown");
+    pressKey(controls()[0] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(controls()[1]);
     // Horizontal arrows are left to the control itself in vertical orientation.
-    const event = key(1, "ArrowRight");
+    const event = pressKey(controls()[1] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[1]);
     expect(event.defaultPrevented).toBe(false);
   });
@@ -237,12 +301,13 @@ describe("ToolbarController", () => {
   it("clamps at the ends when wrap is false", async () => {
     await start({ attrs: 'data-stimeo--toolbar-wrap-value="false"' });
     controls()[0]?.focus();
-    key(0, "ArrowLeft"); // already first -> focus and tab stop stay put
+    // already first -> focus and tab stop stay put
+    pressKey(controls()[0] as HTMLElement, "ArrowLeft");
     expect(document.activeElement).toBe(controls()[0]);
     expect(tabindexes()).toEqual([0, -1, -1]);
-    key(0, "End");
+    pressKey(controls()[0] as HTMLElement, "End");
     controls()[2]?.focus();
-    key(2, "ArrowRight"); // already last -> stays
+    pressKey(controls()[2] as HTMLElement, "ArrowRight"); // already last -> stays
     expect(document.activeElement).toBe(controls()[2]);
     expect(tabindexes()).toEqual([-1, -1, 0]);
   });
@@ -251,7 +316,7 @@ describe("ToolbarController", () => {
     // Keydown is delegated on the container, so markup that omits the optional
     // per-control data-action is fully navigable.
     await start({ action: false });
-    key(0, "ArrowRight");
+    pressKey(controls()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[1]);
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
@@ -259,7 +324,7 @@ describe("ToolbarController", () => {
   it("yields to a key a descendant widget already consumed", async () => {
     await start();
     root().addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
-    key(0, "ArrowRight");
+    pressKey(controls()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).not.toBe(controls()[1]);
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
@@ -267,13 +332,7 @@ describe("ToolbarController", () => {
   it("leaves a modified arrow to the browser (Alt+Left/Right is history navigation)", async () => {
     await start();
     controls()[0]?.focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    controls()[0]?.dispatchEvent(event);
+    const event = pressKey(controls()[0] as HTMLElement, "ArrowRight", { altKey: true });
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(controls()[0]);
     expect(tabindexes()).toEqual([0, -1, -1]); // the lone tab stop stayed put
@@ -281,13 +340,7 @@ describe("ToolbarController", () => {
 
   it("ignores arrow keys while an IME composition is in flight", async () => {
     await start();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-      isComposing: true,
-    });
-    controls()[0]?.dispatchEvent(event);
+    const event = pressKey(controls()[0] as HTMLElement, "ArrowRight", { isComposing: true });
     expect(event.defaultPrevented).toBe(false);
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
@@ -295,14 +348,14 @@ describe("ToolbarController", () => {
   it("skips a disabled control when navigating", async () => {
     await start({ extras: ["", "disabled", ""] });
     // ArrowRight from Bold must hop over the disabled Italic to Underline.
-    key(0, "ArrowRight");
+    pressKey(controls()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[2]);
     expect(tabindexes()).toEqual([-1, -1, 0]);
   });
 
   it("skips a hidden control when navigating", async () => {
     await start({ extras: ["", "hidden", ""] });
-    key(0, "ArrowRight");
+    pressKey(controls()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[2]);
     expect(tabindexes()).toEqual([-1, -1, 0]);
   });
@@ -329,7 +382,8 @@ describe("ToolbarController", () => {
     // control a user can actually reach.
     expect(tabindexes()).toEqual([-1, 0, -1]);
 
-    key(1, "ArrowLeft"); // wrapping backwards must not land in the hidden wrapper
+    // wrapping backwards must not land in the hidden wrapper
+    pressKey(controls()[1] as HTMLElement, "ArrowLeft");
     expect(document.activeElement).toBe(controls()[2]);
   });
 
@@ -341,9 +395,13 @@ describe("ToolbarController", () => {
     // never re-runs the check. A toolbar inside a `hidden` region is already out of
     // the page's Tab order, so there is nothing to fix by moving its tab stop.
     //
-    // This is what makes the shared `canTakeFocus` (unbounded `closest("[hidden]")`)
-    // the wrong rule here even though the rest of `#isNavigable` matches it: the
-    // bounded walk is the toolbar's own rule, not an oversight.
+    // This is what makes the shared `canTakeFocus` the wrong rule here. It walks the
+    // element and every flat-tree ancestor and rejects `[hidden]`, `[inert]` and an element
+    // left out of the flat tree, and it also rejects `input[type="hidden"]`. `#isHidden`
+    // walks the control and its parent elements up to, not including, the controller
+    // element and reads `hidden` alone. The rest of `#isNavigable` (the `disabled`
+    // property, then `inheritsFieldsetDisabled`) is the disabled check `canTakeFocus` ends
+    // with. The bounded walk is the toolbar's own rule, not an oversight.
     await startMarkup(`
       <div hidden>
         <div data-controller="stimeo--toolbar" role="toolbar" aria-label="Text formatting">
@@ -383,7 +441,7 @@ describe("ToolbarController", () => {
     italic.replaceWith(fieldset);
     fieldset.appendChild(italic);
     await tick();
-    key(0, "ArrowRight");
+    pressKey(controls()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[2]);
   });
 
@@ -398,7 +456,7 @@ describe("ToolbarController", () => {
       </fieldset>`);
 
     expect(tabindexes()).toEqual([-1, 0, -1]);
-    key(1, "ArrowRight");
+    pressKey(controls()[1] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[2]);
     expect(tabindexes()).toEqual([-1, -1, 0]);
   });
@@ -439,7 +497,7 @@ describe("ToolbarController", () => {
       </fieldset>`);
 
     expect(tabindexes()).toEqual([-1, 0]);
-    expect(key(1, "ArrowLeft").defaultPrevented).toBe(true);
+    expect(pressKey(controls()[1] as HTMLElement, "ArrowLeft").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(controls()[1]);
   });
 
@@ -459,7 +517,7 @@ describe("ToolbarController", () => {
       </div>`);
 
     expect(tabindexes()).toEqual([0, -1]);
-    key(0, "ArrowRight");
+    pressKey(controls()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[0]);
   });
 
@@ -509,23 +567,23 @@ describe("ToolbarController", () => {
     controls()[0]?.setAttribute("aria-disabled", "true");
     await tick();
     expect(tabindexes()).toEqual([0, -1, -1]);
-    key(0, "ArrowRight");
+    pressKey(controls()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[1]);
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
   it("moves onto an aria-disabled control with an arrow key", async () => {
     await start({ extras: ["", 'aria-disabled="true"', ""] });
-    key(0, "ArrowRight");
+    pressKey(controls()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[1]);
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
   it("reaches the ends from an aria-disabled control with Home/End", async () => {
     await start({ extras: ['aria-disabled="true"', "", ""] });
-    key(0, "End");
+    pressKey(controls()[0] as HTMLElement, "End");
     expect(document.activeElement).toBe(controls()[2]);
-    key(2, "Home");
+    pressKey(controls()[2] as HTMLElement, "Home");
     // ARIA-disabled controls stay in the roving order; activation is separate.
     expect(document.activeElement).toBe(controls()[0]);
   });
@@ -543,7 +601,7 @@ describe("ToolbarController", () => {
     root().appendChild(appended);
     await tick();
     expect(tabindexes()).toEqual([0, -1, -1, -1]);
-    key(3, "ArrowRight");
+    pressKey(controls()[3] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[0]);
   });
 
@@ -565,18 +623,18 @@ describe("ToolbarController", () => {
   it("keeps the lone control tabbable when it is the only one", async () => {
     await start({ labels: ["Bold"], tabindexes: ["0"] });
     expect(tabindexes()).toEqual([0]);
-    key(0, "ArrowRight");
+    pressKey(controls()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[0]);
     expect(tabindexes()).toEqual([0]);
   });
 
   it("keeps two toolbars in one document independent", async () => {
     await startAll({}, { label: "Paragraph", attrs: 'data-stimeo--toolbar-wrap-value="false"' });
-    key(0, "ArrowRight", 0);
+    pressKey(controls(0)[0] as HTMLElement, "ArrowRight");
     expect(tabindexes(0)).toEqual([-1, 0, -1]);
     expect(tabindexes(1)).toEqual([0, -1, -1]);
 
-    key(0, "End", 1);
+    pressKey(controls(1)[0] as HTMLElement, "End");
     expect(tabindexes(1)).toEqual([-1, -1, 0]);
     expect(tabindexes(0)).toEqual([-1, 0, -1]);
     expect(document.activeElement).toBe(controls(1)[2]);
@@ -587,7 +645,7 @@ describe("ToolbarController", () => {
     controls()[0]?.focus();
     application.unload("stimeo--toolbar");
     await tick();
-    key(0, "ArrowRight");
+    pressKey(controls()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(controls()[0]);
     expect(tabindexes()).toEqual([0, -1, -1]);
     // A state change after teardown must not re-establish anything either.
@@ -606,11 +664,11 @@ describe("ToolbarController", () => {
   it("leaves arrow keys to a composition that started on a control", async () => {
     await start();
     controls()[0]?.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    expect(key(0, "ArrowRight").defaultPrevented).toBe(false);
+    expect(pressKey(controls()[0] as HTMLElement, "ArrowRight").defaultPrevented).toBe(false);
     expect(tabindexes()).toEqual([0, -1, -1]);
 
     controls()[0]?.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
-    expect(key(0, "ArrowRight").defaultPrevented).toBe(true);
+    expect(pressKey(controls()[0] as HTMLElement, "ArrowRight").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(controls()[1]);
   });
 
@@ -627,7 +685,7 @@ describe("ToolbarController", () => {
     const instance = controllerFor();
     instance.disconnect();
     instance.connect();
-    expect(key(0, "ArrowRight").defaultPrevented).toBe(true);
+    expect(pressKey(controls()[0] as HTMLElement, "ArrowRight").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(controls()[1]);
   });
 
@@ -681,7 +739,7 @@ describe("ToolbarController", () => {
       .getElementById("tb-wrapper")
       ?.addEventListener("keydown", (event) => event.stopPropagation());
 
-    expect(key(0, "ArrowRight").defaultPrevented).toBe(true);
+    expect(pressKey(controls()[0] as HTMLElement, "ArrowRight").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(controls()[1]);
     expect(tabindexes()).toEqual([-1, 0]);
   });
@@ -689,7 +747,8 @@ describe("ToolbarController", () => {
   it("re-establishes the tab stop on a key that arrives before the observer runs", async () => {
     await start();
     (controls()[0] as HTMLButtonElement).disabled = true;
-    key(1, "Tab");
+    // Delivers the key without focusin so keydown alone must repair the Tab stop.
+    typeKey(controls()[1] as HTMLElement, "Tab");
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
@@ -706,8 +765,8 @@ describe("ToolbarController", () => {
   });
 
   it("announces an authored vertical toolbar as vertical", async () => {
-    // aria-orientation is the *author's* contract (like role); this pins that a
-    // vertical toolbar written per the contract is announced as such.
+    // The author writes aria-orientation, as with role; the controller does not. A
+    // vertical toolbar the author declares as such is announced as vertical.
     await start({
       attrs: 'aria-orientation="vertical" data-stimeo--toolbar-orientation-value="vertical"',
     });

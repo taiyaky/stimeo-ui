@@ -28,18 +28,12 @@
     aria-labelledby="fruit-label"
     data-stimeo--combobox-target="list"
     hidden>
-    <li role="option" id="fruit-apple" class="combobox__option" data-value="Apple"
-        data-stimeo--combobox-target="option"
-        data-action="click->stimeo--combobox#select">Apple</li>
-    <li role="option" id="fruit-apricot" class="combobox__option" data-value="Apricot"
-        data-stimeo--combobox-target="option"
-        data-action="click->stimeo--combobox#select">Apricot</li>
-    <li role="option" id="fruit-banana" class="combobox__option" data-value="Banana"
-        data-stimeo--combobox-target="option"
-        data-action="click->stimeo--combobox#select">Banana</li>
-    <li role="option" id="fruit-cherry" class="combobox__option" data-value="Cherry"
-        data-stimeo--combobox-target="option"
-        data-action="click->stimeo--combobox#select">Cherry</li>
+    <% %w[apple apricot banana cherry].each do |fruit| %>
+      <% label = t("components.combobox.demo.fruits.#{fruit}") %>
+      <li role="option" id="fruit-<%= fruit %>" class="combobox__option" data-value="<%= label %>"
+          data-stimeo--combobox-target="option"
+          data-action="click->stimeo--combobox#select"><%= label %></li>
+    <% end %>
   </ul>
 
   <%# The no-results message is a region of the empty state: the library shows it while the

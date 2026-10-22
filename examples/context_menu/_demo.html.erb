@@ -1,15 +1,19 @@
 <%# Markup for the context_menu demo.
     A right-click on the region (or the ContextMenu key / Shift+F10) opens a
-    role="menu" at the pointer position. The interaction model is the same as a Menu
-    Button. The click coordinate is reflected on the menu as
-    --stimeo--context-menu-x / -y, and the Playground CSS uses it for top/left
-    placement (works even without the positioning module). %>
+    role="menu" at the pointer position. The menu itself follows the APG Menu
+    pattern. The region's role and name are yours: here a named group, which
+    advertises its opening key with aria-keyshortcuts. The click coordinate is
+    reflected on the menu as --stimeo--context-menu-x / -y, and the Playground
+    CSS uses it for top/left placement (works even without the positioning
+    module). %>
 <div class="context-menu" data-controller="stimeo--context-menu">
   <div
     class="context-menu__region"
     data-stimeo--context-menu-target="region"
     tabindex="0"
-    aria-haspopup="menu"
+    role="group"
+    aria-label="<%= t("components.context_menu.demo.region_label") %>"
+    aria-keyshortcuts="Shift+F10"
     aria-controls="context-menu-list"
     data-action="
       contextmenu->stimeo--context-menu#open

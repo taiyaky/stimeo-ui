@@ -19,8 +19,10 @@ const PROP = "--stimeo--reading-progress";
 class FakeResizeObserver implements ResizeObserver {
   static instances: FakeResizeObserver[] = [];
   readonly observed = new Set<Element>();
+  readonly #callback: ResizeObserverCallback;
 
-  constructor(private readonly callback: ResizeObserverCallback) {
+  constructor(callback: ResizeObserverCallback) {
+    this.#callback = callback;
     FakeResizeObserver.instances.push(this);
   }
   observe(element: Element): void {
@@ -34,7 +36,7 @@ class FakeResizeObserver implements ResizeObserver {
   }
   /** Test helper: notify as the platform would when an observed box changes. */
   trigger(element: Element): void {
-    if (this.observed.has(element)) this.callback([], this);
+    if (this.observed.has(element)) this.#callback([], this);
   }
 }
 
@@ -391,12 +393,13 @@ describe("ReadingProgressController", () => {
       // where the reader is, it does not announce that they got there.
       rect = { top: -2000, height: 2600, width: 800 };
       const events: string[] = [];
-      document.addEventListener("stimeo--reading-progress:complete", () => events.push("complete"));
+      const onComplete = () => events.push("complete");
+      document.addEventListener("stimeo--reading-progress:complete", onComplete);
       await mount();
       flushFrames();
       expect(el().style.getPropertyValue(PROP)).toBe("1");
       expect(events).toHaveLength(0);
-      document.removeEventListener("stimeo--reading-progress:complete", () => {});
+      document.removeEventListener("stimeo--reading-progress:complete", onComplete);
     });
 
     it("carries the progress in the change detail", async () => {
@@ -450,11 +453,11 @@ describe("ReadingProgressController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Speech-order regression ------------------------------------------------
+  // --- Speech-order check -----------------------------------------------------
 
   it("keeps the announcement order unchanged while the progress moves", async () => {
     await mount();
-    // Demo-shaped consumer: the bar driven by the custom property is decorative
+    // A typical consumer: the bar driven by the custom property is decorative
     // (aria-hidden) and must never enter the announcement order.
     const bar = document.createElement("div");
     bar.setAttribute("aria-hidden", "true");

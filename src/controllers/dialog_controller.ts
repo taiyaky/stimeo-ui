@@ -24,14 +24,13 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *
  * @remarks
  * Behavior only. The sole visual side effect is locking `document.body`'s scroll
- * while open (the minimum required by the pattern); all other styling is the
- * consumer's. Clicking the dialog backdrop (the dialog target itself, outside
- * its content) also closes it.
+ * while open; all other styling is the consumer's. Clicking the dialog backdrop
+ * (the dialog target itself, outside its content) also closes it.
  *
  * The modal lifecycle — focus trap, scroll lock, background `inert`, focus
  * restore, and teardown reversal — is delegated to the shared `FocusTrap`
- * primitive (also used by `stimeo--alert-dialog` and `stimeo--drawer`). This controller only owns
- * *when* to open/close and the dialog-specific backdrop click.
+ * primitive. This controller only owns *when* to open/close and the
+ * dialog-specific backdrop click.
  *
  * Each move of the open state is reported: `stimeo--dialog:open` and
  * `stimeo--dialog:close` dispatch `{ reason: StateReason }`, after the dialog's

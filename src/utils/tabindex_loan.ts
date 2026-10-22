@@ -1,3 +1,5 @@
+import { setAttributeIfChanged } from "./attribute_write";
+import { deepActiveElement } from "./focus_candidate";
 import { queryOpenDescendants } from "./query_open_descendants";
 import { sharedRegistry } from "./shared_registry";
 
@@ -17,6 +19,11 @@ interface TabindexLoanRegistry {
   readonly names: Set<string>;
 }
 
+/** Focus can be retargeted to a shadow host rather than exposed on the document. */
+function holdsFocus(element: HTMLElement): boolean {
+  return element.matches(":focus") || deepActiveElement(element.ownerDocument) === element;
+}
+
 /**
  * Shared bookkeeping for a `tabindex` a controller lends an element temporarily.
  *
@@ -29,8 +36,8 @@ interface TabindexLoanRegistry {
  * the attribute must also still hold the value this instance wrote. A consumer
  * that changed it afterwards — `tabindex="0"` to make the root its own Tab stop
  * — owns it now, and removing it there silently discards authored markup. The
- * bookkeeping is dropped either way, since the loan is over regardless of who
- * ends up owning the value.
+ * bookkeeping is dropped when returned. With `preserveFocus`, a focused element
+ * still showing this loan keeps its hold and record until a later return can finish.
  *
  * **Never borrow over a value no loan holds.** An element whose `tabindex` no loan
  * holds — the author's, or one the page wrote over the loans — is the author's to
@@ -93,6 +100,7 @@ export class TabindexLoan<T extends HTMLElement = HTMLElement> {
   );
   readonly #value: string;
   readonly #record: string;
+  readonly #preserveFocus: boolean;
   readonly #lent = new Set<T>();
 
   /**
@@ -100,18 +108,22 @@ export class TabindexLoan<T extends HTMLElement = HTMLElement> {
    *   not a Tab stop; `"0"` is a real Tab stop, which a scroll region with no
    *   focusable content of its own needs.
    * @param owner - Names the record on the element; the controller's identifier.
+   * @param options - `preserveFocus`: keep a shown loan while its element holds focus.
    */
-  constructor(value: string, owner: string) {
+  constructor(value: string, owner: string, options: { readonly preserveFocus?: boolean } = {}) {
     this.#value = value;
     this.#record = `data-${owner}-tabindex-loan`;
+    this.#preserveFocus = options.preserveFocus === true;
     TabindexLoan.#registry.names.add(this.#record);
   }
 
   /**
    * Lends `element` the value over the loans holding its `tabindex`, or where the page removed
    * it; a `tabindex` no loan holds is left alone, and a loan recorded on a copy taken over.
+   * `onlyIfUnfocusable` starts no new loan on an element that carries any `tabindex` or is
+   * natively focusable (a `tabIndex` of `0` or more).
    */
-  lend(element: T): void {
+  lend(element: T, options: { readonly onlyIfUnfocusable?: boolean } = {}): void {
     const stack = this.#stack(element);
     const current = element.getAttribute("tabindex");
     const held =
@@ -120,6 +132,7 @@ export class TabindexLoan<T extends HTMLElement = HTMLElement> {
         (hold) => hold.loan === null && hold.record === this.#record && hold.value === this.#value,
       );
     const linked = stack.at(-1)?.value === current;
+    if (!held && options.onlyIfUnfocusable && (current !== null || element.tabIndex >= 0)) return;
     if (!held && current !== null && !linked) return;
     this.#lent.add(element);
     if (held) held.loan = this;
@@ -130,14 +143,27 @@ export class TabindexLoan<T extends HTMLElement = HTMLElement> {
     }
   }
 
-  /** Takes back every loan; one whose value the element shows hands it to the loan beneath. */
-  returnAll(): void {
-    for (const element of this.#lent) {
-      const stack = this.#stack(element);
-      const hold = stack.find((held) => held.loan === this);
-      if (hold) this.#release(element, stack, hold);
+  /** Returns one live or restored loan, retaining a focus-protected hold for a later return. */
+  return(element: T): boolean {
+    const stack = this.#stack(element);
+    const hold =
+      stack.find((held) => held.loan === this) ??
+      stack.find(
+        (held) => held.loan === null && held.record === this.#record && held.value === this.#value,
+      );
+    if (!hold) return false;
+    if (!this.#release(element, stack, hold, this.#preserveFocus)) {
+      hold.loan = this;
+      this.#lent.add(element);
+      return false;
     }
-    this.#lent.clear();
+    this.#lent.delete(element);
+    return true;
+  }
+
+  /** Returns every loan, retaining focus-protected ones even outside the current target set. */
+  returnAll(): void {
+    for (const element of Array.from(this.#lent)) this.return(element);
   }
 
   /**
@@ -148,7 +174,7 @@ export class TabindexLoan<T extends HTMLElement = HTMLElement> {
     if (element.getAttribute(this.#record) !== this.#value) return;
     const stack = this.#stack(element);
     const hold = stack.find((held) => held.loan === null && held.record === this.#record);
-    if (hold && !element.matches(":focus")) this.#release(element, stack, hold);
+    if (hold && !holdsFocus(element)) this.#release(element, stack, hold);
   }
 
   /** Gives back, as {@link reclaim} does, every loan of its owner recorded inside `root`. */
@@ -180,19 +206,26 @@ export class TabindexLoan<T extends HTMLElement = HTMLElement> {
   }
 
   /** Takes `hold` off, handing the value it shows to the loan beneath. */
-  #release(element: HTMLElement, stack: LoanHold[], hold: LoanHold): void {
+  #release(
+    element: HTMLElement,
+    stack: LoanHold[],
+    hold: LoanHold,
+    preserveFocus = false,
+  ): boolean {
     const current = element.getAttribute("tabindex");
     const index = stack.indexOf(hold);
     const owns =
       current === hold.value && !stack.slice(index + 1).some((above) => above.value === current);
+    if (owns && preserveFocus && holdsFocus(element)) return false;
     stack.splice(index, 1);
     const above = stack[index];
     if (above) above.linked &&= hold.linked;
     this.#mark(element, stack);
-    if (!owns) return;
+    if (!owns) return true;
     const below = hold.linked ? stack[index - 1] : undefined;
     if (!below) element.removeAttribute("tabindex");
     else if (below.value !== current) element.setAttribute("tabindex", below.value);
+    return true;
   }
 
   /** Leaves each owner's record of the value its topmost loan lends. */
@@ -200,9 +233,7 @@ export class TabindexLoan<T extends HTMLElement = HTMLElement> {
     const records = new Map<string, string | null>([[this.#record, null]]);
     for (const hold of stack) records.set(hold.record, hold.value);
     for (const [name, recorded] of records) {
-      if (element.getAttribute(name) === recorded) continue;
-      if (recorded === null) element.removeAttribute(name);
-      else element.setAttribute(name, recorded);
+      setAttributeIfChanged(element, name, recorded);
     }
   }
 }

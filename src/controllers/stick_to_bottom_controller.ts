@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { LayoutObserver } from "../utils/layout_observer";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -122,6 +123,9 @@ export class StickToBottomController extends Controller<HTMLElement> {
     this.#setHasNew(this.#hasNew);
   });
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     this.#morphRender.observe(this.element);
     this.#connected = true;
@@ -139,7 +143,7 @@ export class StickToBottomController extends Controller<HTMLElement> {
     this.#pinned = this.#isPinned();
     this.#reflectPinned();
 
-    this.element.addEventListener("scroll", this.#onScroll, { passive: true });
+    this.#listeners.add(this.element, "scroll", this.#onScroll, { passive: true });
     this.#syncWatched();
     // A container with no box yet reports every metric as 0; it stays unpinned until the
     // layout it will actually be read against arrives.
@@ -149,7 +153,7 @@ export class StickToBottomController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#morphRender.disconnect();
     this.#connected = false;
-    this.element.removeEventListener("scroll", this.#onScroll);
+    this.#listeners.dispose();
     this.#stopWatching();
     this.#stopWaitingForLayout();
   }
@@ -196,7 +200,9 @@ export class StickToBottomController extends Controller<HTMLElement> {
    * and a jump the engine cannot honor leaves the container unpinned, so the next append
    * flags it again instead of being swallowed by a pinned state that does not hold.
    *
-   * Which of those happens is not this method's to decide — see {@link behaviorValue}.
+   * Whether the jump arrives at once or animates follows the `behavior` value: `"auto"`
+   * defers to the element's computed `scroll-behavior`, `"smooth"` animates, and reduced
+   * motion forces an instant jump.
    */
   scrollToBottom(): void {
     this.#scrollToBottom();
@@ -286,9 +292,9 @@ export class StickToBottomController extends Controller<HTMLElement> {
   }
 
   /**
-   * Holds the pinned decision until the container is laid out — otherwise the panel opens
-   * at the top while the state claims the bottom, and the appends that arrived meanwhile
-   * were followed into a box that could not move rather than flagged.
+   * Holds the pinned decision until the container is laid out — otherwise the panel would
+   * open at the top while the state claims the bottom, and appends arriving meanwhile would
+   * be followed into a box that cannot move instead of being flagged.
    */
   #waitForLayout(): void {
     this.#awaitingLayout = true;

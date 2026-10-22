@@ -12,9 +12,9 @@ import { axe } from "vitest-axe";
  * WCAG that is *machine-checkable*, and happy-dom does not model a real
  * browser's accessibility tree, CSS, layout, or focus behavior. A clean result
  * therefore means **"no machine-detectable a11y violation was found"** — it is
- * NOT a claim of WCAG 2.2 AA conformance. Real-browser checks and screen-reader
- * verification (virtual-screen-reader for speech order; a real screen reader /
- * human for real speech) cover what this helper cannot.
+ * NOT a claim of WCAG 2.2 AA conformance. What this helper cannot see needs
+ * real-browser checks and screen-reader verification (virtual-screen-reader for
+ * speech order; a real screen reader / human for real speech).
  */
 
 /** What can be audited: a live DOM element or an HTML string. */

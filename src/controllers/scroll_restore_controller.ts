@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { FrameCoalescer } from "../utils/frame_coalescer";
+import { ListenerSet } from "../utils/listener_set";
 
 /** Persisted scroll position; fields are present only for the saved axis. */
 interface StoredScroll {
@@ -31,9 +32,9 @@ function storedOffset(value: unknown): number | null {
 /**
  * Headless **Scroll Restore** behavior: persists and restores the scroll
  * position of an inner scrolling region across Turbo Drive navigations (and full
- * reloads within the same tab session). No APG widget — a pure state-preservation
- * utility, like {@link import("./scroll_visibility_controller").ScrollVisibilityController}
- * and the Sticky State Observer.
+ * reloads within the same tab session). Like `stimeo--scroll-visibility` and
+ * `stimeo--sticky-observer`, it implements no APG widget; it is a pure
+ * state-preservation utility.
  *
  * Markup contract (identifier: `stimeo--scroll-restore`):
  *   <div data-controller="stimeo--scroll-restore"
@@ -123,16 +124,19 @@ export class ScrollRestoreController extends Controller<HTMLElement> {
     this.#frames.schedule(() => this.#persist());
   };
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     this.#connected = true;
     this.#storageKey = this.#resolveKey();
-    this.element.addEventListener("scroll", this.#onScroll, { passive: true });
+    this.#listeners.add(this.element, "scroll", this.#onScroll, { passive: true });
     if (this.#storageKey) this.#restore();
   }
 
   override disconnect(): void {
     this.#connected = false;
-    this.element.removeEventListener("scroll", this.#onScroll);
+    this.#listeners.dispose();
     this.#frames.cancel();
     // Flush the last captured offset (a throttled burst may have left the final
     // frame unsaved). We do NOT re-read the element here: Turbo detaches the node

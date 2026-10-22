@@ -7,6 +7,7 @@ import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /**
  * Behavioral contract for {@link PersistController}: validated versioned drafts,
@@ -42,7 +43,7 @@ describe("PersistController", () => {
 
   const mount = async (attrs: string, inner: string): Promise<void> => {
     stop();
-    // Persist accepts any HTMLElement. Using a neutral host keeps happy-dom's
+    // `stimeo--persist` accepts any HTMLElement. Using a neutral host keeps happy-dom's
     // form-owner bookkeeping from manufacturing duplicate node wrappers when
     // the controller writes its restored marker.
     document.body.innerHTML = `<div data-controller="stimeo--persist" ${attrs}>${inner}</div>`;
@@ -169,7 +170,7 @@ describe("PersistController", () => {
     expect(saves).toEqual([{ key: "draft" }]);
   });
 
-  it("normalizes a negative debounce to the documented default", async () => {
+  it("normalizes a negative debounce to the `debounce` default (400 ms)", async () => {
     await mount(
       'data-stimeo--persist-key-value="draft" data-stimeo--persist-debounce-value="-1"',
       '<input name="title">',
@@ -182,15 +183,11 @@ describe("PersistController", () => {
   });
 
   /**
-   * Rewrites `debounce` and delivers its Value callback directly when the controller
-   * defines one, since happy-dom does not reliably run it for an attribute write.
+   * Rewrites the `debounce` declaration and waits for Stimulus to deliver it, so the
+   * assertions that follow see whatever the controller does with the change.
    */
-  const declareDebounce = (value: number): void => {
-    root().setAttribute("data-stimeo--persist-debounce-value", String(value));
-    const owner = instance();
-    const callback: unknown = Reflect.get(owner, "debounceValueChanged");
-    if (typeof callback === "function") callback.call(owner);
-  };
+  const declareDebounce = (value: number): Promise<void> =>
+    writeValueAttribute(root(), "data-stimeo--persist-debounce-value", String(value));
 
   // `debounce` is read as each edit schedules its save: a pending save keeps the
   // deadline its edit gave it, and the next edit takes the new value.
@@ -204,7 +201,7 @@ describe("PersistController", () => {
     );
     edit("title", "hello");
     vi.advanceTimersByTime(50);
-    declareDebounce(10);
+    await declareDebounce(10);
     vi.advanceTimersByTime(49);
     expect(stored("draft")).toBeNull();
     vi.advanceTimersByTime(1);
@@ -226,7 +223,7 @@ describe("PersistController", () => {
     );
     edit("title", "hello");
     vi.advanceTimersByTime(50);
-    declareDebounce(1000);
+    await declareDebounce(1000);
     vi.advanceTimersByTime(49);
     expect(stored("draft")).toBeNull();
     vi.advanceTimersByTime(1);
@@ -242,7 +239,7 @@ describe("PersistController", () => {
       'data-stimeo--persist-key-value="draft" data-stimeo--persist-debounce-value="100"',
       '<input name="title">',
     );
-    declareDebounce(10);
+    await declareDebounce(10);
     await vi.advanceTimersByTimeAsync(1000);
     expect(stored("draft")).toBeNull();
     expect(saves).toEqual([]);
@@ -302,7 +299,7 @@ describe("PersistController", () => {
     ["string", '"text"'],
     ["array", "[]"],
     ["empty object", "{}"],
-    ["legacy object", '{"title":"legacy"}'],
+    ["unversioned object", '{"title":"unversioned"}'],
     ["wrong version", '{"version":2,"fields":[]}'],
     ["non-record field", '{"version":1,"fields":[null]}'],
     ["duplicate keys", '{"version":1,"fields":[{"key":"x","value":"a"},{"key":"x","value":"b"}]}'],
@@ -1280,7 +1277,7 @@ describe("PersistController", () => {
     expect(values("draft")).toEqual({ late: "saved" });
   });
 
-  it("keeps nested Persist instances inside their own field scope", async () => {
+  it("keeps nested stimeo--persist instances inside their own field scope", async () => {
     writeDraft("outer", { outer: "restored outer" });
     writeDraft("inner", { inner: "restored inner" });
     document.body.innerHTML = `
@@ -1311,7 +1308,7 @@ describe("PersistController", () => {
     expect(values("outer")).toEqual({ outer: "saved outer" });
   });
 
-  it("restores a target when it moves out of a nested Persist scope", async () => {
+  it("restores a target when it moves out of a nested stimeo--persist scope", async () => {
     writeDraft("outer", { late: "restored" });
     document.body.innerHTML = `
       <div id="outer" data-controller="stimeo--persist" data-stimeo--persist-key-value="outer">
@@ -1329,7 +1326,7 @@ describe("PersistController", () => {
     expect(input("late").value).toBe("restored");
   });
 
-  it("restores a known field again when it returns from a nested Persist scope", async () => {
+  it("restores a known field again when it returns from a nested stimeo--persist scope", async () => {
     writeDraft("outer", { late: "restored" });
     await mount(
       'data-stimeo--persist-key-value="outer"',
@@ -1388,10 +1385,10 @@ describe("PersistController", () => {
   });
 
   it.each([
-    ["Dirty Form is registered first", true],
-    ["Persist is registered first", false],
+    ["stimeo--dirty-form is registered first", true],
+    ["stimeo--persist is registered first", false],
   ])(
-    "lets Dirty Form treat restored values as its clean baseline when %s",
+    "lets stimeo--dirty-form treat restored values as its clean baseline when %s",
     async (_label, dirtyFirst) => {
       writeDraft("draft", { title: "restored", early: "early draft", late: "late draft" });
       document.body.innerHTML = `

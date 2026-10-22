@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EscapeLayer } from "../../src/utils/escape_layer";
 import { FocusTrap, type FocusTrapOptions } from "../../src/utils/focus_trap";
+import { keyEvent, press as pressKey, typeKey } from "../helpers/keyboard";
 import { withinTimeLimit } from "../helpers/time_limit";
 import { flushMicrotasks } from "../helpers/timing";
 
@@ -8,6 +9,10 @@ import { flushMicrotasks } from "../helpers/timing";
  * Unit tests for the {@link FocusTrap} primitive: the shared modal lifecycle
  * (scroll lock, background `inert`, Tab handling, Escape delegation, focus
  * restore) that dialog / alert-dialog / drawer build on.
+ *
+ * Direct document presses isolate shared Tab/Escape listeners without changing
+ * the focus the case establishes. Active-element presses preserve shadow-root
+ * host delivery and must not refocus a host over its focused descendant.
  */
 describe("FocusTrap", () => {
   let container: HTMLElement;
@@ -164,7 +169,7 @@ describe("FocusTrap", () => {
     const t = trap();
     t.activate();
     byId("last").focus();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    typeKey(document, "Tab");
     expect(document.activeElement).toBe(byId("first"));
   });
 
@@ -172,7 +177,7 @@ describe("FocusTrap", () => {
     const t = trap();
     t.activate();
     byId("first").focus();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true }));
+    typeKey(document, "Tab", { shiftKey: true });
     expect(document.activeElement).toBe(byId("last"));
   });
 
@@ -181,11 +186,11 @@ describe("FocusTrap", () => {
     const t = trap({ isolate: false });
     t.activate();
     byId("opener").focus();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    typeKey(document, "Tab");
     expect(document.activeElement).toBe(byId("first"));
 
     byId("opener").focus();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true }));
+    typeKey(document, "Tab", { shiftKey: true });
     expect(document.activeElement).toBe(byId("last"));
   });
 
@@ -193,8 +198,8 @@ describe("FocusTrap", () => {
     let escapes = 0;
     const t = trap({ onEscape: () => escapes++ });
     t.activate();
-    const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-    document.dispatchEvent(event);
+    const event = keyEvent("Escape");
+    typeKey(document, event);
     expect(escapes).toBe(1);
     expect(event.defaultPrevented).toBe(true);
   });
@@ -202,9 +207,9 @@ describe("FocusTrap", () => {
   it("leaves Escape alone when no onEscape callback is provided", () => {
     const t = trap();
     t.activate();
-    const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    const event = keyEvent("Escape");
 
-    document.dispatchEvent(event);
+    typeKey(document, event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(t.active).toBe(true);
@@ -214,10 +219,10 @@ describe("FocusTrap", () => {
     let escapes = 0;
     const t = trap({ onEscape: () => escapes++ });
     t.activate();
-    const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    const event = keyEvent("Escape");
     event.preventDefault();
 
-    document.dispatchEvent(event);
+    typeKey(document, event);
 
     expect(escapes).toBe(0);
     expect(t.active).toBe(true);
@@ -238,11 +243,11 @@ describe("FocusTrap", () => {
     outer.activate();
     inner.activate();
 
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+    typeKey(document, "Escape");
     expect(innerEscapes).toBe(1);
     expect(outerEscapes).toBe(0);
 
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+    typeKey(document, "Escape");
     expect(outerEscapes).toBe(1);
   });
 
@@ -254,8 +259,8 @@ describe("FocusTrap", () => {
     owner.activate();
     silent.activate();
 
-    const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-    document.dispatchEvent(event);
+    const event = keyEvent("Escape");
+    typeKey(document, event);
 
     // The silent trap neither consumes the press nor blocks the layer below it.
     expect(escapes).toBe(1);
@@ -272,16 +277,16 @@ describe("FocusTrap", () => {
 
     // Escape belongs to the newer layer: the shared resolver consumes the press
     // and dismisses it, never the trap below …
-    const escapePress = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-    document.dispatchEvent(escapePress);
+    const escapePress = keyEvent("Escape");
+    typeKey(document, escapePress);
     expect(escapes).toBe(0);
     expect(aboveDismissed).toBe(1);
     expect(escapePress.defaultPrevented).toBe(true);
 
     // … but the Tab cycle is owned by trap activation, not Escape ownership.
     byId("last").focus();
-    const tab = new KeyboardEvent("keydown", { key: "Tab", cancelable: true });
-    document.dispatchEvent(tab);
+    const tab = keyEvent("Tab");
+    typeKey(document, tab);
     expect(tab.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(byId("first"));
 
@@ -362,8 +367,8 @@ describe("FocusTrap", () => {
     t.deactivate();
     expect(other.active).toBe(true);
     expect(document.activeElement).toBe(byId("o1"));
-    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-    byId("o1").dispatchEvent(tab);
+    const tab = keyEvent("Tab");
+    pressKey(byId("o1"), tab);
     expect(tab.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(byId("o2"));
   });
@@ -386,7 +391,7 @@ describe("FocusTrap", () => {
     const t = trap({ onEscape: () => escapes++ });
     t.activate();
     t.deactivate();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    typeKey(document, "Escape");
     expect(escapes).toBe(0);
   });
 
@@ -547,7 +552,7 @@ describe("FocusTrap", () => {
 
       isolate = true;
       t.refreshIsolation();
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+      typeKey(document, "Escape");
       expect(escapes).toEqual(["upper"]);
       upper.deactivate();
     });
@@ -649,8 +654,8 @@ describe("FocusTrap", () => {
 
     const inertAt = (id: string): boolean => byId(id).closest("[inert]") !== null;
     const press = (key: string, init: KeyboardEventInit = {}): KeyboardEvent => {
-      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
-      (document.activeElement ?? document.body).dispatchEvent(event);
+      const event = keyEvent(key, init);
+      typeKey(document.activeElement ?? document.body, event);
       return event;
     };
     /** A trap over `#upper`, activated after the one under test. */
@@ -915,13 +920,8 @@ describe("FocusTrap", () => {
 
     /** Dispatches a Tab keydown from the focused element, the way a key press arrives. */
     const press = (init: KeyboardEventInit = {}): KeyboardEvent => {
-      const event = new KeyboardEvent("keydown", {
-        key: "Tab",
-        bubbles: true,
-        cancelable: true,
-        ...init,
-      });
-      (document.activeElement ?? document.body).dispatchEvent(event);
+      const event = keyEvent("Tab", init);
+      typeKey(document.activeElement ?? document.body, event);
       return event;
     };
     const three = () => {
@@ -1257,8 +1257,8 @@ describe("FocusTrap", () => {
     });
 
     const press = (): KeyboardEvent => {
-      const event = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-      (document.activeElement ?? document.body).dispatchEvent(event);
+      const event = keyEvent("Tab");
+      typeKey(document.activeElement ?? document.body, event);
       return event;
     };
     const makeInner = (options: FocusTrapOptions = {}) => {
@@ -1368,13 +1368,8 @@ describe("FocusTrap", () => {
   describe("order", () => {
     const soft = { lockScroll: false, isolate: false };
     const press = (shiftKey = false): void => {
-      const event = new KeyboardEvent("keydown", {
-        key: "Tab",
-        shiftKey,
-        bubbles: true,
-        cancelable: true,
-      });
-      (document.activeElement ?? document.body).dispatchEvent(event);
+      const event = keyEvent("Tab", { shiftKey });
+      typeKey(document.activeElement ?? document.body, event);
     };
     /** The focused element's id, looking through open shadow roots. */
     const focused = (): string => {
@@ -1606,8 +1601,8 @@ describe("FocusTrap", () => {
     };
     const inertAt = (id: string): boolean => byId(id).closest("[inert]") !== null;
     const press = (): void => {
-      const event = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-      (document.activeElement ?? document.body).dispatchEvent(event);
+      const event = keyEvent("Tab");
+      typeKey(document.activeElement ?? document.body, event);
     };
 
     it("keeps the container of a trap opened over a sibling trap out of the background", () => {
@@ -2592,9 +2587,7 @@ describe("FocusTrap", () => {
       return instance;
     };
     const tab = (): void => {
-      (document.activeElement ?? document.body).dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
-      );
+      typeKey(document.activeElement ?? document.body, "Tab");
     };
 
     it.each([
@@ -2852,11 +2845,11 @@ describe("FocusTrap and the Turbo cache", () => {
     expect(t.active).toBe(true);
     expect(byId("background").inert).toBe(true);
     expect(document.body.style.overflow).toBe("hidden");
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    typeKey(document, "Escape");
     expect(escapes).toBe(1);
     byId("first").focus();
-    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-    byId("first").dispatchEvent(tab);
+    const tab = keyEvent("Tab");
+    pressKey(byId("first"), tab);
     expect(tab.defaultPrevented).toBe(true);
   });
 

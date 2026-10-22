@@ -148,62 +148,61 @@ describe("buildManifest", () => {
 
   it("rejects manifests missing the Value-constraint field consumed by the engine", () => {
     expect(isCompatibleManifest(manifest)).toBe(true);
-    const legacy = structuredClone(manifest) as unknown as {
+    const older = structuredClone(manifest) as unknown as {
       controllers: Record<string, Record<string, unknown>>;
     };
-    const slider = legacy.controllers["stimeo--slider"];
+    const slider = older.controllers["stimeo--slider"];
     if (slider) delete slider.valueConstraints;
-    expect(isCompatibleManifest(legacy)).toBe(false);
+    expect(isCompatibleManifest(older)).toBe(false);
   });
 
   it("requires the schema-v11 Value-relation field when loading a manifest", () => {
-    const legacy = structuredClone(manifest) as unknown as {
+    const older = structuredClone(manifest) as unknown as {
       controllers: Record<string, Record<string, unknown>>;
     };
-    const rangeSlider = legacy.controllers["stimeo--range-slider"];
+    const rangeSlider = older.controllers["stimeo--range-slider"];
     if (rangeSlider) delete rangeSlider.valueRelations;
-    expect(isCompatibleManifest(legacy)).toBe(false);
+    expect(isCompatibleManifest(older)).toBe(false);
   });
 
   it("requires the schema-v14 action-param field when loading a manifest", () => {
-    const legacy = structuredClone(manifest) as unknown as {
+    const older = structuredClone(manifest) as unknown as {
       controllers: Record<string, Record<string, unknown>>;
     };
-    const stepper = legacy.controllers["stimeo--stepper"];
+    const stepper = older.controllers["stimeo--stepper"];
     if (stepper) delete stepper.actionParams;
-    expect(isCompatibleManifest(legacy)).toBe(false);
+    expect(isCompatibleManifest(older)).toBe(false);
   });
 
   it("requires the schema-v13 template-root field when loading a manifest", () => {
-    const legacy = structuredClone(manifest) as unknown as {
+    const older = structuredClone(manifest) as unknown as {
       controllers: Record<string, Record<string, unknown>>;
     };
-    const tagsInput = legacy.controllers["stimeo--tags-input"];
+    const tagsInput = older.controllers["stimeo--tags-input"];
     if (tagsInput) delete tagsInput.templateRoots;
-    expect(isCompatibleManifest(legacy)).toBe(false);
+    expect(isCompatibleManifest(older)).toBe(false);
   });
 
   it("requires the schema-v12 required-action field when loading a manifest", () => {
-    const legacy = structuredClone(manifest) as unknown as {
+    const older = structuredClone(manifest) as unknown as {
       controllers: Record<string, Record<string, unknown>>;
     };
-    const separator = legacy.controllers["stimeo--separator"];
+    const separator = older.controllers["stimeo--separator"];
     if (separator) delete separator.requiredActions;
-    expect(isCompatibleManifest(legacy)).toBe(false);
+    expect(isCompatibleManifest(older)).toBe(false);
   });
 
   it("requires the schema-v10 host-contract field when loading a manifest", () => {
-    const legacy = structuredClone(manifest) as unknown as {
+    const older = structuredClone(manifest) as unknown as {
       controllers: Record<string, Record<string, unknown>>;
     };
-    const switchContract = legacy.controllers["stimeo--switch"];
+    const switchContract = older.controllers["stimeo--switch"];
     if (switchContract) delete switchContract.hosts;
-    expect(isCompatibleManifest(legacy)).toBe(false);
+    expect(isCompatibleManifest(older)).toBe(false);
   });
 
   it("includes every core, positioning, and cable controller identifier", () => {
-    // A required subset, not an exact upper bound: every registry identifier has
-    // to be in the manifest, and the count is not what this pins.
+    // Every registry identifier has to be in the manifest.
     expect(Object.keys(manifest.controllers)).toEqual(
       expect.arrayContaining(Object.keys(allControllers)),
     );
@@ -391,7 +390,7 @@ describe("buildManifest", () => {
         });
       }
     }
-    expect(manifest.schemaVersion).toBe(15);
+    expect(manifest.schemaVersion).toBe(16);
     expect(manifest.controllers["stimeo--slider"]?.valueConstraints).toEqual(
       expect.arrayContaining([expect.objectContaining({ value: "step", exclusiveMin: 0 })]),
     );
@@ -475,7 +474,7 @@ describe("buildManifest", () => {
     expect(manifest.controllers["stimeo--avatar"]?.requiredTargets).toEqual([]);
   });
 
-  it("defines exactly one structure rule for every public controller", () => {
+  it("defines exactly one structure rule for every registered controller", () => {
     expect(Object.keys(structureRules).sort()).toEqual(Object.keys(allControllers).sort());
   });
 
@@ -516,7 +515,7 @@ describe("buildManifest", () => {
   });
 
   it("only writes a11y rules for known controllers", () => {
-    // Every rule names a controller in the public registry, including opt-ins.
+    // Every rule names a registered controller, the opt-in subpaths included.
     for (const id of Object.keys(a11yRules)) {
       expect(allControllers).toHaveProperty(id);
     }

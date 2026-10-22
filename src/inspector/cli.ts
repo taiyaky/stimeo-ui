@@ -15,12 +15,13 @@ import type { CheckReport, ControllerManifest, Diagnostic, FileReport, Manifest 
  * `stimeo check <path...>` / `stimeo catalog` — static checker and catalog
  * for `stimeo--*` markup.
  *
- * This is the executable entry point bundled as the `stimeo` npm bin. It is a
- * thin shell around {@link checkSource} and the bundled manifest: discover
- * files, run the engine, format the report, and set the exit code. All checking
- * logic lives in the engine, so every caller reaches the same verdict from one
- * code path. Both commands accept `--json` to emit machine-readable output for
- * editor tooling and CI.
+ * The command logic behind the `stimeo` npm bin; `cli_bin.ts` is the executable
+ * entry point and dispatches `stimeo mcp`. It is a thin shell around
+ * {@link checkSource} and the bundled manifest: discover files, run the engine,
+ * format the report, and return the exit code. All checking logic lives in the
+ * engine, so every caller reaches the same verdict from one code path. Both
+ * commands accept `--json` to emit machine-readable output for editor tooling
+ * and CI.
  */
 
 /** Resolves one of the JSON artifacts postbuild writes next to this file in `dist/inspector/`. */

@@ -2,7 +2,8 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AlertDialogController } from "../src/controllers/alert_dialog_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
-import { typeKey } from "./helpers/keyboard";
+import { byId } from "./helpers/dom";
+import { press as pressKey, typeKey } from "./helpers/keyboard";
 import { expectUpperModalOnTop, openUpperModal, TARGET_SWAPS } from "./helpers/modal_stack";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -128,7 +129,7 @@ describe("AlertDialogController", () => {
     });
     trigger().focus();
     trigger().click();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    typeKey(document, "Escape");
     expect(reasons).toEqual(["escape"]);
     expect(dialog().hidden).toBe(true);
     expect(document.activeElement).toBe(trigger());
@@ -137,15 +138,14 @@ describe("AlertDialogController", () => {
   it("traps Tab focus from the last focusable back to the first", () => {
     trigger().click();
     document.getElementById("confirm")?.focus(); // last
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    typeKey(document, "Tab");
     expect(document.activeElement).toBe(document.getElementById("cancel")); // first
   });
 
   it("takes a Tab that does not wrap and moves to the next focusable itself", () => {
     trigger().click();
     expect(document.activeElement).toBe(document.getElementById("cancel"));
-    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-    document.getElementById("cancel")?.dispatchEvent(tab);
+    const tab = pressKey(byId("cancel"), "Tab");
     expect(tab.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(document.getElementById("confirm"));
   });
@@ -154,7 +154,7 @@ describe("AlertDialogController", () => {
     const background = document.getElementById("background") as HTMLElement;
     trigger().click();
     expect(background.inert).toBe(true);
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    typeKey(document, "Escape");
     expect(background.inert).toBe(false);
   });
 
@@ -178,7 +178,7 @@ describe("AlertDialogController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // Speech-order regression: role, name, modal state, and the describing
+  // Speech-order check: role, name, modal state, and the describing
   // message must enter the accessibility tree in order when open.
   it("announces the alertdialog role, name, and message in order when open", async () => {
     trigger().click();
@@ -227,7 +227,7 @@ describe("AlertDialogController", () => {
     // The document-level keydown listener must be gone after teardown: Escape now
     // dispatches nothing (directly detects a listener leak, complementing the
     // scroll/inert restoration asserted above).
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    typeKey(document, "Escape");
     expect(reasons).toEqual([]);
   });
 
@@ -402,7 +402,7 @@ describe("AlertDialogController", () => {
       await tick();
       original.remove();
       await tick();
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      typeKey(document, "Escape");
 
       expect(decisions).toEqual(["cancel"]);
       expect(successor.hidden).toBe(true);

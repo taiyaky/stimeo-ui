@@ -247,9 +247,10 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
     if (this.#pendingButtonDisables.has(button)) return;
     button.setAttribute("data-overflow-indicator-pending-disabled", "");
     // The ownership marker carries the value we displace, so the DOM alone is
-    // enough to undo it. A Turbo snapshot is cloned before `disconnect()` runs,
-    // so a restored page arrives with these markers while the new instance has
-    // no in-memory record of them — an empty marker means "there was none".
+    // enough to undo it. A snapshot Turbo takes while the controller is still
+    // connected carries these markers, and a restored visit brings them back while
+    // the new instance has no in-memory record of them — an empty marker means
+    // "there was none".
     button.setAttribute(
       "data-overflow-indicator-aria-disabled",
       button.getAttribute("aria-disabled") ?? "",
@@ -272,9 +273,9 @@ export class OverflowIndicatorController extends Controller<HTMLElement> {
   /**
    * Drops the pending marker and gives back the `aria-disabled` it displaced.
    *
-   * Reads the displaced value from the DOM rather than memory: a Turbo snapshot is
-   * cloned before `disconnect()` runs, so a restored page can arrive with markers
-   * this instance never wrote.
+   * Reads the displaced value from the DOM rather than memory: a snapshot Turbo takes
+   * while the controller is still connected carries the markers, so a restored page
+   * can arrive with markers this instance never wrote.
    */
   #restorePendingMarkers(button: HTMLButtonElement): void {
     button.removeAttribute("data-overflow-indicator-pending-disabled");

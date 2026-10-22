@@ -2,14 +2,15 @@
  * Restores a real-browser image-loading lifecycle for happy-dom so image-driven
  * controllers can be tested deterministically.
  *
- * happy-dom never fetches images, and as of 20.10 it reports every `<img>` — even
- * one whose `src` was just assigned — as `complete = true` with
- * `naturalWidth = 0`. In a real browser, assigning `src` starts an asynchronous
- * load, so `complete` stays `false` until the `load`/`error` event resolves it.
- * The avatar controller depends on that window: a connected-but-pending image is
- * "loading", while a `complete` image with zero intrinsic size is a load that
- * already failed. With happy-dom's always-complete images the controller reports
- * `error` the instant a `src` is applied, so the "loading" assertions fail.
+ * Under its default settings (`enableImageFileLoading` off) happy-dom does not fetch
+ * images, and it reports every `<img>` whose `src` is not a `data:` URL — even one
+ * whose `src` was just assigned — as `complete = true` with `naturalWidth = 0`. In a
+ * real browser, assigning `src` starts an asynchronous load, so `complete` stays
+ * `false` until the `load`/`error` event resolves it. The avatar controller depends on
+ * that window: a connected-but-pending image is "loading", while a `complete` image
+ * with zero intrinsic size is a load that already failed. With happy-dom's
+ * always-complete images the controller reports `error` the instant a `src` is
+ * applied, so the "loading" assertions fail.
  *
  * This shim makes the lifecycle deterministic and real-browser-accurate: an
  * `<img>` with a `src` is `complete = false` (loading) until a `load` or `error`

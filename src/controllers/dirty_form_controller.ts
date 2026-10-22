@@ -1,7 +1,9 @@
 import { Controller } from "@hotwired/stimulus";
+import { projectedFieldName } from "../utils/form_data_projection";
 import { ListenerSet } from "../utils/listener_set";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { sharedRegistry } from "../utils/shared_registry";
+import { SubmissionOwner } from "../utils/submission_owner";
 import { TransientHooks } from "../utils/transient_hooks";
 
 /** The hook a connection may find written by an earlier, now-gone one. */
@@ -20,11 +22,6 @@ interface VisitParticipant {
 interface SubmitAttempt {
   readonly event: Event;
   snapshot: string;
-}
-
-interface TurboSubmitDetail {
-  readonly formSubmission?: unknown;
-  readonly success?: boolean;
 }
 
 type SerializedControl = readonly [
@@ -89,6 +86,12 @@ class TurboVisitCoordinator {
     this.#document = document;
   }
 
+  /**
+   * Adds a participant, and the document's visit listener with the first one.
+   *
+   * @stimeoListenerLifetime shared one listener per document serves every participant;
+   *   `remove` takes it away with the last one.
+   */
   add(participant: VisitParticipant): void {
     if (this.#participants.size === 0) {
       this.#document.addEventListener("turbo:before-visit", this.#onBeforeVisit);
@@ -148,7 +151,12 @@ function registerVisitParticipant(document: Document, participant: VisitParticip
  * submit is in flight the guard is suppressed until another edit occurs (so a
  * legitimate submit never prompts); the browser's `formdata` event captures the exact
  * revision Turbo materializes, and a successful `turbo:submit-end` accepts only that
- * revision, preserving any later edits as dirty. A failed submit re-arms the guard;
+ * revision, preserving any later edits as dirty. Only the latest start dispatched on this
+ * form or on an element whose nearest form it is (so not from a nested form) owns
+ * completion; an end must come from that same element with the same token, consumed
+ * once. Missing or null tokens pair synthetic events from that element, separately from
+ * named submissions.
+ * A matched result other than `success: true` re-arms the guard;
  * `markClean` clears it manually (e.g. after a custom save), while `acceptRestore`
  * adopts a restored draft only while no user edit is already dirty.
  *
@@ -176,14 +184,15 @@ export class DirtyFormController extends Controller<HTMLFormElement> {
 
   #baseline = "";
   #dirty = false;
-  #beforeunloadBound = false;
   readonly #timeouts = new SafeTimeout();
   readonly #listeners = new ListenerSet();
+  /** The page-leave prompt, held while the form is dirty. */
+  readonly #unloadListeners = new ListenerSet();
+  readonly #submission = new SubmissionOwner();
   /** Whether the active submission still represents the form's current values. */
   #submitting = false;
   #submitAttempt: SubmitAttempt | null = null;
   #submittedBaseline: string | null = null;
-  #activeSubmission: unknown | null = null;
   #unregisterVisit: (() => void) | null = null;
 
   readonly #onFieldChange = (): void => {
@@ -214,31 +223,21 @@ export class DirtyFormController extends Controller<HTMLFormElement> {
   };
 
   readonly #onSubmitStart = (event: Event): void => {
-    const detail = (event as CustomEvent<TurboSubmitDetail>).detail;
-    this.#activeSubmission = detail?.formSubmission ?? event;
+    if (!this.#ownsSource(event.target)) return;
+    this.#submission.begin(event);
     this.#submittedBaseline = this.#submitAttempt?.snapshot ?? this.#serialize();
     this.#submitAttempt = null;
     this.#submitting = this.#serialize() === this.#submittedBaseline;
   };
 
   readonly #onSubmitEnd = (event: Event): void => {
-    const detail = (event as CustomEvent<TurboSubmitDetail>).detail;
-    if (
-      detail?.formSubmission !== undefined &&
-      (this.#activeSubmission === null || detail.formSubmission !== this.#activeSubmission)
-    ) {
-      return;
-    }
+    const success = this.#submission.resolve(event);
+    if (success === null) return;
     const submittedBaseline = this.#submittedBaseline;
     this.#submitting = false;
     this.#submittedBaseline = null;
-    this.#activeSubmission = null;
-    if (detail?.success === false) return;
-    if (submittedBaseline === null) {
-      this.markClean();
-      return;
-    }
-    // The server accepted the submitted revision, not edits made after it left.
+    if (!success || submittedBaseline === null) return;
+    // The server accepts only the submitted revision; later edits remain unsaved.
     this.#baseline = submittedBaseline;
     this.#evaluate();
   };
@@ -263,6 +262,8 @@ export class DirtyFormController extends Controller<HTMLFormElement> {
     this.#listeners.add(this.element, "formdata", this.#onFormData);
     this.#listeners.add(this.element, "turbo:submit-start", this.#onSubmitStart);
     this.#listeners.add(this.element, "turbo:submit-end", this.#onSubmitEnd);
+    // A second connect with no disconnect between leaves one participant, not two.
+    this.#unregisterVisit?.();
     this.#unregisterVisit = registerVisitParticipant(this.element.ownerDocument, {
       form: this.element,
       evaluate: (event) => this.#evaluateVisit(event),
@@ -319,15 +320,11 @@ export class DirtyFormController extends Controller<HTMLFormElement> {
   }
 
   #bindBeforeUnload(): void {
-    if (this.#beforeunloadBound) return;
-    window.addEventListener("beforeunload", this.#onBeforeUnload);
-    this.#beforeunloadBound = true;
+    this.#unloadListeners.add(window, "beforeunload", this.#onBeforeUnload);
   }
 
   #unbindBeforeUnload(): void {
-    if (!this.#beforeunloadBound) return;
-    window.removeEventListener("beforeunload", this.#onBeforeUnload);
-    this.#beforeunloadBound = false;
+    this.#unloadListeners.dispose();
   }
 
   #guardSuppressed(): boolean {
@@ -342,7 +339,15 @@ export class DirtyFormController extends Controller<HTMLFormElement> {
     this.#submitting = false;
     this.#submitAttempt = null;
     this.#submittedBaseline = null;
-    this.#activeSubmission = null;
+    this.#submission.clear();
+  }
+
+  /** Whether a lifecycle event comes from this form or an element whose nearest form it is. */
+  #ownsSource(target: EventTarget | null): boolean {
+    return (
+      target === this.element ||
+      (target instanceof Element && target.closest("form") === this.element)
+    );
   }
 
   /** Stable serialization of the form's controls for change detection. */
@@ -373,7 +378,7 @@ export class DirtyFormController extends Controller<HTMLFormElement> {
       el instanceof HTMLTextAreaElement ||
       el instanceof HTMLSelectElement
     ) {
-      return el.name || el.id || "";
+      return projectedFieldName(el.name) || el.id || "";
     }
     return null;
   }

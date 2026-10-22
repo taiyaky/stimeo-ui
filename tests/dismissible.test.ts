@@ -1,8 +1,10 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { DismissibleController } from "../src/controllers/dismissible_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { byId, query } from "./helpers/dom";
+import { keyEvent, press as pressKey, typeKey } from "./helpers/keyboard";
+import { recordListeners } from "./helpers/listeners";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -273,7 +275,7 @@ describe("DismissibleController", () => {
         </div>
       </div>`);
     byId("close").focus();
-    host().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    pressKey(byId("close"), "Escape");
     expect(root().hidden).toBe(true);
   });
 
@@ -290,9 +292,7 @@ describe("DismissibleController", () => {
     // Widget-local half of the shared layered-Escape contract: a composing press
     // steers the IME conversion (e.g. in a text field inside this element),
     // never the element itself.
-    host().dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, isComposing: true }),
-    );
+    pressKey(byId("close"), "Escape", { isComposing: true });
     expect(root().hidden).toBe(false);
   });
 
@@ -306,7 +306,7 @@ describe("DismissibleController", () => {
       </div>`);
     byId("close").focus();
 
-    host().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    pressKey(byId("close"), "Escape");
 
     expect(controller().closeOnEscapeValue).toBe(false);
     expect(root().hidden).toBe(false);
@@ -324,7 +324,8 @@ describe("DismissibleController", () => {
       </div>`);
     byId("outside").focus();
 
-    host().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    // The host receives a synthetic key while focus remains outside its dismissible root.
+    typeKey(host(), "Escape");
 
     expect(root().hidden).toBe(false);
     expect(document.activeElement).toBe(byId("outside"));
@@ -340,15 +341,11 @@ describe("DismissibleController", () => {
         </div>
       </div>`);
     byId("close").focus();
-    host().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    const handledEscape = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
+    pressKey(byId("close"), "Enter");
+    const handledEscape = keyEvent("Escape");
     handledEscape.preventDefault();
 
-    host().dispatchEvent(handledEscape);
+    pressKey(byId("close"), handledEscape);
 
     expect(root().hidden).toBe(false);
   });
@@ -365,7 +362,7 @@ describe("DismissibleController", () => {
     controller().closeOnEscapeValueChanged();
     byId("close").focus();
 
-    host().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    pressKey(byId("close"), "Escape");
 
     expect(root().hidden).toBe(true);
   });
@@ -383,7 +380,7 @@ describe("DismissibleController", () => {
     controller().closeOnEscapeValueChanged();
     byId("close").focus();
 
-    host().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    pressKey(byId("close"), "Escape");
 
     expect(root().hidden).toBe(false);
   });
@@ -397,12 +394,19 @@ describe("DismissibleController", () => {
           <button id="close">Close</button>
         </div>
       </div>`);
-    const removed = vi.spyOn(host(), "removeEventListener");
+    controller().disconnect();
+    const ledger = recordListeners();
+    try {
+      controller().connect();
+      expect(ledger.live(host(), "keydown")).toHaveLength(1);
 
-    host().setAttribute("data-stimeo--dismissible-close-on-escape-value", "false");
-    controller().closeOnEscapeValueChanged();
+      host().setAttribute("data-stimeo--dismissible-close-on-escape-value", "false");
+      controller().closeOnEscapeValueChanged();
 
-    expect(removed).toHaveBeenCalledWith("keydown", expect.any(Function));
+      expect(ledger.live(host(), "keydown")).toEqual([]);
+    } finally {
+      ledger.restore();
+    }
   });
 
   it("keeps dismissing on Escape after the element moves within the page", async () => {
@@ -426,7 +430,7 @@ describe("DismissibleController", () => {
     byId("second-slot").append(element);
     await tick();
     byId("close").focus();
-    host().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    pressKey(byId("close"), "Escape");
 
     expect(root().hidden).toBe(true);
   });
@@ -448,7 +452,7 @@ describe("DismissibleController", () => {
       host().setAttribute("data-stimeo--dismissible-close-on-escape-value", "false");
     });
 
-    byId("close").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    pressKey(byId("close"), "Escape");
 
     expect(root().hidden).toBe(false);
   });
@@ -490,9 +494,7 @@ describe("DismissibleController", () => {
       </div>`);
     byId("first-close").focus();
 
-    byId("first-close").dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-    );
+    pressKey(byId("first-close"), "Escape");
 
     expect(byId("first-root").hidden).toBe(true);
     expect(byId("second-root").hidden).toBe(false);
@@ -643,8 +645,8 @@ describe("DismissibleController", () => {
       const only = root();
 
       only.remove();
-      // Drive the callback directly: happy-dom delivers target callbacks unreliably, and a
-      // throw from one it delivers surfaces outside the test.
+      // Drive the callback directly, so a throw from it fails this case instead of
+      // surfacing outside the test.
       expect(() => controller().rootTargetDisconnected(only)).not.toThrow();
       await tick();
 
@@ -883,7 +885,7 @@ describe("DismissibleController", () => {
     controller().disconnect();
 
     byId("close").focus();
-    host().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    pressKey(byId("close"), "Escape");
     expect(root().hidden).toBe(false);
   });
 });

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { claimsWhileFocusWithin, EscapeLayer } from "../../src/utils/escape_layer";
+import { keyEvent, typeKey } from "../helpers/keyboard";
 
 /**
  * Behavioral tests for the shared Escape resolver: activation ordering, the
@@ -26,18 +27,13 @@ describe("EscapeLayer", () => {
     };
   };
 
-  /** Dispatches a cancelable Escape keydown on `target`, like a real keypress. */
+  /** Exercises document-level resolution without changing any claimant's focus. */
   const pressEscape = (
     target: EventTarget = document,
     init: KeyboardEventInit = {},
   ): KeyboardEvent => {
-    const event = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-      ...init,
-    });
-    target.dispatchEvent(event);
+    const event = keyEvent("Escape", init);
+    typeKey(target, event);
     return event;
   };
 
@@ -84,13 +80,9 @@ describe("EscapeLayer", () => {
     const top = layer({ onDismiss: dismiss });
     top.activate();
 
-    const event = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
+    const event = keyEvent("Escape");
     event.preventDefault();
-    document.dispatchEvent(event);
+    typeKey(document, event);
 
     expect(dismiss).not.toHaveBeenCalled();
   });

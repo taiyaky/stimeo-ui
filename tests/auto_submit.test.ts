@@ -5,12 +5,13 @@ import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /**
  * Behavioral tests for {@link AutoSubmitController}: debounced submission (and the
  * 300ms default), rapid coalescing, the `on` allowlist, the pending/busy state
  * hooks across Turbo's cache, the submit/done events and the
- * `done` detail shape, the optional Announcer bridge (and its opt-in default),
+ * `done` detail shape, the optional `stimeo--announcer` bridge (and its opt-in default),
  * the `form` target across runtime replacement/addition/removal, and teardown.
  */
 
@@ -204,7 +205,7 @@ describe("AutoSubmitController", () => {
     expect(details).toStrictEqual([{ message: "Results updated" }]);
   });
 
-  it("does not bridge to the Announcer when announce is left at its default", async () => {
+  it("does not bridge to stimeo--announcer when announce is left at its default", async () => {
     // A message alone must not announce: the bridge is opt-in via `announce`.
     await start(`
       <form data-controller="stimeo--auto-submit"
@@ -221,7 +222,7 @@ describe("AutoSubmitController", () => {
     expect(messages).toEqual([]);
   });
 
-  it("bridges to the Announcer on done when announce + message are set", async () => {
+  it("bridges to stimeo--announcer on done when announce + message are set", async () => {
     await start(`
       <form data-controller="stimeo--auto-submit"
             data-stimeo--auto-submit-announce-value="true"
@@ -619,16 +620,15 @@ describe("AutoSubmitController", () => {
   // --- `debounce` belongs to one scheduled submit ----------------------------
 
   /**
-   * Rewrites `debounce` and delivers its Value callback directly when the controller
-   * defines one, since happy-dom does not reliably run it for an attribute write.
+   * Rewrites the `debounce` declaration and waits for Stimulus to deliver it, so the
+   * assertions that follow see whatever the controller does with the change.
    */
-  const declareDebounce = (value: number) => {
-    const root = query("[data-controller='stimeo--auto-submit']");
-    root.setAttribute("data-stimeo--auto-submit-debounce-value", String(value));
-    const owner = application.getControllerForElementAndIdentifier(root, "stimeo--auto-submit");
-    const callback: unknown = Reflect.get(owner ?? {}, "debounceValueChanged");
-    if (typeof callback === "function") callback.call(owner);
-  };
+  const declareDebounce = (value: number) =>
+    writeValueAttribute(
+      query("[data-controller='stimeo--auto-submit']"),
+      "data-stimeo--auto-submit-debounce-value",
+      String(value),
+    );
 
   it("keeps a pending submit's deadline when debounce shrinks, and times the next input anew", async () => {
     // Hosted on a wrapper: happy-dom connects a second instance to a `<form>` host when
@@ -644,7 +644,7 @@ describe("AutoSubmitController", () => {
     input().dispatchEvent(new Event("input", { bubbles: true }));
     await vi.advanceTimersByTimeAsync(100);
 
-    declareDebounce(50);
+    await declareDebounce(50);
     await vi.advanceTimersByTimeAsync(199);
     expect(submit).not.toHaveBeenCalled();
     expect(form().getAttribute("data-auto-submit-pending")).toBe("true");
@@ -664,7 +664,7 @@ describe("AutoSubmitController", () => {
     input().dispatchEvent(new Event("input", { bubbles: true }));
     await vi.advanceTimersByTimeAsync(100);
 
-    declareDebounce(5000);
+    await declareDebounce(5000);
     await vi.advanceTimersByTimeAsync(199);
     expect(submit).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
@@ -679,7 +679,7 @@ describe("AutoSubmitController", () => {
       form().addEventListener(`stimeo--auto-submit:${type}`, () => seen.push(type));
     }
 
-    declareDebounce(10);
+    await declareDebounce(10);
     await vi.advanceTimersByTimeAsync(1000);
     expect(submit).not.toHaveBeenCalled();
     expect(form().hasAttribute("data-auto-submit-pending")).toBe(false);

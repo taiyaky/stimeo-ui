@@ -114,7 +114,7 @@ export class AutoSubmitController extends Controller<HTMLElement> {
     if (this.#boundForm) this.#busy.return(this.#boundForm);
     const message = this.messageValue;
     this.dispatch("done", { detail: { message: message || undefined } });
-    // Bridge the silent result swap to the shared Announcer so SR users hear it.
+    // Bridge the silent result swap to the shared `stimeo--announcer` so SR users hear it.
     if (this.announceValue) announce(message);
   };
 

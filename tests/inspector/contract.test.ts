@@ -38,16 +38,17 @@ function sourceFor(identifier: string): string {
  * These are genuine public methods that are *not* user-wired actions, so they
  * must not appear in `static actions`, yet legitimately remain public.
  *
- * - `stimeo--toast` `enforceMaxLimit`: enforcement normally runs from
- *   `itemTargetConnected` (a MutationObserver-driven Stimulus callback happy-dom
- *   does not reliably fire), so the toast spec invokes it directly.
+ * - `stimeo--toast` `enforceMaxLimit`: enforcement runs from
+ *   `itemTargetConnected`, a callback Stimulus delivers through a
+ *   MutationObserver; the toast tests call it directly, so a synchronous case
+ *   runs the same enforcement without waiting for that delivery.
  */
 const NON_ACTION_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
   "stimeo--toast": ["enforceMaxLimit"],
 };
 
 describe("public API contract declarations (drift guard)", () => {
-  // Every public registry reflected into the manifest shares the same contract guard.
+  // The core, positioning, and cable registries share one contract guard.
   describeContractGuard(
     { ...stimeoControllers, ...positioningControllers, ...cableControllers },
     sourceFor,

@@ -605,9 +605,9 @@ describe("BulkSelectController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // The revealed bar must read as a toolbar carrying the count: freeze the role,
-  // its name, and the count in spoken order.
-  it("exposes the revealed bar as a named toolbar carrying the count", async () => {
+  // The revealed bar must read as a toolbar carrying the count: freeze the role and
+  // the count in spoken order.
+  it("exposes the revealed bar as a toolbar carrying the count", async () => {
     await start(MARKUP());
     setChecked(itemAt(0), true);
     setChecked(itemAt(1), true);

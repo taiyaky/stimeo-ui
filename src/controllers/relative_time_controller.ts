@@ -1,4 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
+import { setAttributeIfChanged } from "../utils/attribute_write";
+import { readDatetime } from "../utils/datetime";
 import { intlFormatter } from "../utils/intl_format";
 import { resolveLocale } from "../utils/locale";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
@@ -55,10 +57,10 @@ const TEXT_RECORD = "text";
  * timer is owned by `SafeTimeout` and torn down on `disconnect()` (Turbo
  * navigation included).
  *
- * Render inputs are followed at runtime: a morph that swaps `locale`, `threshold`,
- * or `tickInterval` on the live element repaints through one coalesced pass
- * (`MorphRenderWatcher`) rather than leaving the reading frozen. While the element
- * shows the relative form it records the authored absolute text on itself as
+ * Render inputs are followed at runtime: changing `datetime` or a morph that swaps
+ * `locale`, `threshold`, or `tickInterval` on the live element repaints through one
+ * coalesced pass (`MorphRenderWatcher`) rather than leaving the reading frozen. While
+ * the element shows the relative form it records the authored absolute text on itself as
  * `data-<identifier>-text` (a JSON string), so a copy of it — a page Turbo restores from
  * its cache — keeps the threshold fallback: the connection that adopts the copy takes
  * the authored text from the record, never the relative form on display. Nothing is
@@ -86,6 +88,12 @@ export class RelativeTimeController extends Controller<HTMLElement> {
   readonly #timers = new SafeTimeout();
   /** Collapses a morph that swaps several render inputs at once into one repaint. */
   readonly #resync = new MorphRenderWatcher(() => {
+    const target = readDatetime(this.element) ?? Number.NaN;
+    if (!Object.is(target, this.#targetMs)) {
+      this.#targetMs = target;
+      this.#adoptAuthoredText();
+      this.#valuesDirty = true;
+    }
     if (this.#valuesDirty) {
       this.#valuesDirty = false;
       this.#resyncToValues();
@@ -94,6 +102,8 @@ export class RelativeTimeController extends Controller<HTMLElement> {
     }
   });
   #valuesDirty = false;
+  /** Observes only the machine-readable input, never this controller's output. */
+  readonly #datetimeWatch = new MutationObserver(() => this.#resync.schedule());
 
   /** Epoch ms parsed from `datetime`; `NaN` when absent or invalid. */
   #targetMs = Number.NaN;
@@ -101,26 +111,35 @@ export class RelativeTimeController extends Controller<HTMLElement> {
   #absoluteText = "";
 
   override connect(): void {
+    this.#timers.clearAll();
     this.#valuesDirty = false;
     this.#resync.observe(this.element);
-    // Don't adopt already-rendered relative text as the absolute fallback: on a
-    // re-connect against a tree that still holds the live "3 minutes ago" text, that
-    // relative string would otherwise become `#absoluteText`. The authored text is the
-    // record such a tree carries, or the textContent before any relative render.
-    if (this.element.getAttribute("data-state") !== "relative") {
-      this.#absoluteText = (this.element.textContent ?? "").trim();
-    } else {
-      const recorded = this.#recordedText();
-      if (recorded !== null) this.#absoluteText = recorded;
-    }
-    this.#targetMs = Date.parse(this.element.getAttribute("datetime") ?? "");
+    this.#datetimeWatch.observe(this.element, { attributeFilter: ["datetime"] });
+    this.#adoptAuthoredText();
+    this.#targetMs = readDatetime(this.element) ?? Number.NaN;
     if (Number.isNaN(this.#targetMs)) return;
     this.#schedule();
   }
 
   override disconnect(): void {
     this.#resync.disconnect();
+    this.#datetimeWatch.disconnect();
     this.#timers.clearAll();
+  }
+
+  /**
+   * Takes the authored text for the current instant. Already-rendered relative text is
+   * never adopted as the absolute fallback: a tree that still shows "3 minutes ago"
+   * carries the authored text in its record, and any other text is authored — the
+   * markup at connect, or the text a morph brings together with a new instant.
+   */
+  #adoptAuthoredText(): void {
+    if (this.element.getAttribute("data-state") !== "relative") {
+      this.#absoluteText = (this.element.textContent ?? "").trim();
+    } else {
+      const recorded = this.#recordedText();
+      if (recorded !== null) this.#absoluteText = recorded;
+    }
   }
 
   /** The record of the authored text, in this controller's namespace. */
@@ -157,7 +176,7 @@ export class RelativeTimeController extends Controller<HTMLElement> {
   }
 
   /**
-   * Renders against the current Values and re-arms the poll from now.
+   * Renders against the current instant and Values and re-arms the poll from now.
    *
    * Render only: it emits no event, and clearing first keeps the single self-arming
    * timer single — scheduling on top of a pending one would double the poll rate for
@@ -166,8 +185,8 @@ export class RelativeTimeController extends Controller<HTMLElement> {
    * again and stops.
    */
   #resyncToValues(): void {
-    if (Number.isNaN(this.#targetMs)) return;
     this.#timers.clearAll();
+    if (Number.isNaN(this.#targetMs)) return;
     this.#schedule();
   }
 
@@ -222,9 +241,7 @@ export class RelativeTimeController extends Controller<HTMLElement> {
     this.element.textContent = formatter.format(value, scale.unit);
     this.element.setAttribute("data-state", "relative");
     const record = JSON.stringify(this.#absoluteText);
-    if (this.element.getAttribute(this.#textRecord) !== record) {
-      this.element.setAttribute(this.#textRecord, record);
-    }
+    setAttributeIfChanged(this.element, this.#textRecord, record);
     return nextDelay;
   }
 

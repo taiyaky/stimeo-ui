@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { ownerIndex, ownerOf } from "../../src/utils/event_owner";
+import { ownerIndex, ownerOf, ownersOf } from "../../src/utils/event_owner";
 
 /**
- * Tests for {@link ownerIndex} and {@link ownerOf}.
+ * Tests for {@link ownerIndex}, {@link ownerOf} and {@link ownersOf}.
  *
  * The non-`Node` cases carry the most detail because the environment hides the
  * hazard they exist for: happy-dom answers `contains(anything)` with `false`,
@@ -37,7 +37,8 @@ describe("ownerIndex", () => {
   it("finds the candidate owning a node that is not an element", () => {
     const { inner, deep } = fixture();
     const text = deep.firstChild as Text;
-    // Pinned: a fixture that lost its text would otherwise make this an element case.
+    // Pinned: if the fixture's button started with an element, this would pass as an
+    // element case.
     expect(text.nodeType).toBe(Node.TEXT_NODE);
     expect(ownerIndex([inner], text)).toBe(0);
   });
@@ -123,5 +124,80 @@ describe("ownerOf", () => {
     } finally {
       contains.mockRestore();
     }
+  });
+});
+
+describe("ownersOf", () => {
+  const fixture = () => {
+    document.body.innerHTML = `
+      <div id="outer">
+        <div id="inner"><button id="deep">deep</button></div>
+        <div id="beside"></div>
+      </div>
+      <p id="outside">outside</p>`;
+    const at = (id: string) => document.querySelector(`#${id}`) as HTMLElement;
+    return {
+      outer: at("outer"),
+      inner: at("inner"),
+      deep: at("deep"),
+      beside: at("beside"),
+      outside: at("outside"),
+    };
+  };
+
+  it("returns every candidate that holds the node, in the order they were listed", () => {
+    const { outer, inner, beside, outside, deep } = fixture();
+    expect(ownersOf([outer, beside, inner, outside], deep)).toEqual([outer, inner]);
+    expect(ownersOf([inner, outer], deep)).toEqual([inner, outer]);
+  });
+
+  it("includes a candidate that is the node itself alongside its ancestor", () => {
+    const { outer, inner, beside } = fixture();
+    expect(ownersOf([outer, inner], inner)).toEqual([outer, inner]);
+    expect(ownersOf([outer, inner, beside], beside)).toEqual([outer, beside]);
+  });
+
+  it("returns the one owner of a node held by a single candidate", () => {
+    const { inner, beside } = fixture();
+    expect(ownersOf([inner, beside], beside)).toEqual([beside]);
+  });
+
+  it("finds the owners of a node that is not an element", () => {
+    const { outer, inner, deep } = fixture();
+    const text = deep.firstChild as Text;
+    // Pinned: if the fixture's button started with an element, this would pass as an
+    // element case.
+    expect(text.nodeType).toBe(Node.TEXT_NODE);
+    expect(ownersOf([outer, inner], text)).toEqual([outer, inner]);
+  });
+
+  it("returns an empty list when no candidate holds the node", () => {
+    const { inner, beside, outside, outer } = fixture();
+    expect(ownersOf([inner, beside], outside)).toEqual([]);
+    expect(ownersOf([inner], outer)).toEqual([]);
+    expect(ownersOf([], outer)).toEqual([]);
+  });
+
+  it("returns an empty list for absent and non-node targets, without testing them", () => {
+    const { outer } = fixture();
+    const contains = vi.spyOn(Node.prototype, "contains");
+    try {
+      expect(ownersOf([outer], null)).toEqual([]);
+      expect(ownersOf([outer], undefined)).toEqual([]);
+      expect(ownersOf([outer], new EventTarget())).toEqual([]);
+      expect(contains).not.toHaveBeenCalled();
+    } finally {
+      contains.mockRestore();
+    }
+  });
+
+  it("leaves the candidate list as it was", () => {
+    const { outer, inner, beside, deep } = fixture();
+    const candidates = [outer, beside, inner];
+
+    const owners = ownersOf(candidates, deep);
+
+    expect(owners).not.toBe(candidates);
+    expect(candidates).toEqual([outer, beside, inner]);
   });
 });

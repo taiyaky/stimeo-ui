@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TabsController } from "../src/controllers/tabs_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { keyEvent, press } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -58,11 +59,43 @@ describe("TabsController", () => {
   const tabIndexes = () => tabs().map((element) => element.tabIndex);
   const panelVisibility = () => panels().map((element) => !element.hidden);
 
-  const pressKey = (element: HTMLElement, key: string): KeyboardEvent => {
-    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-    element.dispatchEvent(event);
-    return event;
-  };
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Home/End chord (%s, %s)", async (key, _modifier, init) => {
+    tab(1).click();
+    const current = tab(1);
+    current.focus();
+    const element = current.closest<HTMLElement>("[data-controller]");
+    if (!element) throw new Error("Expected tabs root");
+    const events: Event[] = [];
+    for (const name of ["stimeo--tabs:change"]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = press(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(selection()).toEqual(["false", "true", "false"]);
+    expect(tabIndexes()).toEqual([-1, 0, -1]);
+    expect(panelVisibility()).toEqual([false, true, false]);
+    expect(press(current, key).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(tab(key === "Home" ? 0 : 2));
+    expect(selection()).toEqual(
+      key === "Home" ? ["true", "false", "false"] : ["false", "false", "true"],
+    );
+  });
 
   it("reverses the horizontal arrows under RTL", () => {
     // Logical direction: APG describes these as "next / previous", so the pair
@@ -71,11 +104,79 @@ describe("TabsController", () => {
     // is set as an inline style instead.
     (tab(0).closest("[data-controller]") as HTMLElement).style.direction = "rtl";
 
-    pressKey(tab(0), "ArrowLeft"); // "next" under RTL
+    press(tab(0), "ArrowLeft"); // "next" under RTL
     expect(selection()).toEqual(["false", "true", "false"]);
 
-    pressKey(tab(1), "ArrowRight"); // "previous"
+    press(tab(1), "ArrowRight"); // "previous"
     expect(selection()).toEqual(["true", "false", "false"]);
+  });
+
+  /** Inline direction isolates container resolution from the browser's dir mapping. */
+  describe("layout direction", () => {
+    const list = () => {
+      const element = document.querySelector<HTMLElement>("[data-stimeo--tabs-target='list']");
+      if (!element) throw new Error("Expected tablist");
+      return element;
+    };
+
+    it.each(["ltr", "rtl"] as const)(
+      "reads the %s tablist direction when the root and focused tab disagree",
+      (direction) => {
+        const opposite = direction === "rtl" ? "ltr" : "rtl";
+        root().style.direction = opposite;
+        list().style.direction = direction;
+        tab(1).style.direction = opposite;
+
+        const event = press(tab(1), "ArrowRight");
+        const next = direction === "rtl" ? 0 : 2;
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(document.activeElement).toBe(tab(next));
+        expect(selection()).toEqual(tabs().map((_, index) => String(index === next)));
+        expect(panelVisibility()).toEqual(panels().map((_, index) => index === next));
+      },
+    );
+
+    it("reads a live change to the tablist direction on the next key", () => {
+      root().style.direction = "ltr";
+      list().style.direction = "rtl";
+      press(tab(1), "ArrowRight");
+      expect(document.activeElement).toBe(tab(0));
+
+      list().style.direction = "ltr";
+      press(tab(0), "ArrowRight");
+      expect(document.activeElement).toBe(tab(1));
+      expect(selection()).toEqual(["false", "true", "false"]);
+    });
+
+    it("reads the current tablist after its target is replaced", async () => {
+      root().style.direction = "ltr";
+      const original = list();
+      original.style.direction = "ltr";
+      const replacement = original.cloneNode() as HTMLElement;
+      replacement.style.direction = "rtl";
+      replacement.append(...original.children);
+      original.replaceWith(replacement);
+      await tick();
+
+      const event = press(tab(1), "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(tab(0));
+      expect(selection()).toEqual(["true", "false", "false"]);
+    });
+
+    it("falls back to the root when no tablist target remains", async () => {
+      root().style.direction = "rtl";
+      const container = list();
+      container.style.direction = "ltr";
+      container.removeAttribute("data-stimeo--tabs-target");
+      await tick();
+
+      const event = press(tab(1), "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(tab(0));
+      expect(selection()).toEqual(["true", "false", "false"]);
+    });
   });
 
   it("yields a key a descendant widget already consumed", () => {
@@ -84,12 +185,13 @@ describe("TabsController", () => {
     const first = tabs()[0] as HTMLElement;
     first.focus();
     const inner = document.createElement("span");
+    inner.tabIndex = 0;
     first.append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
 
-    pressKey(inner, "ArrowRight");
+    press(inner, "ArrowRight");
 
-    expect(document.activeElement).toBe(first);
+    expect(document.activeElement).toBe(inner);
     expect(selection()).toEqual(["true", "false", "false"]);
   });
 
@@ -126,7 +228,7 @@ describe("TabsController", () => {
 
   it("activates and focuses the next tab on ArrowRight", () => {
     tab(0).focus();
-    const event = pressKey(tab(0), "ArrowRight");
+    const event = press(tab(0), "ArrowRight");
 
     expect(event.defaultPrevented).toBe(true);
     expect(selection()).toEqual(["false", "true", "false"]);
@@ -138,7 +240,7 @@ describe("TabsController", () => {
   it("wraps to the first tab from the last on ArrowRight", () => {
     tab(2).click();
     tab(2).focus();
-    pressKey(tab(2), "ArrowRight");
+    press(tab(2), "ArrowRight");
 
     expect(selection()).toEqual(["true", "false", "false"]);
     expect(panelVisibility()).toEqual([true, false, false]);
@@ -148,7 +250,7 @@ describe("TabsController", () => {
   it("activates and focuses the previous tab on ArrowLeft", () => {
     tab(2).click();
     tab(2).focus();
-    const event = pressKey(tab(2), "ArrowLeft");
+    const event = press(tab(2), "ArrowLeft");
 
     expect(event.defaultPrevented).toBe(true);
     expect(selection()).toEqual(["false", "true", "false"]);
@@ -159,7 +261,7 @@ describe("TabsController", () => {
 
   it("wraps to the last tab from the first on ArrowLeft", () => {
     tab(0).focus();
-    pressKey(tab(0), "ArrowLeft");
+    press(tab(0), "ArrowLeft");
 
     expect(selection()).toEqual(["false", "false", "true"]);
     expect(panelVisibility()).toEqual([false, false, true]);
@@ -169,14 +271,14 @@ describe("TabsController", () => {
   it("moves selection, panel visibility, and focus with End and Home", () => {
     tab(1).click();
     tab(1).focus();
-    const endEvent = pressKey(tab(1), "End");
+    const endEvent = press(tab(1), "End");
 
     expect(endEvent.defaultPrevented).toBe(true);
     expect(selection()).toEqual(["false", "false", "true"]);
     expect(panelVisibility()).toEqual([false, false, true]);
     expect(document.activeElement).toBe(tab(2));
 
-    const homeEvent = pressKey(tab(2), "Home");
+    const homeEvent = press(tab(2), "Home");
     expect(homeEvent.defaultPrevented).toBe(true);
     expect(selection()).toEqual(["true", "false", "false"]);
     expect(panelVisibility()).toEqual([true, false, false]);
@@ -187,13 +289,8 @@ describe("TabsController", () => {
     // A modified arrow belongs to the browser, not the widget: nothing is
     // consumed and no selection moves.
     tab(0).focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    tab(0).dispatchEvent(event);
+    const event = keyEvent("ArrowRight", { altKey: true });
+    press(tab(0), event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(selection()).toEqual(["true", "false", "false"]);
@@ -202,7 +299,7 @@ describe("TabsController", () => {
 
   it("does not intercept an unsupported key", () => {
     tab(0).focus();
-    const event = pressKey(tab(0), "Tab");
+    const event = press(tab(0), "Tab");
 
     expect(event.defaultPrevented).toBe(false);
     expect(selection()).toEqual(["true", "false", "false"]);
@@ -221,7 +318,7 @@ describe("TabsController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Speech-order regression: roving selection must move with arrow navigation.
+  // Speech-order check: roving selection must move with arrow navigation.
   // The whole ordered tablist + active panel announcement is pinned so a lost
   // role, a flipped aria-selected, or a desynced panel surfaces as a diff.
   it("announces selection and roving order before and after arrow navigation", async () => {
@@ -236,7 +333,7 @@ describe("TabsController", () => {
     ]);
 
     tab(0).focus();
-    pressKey(tab(0), "ArrowRight");
+    press(tab(0), "ArrowRight");
     const after = await captureSpeech({ container: root(), steps: 5 });
     expect(after).toEqual([
       "tablist, Example tabs, orientated horizontally",
@@ -248,7 +345,7 @@ describe("TabsController", () => {
     ]);
   });
 
-  // Context-teardown regression. The controller holds no timers, observers, or
+  // Context-teardown check. The controller holds no timers, observers, or
   // document/window listeners (only Stimulus-managed data-action bindings), so
   // unloading its identifier must make the tabs inert.
   it("becomes inert after disconnect (no lingering side effects)", () => {
@@ -258,7 +355,7 @@ describe("TabsController", () => {
     expect(panelVisibility()).toEqual([true, false, false]);
 
     tab(0).focus();
-    const event = pressKey(tab(0), "ArrowRight");
+    const event = press(tab(0), "ArrowRight");
     expect(event.defaultPrevented).toBe(false);
     expect(selection()).toEqual(["true", "false", "false"]);
     expect(document.activeElement).toBe(tab(0));
@@ -335,7 +432,7 @@ describe("TabsController", () => {
     });
 
     it("reports an arrow-key move", () => {
-      tabs()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      press(tabs()[0] as HTMLElement, "ArrowRight");
 
       expect(capture.seen[0]?.detail).toEqual({ index: 1, total: 3, previous: 0, reason: "user" });
     });
@@ -393,7 +490,7 @@ describe("TabsController", () => {
         tabs()[2]?.click();
       });
 
-      tabs()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      press(tabs()[1] as HTMLElement, "ArrowRight");
 
       expect(tabs()[2]?.getAttribute("aria-selected")).toBe("true");
       expect(document.activeElement).not.toBe(tabs()[1]);
@@ -425,7 +522,7 @@ describe("TabsController target API", () => {
     document.body.innerHTML = "";
   });
 
-  it("retains the existing DOM Event success as a positive control", () => {
+  it("selects through the DOM Event action as a positive control", () => {
     const reports: Array<{ reason?: string }> = [];
     element("api-root").addEventListener("stimeo--tabs:change", (event) => {
       reports.push((event as CustomEvent<{ reason?: string }>).detail);
@@ -436,7 +533,7 @@ describe("TabsController target API", () => {
   });
 
   it.each([false, true])(
-    "accepts an owned target or its descendant (%s) after an Event positive control",
+    "accepts an owned target or its descendant (%s) through the element API",
     (descendant) => {
       const reports: Array<{ reason?: string }> = [];
       element("api-root").addEventListener("stimeo--tabs:change", (event) => {
@@ -532,8 +629,8 @@ describe("TabsController target API", () => {
     element("api-root").addEventListener("stimeo--tabs:change", reports);
     invalid.focus();
     const before = element("api-root").innerHTML;
-    const rejected = new KeyboardEvent("keydown", { key: "End", cancelable: true });
-    invalid.dispatchEvent(rejected);
+    const rejected = keyEvent("End");
+    press(invalid, rejected);
     expect(rejected.defaultPrevented).toBe(false);
     expect(element("api-root").innerHTML).toBe(before);
     expect(document.activeElement).toBe(invalid);
@@ -541,8 +638,8 @@ describe("TabsController target API", () => {
     const owned = element("api-a");
     owned.addEventListener("keydown", (event) => instance().onKeydown(event));
     owned.focus();
-    const accepted = new KeyboardEvent("keydown", { key: "End", cancelable: true });
-    owned.dispatchEvent(accepted);
+    const accepted = keyEvent("End");
+    press(owned, accepted);
     expect(accepted.defaultPrevented).toBe(true);
     expect(element("api-b").getAttribute("aria-selected")).toBe("true");
     expect(document.activeElement).toBe(element("api-b"));

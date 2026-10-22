@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CarouselController } from "../src/controllers/carousel_controller";
 import { AttributeLease } from "../src/utils/attribute_lease";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { keyEvent, press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -24,7 +25,7 @@ const markup = (attrs = "") => `
                         focusout->stimeo--carousel#resume">
     <button type="button" aria-label="Slide autoplay"
             data-stimeo--carousel-target="playToggle"
-            data-action="stimeo--carousel#togglePlay">Play</button>
+            data-action="stimeo--carousel#togglePlay"><span aria-hidden="true">▶</span></button>
     <div data-stimeo--carousel-target="viewport">
       <div id="s1" role="tabpanel" aria-roledescription="slide" aria-label="1 of 3"
            aria-labelledby="d1" data-stimeo--carousel-target="slide">One</div>
@@ -56,7 +57,7 @@ const skewedMarkup = (slides: number, pickers: number, attrs = "") => `
            aria-label="Featured" ${attrs}>
     <button type="button" aria-label="Slide autoplay"
             data-stimeo--carousel-target="playToggle"
-            data-action="stimeo--carousel#togglePlay">Play</button>
+            data-action="stimeo--carousel#togglePlay"><span aria-hidden="true">▶</span></button>
     <div data-stimeo--carousel-target="viewport">
       ${Array.from(
         { length: slides },
@@ -177,7 +178,7 @@ describe("CarouselController", () => {
   const click = (element: HTMLElement | undefined) =>
     element?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   const press = (element: HTMLElement | undefined, key: string) =>
-    element?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    !pressKey(element as HTMLElement, key, { bubbles: true, cancelable: true }).defaultPrevented;
   /** Mirrors a real focus move: `focusout` names where focus is going. */
   const moveFocus = (from: HTMLElement | null, to: HTMLElement | null) => {
     from?.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: to }));
@@ -490,23 +491,46 @@ describe("CarouselController", () => {
     expect(viewport().getAttribute("aria-live")).toBe("off");
   });
 
-  it("reverses the horizontal arrows under RTL, leaving Down/Up alone", async () => {
-    // Logical direction: APG describes the horizontal pair as "next / previous",
-    // so it reverses with the writing direction. `dir="rtl"` is the authoring
-    // contract, but happy-dom does not resolve it into the computed style, so the
-    // direction is set inline instead.
-    await start();
-    root().style.direction = "rtl";
+  it.each([false, true])(
+    "uses an optional picker list for RTL, leaving Down/Up alone (%s)",
+    async (withList) => {
+      // Logical direction: APG describes the horizontal pair as "next / previous",
+      // so it reverses with the writing direction. `dir="rtl"` is the authoring
+      // contract, but happy-dom does not resolve it into the computed style, so the
+      // direction is set inline instead.
+      await start();
+      const list = root().querySelector<HTMLElement>('[role="tablist"]') as HTMLElement;
+      if (withList) {
+        list.setAttribute("data-stimeo--carousel-target", "pickerList");
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      const directionElement = withList ? list : root();
+      directionElement.style.direction = "rtl";
+      pickers()[0]?.style.setProperty("direction", "ltr");
 
-    press(pickers()[0], "ArrowLeft"); // "next" under RTL
-    expect(document.activeElement).toBe(pickers()[1]);
+      press(pickers()[0], "ArrowLeft"); // "next" under RTL
+      expect(document.activeElement).toBe(pickers()[1]);
 
-    press(pickers()[1], "ArrowRight"); // "previous"
-    expect(document.activeElement).toBe(pickers()[0]);
+      press(pickers()[1], "ArrowRight"); // "previous"
+      expect(document.activeElement).toBe(pickers()[0]);
 
-    press(pickers()[0], "ArrowDown"); // the vertical pair carries no direction
-    expect(document.activeElement).toBe(pickers()[1]);
-  });
+      press(pickers()[0], "ArrowDown"); // the vertical pair carries no direction
+      expect(document.activeElement).toBe(pickers()[1]);
+
+      directionElement.style.direction = "ltr";
+      press(pickers()[1], "ArrowRight");
+      expect(document.activeElement).toBe(pickers()[2]);
+
+      if (withList) {
+        const replacement = list.cloneNode(true) as HTMLElement;
+        replacement.style.direction = "rtl";
+        list.replaceWith(replacement);
+        await vi.advanceTimersByTimeAsync(0);
+        press(pickers()[0], "ArrowLeft");
+        expect(document.activeElement).toBe(pickers()[1]);
+      }
+    },
+  );
 
   it("yields a picker key a descendant widget already consumed", async () => {
     // A composed widget that claims the key must not ALSO move the picker focus
@@ -514,18 +538,15 @@ describe("CarouselController", () => {
     await start();
     pickers()[0]?.focus();
     const inner = document.createElement("span");
+    inner.tabIndex = -1;
     pickers()[0]?.append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
 
-    const claimed = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    const notCanceled = inner.dispatchEvent(claimed);
+    const claimed = keyEvent("ArrowRight", { bubbles: true, cancelable: true });
+    const notCanceled = !pressKey(inner, claimed).defaultPrevented;
 
     expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
-    expect(document.activeElement).toBe(pickers()[0]);
+    expect(document.activeElement).toBe(inner);
     expect(selected()[0]).toBe("true");
   });
 
@@ -539,12 +560,9 @@ describe("CarouselController", () => {
     await vi.advanceTimersByTimeAsync(0);
     pickers()[0]?.focus();
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    stray.dispatchEvent(event);
+    const event = keyEvent("ArrowRight", { bubbles: true, cancelable: true });
+    // The unowned origin must leave the currently focused picker untouched.
+    typeKey(stray, event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(pickers()[0]);
@@ -631,17 +649,54 @@ describe("CarouselController", () => {
     // preventDefault().
     await start();
     pickers()[0]?.focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    pickers()[0]?.dispatchEvent(event);
+    const event = keyEvent("ArrowRight", { altKey: true, bubbles: true, cancelable: true });
+    pressKey(pickers()[0] as HTMLElement, event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(pickers()[0]);
     expect(selected()).toEqual(["true", "false", "false"]);
+  });
+
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("preserves a modified non-arrow key (%s, %s)", async (key, _modifier, init) => {
+    await start();
+    const current = pickers()[1];
+    if (!current) throw new Error("Expected middle picker");
+    click(current);
+    current.focus();
+    const element = root();
+    const events: Event[] = [];
+    for (const name of [
+      "stimeo--carousel:change",
+      "stimeo--carousel:play",
+      "stimeo--carousel:pause",
+      "stimeo--carousel:reconcile",
+    ]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = pressKey(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(selected()).toEqual(["false", "true", "false"]);
+    expect(states()).toEqual(["inactive", "active", "inactive"]);
+    expect(pressKey(current, key).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(pickers()[key === "Home" ? 0 : 2]);
+    expect(selected()).toEqual(["false", "true", "false"]);
+    expect(states()).toEqual(["inactive", "active", "inactive"]);
   });
 
   it("leaves a modified Home or End to the browser", async () => {
@@ -651,13 +706,8 @@ describe("CarouselController", () => {
     pickers()[0]?.focus();
 
     for (const key of ["Home", "End"]) {
-      const event = new KeyboardEvent("keydown", {
-        key,
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      pickers()[0]?.dispatchEvent(event);
+      const event = keyEvent(key, { ctrlKey: true, bubbles: true, cancelable: true });
+      pressKey(pickers()[0] as HTMLElement, event);
 
       expect(event.defaultPrevented).toBe(false);
       expect(document.activeElement).toBe(pickers()[0]);
@@ -683,8 +733,8 @@ describe("CarouselController", () => {
     await start();
     const keys = ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End"];
     const prevented = keys.map((key) => {
-      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-      pickers()[1]?.dispatchEvent(event);
+      const event = keyEvent(key, { bubbles: true, cancelable: true });
+      pressKey(pickers()[1] as HTMLElement, event);
       return event.defaultPrevented;
     });
     expect(prevented).toEqual([true, true, true, true, true, true]);
@@ -1452,8 +1502,8 @@ describe("CarouselController", () => {
     });
 
     it("lifts a suspension the reconnect read from a stale `:hover` once the pointer moves", async () => {
-      // `moveBefore` leaves `:hover` answering from before the move, and no mouseleave
-      // follows the node. The pointer's next movement is what tells the carousel it left.
+      // After a move `:hover` can still answer from before it, and no mouseleave reaches
+      // the moved node. The pointer's next movement is what tells the carousel it left.
       await startMovable(
         'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
       );
@@ -1621,20 +1671,20 @@ describe("CarouselController", () => {
   describe("play toggle labels", () => {
     /** A label pair authored for a carousel that is not rotating. */
     const stoppedPair = `
-        <span data-stimeo--carousel-target="onLabel" hidden>Pause</span>
-        <span data-stimeo--carousel-target="offLabel">Play</span>`;
+        <span aria-hidden="true" data-stimeo--carousel-target="onLabel" hidden>❚❚</span>
+        <span aria-hidden="true" data-stimeo--carousel-target="offLabel">▶</span>`;
     /** The same pair authored the other way round. */
     const rotatingPair = `
-        <span data-stimeo--carousel-target="onLabel">Pause</span>
-        <span data-stimeo--carousel-target="offLabel" hidden>Play</span>`;
+        <span aria-hidden="true" data-stimeo--carousel-target="onLabel">❚❚</span>
+        <span aria-hidden="true" data-stimeo--carousel-target="offLabel" hidden>▶</span>`;
     /** A pair with no authored visibility on either half. */
     const barePair = `
-        <span data-stimeo--carousel-target="onLabel">Pause</span>
-        <span data-stimeo--carousel-target="offLabel">Play</span>`;
+        <span aria-hidden="true" data-stimeo--carousel-target="onLabel">❚❚</span>
+        <span aria-hidden="true" data-stimeo--carousel-target="offLabel">▶</span>`;
 
     /** The default carousel with `inner` as the play toggle's content. */
     const toggleMarkup = (inner: string, attrs = "") =>
-      markup(attrs).replace(">Play</button>", `>${inner}</button>`);
+      markup(attrs).replace('<span aria-hidden="true">▶</span>', inner);
 
     /** The same carousel with a second play toggle, each carrying its own content. */
     const twoToggles = (first: string, second: string, attrs = "") =>
@@ -1704,12 +1754,12 @@ describe("CarouselController", () => {
     });
 
     it("leaves a toggle's lone half as the author wrote it", async () => {
-      // Hiding the only label a toggle has would take its whole accessible name
-      // with it, so a pair moves only where both halves sit inside the same toggle.
+      // A toggle's lone half keeps its authored visibility; reflection needs both
+      // halves inside the same toggle.
       await startWith(
         twoToggles(
           stoppedPair,
-          '<span data-stimeo--carousel-target="onLabel">Pause</span>',
+          '<span aria-hidden="true" data-stimeo--carousel-target="onLabel">❚❚</span>',
           'data-stimeo--carousel-interval-value="500"',
         ),
       );
@@ -1730,7 +1780,7 @@ describe("CarouselController", () => {
       await startWith(
         twoToggles(
           rotatingPair,
-          '<span data-stimeo--carousel-target="offLabel" hidden>Play</span>',
+          '<span aria-hidden="true" data-stimeo--carousel-target="offLabel" hidden>▶</span>',
           'data-stimeo--carousel-interval-value="500"',
         ),
       );
@@ -1755,7 +1805,7 @@ describe("CarouselController", () => {
       // callback is the only thing that can publish the rotation state on it.
       const late = document.createElement("button");
       late.type = "button";
-      late.textContent = "Play";
+      late.innerHTML = '<span aria-hidden="true">▶</span>';
       late.setAttribute("aria-label", "Autoplay (caption)");
       late.setAttribute("data-stimeo--carousel-target", "playToggle");
       playToggle().after(late);
@@ -1768,13 +1818,16 @@ describe("CarouselController", () => {
       // A half joining a connected toggle is a childList change, which the
       // state-attribute observer does not report: only the target callback does.
       await startWith(
-        toggleMarkup('<span data-stimeo--carousel-target="offLabel" hidden>Play</span>'),
+        toggleMarkup(
+          '<span aria-hidden="true" data-stimeo--carousel-target="offLabel" hidden>▶</span>',
+        ),
       );
       expect(pair()).toEqual([undefined, true]);
 
       const half = document.createElement("span");
       half.setAttribute("data-stimeo--carousel-target", "onLabel");
-      half.textContent = "Pause";
+      half.setAttribute("aria-hidden", "true");
+      half.textContent = "❚❚";
       playToggle().appendChild(half);
       await vi.advanceTimersByTimeAsync(0);
 
@@ -1782,13 +1835,16 @@ describe("CarouselController", () => {
     });
 
     it("reflects a pair completed by an off half that arrives after connect", async () => {
-      await startWith(toggleMarkup('<span data-stimeo--carousel-target="onLabel">Pause</span>'));
+      await startWith(
+        toggleMarkup('<span aria-hidden="true" data-stimeo--carousel-target="onLabel">❚❚</span>'),
+      );
       expect(pair()).toEqual([false, undefined]);
 
       const half = document.createElement("span");
       half.setAttribute("data-stimeo--carousel-target", "offLabel");
+      half.setAttribute("aria-hidden", "true");
       half.hidden = true;
-      half.textContent = "Play";
+      half.textContent = "▶";
       playToggle().appendChild(half);
       await vi.advanceTimersByTimeAsync(0);
 
@@ -1950,7 +2006,7 @@ describe("CarouselController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // Speech-order regression over the picker tablist: role, name, and selected
+  // Speech-order check over the picker tablist: role, name, and selected
   // state are announced in order so a lost role/state surfaces as a diff.
   it("announces the tablist pickers with roles and selected state", async () => {
     await startReal();
@@ -2062,9 +2118,7 @@ describe("CarouselController", () => {
       await start();
       const focus = vi.spyOn(pickers()[1] as HTMLElement, "focus");
 
-      pickers()[0]?.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
-      );
+      pressKey(pickers()[0] as HTMLElement, "ArrowRight", { bubbles: true, cancelable: false });
 
       expect(document.activeElement).toBe(pickers()[1]);
       expect(focus).toHaveBeenCalledTimes(1);
@@ -2456,7 +2510,7 @@ describe("CarouselController", () => {
       <section data-controller="stimeo--carousel" aria-roledescription="carousel"
                aria-label="Featured" ${attrs}>
         <button type="button" aria-label="Slide autoplay"
-                data-stimeo--carousel-target="playToggle">Play</button>
+                data-stimeo--carousel-target="playToggle"><span aria-hidden="true">▶</span></button>
         <div id="outer" data-stimeo--carousel-target="viewport" ${viewportAttrs}>
           <div id="track">
             <div role="group" data-stimeo--carousel-target="slide">One</div>

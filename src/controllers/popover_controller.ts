@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { AttributeLease } from "../utils/attribute_lease";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
 import { firstTabStop } from "../utils/focus_candidate";
+import { ListenerSet } from "../utils/listener_set";
 import { observeScrollDismiss } from "../utils/scroll_dismiss";
 import { type StateReason, stateReasonFor } from "../utils/state_reason";
 
@@ -101,27 +102,29 @@ export class PopoverController extends Controller<HTMLElement> {
   /** Whether state moves are reported: set once `connect()` settled the baseline. */
   #reporting = false;
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /** Starts closed and registers the standing dismissal listeners. */
   override connect(): void {
     this.#close("api");
-    document.addEventListener("click", this.#onOutsideClick, true);
-    this.element.addEventListener("focusout", this.#onFocusOut);
+    this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
+    this.#listeners.add(this.element, "focusout", this.#onFocusOut);
     this.#connected = true;
     this.#reporting = true;
   }
 
   /**
    * Removes every standing listener registered in {@link connect} plus any active
-   * dismiss-on-scroll observers. `removeEventListener` is a no-op when it was
-   * never added, so this is safe in the closed state too — no listener outlives
-   * the element after a Turbo navigation.
+   * dismiss-on-scroll observers. Releasing the set is a no-op for what it does not
+   * hold, so this is safe in the closed state too — no listener outlives the
+   * element after a Turbo navigation.
    */
   override disconnect(): void {
     this.#connected = false;
     this.#reporting = false;
     this.#release();
-    document.removeEventListener("click", this.#onOutsideClick, true);
-    this.element.removeEventListener("focusout", this.#onFocusOut);
+    this.#listeners.dispose();
   }
 
   /**

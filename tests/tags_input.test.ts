@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TagsInputController } from "../src/controllers/tags_input_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { press as keyboardPress, keyEvent } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
@@ -86,7 +87,7 @@ describe("TagsInputController", () => {
     );
   const type = (value: string, key: string) => {
     input().value = value;
-    input().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    keyboardPress(input(), key);
   };
 
   it.each([false, true])(
@@ -138,7 +139,7 @@ describe("TagsInputController", () => {
     }
   });
 
-  it("stops pending reports after a replacement from a announcement listener", async () => {
+  it("stops pending reports after a replacement from an announcement listener", async () => {
     await mount('data-stimeo--tags-input-announce-text-value="{value} added"');
     const seen: string[][] = [];
     root().addEventListener("stimeo--tags-input:change", (event) =>
@@ -223,26 +224,108 @@ describe("TagsInputController", () => {
     expect(seen).toEqual([]);
   });
 
-  it("reverses the horizontal arrows under RTL, in the input and across the chips", async () => {
-    // Logical direction: the chips are an ordered row, and the input
-    // sits at its logical end, so the key that reaches back into the chips
-    // reverses too. Both handlers read the same element on purpose.
+  it.each([
+    ["rtl", "ltr", "ArrowRight", "ArrowLeft"],
+    ["ltr", "rtl", "ArrowLeft", "ArrowRight"],
+  ])(
+    "uses the %s tags row when the root and focused controls are %s",
+    async (direction, opposite, previous, next) => {
+      await mount();
+      type("React", "Enter");
+      type("Rails", "Enter");
+      const row = root().querySelector<HTMLElement>(
+        "[data-stimeo--tags-input-target='tags']",
+      ) as HTMLElement;
+      row.style.direction = direction;
+      root().style.direction = opposite;
+      input().style.direction = opposite;
+      for (const button of buttons()) button.style.direction = opposite;
+      expect(buttons()).toHaveLength(2);
+
+      input().value = "editing";
+      expect(keyboardPress(input(), previous).defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(input());
+      input().value = "";
+      expect(keyboardPress(input(), next).defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(input());
+      expect(keyboardPress(input(), previous).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(buttons()[1]);
+      expect(buttons().map((button) => button.tabIndex)).toEqual([-1, 0]);
+
+      expect(keyboardPress(buttons()[1] as HTMLElement, previous).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(buttons()[0]);
+      expect(keyboardPress(buttons()[0] as HTMLElement, previous).defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(buttons()[0]);
+      expect(keyboardPress(buttons()[0] as HTMLElement, next).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(buttons()[1]);
+      expect(keyboardPress(buttons()[1] as HTMLElement, next).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(input());
+    },
+  );
+
+  it("reads live tags direction for both chip keys and the empty-input boundary", async () => {
     await mount();
-    const root = document.querySelector("[data-controller='stimeo--tags-input']") as HTMLElement;
-    root.style.direction = "rtl";
     type("React", "Enter");
     type("Rails", "Enter");
-    expect(buttons().length).toBe(2);
+    const row = root().querySelector<HTMLElement>(
+      "[data-stimeo--tags-input-target='tags']",
+    ) as HTMLElement;
+    row.style.direction = "ltr";
+    root().style.direction = "ltr";
     input().value = "";
 
-    input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    expect(document.activeElement).toBe(buttons()[1]); // reaches back into the chips
+    keyboardPress(input(), "ArrowLeft");
+    expect(document.activeElement).toBe(buttons()[1]);
+    row.style.direction = "rtl";
+    keyboardPress(buttons()[1] as HTMLElement, "ArrowRight");
+    expect(document.activeElement).toBe(buttons()[0]);
+    keyboardPress(buttons()[1] as HTMLElement, "ArrowLeft");
+    expect(document.activeElement).toBe(input());
+    keyboardPress(input(), "ArrowRight");
+    expect(document.activeElement).toBe(buttons()[1]);
+  });
 
-    buttons()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    expect(document.activeElement).toBe(buttons()[0]); // "previous chip"
+  it("reads the replacement tags target's direction at the next input or chip operation", async () => {
+    await mount();
+    type("React", "Enter");
+    type("Rails", "Enter");
+    const old = root().querySelector<HTMLElement>(
+      "[data-stimeo--tags-input-target='tags']",
+    ) as HTMLElement;
+    old.style.direction = "ltr";
+    const replacement = old.cloneNode(true) as HTMLElement;
+    replacement.style.direction = "rtl";
+    old.replaceWith(replacement);
+    input().value = "";
 
-    buttons()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    expect(document.activeElement).toBe(buttons()[0]); // guarded at the first chip
+    keyboardPress(input(), "ArrowRight");
+    expect(document.activeElement).toBe(buttons()[1]);
+    const instance = controller();
+    instance.tagsTargetConnected(replacement);
+    instance.tagsTargetDisconnected(old);
+    await tick();
+
+    keyboardPress(buttons()[1] as HTMLElement, "ArrowRight");
+    expect(document.activeElement).toBe(buttons()[0]);
+    keyboardPress(buttons()[1] as HTMLElement, "ArrowLeft");
+    expect(document.activeElement).toBe(input());
+  });
+
+  it("uses the root direction for the empty-input boundary while the tags target is absent", async () => {
+    await mount();
+    type("React", "Enter");
+    type("Rails", "Enter");
+    const row = root().querySelector<HTMLElement>(
+      "[data-stimeo--tags-input-target='tags']",
+    ) as HTMLElement;
+    row.style.direction = "ltr";
+    root().style.direction = "rtl";
+    input().style.direction = "ltr";
+    row.removeAttribute("data-stimeo--tags-input-target");
+    input().value = "";
+
+    expect(keyboardPress(input(), "ArrowRight").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(row.querySelectorAll("button")[1]);
   });
 
   it("commits a tag on Enter and clears the input", async () => {
@@ -404,9 +487,9 @@ describe("TagsInputController", () => {
   it.each(["Enter", ","])("consumes the %j that commits a tag", async (key) => {
     await mount();
     input().value = "Vue";
-    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    const event = keyEvent(key);
 
-    input().dispatchEvent(event);
+    keyboardPress(input(), event);
 
     expect(event.defaultPrevented).toBe(true);
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["Vue"]);
@@ -417,9 +500,7 @@ describe("TagsInputController", () => {
     input().value = "ぎじゅつ";
     // The Enter that confirms an IME candidate carries isComposing=true; it must
     // only confirm the IME, never commit the tag.
-    input().dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }),
-    );
+    keyboardPress(input(), "Enter", { isComposing: true });
     expect(tags()).toHaveLength(0);
     expect(input().value).toBe("ぎじゅつ");
     // A subsequent real Enter (composition finished) commits it.
@@ -431,7 +512,7 @@ describe("TagsInputController", () => {
     await mount();
     input().value = "やまだ";
     input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    keyboardPress(input(), "Enter");
     expect(tags()).toHaveLength(0);
 
     input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
@@ -446,7 +527,7 @@ describe("TagsInputController", () => {
 
     controller().disconnect();
     controller().connect();
-    input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    keyboardPress(input(), "Enter");
 
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["日本語"]);
   });
@@ -458,11 +539,11 @@ describe("TagsInputController", () => {
     input().value = "日本語";
     input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
 
-    input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    keyboardPress(input(), "Enter");
     expect(tags()).toHaveLength(0);
 
     input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
-    input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    keyboardPress(input(), "Enter");
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["日本語"]);
   });
 
@@ -476,11 +557,11 @@ describe("TagsInputController", () => {
     replacement.value = "日本語";
     replacement.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
 
-    controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+    controller().onKeydown(keyEvent("Enter"));
     expect(tags()).toHaveLength(0);
 
     replacement.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
-    controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+    controller().onKeydown(keyEvent("Enter"));
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["日本語"]);
   });
 
@@ -495,7 +576,7 @@ describe("TagsInputController", () => {
     controller().inputTargetConnected(replacement);
     replacement.value = "React";
 
-    controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+    controller().onKeydown(keyEvent("Enter"));
 
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["React"]);
   });
@@ -630,7 +711,7 @@ describe("TagsInputController", () => {
     type("Vue", "Enter");
     input().value = "";
     input().focus();
-    input().dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+    keyboardPress(input(), "Backspace");
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["React"]);
     expect(document.activeElement).toBe(input());
 
@@ -646,7 +727,7 @@ describe("TagsInputController", () => {
     input().value = "";
     input().focus();
 
-    input().dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+    keyboardPress(input(), "Backspace");
 
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["React"]);
     expect(document.activeElement).toBe(input());
@@ -656,13 +737,9 @@ describe("TagsInputController", () => {
     await mount();
     type("React", "Enter");
     input().value = "";
-    const event = new KeyboardEvent("keydown", {
-      key: "Backspace",
-      bubbles: true,
-      cancelable: true,
-    });
+    const event = keyEvent("Backspace");
 
-    input().dispatchEvent(event);
+    keyboardPress(input(), event);
 
     expect(event.defaultPrevented).toBe(true);
     expect(tags()).toEqual([]);
@@ -675,7 +752,7 @@ describe("TagsInputController", () => {
     expect(root().hasAttribute("data-stimeo--tags-input-full")).toBe(true);
 
     input().focus();
-    input().dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+    keyboardPress(input(), "Backspace");
 
     expect(root().hasAttribute("data-stimeo--tags-input-full")).toBe(false);
   });
@@ -707,13 +784,13 @@ describe("TagsInputController", () => {
     type("React", "Enter");
     type("Vue", "Enter");
     input().value = "";
-    input().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    keyboardPress(input(), "ArrowLeft");
     expect(document.activeElement).toBe(buttons()[1]); // last chip (Vue)
-    buttons()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    keyboardPress(buttons()[1] as HTMLElement, "ArrowLeft");
     expect(document.activeElement).toBe(buttons()[0]);
-    buttons()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    keyboardPress(buttons()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(buttons()[1]);
-    buttons()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    keyboardPress(buttons()[1] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(input()); // past the end -> input
   });
 
@@ -721,13 +798,9 @@ describe("TagsInputController", () => {
     await mount();
     type("React", "Enter");
     input().value = "";
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowLeft",
-      bubbles: true,
-      cancelable: true,
-    });
+    const event = keyEvent("ArrowLeft");
 
-    input().dispatchEvent(event);
+    keyboardPress(input(), event);
 
     expect(event.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(buttons()[0]);
@@ -742,13 +815,8 @@ describe("TagsInputController", () => {
     input().value = "";
     input().focus();
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowLeft",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    input().dispatchEvent(event);
+    const event = keyEvent("ArrowLeft", { altKey: true });
+    keyboardPress(input(), event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(input());
@@ -764,8 +832,8 @@ describe("TagsInputController", () => {
     root.addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
     input().value = "React";
 
-    const claimed = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
-    const notCanceled = input().dispatchEvent(claimed);
+    const claimed = keyEvent("Enter");
+    const notCanceled = !keyboardPress(input(), claimed).defaultPrevented;
 
     expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
     expect(tags()).toHaveLength(0); // no tag committed
@@ -780,13 +848,8 @@ describe("TagsInputController", () => {
     const first = buttons()[0] as HTMLButtonElement;
     first.focus();
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    first.dispatchEvent(event);
+    const event = keyEvent("ArrowRight", { altKey: true });
+    keyboardPress(first, event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(first);
@@ -800,26 +863,23 @@ describe("TagsInputController", () => {
     type("React", "Enter");
     type("Vue", "Enter");
     const inner = document.createElement("span");
+    inner.tabIndex = 0;
     buttons()[0]?.append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
     buttons()[0]?.focus();
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    const notCanceled = inner.dispatchEvent(event);
+    const event = keyEvent("ArrowRight");
+    const notCanceled = !keyboardPress(inner, event).defaultPrevented;
 
     expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
-    expect(document.activeElement).toBe(buttons()[0]);
+    expect(document.activeElement).toBe(inner);
   });
 
   it("deletes the focused chip with Delete", async () => {
     await mount();
     type("React", "Enter");
     type("Vue", "Enter");
-    buttons()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+    keyboardPress(buttons()[0] as HTMLElement, "Delete");
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["Vue"]);
   });
 
@@ -937,7 +997,7 @@ describe("TagsInputController", () => {
     row.removeAttribute("data-stimeo--tags-input-target");
     controller().tagsTargetDisconnected(row);
     remove.click();
-    remove.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+    keyboardPress(remove, "Delete");
 
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["React"]);
   });
@@ -1035,9 +1095,7 @@ describe("TagsInputController", () => {
     detached.remove();
     await tick();
 
-    expect(() =>
-      controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" })),
-    ).not.toThrow();
+    expect(() => controller().onKeydown(keyEvent("Enter"))).not.toThrow();
     expect(tags()).toEqual([]);
   });
 
@@ -1053,9 +1111,7 @@ describe("TagsInputController", () => {
     type("React", "Enter");
 
     clear.click();
-    clear.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true }),
-    );
+    keyboardPress(clear, "Delete");
 
     expect(tags().map((tag) => tag.dataset.value)).toEqual(["React"]);
   });
@@ -1080,9 +1136,7 @@ describe("TagsInputController", () => {
     ) as HTMLButtonElement;
 
     info.click();
-    info.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true }),
-    );
+    keyboardPress(info, "Delete");
     expect(tags().map((item) => item.dataset.value)).toEqual(["React"]);
 
     remove.click();
@@ -1234,7 +1288,7 @@ ${selfRemove}
       type("Rails", "Enter");
       expect(chips()).toHaveLength(1);
 
-      chips()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+      keyboardPress(chips()[0] as HTMLElement, "Delete");
 
       expect(chips()).toHaveLength(0);
     });

@@ -1,9 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
-import { isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
+import { setAttributeIfChanged } from "../utils/attribute_write";
 import { DetachGate } from "../utils/detach_gate";
 import { ownerIndex } from "../utils/event_owner";
+import { HoverRecheck } from "../utils/hover_recheck";
 import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { MoveCounter } from "../utils/move_counter";
@@ -40,8 +42,8 @@ const OBSERVED_ATTRIBUTES = ["aria-selected", "data-state", "hidden"];
  *            data-stimeo--carousel-interval-value="5000"
  *            data-stimeo--carousel-loop-value="true">
  *     <button aria-label="Slide autoplay" data-stimeo--carousel-target="playToggle">
- *       <span aria-hidden="true" data-stimeo--carousel-target="onLabel" hidden>Pause</span>
- *       <span aria-hidden="true" data-stimeo--carousel-target="offLabel">Play</span>
+ *       <span aria-hidden="true" data-stimeo--carousel-target="onLabel" hidden>❚❚</span>
+ *       <span aria-hidden="true" data-stimeo--carousel-target="offLabel">▶</span>
  *     </button>
  *     <div data-stimeo--carousel-target="viewport">
  *       <div role="tabpanel" data-stimeo--carousel-target="slide">…</div>
@@ -49,7 +51,7 @@ const OBSERVED_ATTRIBUTES = ["aria-selected", "data-state", "hidden"];
  *     </div>
  *     <button data-stimeo--carousel-target="prev">‹</button>
  *     <button data-stimeo--carousel-target="next">›</button>
- *     <div role="tablist">
+ *     <div role="tablist" data-stimeo--carousel-target="pickerList">
  *       <button role="tab" data-stimeo--carousel-target="picker"></button>
  *     </div>
  *   </section>
@@ -68,7 +70,7 @@ const OBSERVED_ATTRIBUTES = ["aria-selected", "data-state", "hidden"];
  * **The controller owns its own wiring.** Clicks, picker keys, hover, and focus
  * are delegated from the controller element, so no `data-action` is required and
  * a target added at runtime works the moment it appears. Explicit `data-action`
- * bindings to the declared actions still work and coexist with the delegated
+ * bindings to the declared actions also work and coexist with the delegated
  * path: the binding runs first and marks the event, and the delegated listener
  * stands down, so one interaction is never handled twice.
  *
@@ -95,7 +97,9 @@ const OBSERVED_ATTRIBUTES = ["aria-selected", "data-state", "hidden"];
  * document hears that end as `pause`. An in-page move reconnects the same
  * instance and keeps the run: no edge, no restarted interval. Picker arrow keys,
  * `Home`, and `End` move focus only (manual activation); slide changes never steal focus
- * from the control the user operated. A slide change the user drove — including an
+ * from the control the user operated. Picker arrow keys follow the writing
+ * direction of the `pickerList` target, or of the controller element without one.
+ * A slide change the user drove — including an
  * autoplay tick they started — is reported as `stimeo--carousel:change` with
  * `{ index, total, reason }`. `stimeo--carousel:reconcile` carries `{ index, total }`
  * when the controller re-derives the position itself, whether a target came or went or
@@ -114,6 +118,7 @@ export class CarouselController extends Controller<HTMLElement> {
     "prev",
     "next",
     "picker",
+    "pickerList",
     "playToggle",
     "onLabel",
     "offLabel",
@@ -140,6 +145,8 @@ export class CarouselController extends Controller<HTMLElement> {
 
   declare readonly slideTargets: HTMLElement[];
   declare readonly pickerTargets: HTMLElement[];
+  declare readonly pickerListTarget: HTMLElement;
+  declare readonly hasPickerListTarget: boolean;
   declare readonly viewportTarget: HTMLElement;
   declare readonly viewportTargets: HTMLElement[];
   declare readonly hasViewportTarget: boolean;
@@ -174,7 +181,10 @@ export class CarouselController extends Controller<HTMLElement> {
   /** Tells an in-page move, which keeps the rotation, from a real detach. */
   readonly #gate = new DetachGate();
   /** The next pointer movement, listened for while a pointer suspension waits on it. */
-  readonly #pointer = new ListenerSet();
+  readonly #pointer = new HoverRecheck(this.element.ownerDocument, () => {
+    this.#pointerPaused = false;
+    this.#syncTimer();
+  });
   /**
    * Events an authored action binding already took. The delegated listener runs
    * later — it sits on the controller element, above every control — so it can
@@ -219,6 +229,9 @@ export class CarouselController extends Controller<HTMLElement> {
     this.#syncTimer();
   };
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /**
    * Renders the initial slide, wires the delegated listeners, and starts autoplay
    * when requested.
@@ -237,7 +250,7 @@ export class CarouselController extends Controller<HTMLElement> {
     const moved = this.#gate.pending;
     this.#gate.cancel();
     this.#pointerPaused = (moved && this.#pointerPaused) || this.element.matches(":hover");
-    if (this.#pointerPaused) this.#awaitPointer();
+    if (this.#pointerPaused) this.#pointer.wait(this.element);
     this.#focusPaused = this.element.contains(document.activeElement);
     this.#hiddenPaused = document.visibilityState === "hidden";
     this.#motionHold = prefersReducedMotion();
@@ -248,13 +261,13 @@ export class CarouselController extends Controller<HTMLElement> {
     this.#connected = true;
     this.#reconcileTargets.observe(this.element);
 
-    this.element.addEventListener("click", this.#onClick);
-    this.element.addEventListener("keydown", this.#onKeydown);
-    this.element.addEventListener("focusin", this.#onFocusin);
-    this.element.addEventListener("focusout", this.#onFocusout);
-    this.element.addEventListener("mouseenter", this.#onMouseenter);
-    this.element.addEventListener("mouseleave", this.#onMouseleave);
-    document.addEventListener("visibilitychange", this.#onVisibilityChange);
+    this.#listeners.add(this.element, "click", this.#onClick);
+    this.#listeners.add(this.element, "keydown", this.#onKeydown);
+    this.#listeners.add(this.element, "focusin", this.#onFocusin);
+    this.#listeners.add(this.element, "focusout", this.#onFocusout);
+    this.#listeners.add(this.element, "mouseenter", this.#onMouseenter);
+    this.#listeners.add(this.element, "mouseleave", this.#onMouseleave);
+    this.#listeners.add(document, "visibilitychange", this.#onVisibilityChange);
     this.#observer = new MutationObserver(this.#onAttributeMutations);
     this.#observer.observe(this.element, {
       subtree: true,
@@ -272,13 +285,7 @@ export class CarouselController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#connected = false;
     this.#pointer.dispose();
-    this.element.removeEventListener("click", this.#onClick);
-    this.element.removeEventListener("keydown", this.#onKeydown);
-    this.element.removeEventListener("focusin", this.#onFocusin);
-    this.element.removeEventListener("focusout", this.#onFocusout);
-    this.element.removeEventListener("mouseenter", this.#onMouseenter);
-    this.element.removeEventListener("mouseleave", this.#onMouseleave);
-    document.removeEventListener("visibilitychange", this.#onVisibilityChange);
+    this.#listeners.dispose();
     this.#observer?.disconnect();
     this.#observer = null;
     this.#reconcileTargets.disconnect();
@@ -531,25 +538,6 @@ export class CarouselController extends Controller<HTMLElement> {
       this.#syncTimer();
     });
 
-  /**
-   * Reads `:hover` once the pointer has moved, when the answer is current, and lifts
-   * the pointer suspension if the pointer is not over the carousel. Listens once.
-   */
-  readonly #onPointerMove = (): void => {
-    this.#pointer.dispose();
-    if (this.element.matches(":hover")) return;
-    this.#pointerPaused = false;
-    this.#syncTimer();
-  };
-
-  /** Leaves the pointer suspension to be confirmed or lifted on the next pointer movement. */
-  #awaitPointer(): void {
-    this.#pointer.add(document, "pointermove", this.#onPointerMove, {
-      capture: true,
-      passive: true,
-    });
-  }
-
   /** Records the pointer suspension; a newer answer ends any wait on the next movement. */
   #setPointerPaused(paused: boolean): void {
     this.#pointer.dispose();
@@ -560,10 +548,8 @@ export class CarouselController extends Controller<HTMLElement> {
    * Schedules one reconciliation when a state attribute is rewritten in place —
    * the only shape of change no target callback reports.
    *
-   * The filter is the `attributeFilter` alone: those three attributes belong to
-   * the slides and pickers, and a coalesced pass over an unrelated one costs a
-   * repaint that writes nothing. Narrowing further here would add a branch no
-   * test could distinguish.
+   * The filter is the `attributeFilter` alone: a pass over an attribute that is
+   * not a slide's or a picker's state costs a repaint that writes nothing.
    */
   readonly #onAttributeMutations = (): void => {
     this.#reconcileTargets.schedule();
@@ -622,19 +608,22 @@ export class CarouselController extends Controller<HTMLElement> {
       case "ArrowLeft":
       case "ArrowUp": {
         event.preventDefault();
-        const step = logicalArrowStep(event.key, this.element);
+        const step = logicalArrowStep(
+          event.key,
+          this.hasPickerListTarget ? this.pickerListTarget : this.element,
+        );
         this.#roving.setActive(rovingMove(current, length, step, "wrap"), { focus: true });
         return;
       }
       // A chorded Home/End is a document-level shortcut (`Control+Home` scrolls
       // the page) that belongs to the browser, exactly as a chorded arrow does.
       case "Home":
-        if (hasModifier(event)) return;
+        if (hasModifierChord(event)) return;
         event.preventDefault();
         this.#roving.setActive(0, { focus: true });
         return;
       case "End":
-        if (hasModifier(event)) return;
+        if (hasModifierChord(event)) return;
         event.preventDefault();
         this.#roving.setActive(length - 1, { focus: true });
         return;
@@ -884,17 +873,7 @@ function isFocusEvent(event?: Event): event is FocusEvent {
   return event?.type.startsWith("focus") === true;
 }
 
-/** Whether a key arrived with a modifier that makes it the browser's shortcut. */
-function hasModifier(event: KeyboardEvent): boolean {
-  return event.altKey || event.ctrlKey || event.metaKey || event.shiftKey;
-}
-
 /** Whether `node` is one of `elements` or sits inside one. */
 function hits(elements: readonly HTMLElement[], node: EventTarget | null): boolean {
   return ownerIndex(elements, node) !== -1;
-}
-
-/** Writes an attribute only on a real transition, so an observer sees no self-echo. */
-function setAttributeIfChanged(element: Element, name: string, value: string): void {
-  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
 }

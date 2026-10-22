@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { KeyedTimers } from "../utils/keyed_timers";
+import { ListenerSet } from "../utils/listener_set";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -24,19 +25,6 @@ const DEFAULT_TIMEOUT = 3000;
 const DEFAULT_THROTTLE = 2000;
 
 /**
- * Fills `%{token}` placeholders in a status template, in one pass.
- *
- * The values come off the wire — another client's display name — so they must never
- * reach a replacement *string*, where `$&`, `` $` ``, `$'` and `$$` expand into the
- * template's own text. A single pass also stops a name that happens to contain a token
- * from being re-substituted by a later one. Every occurrence is filled; a token this
- * call has no value for is left as authored, which keeps a typo visible instead of
- * blanking the word.
- */
-const fillTokens = (template: string, values: Record<string, string>): string =>
-  template.replace(/%\{(name|names|count)\}/g, (match, token: string) => values[token] ?? match);
-
-/**
  * Headless **typing indicator** — a *server-bound* behavior: a controller whose
  * state lives on the server stream, not in client memory. Typing in the composer
  * throttle-broadcasts a `typing` signal over an Action Cable channel; received
@@ -54,7 +42,7 @@ const fillTokens = (template: string, values: Record<string, string>): string =>
  *        data-stimeo--typing-indicator-announce-one-text-value="{name} is typing">
  *     <textarea data-stimeo--typing-indicator-target="input"></textarea>
  *     <p data-stimeo--typing-indicator-target="status"
- *        data-one="%{name} is typing…" data-many="%{names} are typing…"></p>
+ *        data-one="{name} is typing…" data-many="{names} are typing…"></p>
  *   </div>
  *
  * Server contract (a trivial rebroadcast channel):
@@ -75,8 +63,8 @@ const fillTokens = (template: string, values: Record<string, string>): string =>
  * @remarks
  * Behavior only — the indicator's look is the consumer's CSS, keyed off the
  * `data-typing` hook; the copy is localizable through the `data-one` /
- * `data-many` templates (`%{name}` / `%{names}` / `%{count}`, terse English
- * fallback — the same channel design as `stimeo--sortable`). The own echo is
+ * `data-many` templates (`{name}` / `{names}` / `{count}`), with terse English
+ * as the fallback. The own echo is
  * dropped by comparing the broadcast `name` against `name` (a same-name guard,
  * not authentication — identity belongs to the server). Sending tracks the full
  * subscription lifecycle (via the shared confirmation-aware subscription):
@@ -163,6 +151,8 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
    * the status is teardown's to leave empty.
    */
   #connected = false;
+  /** The delegated input listener of one connection. */
+  readonly #listeners = new ListenerSet();
 
   /** Moves the subscription to the declared channel. */
   channelValueChanged(): void {
@@ -216,7 +206,7 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
 
     // Delegated on the container so the composer needs no per-input data-action
     // (and swapped/appended inputs keep working).
-    this.element.addEventListener("input", this.#onInput);
+    this.#listeners.add(this.element, "input", this.#onInput);
     this.#follow.activate();
     this.#open();
   }
@@ -224,7 +214,7 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#connected = false;
     this.#follow.cancel();
-    this.element.removeEventListener("input", this.#onInput);
+    this.#listeners.dispose();
     this.#close();
     this.#reset();
   }
@@ -405,7 +395,7 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
 
   /**
    * Builds the status copy. Localizable through `data-one` / `data-many`
-   * templates on the status target (`%{name}` / `%{names}` / `%{count}`); terse
+   * templates on the status target (`{name}` / `{names}` / `{count}`); terse
    * English is the fallback.
    */
   #message(names: string[]): string {
@@ -414,11 +404,11 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
     if (names.length === 1) {
       const template = this.statusTarget.dataset.one;
       const name = names[0] ?? "";
-      return template ? fillTokens(template, { name }) : `${name} is typing…`;
+      return template ? fillTemplate(template, { name }) : `${name} is typing…`;
     }
     const template = this.statusTarget.dataset.many;
     return template
-      ? fillTokens(template, { names: joined, count: String(names.length) })
+      ? fillTemplate(template, { names: joined, count: names.length })
       : `${joined} are typing…`;
   }
   /** Current `timeout` declaration resolved against its numeric contract. */

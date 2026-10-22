@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  gridDirectionElement,
   hasModifierChord,
   isReservedArrowChord,
   logicalArrowKey,
   logicalArrowStep,
 } from "../../src/utils/arrow_step";
+import { keyEvent } from "../helpers/keyboard";
 
 /**
  * Tests for the logical-direction helpers.
@@ -95,9 +97,42 @@ describe("logicalArrowKey", () => {
   });
 });
 
+describe("gridDirectionElement", () => {
+  const build = (markup: string) => {
+    document.body.innerHTML = markup;
+    const root = document.getElementById("root") as HTMLElement;
+    const grid = document.getElementById("grid") as HTMLElement;
+    return { root, grid };
+  };
+
+  it("returns the table that holds a row-group grid inside the root", () => {
+    const { root, grid } = build(
+      '<div id="root"><table id="table"><tbody id="grid"></tbody></table></div>',
+    );
+    expect(gridDirectionElement(grid, root)).toBe(document.getElementById("table"));
+  });
+
+  it("returns the grid itself when it is the table", () => {
+    const { root, grid } = build('<div id="root"><table id="grid"></table></div>');
+    expect(gridDirectionElement(grid, root)?.id).toBe("grid");
+  });
+
+  it("returns the grid when no table holds it", () => {
+    const { root, grid } = build('<div id="root"><div id="grid" role="grid"></div></div>');
+    expect(gridDirectionElement(grid, root)).toBe(grid);
+  });
+
+  it("returns the grid when the holding table lies outside the root", () => {
+    const { root, grid } = build(
+      '<table><tbody><tr><td><div id="root"><div id="grid" role="grid"></div></div></td></tr></tbody></table>',
+    );
+    expect(gridDirectionElement(grid, root)).toBe(grid);
+  });
+});
+
 describe("isReservedArrowChord", () => {
   const chord = (key: string, modifiers: Partial<KeyboardEventInit> = {}) =>
-    new KeyboardEvent("keydown", { key, ...modifiers });
+    keyEvent(key, modifiers);
 
   it("answers false for a bare arrow", () => {
     expect(isReservedArrowChord(chord("ArrowRight"))).toBe(false);
@@ -135,21 +170,20 @@ describe("isReservedArrowChord", () => {
   });
 
   describe("hasModifierChord", () => {
-    it("reserves a press carrying any single modifier", () => {
+    it("reports a press carrying any single modifier", () => {
       expect(hasModifierChord(chord("Home", { altKey: true }))).toBe(true);
       expect(hasModifierChord(chord("Home", { ctrlKey: true }))).toBe(true);
       expect(hasModifierChord(chord("End", { metaKey: true }))).toBe(true);
       expect(hasModifierChord(chord("End", { shiftKey: true }))).toBe(true);
     });
 
-    it("leaves a bare press to the widget", () => {
+    it("reports no modifier on a bare press", () => {
       expect(hasModifierChord(chord("Home"))).toBe(false);
       expect(hasModifierChord(chord("End"))).toBe(false);
     });
 
     it("answers for any key, unlike the arrow-only reservation", () => {
-      // The two predicates split the keyboard: arrows go to the one with the
-      // allow list, everything else to this one.
+      // Modifier presence and arrow reservation are separate from caller-owned key bindings.
       const press = chord("Home", { ctrlKey: true });
       expect(isReservedArrowChord(press)).toBe(false);
       expect(hasModifierChord(press)).toBe(true);

@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
-import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { setAttributeIfChanged } from "../utils/attribute_write";
 import { commitField, writeField } from "../utils/field_mirror";
 import { isRtl } from "../utils/logical_scroll";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
@@ -89,7 +90,8 @@ const FRACTION_PROPERTY = "--stimeo--slider-fraction";
  * The fraction is a value ratio, not a position, so only the consumer knows
  * whether their track mirrors under RTL. Set `logicalTrack` to declare that it
  * does: the pointer mapping and the horizontal arrow pair then follow the
- * writing direction. Left unset, nothing here reads `direction`.
+ * `track`'s writing direction (the root's while no `track` target is present).
+ * Left unset, nothing here reads `direction`.
  */
 export class SliderController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
@@ -140,9 +142,9 @@ export class SliderController extends Controller<HTMLElement> {
   /** Collapses a morph that swaps several render Values into one repaint. */
   readonly #repaint = new MorphRenderWatcher(() => this.#render());
 
-  /** Whether the consumer declared a mirroring track and the direction mirrors it. */
-  get #mirrored(): boolean {
-    return this.logicalTrackValue && isRtl(this.element);
+  /** The current track owns direction; incomplete markup falls back to the root. */
+  get #directionElement(): HTMLElement {
+    return this.hasTrackTarget ? this.trackTarget : this.element;
   }
 
   /**
@@ -219,13 +221,23 @@ export class SliderController extends Controller<HTMLElement> {
   /** Handles keyboard stepping per the APG slider model. */
   onKeydown(event: KeyboardEvent): void {
     if (isReservedArrowChord(event)) return;
+    if (
+      (event.key === "Home" ||
+        event.key === "End" ||
+        event.key === "PageUp" ||
+        event.key === "PageDown") &&
+      hasModifierChord(event)
+    )
+      return;
     let next: number | null = null;
     // Stepping snaps the declaration onto the value it publishes before moving.
     const declared = this.#safeValue;
     const range = this.#steppedRange;
     // On a mirrored track the greater value sits at the visual left, so the
     // horizontal pair trades places; the vertical pair passes through.
-    switch (this.#mirrored ? logicalArrowKey(event.key, this.element) : event.key) {
+    switch (
+      this.logicalTrackValue ? logicalArrowKey(event.key, this.#directionElement) : event.key
+    ) {
       case "ArrowRight":
       case "ArrowUp":
         next = stepSteppedValue(declared, 1, range);
@@ -261,7 +273,7 @@ export class SliderController extends Controller<HTMLElement> {
     // Resolve the direction once for the whole gesture: reading it per move
     // would query computed style on every frame, and a drag that flipped
     // mid-gesture would be incoherent anyway.
-    const mirrored = this.#mirrored;
+    const mirrored = this.logicalTrackValue && isRtl(track);
     const value = this.#valueFromClientX(event.clientX, mirrored, track);
     if (value === null) return;
     event.preventDefault();
@@ -357,7 +369,7 @@ export class SliderController extends Controller<HTMLElement> {
       "aria-valuenow": String(value),
     };
     for (const [name, next] of Object.entries(attributes)) {
-      if (thumb.getAttribute(name) !== next) thumb.setAttribute(name, next);
+      setAttributeIfChanged(thumb, name, next);
     }
   }
 

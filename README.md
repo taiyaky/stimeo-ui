@@ -15,9 +15,9 @@
 owns the look entirely.
 
 - Lean by design: the **core** needs only `@hotwired/stimulus` at runtime (kept
-  external in the build). The opt-in `stimeo-ui/positioning` module is the one
-  exception — it uses `@floating-ui/dom` (an optional **peer dependency**; see the
-  Peer dependencies note below).
+  external in the build). Two opt-in subpaths each add one optional **peer
+  dependency**: `stimeo-ui/positioning` (`@floating-ui/dom`) and `stimeo-ui/cable`
+  (`@rails/actioncable`); see the Peer dependencies note below.
 - Accessibility first: every controller follows the relevant WAI-ARIA APG pattern
   and the related WCAG 2.2 AA criteria.
 - Public controller identifiers use the `stimeo--` namespace (e.g.
@@ -36,8 +36,12 @@ bin/rails generate stimeo:install
 ```
 
 The generator vendors the prebuilt JS into `vendor/javascript/stimeo/`, pins
-`stimeo-ui` in `config/importmap.rb`, and registers all controllers with your
-Stimulus application. Then drive components from HTML alone:
+`stimeo-ui` in `config/importmap.rb`, and registers the core controllers with your
+Stimulus application (`app/javascript/controllers/stimeo.js`). It writes the opt-in
+`stimeo-ui/positioning` and `stimeo-ui/cable` entry points into those two files
+commented out; to enable one, uncomment its lines. The cable lines include the pin
+for its `@rails/actioncable` peer; positioning also needs a pin for
+`@floating-ui/dom`. Then drive components from HTML alone:
 
 ```erb
 <div data-controller="stimeo--dropdown">
@@ -58,8 +62,11 @@ import { Application } from "@hotwired/stimulus";
 import { registerStimeo } from "stimeo-ui";
 
 const application = Application.start();
-registerStimeo(application); // registers every stimeo--* controller
+registerStimeo(application); // registers every controller of the core entry point
 ```
+
+The opt-in `stimeo-ui/positioning` and `stimeo-ui/cable` entry points register
+theirs with `registerPositioning` / `registerCable`.
 
 Need only a few controllers? Import them individually from
 `stimeo-ui/controllers/*` and register them under your own identifiers. Each
@@ -73,7 +80,8 @@ and peer departure decisions; generated ARIA ids stay distinct across copies too
 
 - **Peer dependencies:** `@hotwired/stimulus` (always), `@floating-ui/dom` (only
   if you use the opt-in `stimeo-ui/positioning` module — tooltips, popovers, etc.
-  work without it via the default flow layout).
+  work without it via the default flow layout), and `@rails/actioncable` (only if
+  you use the opt-in `stimeo-ui/cable` module).
 - **No CSS is shipped.** Style the components yourself; controllers only toggle
   ARIA state and `data-*` hooks.
 
@@ -118,8 +126,9 @@ keep the rules on everywhere else. For Biome:
 The `eslint-plugin-jsx-a11y` equivalents are
 `no-noninteractive-element-to-interactive-role`, `no-redundant-roles`,
 `prefer-tag-over-role`, `interactive-supports-focus`, and
-`no-noninteractive-tabindex`. These components' real accessibility is exercised
-with axe-core and real screen readers in this project's own test suite.
+`no-noninteractive-tabindex`. This repository's tests check these components
+with axe-core and with a virtual screen reader for speech order; neither stands
+in for a real screen reader on your own pages.
 
 ## Composing components
 
@@ -279,7 +288,7 @@ or in `.mcp.json` (Claude Code) / `.cursor/mcp.json` (Cursor):
 It exposes four read-only tools — `stimeo_check` (validate a source string),
 `stimeo_catalog`, `stimeo_controller` (one controller's full contract,
 accessibility requirements included), and `stimeo_example` (verified example
-markup: the official catalog demo under [`examples/`](examples/), bundled at
+markup: the controller's demo under [`examples/`](examples/), bundled at
 build time and guaranteed to pass the checker) — plus MCP resources
 (`stimeo://manifest`, `stimeo://examples/<id>`) for preloading context without
 a tool round-trip. The server reads only its bundled manifest and example

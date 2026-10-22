@@ -29,6 +29,7 @@ import { SkeletonController } from "../src/controllers/skeleton_controller";
 import { SpinnerController } from "../src/controllers/spinner_controller";
 import { StickyObserverController } from "../src/controllers/sticky_observer_controller";
 import { describeFormerFirst, type FormerFirstCase, host, option } from "./helpers/former_first";
+import { keyEvent } from "./helpers/keyboard";
 import { tick } from "./helpers/timing";
 
 /** The callback of the last `IntersectionObserver` built, which a case drives by hand. */
@@ -286,7 +287,7 @@ const cases: readonly (readonly [string, FormerFirstCase])[] = [
       controller: ContextMenuController,
       markup: host(
         "context-menu",
-        `<div data-stimeo--context-menu-target="region" tabindex="0" aria-haspopup="menu">Region</div>
+        `<div data-stimeo--context-menu-target="region" tabindex="0" role="group">Region</div>
          <ul id="former" role="menu" aria-label="Actions" data-stimeo--context-menu-target="menu">
            <li role="none"><button role="menuitem" tabindex="-1" data-stimeo--context-menu-target="item">One</button></li>
          </ul>`,
@@ -302,7 +303,7 @@ const cases: readonly (readonly [string, FormerFirstCase])[] = [
       controller: ContextMenuController,
       markup: host(
         "context-menu",
-        `<div id="former" data-stimeo--context-menu-target="region" tabindex="0" aria-haspopup="menu">Region</div>
+        `<div id="former" data-stimeo--context-menu-target="region" tabindex="0" role="group">Region</div>
          <ul role="menu" aria-label="Actions" data-stimeo--context-menu-target="menu" hidden>
            <li role="none"><button role="menuitem" tabindex="-1" data-stimeo--context-menu-target="item">One</button></li>
          </ul>`,
@@ -801,7 +802,7 @@ const cases: readonly (readonly [string, FormerFirstCase])[] = [
         (controller.open as () => void).call(controller);
         (controller.onKeydown as (event: KeyboardEvent) => void).call(
           controller,
-          new KeyboardEvent("keydown", { key: "ArrowDown", cancelable: true }),
+          keyEvent("ArrowDown", { cancelable: true }),
         );
       },
     },

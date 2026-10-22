@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ScrollAreaController } from "../src/controllers/scroll_area_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { FontEvents, withDocumentFonts as withFonts } from "./helpers/font_events";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -49,17 +50,10 @@ class FakeResizeObserver implements ResizeObserver {
   }
 }
 
-/** Installs an `EventTarget` as `document.fonts` for the duration of `run`. */
-const withDocumentFonts = async (run: (fonts: EventTarget) => Promise<void>): Promise<void> => {
-  const ownDescriptor = Object.getOwnPropertyDescriptor(document, "fonts");
-  const fonts = new EventTarget();
-  Object.defineProperty(document, "fonts", { configurable: true, value: fonts });
-  try {
-    await run(fonts);
-  } finally {
-    if (ownDescriptor) Object.defineProperty(document, "fonts", ownDescriptor);
-    else Reflect.deleteProperty(document, "fonts");
-  }
+/** Installs a counted native font event source for the duration of `run`. */
+const withDocumentFonts = async (run: (fonts: FontEvents) => Promise<void>): Promise<void> => {
+  const fonts = new FontEvents();
+  await withFonts(document, fonts, () => run(fonts));
 };
 
 describe("ScrollAreaController", () => {
@@ -532,7 +526,8 @@ describe("ScrollAreaController", () => {
   });
 
   it("takes the tab stop when a content change adds scroll and removes the control", async () => {
-    // The mirror image, so the fix cannot be "never add on mutation".
+    // The mirror image: a content change can also start the scroll, so the content
+    // observer has to add the tab stop as well as remove it.
     await start(markup('<button type="button" id="jump">Jump</button>'));
     layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
     expect(viewport().hasAttribute("tabindex")).toBe(false);
@@ -850,29 +845,183 @@ describe("ScrollAreaController", () => {
     });
   });
 
+  it.each(["loadingdone", "loadingerror"])(
+    "runs the full measurement pass on %s at an unchanged viewport width",
+    async (type) => {
+      await withDocumentFonts(async (fonts) => {
+        await start(markup());
+        layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
+        Object.defineProperty(viewport(), "clientWidth", { configurable: true, value: 200 });
+        const edges: string[] = [];
+        root().addEventListener("stimeo--scroll-area:reach", (event) => {
+          edges.push((event as CustomEvent<{ edge: string }>).detail.edge);
+        });
+        for (const [key, value] of Object.entries({ scrollHeight: 800, scrollTop: 600 })) {
+          Object.defineProperty(viewport(), key, { configurable: true, value });
+        }
+
+        fonts.dispatchEvent(new Event(type));
+
+        expect(fonts.deliveries).toBe(1);
+        expect(viewport().clientWidth).toBe(200);
+        expect(root().getAttribute("data-overflow")).toBe("true");
+        expect(root().getAttribute("data-scroll")).toBe("end");
+        expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("1");
+        expect(viewport().getAttribute("tabindex")).toBe("0");
+        expect(viewport().getAttribute("role")).toBe("region");
+        expect(edges).toEqual(["end"]);
+      });
+    },
+  );
+
+  it("keeps one font callback through consecutive connects and releases every generation", async () => {
+    await withDocumentFonts(async (fonts) => {
+      await start(markup());
+      const instance = controller();
+      if (!instance) throw new Error("Scroll area did not connect");
+      instance.connect();
+      instance.connect();
+      fonts.dispatchEvent(new Event("loadingdone"));
+      fonts.dispatchEvent(new Event("loadingerror"));
+      expect(fonts.deliveries).toBe(2);
+      instance.disconnect();
+      instance.disconnect();
+      fonts.dispatchEvent(new Event("loadingdone"));
+      fonts.dispatchEvent(new Event("loadingerror"));
+      expect(fonts.deliveries).toBe(2);
+      instance.connect();
+      fonts.dispatchEvent(new Event("loadingdone"));
+      fonts.dispatchEvent(new Event("loadingerror"));
+      expect(fonts.deliveries).toBe(4);
+      instance.disconnect();
+      fonts.dispatchEvent(new Event("loadingdone"));
+      fonts.dispatchEvent(new Event("loadingerror"));
+      expect(fonts.deliveries).toBe(4);
+    });
+  });
+
+  it("releases the former font source when consecutive connects resolve a different source", async () => {
+    await withDocumentFonts(async (former) => {
+      await start(markup());
+      const next = new FontEvents();
+      await withFonts(document, next, async () => {
+        controller()?.connect();
+        former.dispatchEvent(new Event("loadingdone"));
+        former.dispatchEvent(new Event("loadingerror"));
+        expect(former.deliveries).toBe(0);
+        next.dispatchEvent(new Event("loadingdone"));
+        next.dispatchEvent(new Event("loadingerror"));
+        expect(next.deliveries).toBe(2);
+        controller()?.disconnect();
+        next.dispatchEvent(new Event("loadingdone"));
+        next.dispatchEvent(new Event("loadingerror"));
+        expect(next.deliveries).toBe(2);
+      });
+    });
+  });
+
+  it("releases the former font source when consecutive connects find the API absent", async () => {
+    await withDocumentFonts(async (former) => {
+      await start(markup());
+      await withFonts(document, undefined, async () => {
+        expect(() => controller()?.connect()).not.toThrow();
+        former.dispatchEvent(new Event("loadingdone"));
+        former.dispatchEvent(new Event("loadingerror"));
+        expect(former.deliveries).toBe(0);
+      });
+    });
+  });
+
+  it("selects the new ownerDocument font source after disconnect and adoption", async () => {
+    await withDocumentFonts(async (globalFonts) => {
+      const owner = document.implementation.createHTMLDocument("Other font source");
+      const ownerFonts = new FontEvents();
+      await withFonts(owner, ownerFonts, async () => {
+        await start(markup());
+        const element = root();
+        const instance = controller();
+        if (!instance) throw new Error("Scroll area did not connect");
+        instance.disconnect();
+        owner.body.append(owner.adoptNode(element));
+        expect(element.ownerDocument).toBe(owner);
+        instance.connect();
+        globalFonts.dispatchEvent(new Event("loadingdone"));
+        globalFonts.dispatchEvent(new Event("loadingerror"));
+        expect(globalFonts.deliveries).toBe(0);
+        ownerFonts.dispatchEvent(new Event("loadingdone"));
+        ownerFonts.dispatchEvent(new Event("loadingerror"));
+        expect(ownerFonts.deliveries).toBe(2);
+        instance.disconnect();
+        ownerFonts.dispatchEvent(new Event("loadingdone"));
+        ownerFonts.dispatchEvent(new Event("loadingerror"));
+        expect(ownerFonts.deliveries).toBe(2);
+      });
+    });
+  });
+
+  // Direct lifecycle calls isolate font rebinding from Stimulus's asynchronous document scan.
+  it("releases the former document font source on a consecutive connect after adoption", async () => {
+    await withDocumentFonts(async (former) => {
+      const owner = document.implementation.createHTMLDocument("Adopted font source");
+      const next = new FontEvents();
+      await withFonts(owner, next, async () => {
+        await start(markup());
+        const element = root();
+        const instance = controller();
+        if (!instance) throw new Error("Scroll area did not connect");
+        owner.body.append(owner.adoptNode(element));
+        instance.connect();
+        former.dispatchEvent(new Event("loadingdone"));
+        former.dispatchEvent(new Event("loadingerror"));
+        expect(former.deliveries).toBe(0);
+        next.dispatchEvent(new Event("loadingdone"));
+        next.dispatchEvent(new Event("loadingerror"));
+        expect(next.deliveries).toBe(2);
+        instance.disconnect();
+      });
+    });
+  });
+
+  it("disconnects the held font source even if the element was adopted without reconnecting", async () => {
+    await withDocumentFonts(async (held) => {
+      const owner = document.implementation.createHTMLDocument("Unobserved font source");
+      const unobserved = new FontEvents();
+      await withFonts(owner, unobserved, async () => {
+        await start(markup());
+        const element = root();
+        const instance = controller();
+        if (!instance) throw new Error("Scroll area did not connect");
+        held.dispatchEvent(new Event("loadingdone"));
+        expect(held.deliveries).toBe(1);
+        owner.body.append(owner.adoptNode(element));
+        instance.disconnect();
+        held.dispatchEvent(new Event("loadingdone"));
+        held.dispatchEvent(new Event("loadingerror"));
+        unobserved.dispatchEvent(new Event("loadingdone"));
+        unobserved.dispatchEvent(new Event("loadingerror"));
+        expect(held.deliveries).toBe(1);
+        expect(unobserved.deliveries).toBe(0);
+      });
+    });
+  });
+
   it("re-measures when document fonts finish loading and releases the listener", async () => {
-    const ownDescriptor = Object.getOwnPropertyDescriptor(document, "fonts");
-    const fonts = new EventTarget();
-    Object.defineProperty(document, "fonts", { configurable: true, value: fonts });
-    try {
+    await withDocumentFonts(async (fonts) => {
       await start(markup());
       layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
       Object.defineProperty(viewport(), "scrollHeight", { configurable: true, value: 800 });
       fonts.dispatchEvent(new Event("loadingdone"));
       expect(root().getAttribute("data-overflow")).toBe("true");
 
-      const controller = application.getControllerForElementAndIdentifier(
-        root(),
-        "stimeo--scroll-area",
-      );
-      controller?.disconnect();
+      expect(fonts.deliveries).toBe(1);
+      controller()?.disconnect();
       const writes = vi.spyOn(root(), "setAttribute");
+      fonts.dispatchEvent(new Event("loadingdone"));
       fonts.dispatchEvent(new Event("loadingerror"));
+      expect(fonts.deliveries).toBe(1);
       expect(writes).not.toHaveBeenCalled();
-    } finally {
-      if (ownDescriptor) Object.defineProperty(document, "fonts", ownDescriptor);
-      else Reflect.deleteProperty(document, "fonts");
-    }
+      writes.mockRestore();
+    });
   });
 
   it("re-measures a retained viewport when orientation changes", async () => {
@@ -1008,19 +1157,19 @@ describe("ScrollAreaController", () => {
 
   it("releases its window and font subscriptions on disconnect", async () => {
     await withDocumentFonts(async (fonts) => {
-      const fontSubscriptions = vi.spyOn(fonts, "addEventListener");
-      const fontReleases = vi.spyOn(fonts, "removeEventListener");
       const windowReleases = vi.spyOn(window, "removeEventListener");
       try {
         await start(markup());
-        const onFonts = fontSubscriptions.mock.calls[0]?.[1];
-        expect(onFonts).toBeTypeOf("function");
+        fonts.dispatchEvent(new Event("loadingdone"));
+        fonts.dispatchEvent(new Event("loadingerror"));
+        expect(fonts.deliveries).toBe(2);
 
         controller()?.disconnect();
+        fonts.dispatchEvent(new Event("loadingdone"));
+        fonts.dispatchEvent(new Event("loadingerror"));
 
         expect(windowReleases).toHaveBeenCalledWith("resize", expect.any(Function));
-        expect(fontReleases).toHaveBeenCalledWith("loadingdone", onFonts);
-        expect(fontReleases).toHaveBeenCalledWith("loadingerror", onFonts);
+        expect(fonts.deliveries).toBe(2);
       } finally {
         windowReleases.mockRestore();
       }
@@ -1029,15 +1178,21 @@ describe("ScrollAreaController", () => {
 
   it("keeps its window and font subscriptions through turbo:before-cache", async () => {
     await withDocumentFonts(async (fonts) => {
-      const fontReleases = vi.spyOn(fonts, "removeEventListener");
       const windowReleases = vi.spyOn(window, "removeEventListener");
       try {
         await start(markup());
+        layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
 
         document.dispatchEvent(new Event("turbo:before-cache"));
+        Object.defineProperty(viewport(), "scrollHeight", { configurable: true, value: 800 });
+        fonts.dispatchEvent(new Event("loadingdone"));
+        expect(root().getAttribute("data-overflow")).toBe("true");
+        Object.defineProperty(viewport(), "scrollHeight", { configurable: true, value: 150 });
+        fonts.dispatchEvent(new Event("loadingerror"));
+        expect(root().getAttribute("data-overflow")).toBe("false");
 
         expect(windowReleases).not.toHaveBeenCalledWith("resize", expect.any(Function));
-        expect(fontReleases).not.toHaveBeenCalled();
+        expect(fonts.deliveries).toBe(2);
       } finally {
         windowReleases.mockRestore();
       }
@@ -1231,7 +1386,7 @@ describe("ScrollAreaController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // --- Speech-order regression ------------------------------------------------
+  // --- Speech-order check -----------------------------------------------------
 
   it("announces the scroll region by its name once it overflows", async () => {
     await start(markup("<p>only content</p>"));

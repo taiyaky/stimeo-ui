@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RovingController } from "../src/controllers/roving_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { press as keyboardPress, keyEvent, typeKey } from "./helpers/keyboard";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -44,11 +45,8 @@ describe("RovingController", () => {
 
   const group = () => query("#group");
   const tabindexes = () => ["#a", "#b", "#c"].map((id) => query(id).tabIndex);
-  /** Dispatches a keydown and reports whether the widget consumed it. */
-  const arrow = (from: string, key: string) =>
-    query(from).dispatchEvent(
-      new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
-    );
+  /** Focuses an item and returns the keydown event so cancellation remains observable. */
+  const arrow = (from: string, key: string) => keyboardPress(query(from), key);
 
   it("makes exactly one item tabbable, keeping an existing tab stop on connect", async () => {
     // The middle item is the authored tab stop — connect must preserve it (DOM is
@@ -100,17 +98,17 @@ describe("RovingController", () => {
 
   it("moves focus and the tab stop with horizontal arrows", async () => {
     await mount();
-    // dispatchEvent reports false once the handler consumed the key.
-    expect(arrow("#a", "ArrowRight")).toBe(false);
+    // The returned event exposes whether the handler consumed the key.
+    expect(arrow("#a", "ArrowRight").defaultPrevented).toBe(true);
     expect(tabindexes()).toEqual([-1, 0, -1]);
     expect(document.activeElement).toBe(query("#b"));
 
-    expect(arrow("#b", "ArrowLeft")).toBe(false);
+    expect(arrow("#b", "ArrowLeft").defaultPrevented).toBe(true);
     expect(tabindexes()).toEqual([0, -1, -1]);
     expect(document.activeElement).toBe(query("#a"));
 
     // The default orientation is horizontal, so the vertical pair is not ours.
-    expect(arrow("#a", "ArrowDown")).toBe(true);
+    expect(arrow("#a", "ArrowDown").defaultPrevented).toBe(false);
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
 
@@ -149,9 +147,9 @@ describe("RovingController", () => {
     expect(document.activeElement).toBe(query("#a"));
 
     await mount('data-stimeo--roving-home-end-value="false"', ["-1", "-1", "0"]);
-    expect(arrow("#c", "End")).toBe(true); // ignored, and not consumed
+    expect(arrow("#c", "End").defaultPrevented).toBe(false); // ignored, and not consumed
     expect(tabindexes()).toEqual([-1, -1, 0]);
-    expect(arrow("#c", "Home")).toBe(true); // the Home side is governed by the same value
+    expect(arrow("#c", "Home").defaultPrevented).toBe(false); // the Home side is governed by the same value
     expect(tabindexes()).toEqual([-1, -1, 0]);
   });
 
@@ -215,13 +213,9 @@ describe("RovingController", () => {
     // Composition contract: a grabbed stimeo--pointer-drag handle consumes the
     // arrows (preventDefault) to move an item; roving must not also move focus.
     await mount();
-    const claimed = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
+    const claimed = keyEvent("ArrowRight");
     claimed.preventDefault();
-    query("#a").dispatchEvent(claimed);
+    keyboardPress(query("#a"), claimed);
     expect(tabindexes()).toEqual([0, -1, -1]); // tab stop did not move
   });
 
@@ -229,13 +223,8 @@ describe("RovingController", () => {
     // A chorded arrow is the browser's (history back/forward and the like), so
     // the delegated handler neither consumes the key nor moves the tab stop.
     await mount();
-    const chord = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    query("#a").dispatchEvent(chord);
+    const chord = keyEvent("ArrowRight", { altKey: true });
+    keyboardPress(query("#a"), chord);
 
     expect(chord.defaultPrevented).toBe(false);
     expect(tabindexes()).toEqual([0, -1, -1]);
@@ -249,9 +238,8 @@ describe("RovingController", () => {
     group().remove(); // detaches → Stimulus disconnect() runs on the next tick
     await tick();
     // The delegated keydown listener is gone: a stray key must not move the tab stop.
-    expect(() =>
-      a.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })),
-    ).not.toThrow();
+    // Detached targets cannot receive DOM focus; the stale-event probe must preserve focus.
+    expect(() => typeKey(a, "ArrowRight")).not.toThrow();
     expect(a.tabIndex).toBe(0); // unchanged
     expect(b.tabIndex).toBe(-1);
     // The delegated focusin listener is gone as well.
@@ -341,14 +329,7 @@ describe("RovingController", () => {
 
   it("yields a keydown raised during IME composition", async () => {
     await mount();
-    query("#a").dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "ArrowRight",
-        bubbles: true,
-        cancelable: true,
-        isComposing: true,
-      }),
-    );
+    keyboardPress(query("#a"), "ArrowRight", { isComposing: true });
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
 
@@ -356,23 +337,13 @@ describe("RovingController", () => {
     // Chorded Home/End belong to the browser and the OS; APG assigns the widget
     // no modifier combination for them.
     await mount("", ["-1", "-1", "0"]);
-    const home = new KeyboardEvent("keydown", {
-      key: "Home",
-      ctrlKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    query("#c").dispatchEvent(home);
+    const home = keyEvent("Home", { ctrlKey: true });
+    keyboardPress(query("#c"), home);
     expect(home.defaultPrevented).toBe(false);
     expect(tabindexes()).toEqual([-1, -1, 0]);
 
-    const end = new KeyboardEvent("keydown", {
-      key: "End",
-      shiftKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    query("#c").dispatchEvent(end);
+    const end = keyEvent("End", { shiftKey: true });
+    keyboardPress(query("#c"), end);
     expect(end.defaultPrevented).toBe(false);
     expect(tabindexes()).toEqual([-1, -1, 0]);
   });
@@ -415,26 +386,20 @@ describe("RovingController", () => {
     await mount("", ["-1", "0", "-1"]);
     const note = document.createElement("span");
     note.id = "note";
+    note.tabIndex = 0;
     group().appendChild(note);
-    expect(
-      note.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }),
-      ),
-    ).toBe(true);
+    expect(keyboardPress(note, "ArrowRight").defaultPrevented).toBe(false);
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
   it("resolves an event raised inside an item to that item", async () => {
     await mount();
     const icon = document.createElement("span");
+    icon.tabIndex = 0;
     query("#c").appendChild(icon);
     icon.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
     expect(tabindexes()).toEqual([-1, -1, 0]);
-    expect(
-      icon.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }),
-      ),
-    ).toBe(false);
+    expect(keyboardPress(icon, "ArrowLeft").defaultPrevented).toBe(true);
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
@@ -494,13 +459,13 @@ describe("RovingController", () => {
 
   it("stays put when the only item past the end is unreachable", async () => {
     await mount('data-stimeo--roving-wrap-value="false"', ["-1", "0", "-1"], ["", "", "disabled"]);
-    expect(arrow("#b", "ArrowRight")).toBe(false); // consumed: the axis is ours
+    expect(arrow("#b", "ArrowRight").defaultPrevented).toBe(true); // consumed: the axis is ours
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
   it("stays on the only reachable item when wrapping", async () => {
     await mount("", ["-1", "0", "-1"], ["disabled", "", "disabled"]);
-    expect(arrow("#b", "ArrowRight")).toBe(false);
+    expect(arrow("#b", "ArrowRight").defaultPrevented).toBe(true);
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
@@ -527,7 +492,8 @@ describe("RovingController", () => {
     // as they are so the stop comes back when an item becomes reachable again.
     await mount("", ["-1", "0", "-1"], ["disabled", "disabled", "disabled"]);
     expect(tabindexes()).toEqual([-1, 0, -1]);
-    expect(arrow("#b", "ArrowRight")).toBe(true);
+    // Native-disabled origins cannot take focus; the stray event must leave focus intact.
+    expect(typeKey(query("#b"), "ArrowRight").defaultPrevented).toBe(false);
     expect(tabindexes()).toEqual([-1, 0, -1]);
   });
 
@@ -543,7 +509,8 @@ describe("RovingController", () => {
       ["0", "-1", "-1"],
       ["", "disabled", "disabled"],
     );
-    arrow("#c", "ArrowRight"); // unreachable origin with nothing reachable past it
+    // Native-disabled origins cannot take focus; this event probes the reachability guard.
+    typeKey(query("#c"), "ArrowRight");
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
 

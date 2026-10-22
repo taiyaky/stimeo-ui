@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
-import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { setAttributeIfChanged } from "../utils/attribute_write";
 import { toFiniteNumber } from "../utils/coerce";
 import { ownerOf } from "../utils/event_owner";
 import { commitField, writeField } from "../utils/field_mirror";
@@ -7,6 +8,7 @@ import { isRtl } from "../utils/logical_scroll";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { MoveCounter } from "../utils/move_counter";
 import { OwnedPointerSession } from "../utils/owned_pointer_session";
+import { fillTemplate } from "../utils/template";
 
 /** CSS custom property exposing the current color to consumer CSS. */
 const COLOR_PROPERTY = "--stimeo--color";
@@ -155,11 +157,6 @@ export class ColorPickerController extends Controller<HTMLElement> {
   declare alphaValue: boolean;
   declare logicalTrackValue: boolean;
 
-  /** Whether the consumer declared a mirroring track and the direction mirrors it. */
-  get #mirrored(): boolean {
-    return this.logicalTrackValue && isRtl(this.element);
-  }
-
   /** The current color in the editing model; its alpha is 100 while `alpha` is off. */
   #color: Hsla = { hue: 0, saturation: 0, lightness: 0, alpha: 100 };
   /** The pointer that owns the live drag, with the slider whose geometry maps it. */
@@ -254,6 +251,14 @@ export class ColorPickerController extends Controller<HTMLElement> {
   /** Keyboard stepping on the focused channel slider (APG Slider model). */
   onKeydown(event: KeyboardEvent): void {
     if (isReservedArrowChord(event)) return;
+    if (
+      (event.key === "Home" ||
+        event.key === "End" ||
+        event.key === "PageUp" ||
+        event.key === "PageDown") &&
+      hasModifierChord(event)
+    )
+      return;
     const slider = event.currentTarget as HTMLElement;
     const channel = this.#editableChannel(slider);
     if (!channel) return;
@@ -264,7 +269,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
     let next: number | null = null;
     // On a mirrored track the greater value sits at the visual left, so the
     // horizontal pair trades places; the vertical pair passes through.
-    switch (this.#mirrored ? logicalArrowKey(event.key, this.element) : event.key) {
+    switch (this.logicalTrackValue ? logicalArrowKey(event.key, slider) : event.key) {
       case "ArrowRight":
       case "ArrowUp":
         next = value + 1;
@@ -305,7 +310,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
     // Resolve the direction once for the whole gesture: reading it per move
     // would query computed style on every frame, and a drag that flipped
     // mid-gesture would be incoherent anyway.
-    const mirrored = this.#mirrored;
+    const mirrored = this.logicalTrackValue && isRtl(slider);
     const update = (clientX: number): boolean => {
       const rect = slider.getBoundingClientRect();
       if (rect.width === 0) return false;
@@ -471,7 +476,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
       "aria-valuetext": this.#valueText(slider, channel, value),
     };
     for (const [name, next] of Object.entries(attributes)) {
-      if (slider.getAttribute(name) !== next) slider.setAttribute(name, next);
+      setAttributeIfChanged(slider, name, next);
     }
   }
 
@@ -512,7 +517,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
     // callback that scheduled this pass has already moved the Values, so
     // re-deriving the "before" state here would always match the "after" one.
     const previous = this.#committedHex;
-    /** A consumed declaration leaves hue and saturation retained in achromatic colors. */
+    // A consumed declaration leaves hue and saturation retained in achromatic colors.
     this.#adoptPendingValue();
     if (!this.alphaValue) this.#color.alpha = 100;
     this.#render();
@@ -570,9 +575,7 @@ export class ColorPickerController extends Controller<HTMLElement> {
     const template = slider.getAttribute(VALUE_TEXT_ATTRIBUTE);
     // A placeholder with no substitution stays as authored, so a typo is visible
     // instead of being read as a blank.
-    return template
-      ? template.replaceAll("{value}", String(value))
-      : defaultValueText(channel, value);
+    return template ? fillTemplate(template, { value }) : defaultValueText(channel, value);
   }
 
   /** Ends the live drag so no further movement of that pointer reaches the model. */

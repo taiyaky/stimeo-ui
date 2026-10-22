@@ -2,7 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DrawerController } from "../src/controllers/drawer_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
-import { typeKey } from "./helpers/keyboard";
+import { press as keyboardPress, keyEvent } from "./helpers/keyboard";
 import { expectUpperModalOnTop, openUpperModal, TARGET_SWAPS } from "./helpers/modal_stack";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
@@ -104,9 +104,9 @@ describe("DrawerController", () => {
       "stimeo--drawer",
     ) as DrawerController;
     root.setAttribute("data-stimeo--drawer-placement-value", "bottom");
-    // Drive the reflect directly: Stimulus's value-change observer is
-    // MutationObserver-based and intermittently misses the change under parallel
-    // load in happy-dom. placementValueChanged re-reads the updated value getter.
+    // The test stays synchronous, so it calls placementValueChanged directly instead of
+    // waiting for the MutationObserver delivery; the callback re-reads the updated value
+    // getter.
     controller.placementValueChanged();
     expect(panel().getAttribute("data-placement")).toBe("bottom");
   });
@@ -152,7 +152,7 @@ describe("DrawerController", () => {
   it("closes on Escape and restores focus", () => {
     trigger().focus();
     trigger().click();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
     expect(panel().getAttribute("data-state")).toBe("closed");
     expect(document.activeElement).toBe(trigger());
   });
@@ -172,7 +172,7 @@ describe("DrawerController", () => {
   it("traps Tab focus within the panel", () => {
     trigger().click();
     document.getElementById("close")?.focus(); // last focusable
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    keyboardPress(document.activeElement as HTMLElement, "Tab");
     expect(document.activeElement).toBe(document.getElementById("inside")); // first
   });
 
@@ -180,8 +180,8 @@ describe("DrawerController", () => {
     trigger().click();
     const inside = document.getElementById("inside") as HTMLElement;
     inside.focus();
-    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-    inside.dispatchEvent(tab);
+    const tab = keyEvent("Tab");
+    keyboardPress(inside, tab);
     expect(tab.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(document.getElementById("close"));
   });
@@ -190,7 +190,7 @@ describe("DrawerController", () => {
     const background = document.getElementById("background") as HTMLElement;
     trigger().click();
     expect(background.inert).toBe(true);
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
     expect(background.inert).toBe(false);
   });
 
@@ -213,7 +213,7 @@ describe("DrawerController", () => {
     trigger().click();
     const controller = application.getControllerForElementAndIdentifier(root, "stimeo--drawer");
     controller?.disconnect();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
     expect(panel().getAttribute("data-state")).toBe("open");
   });
 
@@ -505,7 +505,7 @@ describe("DrawerController", () => {
       expectUpperModalOnTop(upper, successor);
       expect(successor.getAttribute("data-state")).toBe("open");
       expect(overlay().hidden).toBe(false);
-      typeKey(document, "Escape");
+      keyboardPress(document.activeElement as HTMLElement, "Escape");
       expect(successor.hidden).toBe(true);
       expect(document.activeElement).toBe(trigger());
     },
@@ -523,7 +523,7 @@ describe("DrawerController", () => {
     expect(document.body.style.overflow).toBe("hidden");
     expect(background.inert).toBe(true);
     expect(panel().getAttribute("data-state")).toBe("open");
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
     expect(panel().getAttribute("data-state")).not.toBe("open");
   });
 
@@ -556,7 +556,7 @@ describe("DrawerController", () => {
       trigger().click();
       expect(panel().getAttribute("data-state")).toBe("open");
       expect(document.body.style.overflow).toBe("hidden");
-      typeKey(document, "Escape");
+      keyboardPress(document.activeElement as HTMLElement, "Escape");
       expect(panel().getAttribute("data-state")).toBe("closed");
       expect(document.body.style.overflow).toBe("");
     });
@@ -612,7 +612,7 @@ describe("DrawerController", () => {
 
       trigger().click();
       expect(panel().getAttribute("data-state")).toBe("open");
-      typeKey(document, "Escape");
+      keyboardPress(document.activeElement as HTMLElement, "Escape");
       expect(panel().getAttribute("data-state")).toBe("closed");
     });
 
@@ -677,7 +677,7 @@ describe("DrawerController", () => {
 
     it("keeps a closed drawer closed", async () => {
       trigger().click();
-      typeKey(document, "Escape");
+      keyboardPress(document.activeElement as HTMLElement, "Escape");
 
       await restore();
 
@@ -761,7 +761,7 @@ describe("DrawerController", () => {
 
       trigger().click();
       capture.clear();
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      keyboardPress(document.activeElement as HTMLElement, "Escape");
 
       expect(capture.reasons()).toEqual(["escape"]);
     });
@@ -862,9 +862,7 @@ describe("DrawerController", () => {
       root().addEventListener("stimeo--drawer:open", () => instance.disconnect(), { once: true });
       instance.open();
       vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
-      document.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
-      );
+      keyboardPress(document.activeElement as HTMLElement, "Escape");
       // The open went on after its handler disconnected the controller, so the modal is held
       // through the exit transition.
       expect(document.body.style.overflow).toBe("hidden");
@@ -916,10 +914,10 @@ describe("DrawerController", () => {
       const scrollLocked = document.body.style.overflow === "hidden";
       const backgroundInert = (document.getElementById("background") as HTMLElement).inert;
       trigger().focus();
-      const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-      document.dispatchEvent(tab);
-      const esc = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-      document.dispatchEvent(esc);
+      const tab = keyEvent("Tab");
+      keyboardPress(document.activeElement as HTMLElement, tab);
+      const esc = keyEvent("Escape");
+      keyboardPress(document.activeElement as HTMLElement, esc);
       return {
         scrollLocked,
         backgroundInert,

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TextareaAutosizeController } from "../src/controllers/textarea_autosize_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { FontEvents, withDocumentFonts } from "./helpers/font_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -22,7 +23,10 @@ class FakeResizeObserver implements ResizeObserver {
   static instances: FakeResizeObserver[] = [];
   readonly observed = new Set<Element>();
 
-  constructor(private readonly callback: ResizeObserverCallback) {
+  readonly #callback: ResizeObserverCallback;
+
+  constructor(callback: ResizeObserverCallback) {
+    this.#callback = callback;
     FakeResizeObserver.instances.push(this);
   }
 
@@ -40,7 +44,7 @@ class FakeResizeObserver implements ResizeObserver {
 
   /** Reports a resize; a disconnected observer (no observations) stays silent. */
   trigger(): void {
-    if (this.observed.size > 0) this.callback([], this);
+    if (this.observed.size > 0) this.#callback([], this);
   }
 }
 
@@ -109,6 +113,17 @@ describe("TextareaAutosizeController", () => {
   const type = (el: HTMLTextAreaElement, value: string) => {
     el.value = value;
     el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+
+  const controller = (element: HTMLTextAreaElement): TextareaAutosizeController => {
+    const instance = application.getControllerForElementAndIdentifier(
+      element,
+      "stimeo--textarea-autosize",
+    );
+    if (!(instance instanceof TextareaAutosizeController)) {
+      throw new Error("Textarea autosize did not connect");
+    }
+    return instance;
   };
 
   it("sets an explicit pixel height on connect", async () => {
@@ -226,10 +241,8 @@ describe("TextareaAutosizeController", () => {
   });
 
   it("re-measures when document fonts settle and releases the listeners", async () => {
-    const own = Object.getOwnPropertyDescriptor(document, "fonts");
-    const fonts = new EventTarget();
-    Object.defineProperty(document, "fonts", { configurable: true, value: fonts });
-    try {
+    const fonts = new FontEvents();
+    await withDocumentFonts(document, fonts, async () => {
       const el = await mount();
       el.value = "a\nb"; // silent assignment: font settling must re-measure it
       fonts.dispatchEvent(new Event("loadingdone"));
@@ -237,16 +250,199 @@ describe("TextareaAutosizeController", () => {
       el.value = "a\nb\nc"; // failed font loads settle layout too
       fonts.dispatchEvent(new Event("loadingerror"));
       expect(el.style.height).toBe(`${LINE * 3}px`);
-      el.remove();
-      await tick();
+      expect(fonts.deliveries).toBe(2);
+      controller(el).disconnect();
       el.value = "a\nb\nc\nd\ne";
       fonts.dispatchEvent(new Event("loadingdone"));
       fonts.dispatchEvent(new Event("loadingerror"));
+      expect(fonts.deliveries).toBe(2);
       expect(el.style.height).toBe(`${LINE * 3}px`); // both released on disconnect
-    } finally {
-      if (own) Object.defineProperty(document, "fonts", own);
-      else Reflect.deleteProperty(document, "fonts");
-    }
+    });
+  });
+
+  it("keeps one font callback through consecutive connects and releases every generation", async () => {
+    const fonts = new FontEvents();
+    await withDocumentFonts(document, fonts, async () => {
+      const element = await mount();
+      const instance = controller(element);
+      instance.connect();
+      instance.connect();
+      fonts.dispatchEvent(new Event("loadingdone"));
+      fonts.dispatchEvent(new Event("loadingerror"));
+      expect(fonts.deliveries).toBe(2);
+      instance.disconnect();
+      instance.disconnect();
+      fonts.dispatchEvent(new Event("loadingdone"));
+      fonts.dispatchEvent(new Event("loadingerror"));
+      expect(fonts.deliveries).toBe(2);
+      instance.connect();
+      fonts.dispatchEvent(new Event("loadingdone"));
+      fonts.dispatchEvent(new Event("loadingerror"));
+      expect(fonts.deliveries).toBe(4);
+      instance.disconnect();
+      fonts.dispatchEvent(new Event("loadingdone"));
+      fonts.dispatchEvent(new Event("loadingerror"));
+      expect(fonts.deliveries).toBe(4);
+    });
+  });
+
+  it("releases the former font source when consecutive connects resolve a different source", async () => {
+    const former = new FontEvents();
+    await withDocumentFonts(document, former, async () => {
+      const element = await mount();
+      const next = new FontEvents();
+      await withDocumentFonts(document, next, async () => {
+        const instance = controller(element);
+        instance.connect();
+        former.dispatchEvent(new Event("loadingdone"));
+        former.dispatchEvent(new Event("loadingerror"));
+        expect(former.deliveries).toBe(0);
+        next.dispatchEvent(new Event("loadingdone"));
+        next.dispatchEvent(new Event("loadingerror"));
+        expect(next.deliveries).toBe(2);
+        instance.disconnect();
+        next.dispatchEvent(new Event("loadingdone"));
+        next.dispatchEvent(new Event("loadingerror"));
+        expect(next.deliveries).toBe(2);
+      });
+    });
+  });
+
+  it("releases the former font source when consecutive connects find the API absent", async () => {
+    const former = new FontEvents();
+    await withDocumentFonts(document, former, async () => {
+      const element = await mount();
+      await withDocumentFonts(document, undefined, async () => {
+        expect(() => controller(element).connect()).not.toThrow();
+        former.dispatchEvent(new Event("loadingdone"));
+        former.dispatchEvent(new Event("loadingerror"));
+        expect(former.deliveries).toBe(0);
+      });
+    });
+  });
+
+  it("selects the new ownerDocument font source after disconnect and adoption", async () => {
+    const globalFonts = new FontEvents();
+    await withDocumentFonts(document, globalFonts, async () => {
+      const owner = document.implementation.createHTMLDocument("Other font source");
+      const ownerFonts = new FontEvents();
+      await withDocumentFonts(owner, ownerFonts, async () => {
+        const element = await mount();
+        const instance = controller(element);
+        instance.disconnect();
+        owner.body.append(owner.adoptNode(element));
+        expect(element.ownerDocument).toBe(owner);
+        instance.connect();
+        globalFonts.dispatchEvent(new Event("loadingdone"));
+        globalFonts.dispatchEvent(new Event("loadingerror"));
+        expect(globalFonts.deliveries).toBe(0);
+        element.value = "a\nb";
+        ownerFonts.dispatchEvent(new Event("loadingdone"));
+        expect(element.style.height).toBe(`${LINE * 2}px`);
+        element.value = "a\nb\nc";
+        ownerFonts.dispatchEvent(new Event("loadingerror"));
+        expect(element.style.height).toBe(`${LINE * 3}px`);
+        expect(ownerFonts.deliveries).toBe(2);
+        instance.disconnect();
+        ownerFonts.dispatchEvent(new Event("loadingdone"));
+        ownerFonts.dispatchEvent(new Event("loadingerror"));
+        expect(ownerFonts.deliveries).toBe(2);
+      });
+    });
+  });
+
+  // Direct lifecycle calls isolate font rebinding from Stimulus's asynchronous document scan.
+  it("releases the former document font source on a consecutive connect after adoption", async () => {
+    const former = new FontEvents();
+    await withDocumentFonts(document, former, async () => {
+      const owner = document.implementation.createHTMLDocument("Adopted font source");
+      const next = new FontEvents();
+      await withDocumentFonts(owner, next, async () => {
+        const element = await mount();
+        const instance = controller(element);
+        owner.body.append(owner.adoptNode(element));
+        instance.connect();
+        former.dispatchEvent(new Event("loadingdone"));
+        former.dispatchEvent(new Event("loadingerror"));
+        expect(former.deliveries).toBe(0);
+        next.dispatchEvent(new Event("loadingdone"));
+        next.dispatchEvent(new Event("loadingerror"));
+        expect(next.deliveries).toBe(2);
+        instance.disconnect();
+      });
+    });
+  });
+
+  it("disconnects the held font source even if the element was adopted without reconnecting", async () => {
+    const held = new FontEvents();
+    await withDocumentFonts(document, held, async () => {
+      const owner = document.implementation.createHTMLDocument("Unobserved font source");
+      const unobserved = new FontEvents();
+      await withDocumentFonts(owner, unobserved, async () => {
+        const element = await mount();
+        const instance = controller(element);
+        held.dispatchEvent(new Event("loadingdone"));
+        expect(held.deliveries).toBe(1);
+        owner.body.append(owner.adoptNode(element));
+        instance.disconnect();
+        held.dispatchEvent(new Event("loadingdone"));
+        held.dispatchEvent(new Event("loadingerror"));
+        unobserved.dispatchEvent(new Event("loadingdone"));
+        unobserved.dispatchEvent(new Event("loadingerror"));
+        expect(held.deliveries).toBe(1);
+        expect(unobserved.deliveries).toBe(0);
+      });
+    });
+  });
+
+  it.each(["loadingdone", "loadingerror"])(
+    "defers %s while collapsed and flushes at the same width without duplicate resize notices",
+    async (type) => {
+      vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+      const fonts = new FontEvents();
+      await withDocumentFonts(document, fonts, async () => {
+        let width = 100;
+        const element = await mount("", {}, 0, (node) => {
+          Object.defineProperty(node, "clientWidth", { configurable: true, get: () => width });
+          Object.defineProperty(node, "scrollHeight", {
+            configurable: true,
+            get: () => (width === 0 ? 0 : node.value.split("\n").length * LINE),
+          });
+        });
+        const events: Array<{ height: number; rows: number }> = [];
+        element.addEventListener("stimeo--textarea-autosize:resize", (event) => {
+          events.push((event as CustomEvent<{ height: number; rows: number }>).detail);
+        });
+        element.value = "a\nb\nc";
+        width = 0;
+        fonts.dispatchEvent(new Event(type));
+        expect(element.style.height).toBe(`${LINE}px`);
+        expect(events).toEqual([]);
+        width = 100;
+        FakeResizeObserver.instances[0]?.trigger();
+        expect(element.style.height).toBe(`${LINE * 3}px`);
+        expect(events).toEqual([{ height: LINE * 3, rows: 3 }]);
+        fonts.dispatchEvent(new Event(type));
+        expect(fonts.deliveries).toBe(2);
+        expect(events).toHaveLength(1);
+      });
+    },
+  );
+
+  it("keeps both font callbacks through turbo:before-cache at an unchanged width", async () => {
+    const fonts = new FontEvents();
+    await withDocumentFonts(document, fonts, async () => {
+      const element = await mount();
+      document.dispatchEvent(new Event("turbo:before-cache"));
+      element.value = "a\nb";
+      fonts.dispatchEvent(new Event("loadingdone"));
+      expect(element.style.height).toBe(`${LINE * 2}px`);
+      element.value = "a\nb\nc";
+      fonts.dispatchEvent(new Event("loadingerror"));
+      expect(element.style.height).toBe(`${LINE * 3}px`);
+      expect(element.clientWidth).toBe(100);
+      expect(fonts.deliveries).toBe(2);
+    });
   });
 
   it("defers re-measuring while the element's box is collapsed", async () => {

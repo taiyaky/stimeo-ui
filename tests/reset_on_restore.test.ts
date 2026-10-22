@@ -326,8 +326,8 @@ describe("ResetOnRestoreController", () => {
 
   it("keeps sweeping when the scope declaration cannot be parsed", async () => {
     // A declaration the engine cannot read must not take the sweep down with it:
-    // this part exists to keep a restored page from showing a stale interaction, and a
-    // typo in one attribute would otherwise disable that for the whole document.
+    // this controller exists to keep a restored page from showing a stale interaction, and
+    // a typo in one attribute would otherwise disable that for the whole document.
     await start(
       `<button id="a" data-reset-attr="aria-expanded" aria-expanded="true"></button>`,
       `data-stimeo--reset-on-restore-scope-value="#panel["`,

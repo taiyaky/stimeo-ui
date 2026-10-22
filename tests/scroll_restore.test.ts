@@ -459,7 +459,7 @@ describe("ScrollRestoreController", () => {
     expect(box().scrollLeft).toBe(34);
   });
 
-  it("keeps the saved offset of an axis it no longer tracks", async () => {
+  it("keeps the saved offset of an axis it does not track", async () => {
     sessionStorage.setItem("stimeo--scroll-restore:pane", JSON.stringify({ top: 12, left: 900 }));
     await start(`
       <div id="box" data-controller="stimeo--scroll-restore"

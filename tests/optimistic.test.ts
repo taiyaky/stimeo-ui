@@ -3,8 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { OptimisticController } from "../src/controllers/optimistic_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureSpeech } from "./helpers/speech";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link OptimisticController}: the submit-start
@@ -180,14 +180,14 @@ describe("OptimisticController", () => {
 
   describe("submission ownership", () => {
     /** Turbo names the submission on both events; these fixtures do the same. */
-    const startOf = (el: Element, submission: object) =>
+    const startOf = (el: Element, submission: unknown) =>
       el.dispatchEvent(
         new CustomEvent("turbo:submit-start", {
           bubbles: true,
           detail: { formSubmission: submission },
         }),
       );
-    const endOf = (el: Element, submission: object, success?: boolean) =>
+    const endOf = (el: Element, submission: unknown, success?: unknown) =>
       el.dispatchEvent(
         new CustomEvent("turbo:submit-end", {
           bubbles: true,
@@ -228,6 +228,243 @@ describe("OptimisticController", () => {
       expect(on().hasAttribute("data-optimistic-toggled")).toBe(true);
     });
 
+    it.each([undefined, null])(
+      "keeps a synthetic terminal from another form out of the ownership (%s)",
+      async (submission) => {
+        await mount(wrapper);
+        listen();
+        startOf(like(), submission);
+        endOf(search(), submission, true);
+        expect(seen).toEqual([]);
+        expect(wrap().getAttribute("data-optimistic")).toBe("true");
+        expect(wrap().getAttribute("aria-busy")).toBe("true");
+        expect(on().hasAttribute("data-optimistic-toggled")).toBe(true);
+
+        endOf(like(), submission, false);
+        expect(seen).toEqual(["rollback"]);
+        expect(on().hidden).toBe(true);
+        expect(off().hidden).toBe(false);
+      },
+    );
+
+    it("requires the owning form even when another form names the same token", async () => {
+      await mount(wrapper);
+      listen();
+      const submission = {};
+      startOf(like(), submission);
+      endOf(search(), submission, false);
+      expect(seen).toEqual([]);
+      expect(on().hidden).toBe(false);
+      expect(wrap().getAttribute("data-optimistic")).toBe("true");
+
+      endOf(like(), submission, true);
+      endOf(like(), submission, false);
+      expect(seen).toEqual(["commit"]);
+      expect(on().hidden).toBe(false);
+    });
+
+    it.each([
+      [undefined, null],
+      [null, undefined],
+    ])(
+      "pairs absent and null synthetic identities on the owning form (%s, %s)",
+      async (start, end) => {
+        await mount(wrapper);
+        listen();
+        startOf(like(), start);
+        endOf(like(), end, true);
+        endOf(like(), end, false);
+        expect(seen).toEqual(["commit"]);
+        expect(wrap().hasAttribute("data-optimistic")).toBe(false);
+        expect(on().hidden).toBe(false);
+      },
+    );
+
+    it.each([undefined, null])(
+      "does not let a synthetic terminal resolve an explicit submission (%s)",
+      async (synthetic) => {
+        await mount(wrapper);
+        listen();
+        const submission = {};
+        startOf(like(), submission);
+        endOf(like(), synthetic, true);
+        expect(seen).toEqual([]);
+        expect(wrap().getAttribute("data-optimistic")).toBe("true");
+        endOf(like(), submission, false);
+        expect(seen).toEqual(["rollback"]);
+      },
+    );
+
+    it.each([undefined, null])(
+      "does not let an explicit terminal resolve a synthetic submission (%s)",
+      async (synthetic) => {
+        await mount(wrapper);
+        listen();
+        startOf(like(), synthetic);
+        endOf(like(), {}, true);
+        expect(seen).toEqual([]);
+        expect(wrap().getAttribute("data-optimistic")).toBe("true");
+        endOf(like(), synthetic, false);
+        expect(seen).toEqual(["rollback"]);
+      },
+    );
+
+    it.each(["older-first", "owner-first"])(
+      "only resolves the newest start with two submissions in flight (%s)",
+      async (order) => {
+        await mount(wrapper);
+        listen();
+        const older = {};
+        const owner = {};
+        startOf(like(), older);
+        startOf(search(), owner);
+        if (order === "older-first") {
+          endOf(like(), older, true);
+          expect(seen).toEqual([]);
+          expect(wrap().getAttribute("data-optimistic")).toBe("true");
+          endOf(search(), owner, false);
+        } else {
+          endOf(search(), owner, false);
+          endOf(like(), older, true);
+        }
+        expect(seen).toEqual(["rollback"]);
+        expect(wrap().hasAttribute("data-optimistic")).toBe(false);
+        expect(on().hidden).toBe(true);
+        expect(off().hidden).toBe(false);
+      },
+    );
+
+    it.each([false, undefined, null, "true", 1])(
+      "rolls back an owning terminal unless success is the boolean true (%s)",
+      async (success) => {
+        await mount(wrapper);
+        listen();
+        const submission = {};
+        startOf(like(), submission);
+        endOf(like(), submission, success);
+        endOf(like(), submission, true);
+        expect(seen).toEqual(["rollback"]);
+        expect(on().hidden).toBe(true);
+        expect(off().hidden).toBe(false);
+        expect(wrap().hasAttribute("aria-busy")).toBe(false);
+      },
+    );
+
+    it.each([true, false])(
+      "releases ownership before its terminal callback (%s)",
+      async (success) => {
+        await mount(wrapper);
+        listen();
+        const previous = {};
+        const next = {};
+        wrap().addEventListener(
+          `stimeo--optimistic:${success ? "commit" : "rollback"}`,
+          () => {
+            endOf(like(), previous, !success);
+            startOf(like(), next);
+          },
+          { once: true },
+        );
+        startOf(like(), previous);
+        endOf(like(), previous, success);
+        expect(seen).toEqual([success ? "commit" : "rollback"]);
+        expect(wrap().getAttribute("data-optimistic")).toBe("true");
+        endOf(like(), next, true);
+        expect(seen).toEqual([success ? "commit" : "rollback", "commit"]);
+        expect(wrap().hasAttribute("data-optimistic")).toBe(false);
+      },
+    );
+
+    it("preserves an explicit owner through an in-page reconnect", async () => {
+      await mount(wrapper);
+      listen();
+      const submission = {};
+      startOf(like(), submission);
+      const instance = application.getControllerForElementAndIdentifier(
+        wrap(),
+        "stimeo--optimistic",
+      ) as OptimisticController;
+      instance.disconnect();
+      instance.connect();
+      await flushMicrotasks();
+      endOf(search(), submission, true);
+      expect(seen).toEqual([]);
+      endOf(like(), submission, false);
+      expect(seen).toEqual(["rollback"]);
+      expect(on().hidden).toBe(true);
+    });
+
+    it("preserves an explicit owner through a permanent carry after a microtask", async () => {
+      await mount(wrapper);
+      listen();
+      const host = wrap();
+      host.setAttribute("data-turbo-permanent", "");
+      const ownerForm = like();
+      const submission = {};
+      const instance = application.getControllerForElementAndIdentifier(
+        host,
+        "stimeo--optimistic",
+      ) as OptimisticController;
+      application.stop();
+      startOf(ownerForm, submission);
+      host.remove();
+      instance.disconnect();
+      await flushMicrotasks();
+      document.body.append(host);
+      instance.connect();
+      await tick();
+      expect(host.getAttribute("data-optimistic")).toBe("true");
+      endOf(ownerForm, submission, false);
+      expect(seen).toEqual(["rollback"]);
+      expect(on().hidden).toBe(true);
+    });
+
+    it("forgets an explicit owner on a real detach before reconnecting", async () => {
+      await mount(wrapper);
+      listen();
+      const host = wrap();
+      const ownerForm = like();
+      const submission = {};
+      const instance = application.getControllerForElementAndIdentifier(
+        host,
+        "stimeo--optimistic",
+      ) as OptimisticController;
+      application.stop();
+      startOf(ownerForm, submission);
+      host.remove();
+      instance.disconnect();
+      document.body.append(host);
+      instance.connect();
+      expect(host.hasAttribute("data-optimistic")).toBe(false);
+      endOf(ownerForm, submission, true);
+      expect(seen).toEqual([]);
+      expect(on().hidden).toBe(true);
+
+      const current = {};
+      startOf(ownerForm, current);
+      endOf(ownerForm, current, true);
+      expect(seen).toEqual(["commit"]);
+    });
+
+    it("rewinds a cached copy without accepting the earlier instance's owner", async () => {
+      await mount(wrapper);
+      const submission = {};
+      startOf(like(), submission);
+      application = await restoreFromCache(application, (restored) => {
+        restored.register("stimeo--optimistic", OptimisticController);
+      });
+      listen();
+      expect(wrap().hasAttribute("data-optimistic")).toBe(false);
+      expect(wrap().hasAttribute("aria-busy")).toBe(false);
+      expect(on().hidden).toBe(true);
+      endOf(like(), submission, true);
+      expect(seen).toEqual([]);
+      const current = {};
+      startOf(like(), current);
+      endOf(like(), current, true);
+      expect(seen).toEqual(["commit"]);
+    });
+
     it("still rolls back when the owning submission fails after a sibling finished", async () => {
       await mount(wrapper);
       listen();
@@ -240,7 +477,7 @@ describe("OptimisticController", () => {
       expect(off().hidden).toBe(false);
     });
 
-    it("ignores a sibling terminal that arrives before the owning one, in either order", async () => {
+    it("ignores a sibling terminal that arrives after the owning one", async () => {
       await mount(wrapper);
       listen();
       const liking = {};

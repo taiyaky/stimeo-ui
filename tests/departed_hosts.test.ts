@@ -96,8 +96,8 @@ describe("an element that stops resolving as a target", () => {
   const carousel = `<section data-controller="stimeo--carousel" aria-roledescription="carousel" aria-label="Featured"
        data-stimeo--carousel-autoplay-value="false" data-stimeo--carousel-loop-value="false">
      <button id="toggle" aria-label="Slide autoplay" data-stimeo--carousel-target="playToggle">
-       <span data-stimeo--carousel-target="onLabel">Pause</span>
-       <span data-stimeo--carousel-target="offLabel">Play</span>
+       <span aria-hidden="true" data-stimeo--carousel-target="onLabel">❚❚</span>
+       <span aria-hidden="true" data-stimeo--carousel-target="offLabel">▶</span>
      </button>
      <div data-stimeo--carousel-target="viewport">
        <div data-stimeo--carousel-target="slide">One</div>

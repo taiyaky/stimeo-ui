@@ -1,12 +1,13 @@
 import { Controller } from "@hotwired/stimulus";
 import { ensureId } from "../utils/aria_ids";
-import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
-import { CompositionTracker } from "../utils/composition_tracker";
+import { CompositionTracker, isCompositionInputType } from "../utils/composition_tracker";
 import { compileRegExp } from "../utils/declared_value";
 import { FormResetWatcher } from "../utils/form_reset_watcher";
 import { toHalfWidth } from "../utils/half_width";
-import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
+import { KeyedTimers } from "../utils/keyed_timers";
+import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { MoveCounter } from "../utils/move_counter";
 
 /** The error attributes this component writes on each field while input is rejected. */
@@ -76,11 +77,6 @@ const DEFAULT_PATTERN = "[0-9]";
  */
 const DEFAULT_MATCHER = new RegExp(`^(?:${DEFAULT_PATTERN})$`);
 
-/** Whether a press carries a modifier, which makes it the document's to handle. */
-function hasModifier(event: KeyboardEvent): boolean {
-  return event.altKey || event.ctrlKey || event.metaKey || event.shiftKey;
-}
-
 /**
  * The controller-derived state a consumer can observe.
  *
@@ -91,6 +87,14 @@ function hasModifier(event: KeyboardEvent): boolean {
 interface OtpState {
   readonly value: string;
   readonly state: string;
+}
+
+/** The edit a normal beforeinput announces, before interrupted text is reconciled. */
+interface InputBaseline {
+  readonly field: HTMLInputElement;
+  readonly before: string;
+  readonly dropHeld: boolean;
+  interrupted: boolean;
 }
 
 /** Compares exactly the derived state the root publishes. */
@@ -148,12 +152,38 @@ function statesDiffer(left: OtpState, right: OtpState): boolean {
  * composition to end and is then applied and reported before the commit is
  * taken. A composition that ends on the text the field held when it began was
  * cancelled: no edit, so it reports nothing and focus stays.
+ * An interrupted conversion is not a confirmation: only an empty residual or
+ * one whole-pattern character, after full-width normalization, is retained.
+ * Other residuals return to the prior accepted character, or empty if the current
+ * pattern rejects it. No characters are distributed and focus stays. Locked
+ * fields and a new conversion keep their DOM text; publication counts the validated
+ * character until that text is superseded. Page writes are read as page writes,
+ * never rolled back as an old residual. This cleanup reports only `reconcile`,
+ * and only if the combined value or state moved. A following ordinary input or
+ * real compositionend still reports its own edit, independently of that cleanup;
+ * the cleanup keeps the selection of a field it rewrites, so that input lands where
+ * the user put it. A real compositionend still owed survives a move that keeps its
+ * field focused within one turn (`moveBefore`); it goes when the field is released
+ * or returns without focus, stays out past the turn, or a `change` publishes a value
+ * that already carries the residual, after which the end is compared with that value.
+ * Until the conversion's end is observed, only its own field waits: a key in another
+ * field is handled as a key, a script's input there is distributed past the field
+ * still composing without moving focus, and a paste fills every writable field from
+ * its own, conversion text included, then advances focus.
+ * A `pattern` drop held for a conversion applies, reported as `reconcile`, ahead of
+ * the next key, edit or paste — to every field but one still composing, which keeps
+ * its text for its own end and counts a committed character only if the pattern
+ * accepts it or the field is locked. A listener that answers that `reconcile`
+ * synchronously with another operation — another edit or reconciliation,
+ * disconnecting the group, removing the field, starting or ending a conversion —
+ * supersedes the gesture.
  * Completeness belongs to that state: dropping a trailing empty field completes
  * a passcode whose combined value never moved, and that transition is reported
  * too, so a consumer reading `data-state` is never left behind a silent move.
  * `invalid` dispatches `{ pattern: string }` carrying the compiled pattern.
  *
- * Controller-owned output: `data-filled` on each entered field, `data-state`
+ * Controller-owned output: `data-filled` and a `data-stimeo--otp-interrupted`
+ * projection marker on a field whose DOM text must be preserved, `data-state`
  * (`empty` / `partial` / `complete`) on the root, and — while input is being
  * reported invalid — `aria-invalid`, `aria-errormessage`, `aria-describedby`,
  * and the `error` target's `hidden`. Authored values return on teardown: the
@@ -192,22 +222,52 @@ export class OtpController extends Controller<HTMLElement> {
   #pattern = DEFAULT_MATCHER;
   /** Source of {@link #pattern}, reported in `invalid` so consumers can word it. */
   #patternSource = DEFAULT_PATTERN;
-  /** Public state carried by the last dispatch; keeps a no-op sync silent. */
+  /** The published state carried by the last dispatch; keeps a no-op sync silent. */
   #published: OtpState | null = null;
   /** True between connect and disconnect, so pre-connect Value changes stay silent. */
   #connected = false;
   /** Digit each field last committed, restored when rejected input replaced it. */
   readonly #committed = new WeakMap<HTMLInputElement, string>();
-  /** The field being composed, and the text it held when the composition began. */
+  /** Validated publication while a locked field or a new conversion keeps its own DOM text. */
+  readonly #retained = new WeakMap<
+    HTMLInputElement,
+    { readonly text: string; readonly value: string }
+  >();
+  /** One ordinary edit's comparison basis, independent of an intervening reconciliation. */
+  readonly #inputBaselines = new Map<HTMLInputElement, InputBaseline>();
+  readonly #inputExpiry = new KeyedTimers<HTMLInputElement>();
+  /** A formal end can arrive after the ordinary input window has expired. */
+  readonly #endBaselines = new Map<
+    HTMLInputElement,
+    { readonly text: string; readonly baseline: InputBaseline }
+  >();
+  /**
+   * Fields released while they kept focus, until the turn ends: a move with
+   * `moveBefore`, which Stimulus releases and observes again in one mutation batch,
+   * keeps the formal end a field owes; anything else is leaving.
+   */
+  readonly #away = new Set<HTMLInputElement>();
+  /**
+   * The field a composition began in and the text it held then, which tells a
+   * cancelled composition from a commit when it ends. Whether a field is composing
+   * now is the tracker's to say.
+   */
   #composing: { readonly field: HTMLInputElement; readonly before: string } | null = null;
   /** A `pattern` change whose rejected characters wait for the composition to end. */
   #dropHeld = false;
+  /**
+   * The pattern the entered digits were last judged by. A connection that finds
+   * another one declared judges them again, as the change does while connected.
+   */
+  #judgedBy: string | null = null;
 
   /**
    * Collapses one batch of page changes — field and value target and `pattern`
-   * callbacks, a form reset — into a single reconciliation.
+   * callbacks, a form reset, a Turbo morph of the group or its subtree — into a
+   * single reconciliation. A morph can empty a retained `value` target whose new
+   * markup carries no value while the digits keep theirs; the pass rewrites it.
    */
-  readonly #reconcile = new MicrotaskCoalescer(() => this.#reconcileFields());
+  readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileFields());
 
   readonly #errorHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
   readonly #state = new AttributeLease<HTMLElement>("data-state", this.identifier);
@@ -229,26 +289,50 @@ export class OtpController extends Controller<HTMLElement> {
   readonly #composition = new CompositionTracker({
     onStart: (event) => {
       const field = this.#fieldFrom(event);
-      if (field) this.#composing = { field, before: field.value };
+      this.#clearInputBaseline();
+      if (field) this.#endBaselines.delete(field);
+      if (field && this.#composition.composingElement() === field) {
+        this.#composing = { field, before: field.value };
+      }
     },
     onEnd: (event) => {
-      const composing = this.#composing;
-      this.#composing = null;
       const input = this.#fieldFrom(event);
+      if (!input) return;
+      const baseline = this.#inputBaselines.get(input) ?? this.#endBaselines.get(input)?.baseline;
+      this.#clearEdits(input);
+      const composing = this.#composing;
+      if (!this.#composition.isComposing()) this.#composing = null;
       // `maxlength` has already cut the field down to one character, but the
       // commit itself carries the whole confirmed string — so a conversion that
       // ends in several characters still reaches the fields after this one.
       const data = (event as CompositionEvent).data ?? "";
-      const text = input && data.length <= input.value.length ? input.value : data;
+      const text = data.length <= input.value.length ? input.value : data;
       // A composition that ends on the text the field held when it began was
       // cancelled: the user entered nothing, so there is nothing to take.
-      const commit = input !== null && (composing?.field !== input || text !== composing.before);
-      if (this.#dropHeld) {
-        // The drop judges what the fields had committed; the commit waits aside.
-        if (input && commit) input.value = this.#committed.get(input) ?? "";
-        this.#reconcileFields();
+      const commit = composing?.field !== input || text !== composing.before;
+      if (commit) this.#accept(input, text, baseline?.interrupted ? baseline : undefined);
+      else {
+        this.#restoreRetained(input);
+        if (this.#dropHeld) this.#reconcileFields();
       }
-      if (input && commit) this.#accept(input, text);
+    },
+    onAbandon: (element, inPlace) => {
+      this.#composing = null;
+      if (inPlace && element instanceof HTMLInputElement && this.fieldTargets.includes(element)) {
+        const baseline = this.#inputBaselines.get(element) ?? {
+          field: element,
+          before: this.#committed.get(element) ?? "",
+          dropHeld: this.#dropHeld,
+          interrupted: true,
+        };
+        baseline.interrupted = true;
+        this.#settleResidual(element);
+        this.#endBaselines.set(element, { text: element.value, baseline });
+        this.#reconcileFields();
+      } else if (this.#dropHeld) {
+        // A write may be the input about to run; its value is not a page reconciliation yet.
+        this.#reconcile.schedule();
+      }
     },
   });
 
@@ -256,18 +340,31 @@ export class OtpController extends Controller<HTMLElement> {
     this.#connected = true;
     for (const field of this.fieldTargets) this.#bind(field);
     this.#formReset.observe();
-    this.#reconcile.activate();
+    this.#reconcile.observe(this.element);
     this.#adopt();
     this.#sync();
+    // A pattern that changed while the group was away — moved with the change, or
+    // with a drop a composition still holds — drops what it rejects now, or once
+    // the composition the group kept through the move ends.
+    this.#judgedBy ??= this.#patternSource;
+    if (this.#judgedBy !== this.#patternSource) {
+      if (this.#composition.isComposing()) this.#dropHeld = true;
+      else if (this.#dropRejected()) this.#reconcile.schedule();
+    }
   }
 
   override disconnect(): void {
     this.#connected = false;
     for (const field of this.fieldTargets) this.#unbind(field);
     this.#composition.disconnect();
+    this.#clearInputBaseline();
+    // Only a field that keeps focus through the move still owes its end to this group
+    for (const field of this.#endBaselines.keys())
+      if (!this.#away.has(field)) this.#endBaselines.delete(field);
     this.#formReset.disconnect();
-    this.#reconcile.cancel();
-    // A drop a composition held goes with the connection, like a pending pass.
+    this.#reconcile.disconnect();
+    // A drop a composition held goes with the connection, like a pending pass; the
+    // next connection judges the digits again by the pattern it finds.
     this.#dropHeld = false;
     this.#clearError();
     this.#state.return(this.element);
@@ -275,8 +372,10 @@ export class OtpController extends Controller<HTMLElement> {
 
   /**
    * Stimulus lifecycle callback when a new field target enters the DOM.
-   * Wires the new field and folds the wider digit count into one reconciliation,
-   * which stays inert until `connect()` opens the window.
+   * Wires the new field and reads it at once, so its mark and the digit a rejected
+   * keystroke restores hold before anything else runs, then folds the wider digit
+   * count into one reconciliation, which stays inert until `connect()` opens the
+   * window.
    */
   fieldTargetConnected(element: HTMLInputElement): void {
     this.#bind(element);
@@ -284,10 +383,13 @@ export class OtpController extends Controller<HTMLElement> {
     this.#reconcile.schedule();
   }
 
-  /** Releases a dropped field's listeners and leases, then reconciles the rest. */
+  /**
+   * Releases a dropped field's listeners and leases, then reconciles the rest. A
+   * field that only moved within the group stays a field and keeps what it shows.
+   */
   fieldTargetDisconnected(element: HTMLInputElement): void {
     this.#unbind(element);
-    this.#returnLeases(element);
+    if (!this.fieldTargets.includes(element)) this.#returnLeases(element);
     this.#reconcile.schedule();
   }
 
@@ -332,20 +434,36 @@ export class OtpController extends Controller<HTMLElement> {
     this.#patternSource = compiled ? this.patternValue : DEFAULT_PATTERN;
     this.#pattern = compiled ?? DEFAULT_MATCHER;
     if (!this.#connected) return;
-    if (this.#composing !== null) {
+    if (this.#composition.isComposing()) {
       this.#dropHeld = true;
       return;
     }
     if (this.#dropRejected()) this.#reconcile.schedule();
   }
 
-  /** Empties every writable field holding a character the pattern rejects; whether one did. */
-  #dropRejected(): boolean {
+  /**
+   * Empties every writable field holding a character the pattern rejects; whether one did.
+   * A field still `composing` keeps its text, the IME's until the conversion ends, and
+   * only stops counting a committed character the pattern rejects — unless it is locked,
+   * since a locked field keeps its characters; its text is judged, and the digits marked
+   * judged, when the drop applies again after that end.
+   */
+  #dropRejected(composing: EventTarget | null = null): boolean {
+    if (composing === null) this.#judgedBy = this.#patternSource;
     let dropped = false;
     for (const field of this.fieldTargets) {
-      if (field.value === "" || !this.#isWritable(field)) continue;
-      if (this.#pattern.test(field.value)) continue;
-      this.#writeField(field, "");
+      if (field === composing) {
+        const committed = this.#committed.get(field) ?? "";
+        if (committed === "" || !this.#isWritable(field) || this.#pattern.test(committed)) continue;
+        this.#committed.set(field, "");
+        dropped = true;
+        continue;
+      }
+      const value = this.#settledText(field);
+      if (value === "" || !this.#isWritable(field)) continue;
+      if (this.#pattern.test(value)) continue;
+      if (this.#retained.has(field)) this.#holdText(field, "");
+      else this.#writeField(field, "");
       dropped = true;
     }
     return dropped;
@@ -355,35 +473,38 @@ export class OtpController extends Controller<HTMLElement> {
   onInput(event: Event): void {
     const input = this.#fieldFrom(event);
     if (!input) return;
+    const baseline = this.#inputBaselines.get(input);
+    this.#clearEdits(input);
 
     // The browser may follow a commit with one more `input` carrying the same
     // text; running it again would spread the commit twice.
     if (this.#composition.consumesConfirmedInput(event)) return;
 
-    // Guard during active composition to prevent premature focus switching
-    if (this.#composition.isComposing(event as InputEvent)) return;
+    // The IME's own draft waits for its end; an edit in another field is not the conversion's
+    if (this.#composition.owns(event as InputEvent)) return;
 
-    this.#accept(input);
+    this.#accept(input, input.value, baseline?.interrupted ? baseline : undefined);
   }
 
   /** Handles Backspace clearing, arrows, and home/end navigation. */
   onKeydown(event: KeyboardEvent): void {
+    this.#clearInputBaseline();
     if (isReservedArrowChord(event)) return;
     const input = this.#fieldFrom(event);
     if (!input) return;
 
-    // Do not trigger keydown actions during composition
-    if (this.#composition.isComposing(event)) return;
+    // Keys belong to the IME in the field it composes in, and only there
+    if (this.#composition.owns(event)) return;
+
+    if (!this.#prepareEdit(input)) return;
 
     const index = this.fieldTargets.indexOf(input);
     const fields = this.fieldTargets;
-    // Logical, not physical. The key is normalised rather than the
-    // delta negated: these two branches are not mirror images — their bounds
-    // guards differ — so swapping the key keeps each guard with its own direction.
-
+    // Logical, not physical: `logicalArrowKey` swaps the key under RTL, so each branch
+    // keeps its own direction's helper (`#focusableBefore` / `#focusableAfter`).
     switch (logicalArrowKey(event.key, this.element)) {
       case "Backspace":
-        if (hasModifier(event)) break;
+        if (hasModifierChord(event)) break;
         if (input.value && this.#isWritable(input)) {
           // Filled field: clear it where it stands
           event.preventDefault();
@@ -423,7 +544,7 @@ export class OtpController extends Controller<HTMLElement> {
 
       case "Home": {
         // Control+Home belongs to the document, not to the digit group
-        if (hasModifier(event)) break;
+        if (hasModifierChord(event)) break;
         const first = fields.find((field) => this.#isFocusable(field));
         if (first) {
           event.preventDefault();
@@ -433,7 +554,7 @@ export class OtpController extends Controller<HTMLElement> {
       }
 
       case "End": {
-        if (hasModifier(event)) break;
+        if (hasModifierChord(event)) break;
         const last = fields
           .slice()
           .reverse()
@@ -456,7 +577,8 @@ export class OtpController extends Controller<HTMLElement> {
     if (!input) return;
 
     event.preventDefault();
-    this.#distribute(input, toHalfWidth(event.clipboardData?.getData("text") ?? ""));
+    if (this.#prepareEdit(input))
+      this.#distribute(input, toHalfWidth(event.clipboardData?.getData("text") ?? ""), false);
   }
 
   /**
@@ -485,6 +607,37 @@ export class OtpController extends Controller<HTMLElement> {
     this.#syncAndDispatch();
   }
 
+  /** Captures an ordinary edit before the tracker reconciles any composition it interrupts. */
+  readonly #onBeforeInput = (event: InputEvent): void => {
+    const field = event.currentTarget as HTMLInputElement;
+    this.#clearEdits(field);
+    if (event.isComposing || !event.inputType || isCompositionInputType(event.inputType)) return;
+    this.#inputBaselines.set(field, {
+      field,
+      before: this.#committed.get(field) ?? "",
+      dropHeld: this.#dropHeld,
+      interrupted: false,
+    });
+    this.#inputExpiry.set(field, () => this.#clearInputBaseline(field), 0);
+  };
+
+  /** Expires a beforeinput that produced no input, or was superseded by another gesture. */
+  #clearInputBaseline(field?: HTMLInputElement): void {
+    if (field) {
+      this.#inputBaselines.delete(field);
+      this.#inputExpiry.clear(field);
+    } else {
+      this.#inputBaselines.clear();
+      this.#inputExpiry.clearAll();
+    }
+  }
+
+  /** Consumes an edit or releases its field, including any still-owed formal end. */
+  #clearEdits(field: HTMLInputElement): void {
+    this.#clearInputBaseline(field);
+    this.#endBaselines.delete(field);
+  }
+
   readonly #onFieldFocus = (event: FocusEvent): void => {
     const input = event.currentTarget as HTMLInputElement | null;
     if (input) {
@@ -499,16 +652,38 @@ export class OtpController extends Controller<HTMLElement> {
     return this.hasValueTarget && this.valueTarget.form === form;
   }
 
+  /**
+   * Listens for focus and ordinary edits on one field and hands it to the composition
+   * tracker; a field back from a move keeps the end it owes only while it holds focus.
+   *
+   * @stimeoListenerLifetime element each field is bound when it arrives and unbound by
+   *   `#unbind` when it leaves or the controller disconnects.
+   */
   #bind(field: HTMLInputElement): void {
     field.addEventListener("focus", this.#onFieldFocus);
+    field.addEventListener("beforeinput", this.#onBeforeInput, true);
+    // A field back from a move owes its end only if it still holds focus
+    if (this.#away.delete(field) && document.activeElement !== field)
+      this.#endBaselines.delete(field);
     this.#composition.observe(field);
   }
 
+  /** Lets a field go; one that keeps focus through a move keeps the formal end it owes. */
   #unbind(field: HTMLInputElement): void {
     field.removeEventListener("focus", this.#onFieldFocus);
+    field.removeEventListener("beforeinput", this.#onBeforeInput, true);
+    this.#clearInputBaseline(field);
+    if (document.activeElement === field) this.#holdAway(field);
+    else this.#endBaselines.delete(field);
     this.#composition.unobserve(field);
-    // A field that leaves mid-composition never ends that composition here.
-    if (this.#composing?.field === field) this.#composing = null;
+  }
+
+  /** Keeps the end a released field owes until the turn ends, for a move to bring it back. */
+  #holdAway(field: HTMLInputElement): void {
+    this.#away.add(field);
+    queueMicrotask(() => {
+      if (this.#away.delete(field)) this.#endBaselines.delete(field);
+    });
   }
 
   /**
@@ -543,14 +718,20 @@ export class OtpController extends Controller<HTMLElement> {
 
   /** Takes one field's current value as the truth behind its derived state. */
   #adoptField(field: HTMLInputElement): void {
-    this.#committed.set(field, field.value);
-    this.#markFilled(field, field.value);
+    // A field that moved here with its conversion keeps the character it committed.
+    if (this.#composition.composingElement() === field) return;
+    const value = this.#settledText(field);
+    this.#committed.set(field, value);
+    this.#markFilled(field, value);
   }
 
   /**
    * Absorbs one batch of page changes — fields added or removed, entered digits a
-   * new `pattern` rejects, fields a native form reset restored — as one state
-   * transition.
+   * new `pattern` rejects, fields a native form reset restored, digits a Turbo
+   * morph rewrote — as one state transition. Every field but one mid-composition
+   * is read back first, so its `data-filled` mark and the character a rejected
+   * keystroke restores follow what the page left in it; a field mid-composition
+   * keeps the character it had committed and is marked by that.
    *
    * Nobody edited the passcode here, so the move is reported as `reconcile`:
    * automation listening for `change` must not read a re-render or a reset as an
@@ -567,16 +748,23 @@ export class OtpController extends Controller<HTMLElement> {
    * character it had committed, never by the IME's uncommitted text. Only a
    * `pattern` drop waits for the composition to end.
    */
-  #reconcileFields(): void {
-    if (this.#dropHeld && this.#composing === null) {
+  #reconcileFields(): boolean {
+    // Asking ends a composition a write already ended, so its field reads as written.
+    const composing = this.#composition.composingElement();
+    if (this.#dropHeld && composing === null) {
       this.#dropHeld = false;
       this.#dropRejected();
     }
+    for (const field of this.fieldTargets) {
+      if (field === composing) this.#markFilled(field, this.#publishedText(field));
+      else this.#adoptField(field);
+    }
     const previous = this.#published;
     const current = this.#sync();
-    if (previous && !statesDiffer(previous, current)) return;
-    this.#moves.record();
+    if (previous && !statesDiffer(previous, current)) return true;
+    const token = this.#moves.record();
     this.dispatch("reconcile", { detail: { value: current.value } });
+    return this.#moves.isLatest(token);
   }
 
   /**
@@ -584,29 +772,47 @@ export class OtpController extends Controller<HTMLElement> {
    * `text` defaults to the field's own value; a confirmation passes the string it
    * committed, which `maxlength` would otherwise have truncated.
    */
-  #accept(input: HTMLInputElement, text: string = input.value): void {
+  #accept(input: HTMLInputElement, text: string = input.value, baseline?: InputBaseline): void {
+    if (!this.#prepareEdit(input, true)) return;
+    const before = baseline
+      ? this.fieldTargets
+          .map((field) =>
+            field === input
+              ? baseline.dropHeld && !this.#pattern.test(baseline.before)
+                ? ""
+                : baseline.before
+              : this.#publishedText(field),
+          )
+          .join("")
+      : undefined;
     const raw = toHalfWidth(text);
     if (raw === "") {
       // Emptying a field is a legitimate edit, not rejected input
       this.#writeField(input, "");
       this.#clearError();
-      this.#syncAndDispatch();
+      this.#syncAndDispatch(before);
       return;
     }
 
-    this.#distribute(input, raw);
+    this.#distribute(input, raw, true, before);
   }
 
   /**
-   * Fills `text`'s accepted characters into the writable fields at and after the
-   * entry point, then leaves focus on the field after the last one filled.
+   * Fills `text`'s accepted characters into writable fields at and after the
+   * entry point, preserving any other field's composition and its focus. Without
+   * an active composition, focus advances past the last field filled.
+   *
+   * A paste passes `spare` false: it lands in the focused field, so no other field can
+   * still be composing, whatever end the tracker has yet to see, and the paste replaces
+   * what its own field holds. It fills every writable field and advances focus.
    */
-  #distribute(from: HTMLInputElement, text: string): void {
+  #distribute(from: HTMLInputElement, text: string, spare = true, before?: string): void {
     const accepted = Array.from(text).filter((char) => this.#pattern.test(char));
     let reached = false;
+    const composing = spare ? this.#composition.composingElement() : null;
     const slots = this.fieldTargets.filter((field) => {
       reached ||= field === from;
-      return reached && this.#isWritable(field);
+      return reached && field !== composing && this.#isWritable(field);
     });
     const filled = Math.min(accepted.length, slots.length);
 
@@ -625,10 +831,105 @@ export class OtpController extends Controller<HTMLElement> {
     }
 
     const last = slots[filled - 1];
-    if (last) (this.#writableAfter(last) ?? last).focus();
+    if (last && composing === null) (this.#writableAfter(last) ?? last).focus();
 
     this.#clearError();
-    this.#syncAndDispatch();
+    this.#syncAndDispatch(before);
+  }
+
+  /**
+   * Applies page-declared drops a conversion held, ahead of a user's key, edit or paste
+   * in `input`; whether that gesture still applies. A conversion still running elsewhere
+   * keeps its text for its own end, and every other field takes the drop. `edit` says
+   * the field's text is already the incoming edit, which the drop reads by the prior
+   * slot instead. A listener that answers the drop's `reconcile` synchronously with
+   * another operation — a newer edit or reconciliation, disconnecting the group,
+   * removing the field, starting or ending a conversion — supersedes the gesture.
+   */
+  #prepareEdit(input: HTMLInputElement, edit = false): boolean {
+    if (!this.#dropHeld) return true;
+    if (edit) this.#holdText(input, this.#committed.get(input) ?? "");
+    // A conversion still running keeps its own text; every other field takes the drop now
+    const composing = this.#composition.composingElement();
+    if (composing !== null) this.#dropRejected(composing);
+    return (
+      this.#reconcileFields() &&
+      this.#connected &&
+      this.fieldTargets.includes(input) &&
+      this.#composition.composingElement() === composing
+    );
+  }
+
+  /** Validates the whole residual as one slot, without distribution or focus changes. */
+  #settleResidual(field: HTMLInputElement): void {
+    const raw = toHalfWidth(field.value);
+    const previous = this.#committed.get(field) ?? "";
+    const accepts = (text: string) => Array.from(text).length === 1 && this.#pattern.test(text);
+    const value = raw === "" || accepts(raw) ? raw : accepts(previous) ? previous : "";
+    if (this.#isWritable(field) && this.#composition.composingElement() !== field) {
+      // The edit that showed the end lands where the user put it
+      const { selectionStart, selectionEnd } = field;
+      this.#writeField(field, value);
+      if (selectionStart !== null && selectionEnd !== null)
+        field.setSelectionRange(selectionStart, selectionEnd);
+    } else this.#holdText(field, value);
+  }
+
+  /** Keeps a validated publication separate from DOM text this pass must leave alone. */
+  #holdText(field: HTMLInputElement, value: string): void {
+    const retained = { text: field.value, value };
+    this.#retained.set(field, retained);
+    field.setAttribute(this.#retainedMarker, JSON.stringify(retained));
+    this.#committed.set(field, value);
+  }
+
+  /** A page write supersedes a retained projection; unchanged residual DOM keeps it. */
+  #settledText(field: HTMLInputElement): string {
+    const ending = this.#endBaselines.get(field);
+    if (ending && ending.text !== field.value) this.#clearEdits(field);
+    const retained = this.#retained.get(field) ?? this.#readRetained(field);
+    if (retained?.text === field.value) {
+      this.#retained.set(field, retained);
+      const marker = JSON.stringify(retained);
+      if (field.getAttribute(this.#retainedMarker) !== marker)
+        field.setAttribute(this.#retainedMarker, marker);
+      return retained.value;
+    }
+    this.#retained.delete(field);
+    field.removeAttribute(this.#retainedMarker);
+    return field.value;
+  }
+
+  /** The projection travels with a copied field, without treating authored values as residuals. */
+  get #retainedMarker(): string {
+    return `data-${this.identifier}-interrupted`;
+  }
+
+  /** Reads only a complete projection; unrelated or malformed markup remains a page value. */
+  #readRetained(field: HTMLInputElement): { readonly text: string; readonly value: string } | null {
+    try {
+      const record: unknown = JSON.parse(field.getAttribute(this.#retainedMarker) ?? "null");
+      if (
+        typeof record === "object" &&
+        record !== null &&
+        "text" in record &&
+        "value" in record &&
+        typeof record.text === "string" &&
+        typeof record.value === "string"
+      ) {
+        return { text: record.text, value: record.value };
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  /** A cancelled restart restores its validated slot after composition ends. */
+  #restoreRetained(field: HTMLInputElement): void {
+    const retained = this.#retained.get(field);
+    if (retained?.text === field.value && this.#isWritable(field))
+      this.#writeField(field, retained.value);
   }
 
   /** Restores the digit a field committed before rejected input replaced it. */
@@ -638,6 +939,9 @@ export class OtpController extends Controller<HTMLElement> {
 
   /** Commits one field's value and the derived hook that reports it as entered. */
   #writeField(field: HTMLInputElement, value: string): void {
+    this.#retained.delete(field);
+    this.#endBaselines.delete(field);
+    field.removeAttribute(this.#retainedMarker);
     field.value = value;
     this.#committed.set(field, value);
     this.#markFilled(field, value);
@@ -694,9 +998,14 @@ export class OtpController extends Controller<HTMLElement> {
     return fields.length > 0 && fields.every((field) => this.#publishedText(field).length > 0);
   }
 
-  /** A field's text as the combined value counts it: a composing field by its committed character. */
+  /**
+   * A field's text as the combined value counts it: a composing field by its committed
+   * character.
+   */
   #publishedText(field: HTMLInputElement): string {
-    return field === this.#composing?.field ? (this.#committed.get(field) ?? "") : field.value;
+    return field === this.#composition.composingElement()
+      ? (this.#committed.get(field) ?? "")
+      : this.#settledText(field);
   }
 
   /**
@@ -722,12 +1031,21 @@ export class OtpController extends Controller<HTMLElement> {
     return this.#isComplete() ? "complete" : "partial";
   }
 
-  #syncAndDispatch(): void {
+  #syncAndDispatch(before?: string): void {
     const previous = this.#published;
-    const { value: combined } = this.#sync();
-    if (previous?.value === combined) return;
+    const current = this.#sync();
+    const combined = current.value;
+    if ((before ?? previous?.value) === combined) {
+      if (previous && statesDiffer(previous, current)) {
+        this.#moves.record();
+        this.dispatch("reconcile", { detail: { value: combined } });
+      }
+      return;
+    }
 
     const token = this.#moves.record();
+    // The value published now carries every residual a late formal end would confirm
+    this.#endBaselines.clear();
     this.dispatch("change", { detail: { value: combined } });
     if (!this.#moves.isLatest(token)) return;
 

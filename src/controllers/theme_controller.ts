@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { hasModifierChord, isReservedArrowChord, logicalArrowStep } from "../utils/arrow_step";
 import { validSelector } from "../utils/declared_value";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { RovingTabindex, rovingMove } from "../utils/roving_tabindex";
 import { readLocalStorage, writeLocalStorage } from "../utils/safe_storage";
@@ -62,8 +63,9 @@ const DEFAULT_TARGET = "html";
  * on the root. It applies `data-theme` (the *resolved* light/dark) and a matching
  * `color-scheme` to the `target` element (`<html>` by default), keeps the radiogroup
  * `aria-checked` + roving tabindex (APG radio) or the single button's `aria-pressed`
- * in sync. Arrow/Home/End move focus across the radiogroup as the APG radio pattern
- * requires; applying a theme never moves focus. The `prefers-color-scheme` listener is attached on
+ * in sync. Arrow keys move focus and the selection across the radiogroup as the APG radio
+ * pattern requires, and Home/End move both to the first/last option; applying a theme never
+ * moves focus. The `prefers-color-scheme` listener is attached on
  * `connect()` and removed on `disconnect()` (Turbo included). FOUC avoidance for the
  * very first paint is an inline `<head>` snippet, not this controller. A `mode`
  * declaration rewritten after connect is followed, but never over a stored choice
@@ -102,6 +104,12 @@ export class ThemeController extends Controller<HTMLElement> {
   /** The OS dark-mode query, watched so `system` tracks live changes. */
   #media: MediaQueryList | null = null;
 
+  /**
+   * The listeners of one connection — the query each connection takes and the keys on
+   * the element — released together on `disconnect()`.
+   */
+  readonly #listeners = new ListenerSet();
+
   /** Gate for the target and `mode` callbacks, which Stimulus runs before `connect()`. */
   #connected = false;
 
@@ -132,7 +140,7 @@ export class ThemeController extends Controller<HTMLElement> {
     this.#commit("media");
   };
 
-  /** Arrow/Home/End navigation for the radiogroup (APG radio pattern). */
+  /** Arrow-key navigation for the radiogroup (APG radio pattern), plus Home/End. */
   readonly #onKeydown = (event: KeyboardEvent): void => {
     // A descendant widget that already claimed the key (a grabbed drag handle, a
     // nested menu) must not ALSO act on it — composition depends on this yield.
@@ -186,8 +194,8 @@ export class ThemeController extends Controller<HTMLElement> {
     if (stored) this.modeValue = stored;
 
     this.#media = window.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
-    this.#media?.addEventListener("change", this.#onMediaChange);
-    this.element.addEventListener("keydown", this.#onKeydown);
+    if (this.#media) this.#listeners.add(this.#media, "change", this.#onMediaChange);
+    this.#listeners.add(this.element, "keydown", this.#onKeydown);
 
     this.#connected = true;
     this.#applyTheme();
@@ -199,8 +207,7 @@ export class ThemeController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#morph.disconnect();
     this.#connected = false;
-    this.#media?.removeEventListener("change", this.#onMediaChange);
-    this.element.removeEventListener("keydown", this.#onKeydown);
+    this.#listeners.dispose();
   }
 
   /** Validates the `target` declaration once, so the render path never parses. */
@@ -286,7 +293,10 @@ export class ThemeController extends Controller<HTMLElement> {
     this.#setMode(dark ? "light" : "dark", stateReasonFor(event));
   }
 
-  /** Central mode change: persist, apply to the root, resync controls, announce. */
+  /**
+   * Central mode change: persist, apply to the root, resync controls, and report a real
+   * move as `change`.
+   */
   #setMode(mode: ThemeMode, reason: StateReason = "user"): void {
     this.modeValue = mode;
     this.#writeStored(mode);

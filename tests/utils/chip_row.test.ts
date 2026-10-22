@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChipRow } from "../../src/utils/chip_row";
+import { keyEvent, press as pressKey } from "../helpers/keyboard";
 
 /** Behavioral tests for delegated, replaceable removable-chip rows. */
 describe("ChipRow", () => {
@@ -10,6 +11,7 @@ describe("ChipRow", () => {
   const items = () => Array.from(document.querySelectorAll<HTMLElement>("[data-chip]"));
   const buttons = () => items().map((item) => item.querySelector("button") as HTMLButtonElement);
   const root = () => document.querySelector<HTMLElement>("#root") as HTMLElement;
+  const row = () => document.querySelector<HTMLElement>("#row") as HTMLElement;
   const input = () => document.querySelector<HTMLInputElement>("#input") as HTMLInputElement;
 
   beforeEach(() => {
@@ -25,7 +27,7 @@ describe("ChipRow", () => {
     remove = vi.fn<(index: number) => void>();
     getItems = vi.fn(items);
     chipRow = new ChipRow({
-      directionElement: root(),
+      getDirectionElement: row,
       getItems,
       onRemove: remove,
       focusAfterEnd: () => input().focus(),
@@ -50,12 +52,8 @@ describe("ChipRow", () => {
     const clear = document.querySelector<HTMLButtonElement>("#clear") as HTMLButtonElement;
     clear.click();
 
-    const keydown = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    clear.dispatchEvent(keydown);
+    const keydown = keyEvent("ArrowRight");
+    pressKey(clear, keydown);
 
     expect(remove).not.toHaveBeenCalled();
     expect(keydown.defaultPrevented).toBe(false);
@@ -71,7 +69,7 @@ describe("ChipRow", () => {
         ?.setAttribute("data-remove", "");
     }
     chipRow = new ChipRow({
-      directionElement: root(),
+      getDirectionElement: row,
       getItems,
       getButton: (item) => item.querySelector<HTMLButtonElement>("button[data-remove]"),
       onRemove: remove,
@@ -85,7 +83,7 @@ describe("ChipRow", () => {
       "button[data-remove]",
     ) as HTMLButtonElement;
     info.click();
-    info.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+    pressKey(info, "Delete");
     expect(remove).not.toHaveBeenCalled();
 
     removeButton.click();
@@ -133,10 +131,65 @@ describe("ChipRow", () => {
 
   it("moves logically through the row and hands the end back to the input", () => {
     buttons()[0]?.focus();
-    buttons()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    pressKey(buttons()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(buttons()[1]);
 
-    buttons()[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    pressKey(buttons()[1] as HTMLElement, "ArrowRight");
+    expect(document.activeElement).toBe(input());
+  });
+
+  it.each([
+    ["rtl", "ltr", "ArrowRight", "ArrowLeft"],
+    ["ltr", "rtl", "ArrowLeft", "ArrowRight"],
+  ])(
+    "reads %s from the row when the root and focused buttons are %s",
+    (direction, opposite, previous, next) => {
+      row().style.direction = direction;
+      root().style.direction = opposite;
+      for (const button of buttons()) button.style.direction = opposite;
+
+      expect(pressKey(buttons()[1] as HTMLElement, previous).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(buttons()[0]);
+      expect(buttons().map((button) => button.tabIndex)).toEqual([0, -1]);
+      expect(pressKey(buttons()[0] as HTMLElement, previous).defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(buttons()[0]);
+      expect(pressKey(buttons()[0] as HTMLElement, next).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(buttons()[1]);
+      expect(buttons().map((button) => button.tabIndex)).toEqual([-1, 0]);
+      expect(pressKey(buttons()[1] as HTMLElement, next).defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(input());
+    },
+  );
+
+  it("reads a live writing-direction change on the next chip key", () => {
+    row().style.direction = "ltr";
+    pressKey(buttons()[0] as HTMLElement, "ArrowRight");
+    expect(document.activeElement).toBe(buttons()[1]);
+
+    row().style.direction = "rtl";
+    pressKey(buttons()[1] as HTMLElement, "ArrowRight");
+    expect(document.activeElement).toBe(buttons()[0]);
+    pressKey(buttons()[0] as HTMLElement, "ArrowLeft");
+    expect(document.activeElement).toBe(buttons()[1]);
+    pressKey(buttons()[1] as HTMLElement, "ArrowLeft");
+    expect(document.activeElement).toBe(input());
+  });
+
+  it("reads the replacement row's direction after a stale target disconnect", () => {
+    const old = row();
+    old.style.direction = "ltr";
+    // A key on the first row before the swap, so a direction read once cannot pass.
+    pressKey(buttons()[0] as HTMLElement, "ArrowRight");
+    expect(document.activeElement).toBe(buttons()[1]);
+    const replacement = old.cloneNode(true) as HTMLElement;
+    replacement.style.direction = "rtl";
+    old.replaceWith(replacement);
+    chipRow.connect(replacement);
+    chipRow.disconnect(old);
+
+    pressKey(buttons()[1] as HTMLElement, "ArrowRight");
+    expect(document.activeElement).toBe(buttons()[0]);
+    pressKey(buttons()[1] as HTMLElement, "ArrowLeft");
     expect(document.activeElement).toBe(input());
   });
 
@@ -144,26 +197,20 @@ describe("ChipRow", () => {
     const first = buttons()[0] as HTMLButtonElement;
     getItems.mockClear();
 
-    first.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    pressKey(first, "ArrowRight");
 
     expect(getItems).toHaveBeenCalledTimes(1);
     expect(document.activeElement).toBe(buttons()[1]);
   });
 
   it("delegates Delete while respecting already-consumed and modified keys", () => {
-    const consumed = new KeyboardEvent("keydown", {
-      key: "Delete",
-      bubbles: true,
-      cancelable: true,
-    });
+    const consumed = keyEvent("Delete");
     consumed.preventDefault();
-    buttons()[0]?.dispatchEvent(consumed);
-    buttons()[0]?.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowRight", ctrlKey: true, bubbles: true }),
-    );
+    pressKey(buttons()[0] as HTMLElement, consumed);
+    pressKey(buttons()[0] as HTMLElement, "ArrowRight", { ctrlKey: true });
     expect(remove).not.toHaveBeenCalled();
 
-    buttons()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+    pressKey(buttons()[0] as HTMLElement, "Delete");
     expect(remove).toHaveBeenCalledExactlyOnceWith(0);
   });
 
@@ -190,8 +237,8 @@ describe("ChipRow", () => {
 
   it("consumes each key it acts on, and leaves ArrowLeft on the first chip to the browser", () => {
     const press = (button: HTMLButtonElement | undefined, key: string): boolean => {
-      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-      button?.dispatchEvent(event);
+      const event = keyEvent(key);
+      pressKey(button as HTMLElement, event);
       return event.defaultPrevented;
     };
 
@@ -276,7 +323,7 @@ describe("ChipRow", () => {
         <input id="input">
       </div>`;
       ownRow = new ChipRow({
-        directionElement: root(),
+        getDirectionElement: row,
         getItems: items,
         onRemove: remove,
         focusAfterEnd: () => input().focus(),

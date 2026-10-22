@@ -327,8 +327,8 @@ describe("LiveCounterController", () => {
     it("applies the current gate to a late-added trigger", async () => {
       await mount({ confirm: false });
       const late = document.createElement("button");
-      // Driven directly: happy-dom's MutationObserver delivers target
-      // callbacks unreliably, and the callback's contract is what matters.
+      // Driven directly: the callback receives a button that is never inserted, so its
+      // contract is checked without a MutationObserver delivery.
       controller()?.triggerTargetConnected(late);
       expect(late.hasAttribute("disabled")).toBe(true);
 
@@ -674,8 +674,8 @@ describe("LiveCounterController", () => {
   });
 
   /**
-   * Rewrites a declaration and delivers its Value callback directly, since happy-dom
-   * does not reliably run it for an attribute write.
+   * Rewrites a declaration and delivers its Value callback directly, so the callback
+   * runs before the next line instead of at the MutationObserver delivery.
    */
   const declare = (name: "channel" | "params", value: string) => {
     root().setAttribute(`data-stimeo--live-counter-${name}-value`, value);

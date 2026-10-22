@@ -1,3 +1,4 @@
+import { setAttributeIfChanged } from "./attribute_write";
 import { sharedRegistry } from "./shared_registry";
 
 /** What a lease's record says: the author's value, its last write, the leases beneath. */
@@ -28,6 +29,12 @@ interface AttributeLeaseRegistry {
   readonly names: Map<string, Set<string>>;
 }
 
+/** Holds and record names coordinate across separately built package entries. */
+const registry = sharedRegistry(
+  "stimeo-ui.attribute-lease.registry.v1",
+  (): AttributeLeaseRegistry => ({ stacks: new WeakMap(), names: new Map() }),
+);
+
 /** Whether a parsed record entry is an attribute value: a string, or `null` for absence. */
 function isAttributeValue(value: unknown): value is string | null {
   return value === null || typeof value === "string";
@@ -52,6 +59,72 @@ function readLeaseRecord(element: Element, record: string): AttributeLeaseRecord
   } catch {
     return undefined;
   }
+}
+
+/** The element's stack, seeded from complete ownership records once. */
+function attributeStack(element: Element, attribute: string): AttributeHold[] {
+  const byAttribute = registry.stacks.get(element) ?? new Map<string, AttributeHold[]>();
+  registry.stacks.set(element, byAttribute);
+  const known = byAttribute.get(attribute);
+  if (known) return known;
+  const found: (AttributeLeaseRecord & { readonly record: string })[] = [];
+  for (const record of registry.names.get(attribute) ?? []) {
+    const read = readLeaseRecord(element, record);
+    if (read) found.push({ ...read, record });
+  }
+  const depth = ({ beneath }: (typeof found)[number]) =>
+    beneath.filter((name) => found.some((other) => other.record === name)).length;
+  const stack = found
+    .sort((one, other) => depth(one) - depth(other))
+    .map(({ record, written, original, linked }, index) => ({
+      lease: null,
+      record,
+      written,
+      original,
+      linked: linked && index > 0,
+    }));
+  byAttribute.set(attribute, stack);
+  return stack;
+}
+
+/** The lease's live hold or the unclaimed hold described by its owner's record. */
+function findHold(
+  stack: readonly AttributeHold[],
+  lease: object,
+  record: string,
+): AttributeHold | undefined {
+  return (
+    stack.find((held) => held.lease === lease) ??
+    stack.find((held) => held.lease === null && held.record === record)
+  );
+}
+
+/**
+ * Inspects a derived writer's continuation without acquiring or returning a hold.
+ * A covered hold may update beneath its cover. Without a hold, the expected authored
+ * value is compared with the original beneath any temporary cover. The original
+ * distinguishes an absent attribute from an empty one.
+ */
+export function readAttributeLease(
+  element: Element,
+  attribute: string,
+  owner: string,
+  lease: object,
+  expected: string | null,
+): { readonly allowed: boolean; readonly original: string | null } {
+  const stack = attributeStack(element, attribute);
+  const hold = findHold(stack, lease, `data-${owner}-${attribute}-lease`);
+  const current = element.getAttribute(attribute);
+  const covering = [...stack].reverse().find((other) => other.written === current);
+  const original = (hold ?? covering)?.original;
+  const authored = original === undefined ? current : original;
+  return {
+    original: authored,
+    allowed: hold
+      ? current === hold.written ||
+        stack.slice(stack.indexOf(hold) + 1).some((above) => above.written === current)
+      : authored === expected,
+  };
 }
 
 /**
@@ -129,32 +202,34 @@ export function leasedAuthorValue(element: Element, attribute: string): string |
  * fires on pages that stay.
  */
 export class AttributeLease<T extends Element = Element> {
-  /** The holds on each element, bottom first, and the record names; one per page. */
-  static readonly #registry = sharedRegistry(
-    "stimeo-ui.attribute-lease.registry.v1",
-    (): AttributeLeaseRegistry => ({ stacks: new WeakMap(), names: new Map() }),
-  );
   readonly #attribute: string;
   readonly #record: string;
   readonly #base: boolean;
+  readonly #preserveAuthor: boolean;
   readonly #held = new Set<T>();
 
   /**
    * @param attribute - The attribute whose temporary values this lease owns.
    * @param owner - Names the record on the element; the controller's identifier.
-   * @param options - `base`: written beneath the other owners' leases.
+   * @param options - `base`: written beneath the other owners' leases;
+   *   `preserveAuthor`: a new base hold keeps a current value that no hold carries as authored.
    */
-  constructor(attribute: string, owner: string, options: { readonly base?: boolean } = {}) {
+  constructor(
+    attribute: string,
+    owner: string,
+    options: { readonly base?: boolean; readonly preserveAuthor?: boolean } = {},
+  ) {
     this.#attribute = attribute;
     this.#record = `data-${owner}-${attribute}-lease`;
     this.#base = options.base === true;
-    const names = AttributeLease.#registry.names;
+    this.#preserveAuthor = options.preserveAuthor === true;
+    const names = registry.names;
     names.set(attribute, (names.get(attribute) ?? new Set<string>()).add(this.#record));
   }
 
   /** Writes or removes the leased attribute while preserving its authored value. */
   write(element: T, value: string | null): void {
-    const stack = this.#stack(element);
+    const stack = attributeStack(element, this.#attribute);
     const hold = this.#take(stack) ?? this.#acquire(element, stack);
     this.#held.add(element);
     const shows = !this.#covered(element, stack, hold);
@@ -171,8 +246,11 @@ export class AttributeLease<T extends Element = Element> {
    */
   return(element: T): boolean {
     const held = this.#held.delete(element);
-    const known = AttributeLease.#registry.stacks.get(element)?.has(this.#attribute);
-    const stack = held || known || element.hasAttribute(this.#record) ? this.#stack(element) : [];
+    const known = registry.stacks.get(element)?.has(this.#attribute);
+    const stack =
+      held || known || element.hasAttribute(this.#record)
+        ? attributeStack(element, this.#attribute)
+        : [];
     const hold = this.#take(stack);
     if (!hold) return false;
     const carries = element.getAttribute(this.#attribute) === hold.written;
@@ -193,41 +271,9 @@ export class AttributeLease<T extends Element = Element> {
     for (const element of Array.from(this.#held)) this.return(element);
   }
 
-  /** The element's stack, read from its records the first time. */
-  #stack(element: T): AttributeHold[] {
-    const stacks = AttributeLease.#registry.stacks;
-    const byAttribute = stacks.get(element) ?? new Map<string, AttributeHold[]>();
-    stacks.set(element, byAttribute);
-    const stack = byAttribute.get(this.#attribute) ?? this.#seed(element);
-    byAttribute.set(this.#attribute, stack);
-    return stack;
-  }
-
-  /** The holds a copy's records describe, each above every hold its record lists beneath. */
-  #seed(element: T): AttributeHold[] {
-    const found: (AttributeLeaseRecord & { readonly record: string })[] = [];
-    for (const record of AttributeLease.#registry.names.get(this.#attribute) ?? []) {
-      const read = readLeaseRecord(element, record);
-      if (read) found.push({ ...read, record });
-    }
-    const depth = ({ beneath }: (typeof found)[number]) =>
-      beneath.filter((name) => found.some((other) => other.record === name)).length;
-    return found
-      .sort((one, other) => depth(one) - depth(other))
-      .map(({ record, written, original, linked }, index) => ({
-        lease: null,
-        record,
-        written,
-        original,
-        linked: linked && index > 0,
-      }));
-  }
-
   /** Its hold in `stack`, taking over one read from its record. */
   #take(stack: AttributeHold[]): AttributeHold | undefined {
-    const hold =
-      stack.find((held) => held.lease === this) ??
-      stack.find((held) => held.lease === null && held.record === this.#record);
+    const hold = findHold(stack, this, this.#record);
     if (hold) hold.lease = this;
     return hold;
   }
@@ -238,7 +284,11 @@ export class AttributeLease<T extends Element = Element> {
     const top = stack.at(-1);
     const bottom = stack[0];
     const over = top?.written === current ? top : undefined;
-    const from = this.#base ? bottom : over;
+    const from = this.#base
+      ? this.#preserveAuthor && !stack.some((held) => held.written === current)
+        ? undefined
+        : bottom
+      : over;
     const hold: AttributeHold = {
       lease: this,
       record: this.#record,
@@ -274,16 +324,12 @@ export class AttributeLease<T extends Element = Element> {
       );
     });
     for (const [name, recorded] of records) {
-      if (element.getAttribute(name) === recorded) continue;
-      if (recorded === null) element.removeAttribute(name);
-      else element.setAttribute(name, recorded);
+      setAttributeIfChanged(element, name, recorded);
     }
   }
 
   /** Reflects only a real value transition, avoiding self-triggered mutation work. */
   #reflect(element: T, value: string | null): void {
-    if (element.getAttribute(this.#attribute) === value) return;
-    if (value === null) element.removeAttribute(this.#attribute);
-    else element.setAttribute(this.#attribute, value);
+    setAttributeIfChanged(element, this.#attribute, value);
   }
 }

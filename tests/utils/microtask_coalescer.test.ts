@@ -133,6 +133,27 @@ describe("MicrotaskCoalescer", () => {
     });
   });
 
+  describe("pending", () => {
+    it("reports a requested pass until it runs", async () => {
+      expect(coalescer.pending).toBe(false);
+      coalescer.schedule();
+      expect(coalescer.pending).toBe(false);
+      coalescer.activate();
+      coalescer.schedule();
+      expect(coalescer.pending).toBe(true);
+      await settle();
+      expect(runs).toBe(1);
+      expect(coalescer.pending).toBe(false);
+    });
+
+    it("reports nothing pending once cancelled", () => {
+      coalescer.activate();
+      coalescer.schedule();
+      coalescer.cancel();
+      expect(coalescer.pending).toBe(false);
+    });
+  });
+
   it("uses a microtask, not a timer", async () => {
     // The horizon matters: Stimulus drives these callbacks from a
     // MutationObserver whose own callback is already a microtask, so one more

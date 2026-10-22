@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { AttributeLease } from "../utils/attribute_lease";
+import { ListenerSet } from "../utils/listener_set";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
 import { SafeTimeout } from "../utils/safe_timeout";
@@ -79,6 +80,9 @@ export class NetworkStatusController extends Controller<HTMLElement> {
   readonly #handleOnline = (): void => this.#update(true);
   readonly #handleOffline = (): void => this.#update(false);
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     this.#connected = true;
     this.#online = navigator.onLine;
@@ -90,14 +94,13 @@ export class NetworkStatusController extends Controller<HTMLElement> {
     this.element.setAttribute("data-state", this.#online ? "online" : "offline");
     this.#paint();
 
-    window.addEventListener("online", this.#handleOnline);
-    window.addEventListener("offline", this.#handleOffline);
+    this.#listeners.add(window, "online", this.#handleOnline);
+    this.#listeners.add(window, "offline", this.#handleOffline);
   }
 
   override disconnect(): void {
     this.#connected = false;
-    window.removeEventListener("online", this.#handleOnline);
-    window.removeEventListener("offline", this.#handleOffline);
+    this.#listeners.dispose();
     this.#timers.clearAll();
   }
 

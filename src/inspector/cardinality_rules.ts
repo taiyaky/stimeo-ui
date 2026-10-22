@@ -34,6 +34,17 @@ import type { CardinalityRules } from "./types";
  * what report them.
  */
 export const cardinalityRules: CardinalityRules = {
+  "stimeo--currency-input": [
+    {
+      within: "",
+      target: "display",
+      max: 1,
+      severity: "warning",
+      excludeTemplateContents: true,
+      suggestion:
+        'Keep one "display" input per "stimeo--currency-input" controller; only the first display is read, so input in the others never reaches the submitted value.',
+    },
+  ],
   // A parent is optional, but the controller derives and cascades through its
   // singular parentTarget. A second parent would display an unmanaged state and
   // its action would still operate on the first one.

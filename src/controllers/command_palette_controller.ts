@@ -1,10 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { syncActiveOption } from "../utils/active_option";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { FocusTrap } from "../utils/focus_trap";
+import { ListenerSet } from "../utils/listener_set";
 import { LivedMark } from "../utils/lived_mark";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
@@ -40,20 +41,20 @@ import { targetSelector } from "../utils/target_selector";
  * within the dialog, virtual focus roves via `aria-activedescendant`, and filtering
  * is performed in memory.
  *
- * `select` dispatches `{ value: string, option: HTMLElement }`.
+ * `select` dispatches `{ value: string, option: HTMLElement, reason: StateReason }`.
  *
  * @remarks
  * Behavior only. The combobox concerns (filtering, virtual focus, selection) live
  * here; the modal lifecycle — focus trap, scroll lock, background `inert`, focus
  * restore, and teardown reversal — is delegated to the shared `FocusTrap`
- * primitive (also used by dialog / alert-dialog / drawer). `Escape` closes and
- * `Tab`/`Shift+Tab` cycle focus regardless of which element inside the dialog holds
- * focus (input, close button, …), because the trap listens at the document level.
- * IME composition is tracked from start to end: intermediate input does not filter,
- * and conversion-confirming keys never select a command. Styling, transitions, and
- * the actual command handlers remain the consumer's. A Turbo morph that puts the
- * server's markup back over the palette is answered by writing the palette back: an
- * open palette stays open with its query's matches and its active option.
+ * primitive. `Escape` closes and `Tab`/`Shift+Tab` cycle focus regardless of which
+ * element inside the dialog holds focus (input, close button, …), because the trap
+ * listens at the document level. IME composition is tracked from start to end:
+ * intermediate input does not filter, and conversion-confirming keys never select a
+ * command. Styling, transitions, and the actual command handlers remain the
+ * consumer's. A Turbo morph that puts the server's markup back over the palette is
+ * answered by writing the palette back: an open palette stays open with its query's
+ * matches and its active option.
  */
 export class CommandPaletteController extends Controller<HTMLElement> {
   static readonly #ORIGINAL_ARIA_DISABLED = "data-command-palette-original-aria-disabled";
@@ -104,7 +105,10 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   readonly #lived = new LivedMark(this.identifier);
   /** The dialog the open state was last applied to. */
   #dialog: HTMLElement | null = null;
-  /** Borrows `hidden` on the dialog and the empty region, to give back when one stops being a target. */
+  /**
+   * Borrows `hidden` on the dialog and the empty region, to give back when one stops
+   * being a target.
+   */
   readonly #hidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
   /** Borrows `aria-expanded` on the input, to give back when an element stops being the input. */
   readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
@@ -142,6 +146,9 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     },
   });
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /**
    * Initializes the global hotkey handler and establishes the initial open state.
    *
@@ -159,7 +166,7 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   override connect(): void {
     const connection = this.#lived.connect(this.element);
     this.#trap.connect();
-    document.addEventListener("keydown", this.#onGlobalKeydown);
+    this.#listeners.add(document, "keydown", this.#onGlobalKeydown);
     if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
     this.#syncOptionSemantics();
     if (connection === "reconnect" && this.#isOpen) {
@@ -185,7 +192,7 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     this.#lived.disconnect();
     this.#morphRender.disconnect();
     this.#reconcile.cancel();
-    document.removeEventListener("keydown", this.#onGlobalKeydown);
+    this.#listeners.dispose();
     this.#composition.disconnect();
     this.#trap.disconnect(this);
   }
@@ -316,8 +323,8 @@ export class CommandPaletteController extends Controller<HTMLElement> {
 
   /** Filters option elements in-memory matching the input value. Bound to input target. */
   filter(event?: InputEvent): void {
-    // Match the library's Character Counter policy: do not react to intermediate
-    // pre-conversion text. `compositionend` applies the confirmed query once.
+    // Intermediate pre-conversion text does not filter; `compositionend` applies the
+    // confirmed query once.
     if (!this.hasInputTarget || this.#composition.isComposing(event)) return;
     this.#setActiveIndex(this.#applyQuery() ? 0 : -1);
   }
@@ -403,6 +410,7 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     // nested menu) must not ALSO act on it — composition depends on this yield.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     // Composition-confirming Enter must stay with the IME instead of selecting a
     // command. Controller-owned lifecycle state covers events that omit isComposing.
     if (this.#composition.isComposing(event) || !this.#isOpen) return;
@@ -453,10 +461,9 @@ export class CommandPaletteController extends Controller<HTMLElement> {
     const activeOption = visible[index] ?? null;
 
     syncActiveOption(this.optionTargets, activeOption);
-    // `data-active` is a styling hook, not ARIA, so it stays here. It carries the
-    // literal value `"true"` (not a bare attribute) because the reconciliation
-    // path compares against it, so `toggleAttribute` — which writes `""` — would
-    // change what a same-id replacement reads back.
+    // `data-active` is a styling hook, not ARIA, so it stays here. It is always the
+    // literal `"true"` (never the `""` that `toggleAttribute` writes); reconciliation
+    // reads only its presence.
     for (const option of this.optionTargets) {
       if (option === activeOption) option.setAttribute("data-active", "true");
       else option.removeAttribute("data-active");
@@ -559,11 +566,9 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   /**
    * Runs `option`: dispatches `select` and closes.
    *
-   * **Activation is refused here, not at the call sites.** Every path that runs a
-   * command funnels through this method, so one check covers keyboard, pointer,
-   * and anything added later. Per-call-site guards would leave `aria-disabled`
-   * options — which stay within the keyboard's reach — runnable from whichever
-   * path forgets to consult the predicate.
+   * Activation is refused here for every path. Every path that runs a command funnels
+   * through this method, so one check covers keyboard, pointer, and anything added
+   * later; `select` also skips a disabled option before it gets here.
    */
   #confirmSelection(option: HTMLElement, reason: StateReason = "user", restoreFocus = true): void {
     if (this.#isDisabled(option)) return;

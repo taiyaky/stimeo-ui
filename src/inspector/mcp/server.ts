@@ -17,9 +17,11 @@ import {
  * as read-only tools, resources, and prompts: `initialize`, the
  * `notifications/initialized` notification, `ping`, `tools/list`,
  * `tools/call`, `resources/list`, `resources/read`, `prompts/list`, and
- * `prompts/get` (newline-delimited messages, one per line). It is hand-written
- * to keep the shipped server dependency-free; this bounded subset is small
- * enough to implement and review directly.
+ * `prompts/get` (newline-delimited messages, one per line). A session that
+ * negotiated protocol version 2025-03-26 also takes a JSON-RPC batch on one line
+ * and answers it on one line; sessions on the other revisions reject batches. It
+ * is hand-written to keep the shipped server dependency-free; this bounded subset
+ * is small enough to implement and review directly.
  *
  * stdout carries protocol messages only; anything diagnostic must go to the
  * caller-provided error log (stderr in production).
@@ -29,15 +31,21 @@ import {
 export const LATEST_PROTOCOL_VERSION = "2025-06-18";
 
 /**
- * Revisions this server can speak. The tools-only subset is identical across
- * these revisions, so we echo whichever supported version the client asks for
- * and otherwise answer with the latest (per the MCP version-negotiation rule).
+ * Revisions this server can speak. It echoes whichever supported version the
+ * client asks for and otherwise answers with the latest (per the MCP
+ * version-negotiation rule).
  */
 export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
   LATEST_PROTOCOL_VERSION,
   "2025-03-26",
   "2024-11-05",
 ];
+
+/**
+ * The one revision whose sessions take JSON-RPC batches: 2025-03-26 requires a
+ * receiver to accept them, 2025-06-18 removed them and 2024-11-05 predates them.
+ */
+const BATCH_PROTOCOL_VERSION = "2025-03-26";
 
 /** JSON-RPC 2.0 error codes used by this server. */
 export const JSONRPC_PARSE_ERROR = -32700;
@@ -109,17 +117,21 @@ function asRecord(value: unknown): Record<string, unknown> | null {
  */
 export class McpSession {
   #context: ToolContext;
-  #initialized = false;
+  /** The revision the last `initialize` negotiated; null until one has. */
+  #protocolVersion: string | null = null;
 
   constructor(context: ToolContext) {
     this.#context = context;
   }
 
   /**
-   * Handles one newline-delimited message.
+   * Handles one newline-delimited message: a single JSON-RPC message, or a
+   * batch (an array of them) in a session that negotiated 2025-03-26.
    *
    * @returns The serialized response line, or null when no response is due
-   *   (blank lines and notifications).
+   *   (blank lines, notifications, and an accepted batch of notifications only).
+   *   Only an accepted batch is answered with an array of responses; a refused
+   *   or empty batch is answered with a single error object.
    */
   handleLine(line: string): string | null {
     const trimmed = line.trim();
@@ -130,12 +142,42 @@ export class McpSession {
     } catch {
       return failure(null, JSONRPC_PARSE_ERROR, "Parse error");
     }
-    return this.#handleMessage(message);
+    if (Array.isArray(message)) return this.#handleBatch(message);
+    return this.#handleMessage(message, false);
   }
 
-  #handleMessage(message: unknown): string | null {
+  /**
+   * Answers a JSON-RPC batch. Before `initialize` and in a session on any
+   * revision but 2025-03-26 the whole batch is one invalid request. Otherwise
+   * each element is handled in order as a single message would be, except that
+   * `initialize` is refused, and the responses go out as one array.
+   */
+  #handleBatch(messages: readonly unknown[]): string | null {
+    if (this.#protocolVersion !== BATCH_PROTOCOL_VERSION) {
+      return failure(
+        null,
+        JSONRPC_INVALID_REQUEST,
+        "Invalid request: JSON-RPC batches are accepted only in a session that negotiated " +
+          `protocol version ${BATCH_PROTOCOL_VERSION}.`,
+      );
+    }
+    // JSON-RPC 2.0 answers an empty array with one Invalid Request, not with an array.
+    if (messages.length === 0) {
+      return failure(null, JSONRPC_INVALID_REQUEST, "Invalid request: empty batch");
+    }
+    const responses: string[] = [];
+    for (const message of messages) {
+      const response = this.#handleMessage(message, true);
+      if (response !== null) responses.push(response);
+    }
+    // A batch of notifications only gets no answer at all, never an empty array.
+    return responses.length === 0 ? null : `[${responses.join(",")}]`;
+  }
+
+  #handleMessage(message: unknown, inBatch: boolean): string | null {
     const record = asRecord(message);
-    // JSON-RPC batches were removed in MCP 2025-06-18; reject them explicitly.
+    // Anything but a request or notification object is invalid, an array nested
+    // inside a batch included.
     if (record === null || record.jsonrpc !== "2.0" || typeof record.method !== "string") {
       return failure(null, JSONRPC_INVALID_REQUEST, "Invalid request");
     }
@@ -151,13 +193,21 @@ export class McpSession {
       // ids (unlike bare JSON-RPC 2.0), so it is rejected, not echoed.
       return failure(null, JSONRPC_INVALID_REQUEST, "Invalid request id");
     }
+    if (inBatch && method === "initialize") {
+      // MCP 2025-03-26 keeps initialize out of batches; the negotiated version stays.
+      return failure(
+        id,
+        JSONRPC_INVALID_REQUEST,
+        "Invalid request: initialize must not be part of a JSON-RPC batch.",
+      );
+    }
     return this.#handleRequest(id, method, record.params);
   }
 
   #handleRequest(id: JsonRpcId, method: string, params: unknown): string {
     if (method === "initialize") return this.#initialize(id, params);
     if (method === "ping") return success(id, {});
-    if (!this.#initialized) {
+    if (this.#protocolVersion === null) {
       return failure(
         id,
         JSONRPC_SERVER_NOT_INITIALIZED,
@@ -179,7 +229,7 @@ export class McpSession {
     const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
       ? requested
       : LATEST_PROTOCOL_VERSION;
-    this.#initialized = true;
+    this.#protocolVersion = protocolVersion;
     return success(id, {
       protocolVersion,
       capabilities: {
@@ -332,11 +382,13 @@ export interface McpServerIo {
 }
 
 /**
- * Runs the stdio server loop: one JSON-RPC message per input line, one
- * response per output line. Resolves when the input stream closes (the MCP
- * client disconnecting), which is the server's shutdown signal. Declared
- * async so a failing manifest load rejects the returned promise instead of
- * throwing synchronously past the caller's rejection handler.
+ * Runs the stdio server loop: each input line carries one JSON-RPC message or
+ * one batch, and the answer to a line, when one is due — one response, or the
+ * array that answers a batch — goes out as one output line. Resolves when the
+ * input stream closes (the MCP client disconnecting), which is the server's
+ * shutdown signal. Declared async so a failing manifest load rejects the
+ * returned promise instead of throwing synchronously past the caller's
+ * rejection handler.
  */
 export async function runMcpServer(io: McpServerIo): Promise<void> {
   const session = new McpSession(io.load());

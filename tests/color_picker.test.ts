@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ColorPickerController } from "../src/controllers/color_picker_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { keyEvent, press } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
@@ -78,9 +79,32 @@ describe("ColorPickerController", () => {
     ) as HTMLElement;
   const color = (element: HTMLElement = root()) =>
     element.style.getPropertyValue("--stimeo--color");
-  const press = (el: HTMLElement, key: string) =>
-    el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
   const declaredValue = () => root().getAttribute("data-stimeo--color-picker-value-value");
+
+  it("repaints retained sliders without rewriting equal ARIA values", async () => {
+    await start('data-stimeo--color-picker-value-value="#ff0000"');
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((batch) => records.push(...batch));
+    observer.observe(root(), {
+      attributes: true,
+      subtree: true,
+      attributeFilter: ["aria-valuemin", "aria-valuemax", "aria-valuenow", "aria-valuetext"],
+    });
+    try {
+      root().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await tick();
+      records.push(...observer.takeRecords());
+      expect(records).toHaveLength(0);
+
+      root().setAttribute("data-stimeo--color-picker-value-value", "#00ff00");
+      await tick();
+      records.push(...observer.takeRecords());
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("120");
+      expect(records.some((record) => record.attributeName === "aria-valuenow")).toBe(true);
+    } finally {
+      observer.disconnect();
+    }
+  });
   /** Gives a channel slider a 360px track so a client X maps to a round fraction. */
   const track = (channel: string, width = 360) => {
     const element = slider(channel);
@@ -129,7 +153,7 @@ describe("ColorPickerController", () => {
           '" data-stimeo--color-picker-alpha-value="true"',
         { alpha: true },
       );
-      const expected = value.length === 7 ? value + "ff" : value;
+      const expected = value.length === 7 ? `${value}ff` : value;
       expect(hex().value).toBe(expected);
       const current = slider("hue").getAttribute("aria-valuenow") as string;
       slider("hue").setAttribute("aria-valuemax", current);
@@ -159,6 +183,80 @@ describe("ColorPickerController", () => {
       press(slider("hue"), mode === "a" ? "ArrowUp" : "ArrowDown");
       expect(field().value).toBe(mode === "a" ? "#00ff04" : "#ff0000");
       expect(seen).toEqual(mode === "a" ? ["#00ff04"] : []);
+    },
+  );
+
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+        key,
+        modifier,
+      })),
+    ),
+  )(
+    "yields modified boundary key $modifier+$key without changing widget state",
+    async ({ key, modifier }) => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      slider("lightness").focus();
+      const seen: string[] = [];
+      for (const name of [
+        "stimeo--color-picker:change",
+        "stimeo--color-picker:reconcile",
+        "input",
+        "change",
+      ]) {
+        root().addEventListener(name, () => seen.push(name));
+      }
+      const before = root().innerHTML;
+      const event = press(slider("lightness"), key, { [modifier]: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(slider("lightness"));
+      expect(root().innerHTML).toBe(before);
+      expect(declaredValue()).toBe("#ff0000");
+      expect(field().value).toBe("#ff0000");
+      expect(hex().value).toBe("#ff0000");
+      expect(color()).toBe("#ff0000");
+      expect(seen).toEqual([]);
+    },
+  );
+
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+        key,
+        modifier,
+      })),
+    ),
+  )(
+    "yields modified boundary key $modifier+$key before adopting a pending color",
+    async ({ key, modifier }) => {
+      await start('data-stimeo--color-picker-value-value="#ff0000"');
+      slider("lightness").focus();
+      const seen: string[] = [];
+      for (const name of [
+        "stimeo--color-picker:change",
+        "stimeo--color-picker:reconcile",
+        "input",
+        "change",
+      ]) {
+        root().addEventListener(name, () => seen.push(name));
+      }
+      root().setAttribute("data-stimeo--color-picker-value-value", "#00ff00");
+      const before = root().innerHTML;
+      const event = press(slider("lightness"), key, { [modifier]: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(root().innerHTML).toBe(before);
+      expect(declaredValue()).toBe("#00ff00");
+      const instance = application.getControllerForElementAndIdentifier(
+        root(),
+        "stimeo--color-picker",
+      ) as ColorPickerController;
+      // A target callback publishes the settled model without adopting a pending declaration.
+      instance.fieldTargetConnected(field());
+      expect(field().value).toBe("#ff0000");
+      expect(hex().value).toBe("#ff0000");
+      expect(color()).toBe("#ff0000");
+      expect(seen).toEqual([]);
     },
   );
 
@@ -285,12 +383,8 @@ describe("ColorPickerController", () => {
 
   it("keeps the page from scrolling on a key that steps a channel", async () => {
     await start('data-stimeo--color-picker-value-value="#ff0000"');
-    const event = new KeyboardEvent("keydown", {
-      key: "PageDown",
-      bubbles: true,
-      cancelable: true,
-    });
-    slider("lightness").dispatchEvent(event);
+    const event = keyEvent("PageDown");
+    press(slider("lightness"), event);
 
     expect(slider("lightness").getAttribute("aria-valuenow")).toBe("40");
     expect(event.defaultPrevented).toBe(true);
@@ -300,13 +394,8 @@ describe("ColorPickerController", () => {
     // Alt+Arrow is a browser binding: the slider neither steps its channel nor
     // calls preventDefault().
     await start('data-stimeo--color-picker-value-value="#ff0000"');
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    slider("hue").dispatchEvent(event);
+    const event = keyEvent("ArrowRight", { altKey: true });
+    press(slider("hue"), event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(slider("hue").getAttribute("aria-valuenow")).toBe("0");
@@ -352,6 +441,55 @@ describe("ColorPickerController", () => {
     expect(slider("hue").getAttribute("aria-valuemax")).toBe("180");
   });
 
+  it.each(
+    (["PageUp", "PageDown"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Alt+Shift", { altKey: true, shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+          ["Meta+Shift", { metaKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Page chord (%s, %s)", async (key, _modifier, init) => {
+    await start('data-stimeo--color-picker-value-value="#ff0000"');
+    const current = slider("lightness");
+    current.focus();
+    const seen: string[] = [];
+    for (const name of [
+      "stimeo--color-picker:change",
+      "stimeo--color-picker:reconcile",
+      "input",
+      "change",
+    ]) {
+      root().addEventListener(name, () => seen.push(name));
+    }
+    const before = root().outerHTML;
+    const rejected = press(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(root().outerHTML).toBe(before);
+    expect(current.getAttribute("aria-valuenow")).toBe("50");
+    expect(declaredValue()).toBe("#ff0000");
+    expect(field().value).toBe("#ff0000");
+    expect(hex().value).toBe("#ff0000");
+    expect(color()).toBe("#ff0000");
+    expect(seen).toEqual([]);
+
+    expect(press(current, key).defaultPrevented).toBe(true);
+    const expected = key === "PageUp" ? "#ff3333" : "#cc0000";
+    expect(current.getAttribute("aria-valuenow")).toBe(key === "PageUp" ? "60" : "40");
+    expect(field().value).toBe(expected);
+    expect(hex().value).toBe(expected);
+    expect(color()).toBe(expected);
+    expect(document.activeElement).toBe(current);
+    expect(seen).toEqual(["change", "stimeo--color-picker:change"]);
+  });
+
   it("moves by a larger step on PageUp/PageDown", async () => {
     await start('data-stimeo--color-picker-value-value="#ff0000"');
     press(slider("saturation"), "PageDown");
@@ -389,6 +527,15 @@ describe("ColorPickerController", () => {
 
     expect(slider("hue").getAttribute("aria-valuetext")).toBe("色相 1 度");
     expect(slider("saturation").getAttribute("aria-valuetext")).toBe("Saturation 100 percent");
+  });
+
+  it("fills every {value} in a template and leaves an unknown placeholder as written", async () => {
+    await start('data-stimeo--color-picker-value-value="#ff0000"');
+    slider("hue").setAttribute("data-value-text", "{value} of {value} {unit}");
+
+    press(slider("hue"), "ArrowRight");
+
+    expect(slider("hue").getAttribute("aria-valuetext")).toBe("1 of 1 {unit}");
   });
 
   it("syncs sliders from a valid hex input", async () => {
@@ -879,7 +1026,7 @@ describe("ColorPickerController", () => {
 
     it("ignores RTL when the tracks were not declared logical", async () => {
       await start('data-stimeo--color-picker-value-value="#000000"');
-      root().style.direction = "rtl";
+      slider("hue").style.direction = "rtl";
 
       pressHue(180);
       expect(slider("hue").getAttribute("aria-valuenow")).toBe("180");
@@ -892,7 +1039,7 @@ describe("ColorPickerController", () => {
       await start(
         'data-stimeo--color-picker-value-value="#000000" data-stimeo--color-picker-logical-track-value="true"',
       );
-      root().style.direction = "rtl";
+      slider("hue").style.direction = "rtl";
 
       pressHue(180);
       expect(slider("hue").getAttribute("aria-valuenow")).toBe("180");
@@ -903,7 +1050,7 @@ describe("ColorPickerController", () => {
 
     it("keeps the direction a drag started with when logicalTrack changes, and reads it anew at the next press", async () => {
       await start('data-stimeo--color-picker-value-value="#000000"');
-      root().style.direction = "rtl";
+      slider("hue").style.direction = "rtl";
       pointerDown(track("hue"), { clientX: 90, pointerId: 2 });
       expect(slider("hue").getAttribute("aria-valuenow")).toBe("90");
 
@@ -922,7 +1069,7 @@ describe("ColorPickerController", () => {
       await start(
         'data-stimeo--color-picker-value-value="#000000" data-stimeo--color-picker-logical-track-value="true"',
       );
-      root().style.direction = "rtl";
+      slider("hue").style.direction = "rtl";
 
       press(slider("hue"), "ArrowLeft");
       expect(slider("hue").getAttribute("aria-valuenow")).toBe("1");
@@ -934,10 +1081,41 @@ describe("ColorPickerController", () => {
       press(slider("hue"), "ArrowUp");
       expect(slider("hue").getAttribute("aria-valuenow")).toBe("1");
     });
+
+    it("resolves each channel's direction independently and reads changes at the next key", async () => {
+      await start(
+        'data-stimeo--color-picker-value-value="#000000" data-stimeo--color-picker-logical-track-value="true"',
+      );
+      root().style.direction = "ltr";
+      slider("hue").style.direction = "rtl";
+      slider("saturation").style.direction = "ltr";
+      press(slider("hue"), "ArrowLeft");
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("1");
+      press(slider("saturation"), "ArrowRight");
+      expect(slider("saturation").getAttribute("aria-valuenow")).toBe("1");
+      slider("hue").style.direction = "ltr";
+      press(slider("hue"), "ArrowRight");
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("2");
+    });
+
+    it("keeps a channel drag's direction until that pointer ends", async () => {
+      await start(
+        'data-stimeo--color-picker-value-value="#000000" data-stimeo--color-picker-logical-track-value="true"',
+      );
+      slider("hue").style.direction = "rtl";
+      pointerDown(track("hue"), { clientX: 270, pointerId: 5 });
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("90");
+      slider("hue").style.direction = "ltr";
+      pointerMove({ clientX: 90, pointerId: 5 });
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("270");
+      pointerUp({ pointerId: 5 });
+      pressHue(90);
+      expect(slider("hue").getAttribute("aria-valuenow")).toBe("90");
+    });
   });
 
-  // Speech-order regression: each channel announces its slider role, name,
-  // bounds, and value text, so a dropped role/name surfaces as a diff.
+  // Speech-order check: the hue slider announces its role, name, orientation, bounds,
+  // and value text, so a dropped role or name surfaces as a diff.
   it("announces the hue slider role, name, and value text", async () => {
     await start('data-stimeo--color-picker-value-value="#ff0000"');
     const phrases = await captureSpeech({ container: slider("hue"), steps: 0 });
@@ -947,8 +1125,8 @@ describe("ColorPickerController", () => {
   });
 
   it("follows alpha swapped in place by a morph", async () => {
-    // Turning alpha off drops it from the emitted hex, and a morph is the one path
-    // where `connect()` does not run again.
+    // Turning alpha off drops it from the emitted hex. A morph, like the attribute write
+    // here, changes the Value on a connected element, so `connect()` does not run again.
     await start(
       'data-stimeo--color-picker-value-value="#3366ccff" data-stimeo--color-picker-alpha-value="true"',
     );
@@ -1243,8 +1421,8 @@ describe("ColorPickerController", () => {
       const added = buildSlider("lightness", "Lightness");
 
       root().append(added);
-      // Target callbacks are delivered unreliably under happy-dom, so the one
-      // Stimulus makes for the inserted slider is made here directly as well.
+      // The callback Stimulus makes for the inserted slider is called here directly,
+      // so the repaint pass it schedules runs within the microtask flush below.
       picker.sliderTargetConnected();
       await flushMicrotasks();
 
@@ -1385,9 +1563,9 @@ describe("ColorPickerController", () => {
     });
 
     /**
-     * Commits `text` in `input` the way its bound `change` does. Stimulus binds the
-     * action of an appended input unreliably under happy-dom, so the call it would
-     * make with that event is made here directly as well.
+     * Commits `text` in `input` the way its bound `change` does: it dispatches the
+     * event and also makes the `onHexInput` call with it directly, so the commit does
+     * not rest on the action binding of an appended input.
      */
     const commitIn = (input: HTMLInputElement, text: string) => {
       const picker = application.getControllerForElementAndIdentifier(
@@ -1514,8 +1692,8 @@ describe("ColorPickerController", () => {
       added.setAttribute("data-stimeo--color-picker-target", "slider");
 
       root().append(added);
-      // Target callbacks are delivered unreliably under happy-dom, so the one
-      // Stimulus makes for the inserted slider is made here directly as well.
+      // The callback Stimulus makes for the inserted slider is also called here
+      // directly, so the repaint it schedules is queued before the tick below.
       picker.sliderTargetConnected();
       await tick();
 
@@ -1542,8 +1720,8 @@ describe("ColorPickerController", () => {
       input.setAttribute("aria-label", "Hex color");
       input.setAttribute("data-stimeo--color-picker-target", "hex");
       root().append(input);
-      // Target callbacks are delivered unreliably under happy-dom, so the one
-      // Stimulus makes for the inserted input is made here directly as well.
+      // The callback Stimulus makes for the inserted input is also called here
+      // directly, so the input is filled before the tick below.
       picker.hexTargetConnected(input);
       await tick();
       expect(input.value).toBe("#ff0400");
@@ -1575,8 +1753,8 @@ describe("ColorPickerController", () => {
       added.setAttribute("data-channel", "lightness");
       added.setAttribute("data-stimeo--color-picker-target", "slider");
       root().append(added);
-      // Target callbacks are delivered unreliably under happy-dom, so the one
-      // Stimulus makes for the inserted slider is made here directly as well.
+      // The callback Stimulus makes for the inserted slider is also called here
+      // directly, so the repaint it schedules is queued before the tick below.
       picker.sliderTargetConnected();
       await tick();
       return added;

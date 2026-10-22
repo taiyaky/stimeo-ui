@@ -1,9 +1,12 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
+import { setAttributeIfChanged } from "../utils/attribute_write";
+import { AuthoredMutationWatcher } from "../utils/authored_mutation_watcher";
 import { commitField, writeField } from "../utils/field_mirror";
 import { canTakeFocus } from "../utils/focus_candidate";
 import { INTERACTIVE_HOST_SELECTOR, isInteractiveHost } from "../utils/interactive_host";
+import { ListenerSet } from "../utils/listener_set";
 import { isRtl } from "../utils/logical_scroll";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { MoveCounter } from "../utils/move_counter";
@@ -14,15 +17,6 @@ import { findTypeaheadMatch, isTypeaheadKey, Typeahead, typeaheadLabel } from ".
 
 /** Item attributes a page can rewrite in place that move the published selection. */
 const OBSERVED_ATTRIBUTES = ["aria-selected", "data-value"];
-
-/**
- * Sets `name` on `element` only when its value differs. A same-value write still
- * queues a mutation record for every observer on the page, so an unchanged state
- * writes nothing.
- */
-function setAttributeIfChanged(element: Element, name: string, value: string): void {
-  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
-}
 
 /** The published selection: the selected item and the value its field submits. */
 interface Selection {
@@ -108,7 +102,7 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  * Contract notes:
  * - A child container is resolved by `role="group"`, not by the target: the
  *   `group` target is what `stimeo check`'s accessibility rule anchors on, which
- *   is why the contract still declares it.
+ *   is why the contract declares it.
  * - Nested interactive controls (natively interactive elements such as `button`,
  *   `input`, `select`, `textarea`, `label`, `a[href]`, `summary`) and IME composition
  *   keys are left alone; a click on a child `group`'s own box (its indentation
@@ -143,6 +137,7 @@ const NESTED_INTERACTIVE = INTERACTIVE_HOST_SELECTOR;
  */
 export class TreeViewController extends Controller<HTMLElement> {
   readonly #moves = new MoveCounter();
+  #connectionGeneration = 0;
   static override targets = ["item", "group", "field"];
   static actions = ["onKeydown", "select", "toggle"] as const;
   static events = ["select", "toggle", "reconcile"] as const;
@@ -160,7 +155,9 @@ export class TreeViewController extends Controller<HTMLElement> {
    */
   readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileSelection());
   /** Watches the item attributes a page can rewrite in place; set while connected. */
-  #observer: MutationObserver | null = null;
+  readonly #observer = new AuthoredMutationWatcher((records) => {
+    if (this.#concernsItems(records)) this.#reconcile.schedule();
+  });
   /** The selection last settled: on connect, by the user, or by a reported pass. */
   #settled: Selection = { item: null, value: "" };
   #connected = false;
@@ -209,6 +206,9 @@ export class TreeViewController extends Controller<HTMLElement> {
     });
   };
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /**
    * Reconciles authored expansion state, establishes the single tab stop, and
    * settles the selection without reporting it. Idempotent, so a Turbo cache
@@ -216,8 +216,8 @@ export class TreeViewController extends Controller<HTMLElement> {
    * no-op per the DOM spec).
    */
   override connect(): void {
-    this.element.addEventListener("focusin", this.#onFocusIn);
-    this.element.addEventListener("focusout", this.#onFocusOut);
+    this.#listeners.add(this.element, "focusin", this.#onFocusIn);
+    this.#listeners.add(this.element, "focusout", this.#onFocusOut);
     this.#seedFocused();
     this.#reconcileExpansion();
     this.#normalizeSelection();
@@ -245,12 +245,11 @@ export class TreeViewController extends Controller<HTMLElement> {
    * pass, the typeahead buffer and its timer.
    */
   override disconnect(): void {
-    this.element.removeEventListener("focusin", this.#onFocusIn);
-    this.element.removeEventListener("focusout", this.#onFocusOut);
+    this.#connectionGeneration += 1;
+    this.#listeners.dispose();
     this.#connected = false;
     this.#reconcile.disconnect();
-    this.#observer?.disconnect();
-    this.#observer = null;
+    this.#observer.disconnect();
     this.#typeahead.reset();
     this.#order = [];
     this.#focused = null;
@@ -297,7 +296,7 @@ export class TreeViewController extends Controller<HTMLElement> {
     const items = this.itemTargets;
     const selected = items.find((item) => item.getAttribute("aria-selected") === "true");
     for (const item of items) {
-      setAttributeIfChanged(item, "aria-selected", item === selected ? "true" : "false");
+      this.#writeSelection(item, item === selected ? "true" : "false");
     }
   }
 
@@ -328,7 +327,7 @@ export class TreeViewController extends Controller<HTMLElement> {
     this.#reconcileExpansion();
     this.#normalizeSelection();
     this.#normalizeTabStop();
-    this.#dropOwnRecords();
+    this.#flushMutations();
     this.#mirrorField(false);
     this.#reportMove();
   }
@@ -345,22 +344,12 @@ export class TreeViewController extends Controller<HTMLElement> {
     this.dispatch("reconcile", { detail: { item: selection.item } });
   }
 
-  /**
-   * Watches the items' `aria-selected` and `data-value`. The tree's own writes to
-   * them are dropped from the queue as they happen, so each record the callback
-   * receives is the page's, and only a record on one of the tree's own items
-   * schedules a pass.
-   */
+  /** Watches authored state on this component's targets without discarding page records. */
   #observeItems(): void {
-    const observer = new MutationObserver((records) => {
-      if (this.#concernsItems(records)) this.#reconcile.schedule();
-    });
-    observer.observe(this.element, {
+    this.#observer.observe(this.element, {
       subtree: true,
-      attributes: true,
-      attributeFilter: OBSERVED_ATTRIBUTES,
+      attributes: OBSERVED_ATTRIBUTES,
     });
-    this.#observer = observer;
   }
 
   /**
@@ -373,15 +362,9 @@ export class TreeViewController extends Controller<HTMLElement> {
     return records.some((record) => items.has(record.target));
   }
 
-  /**
-   * Drops the records the tree's own writes just queued, so the observer never
-   * takes them for the page's. A page write queued just before goes with them and
-   * owes nothing: every such write leaves every item's `aria-selected` at the value
-   * the selection gives it, and the selection is then read back from the DOM, so it
-   * already holds what the page wrote.
-   */
-  #dropOwnRecords(): void {
-    this.#observer?.takeRecords();
+  /** Expires own claims while keeping queued authored items changes observable. */
+  #flushMutations(): void {
+    if (this.#concernsItems(this.#observer.take())) this.#reconcile.schedule();
   }
 
   /**
@@ -457,6 +440,7 @@ export class TreeViewController extends Controller<HTMLElement> {
     // name; this covers the ones it cannot.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     if (event.isComposing) return;
     const item = this.#ownerItem(event);
     if (!item) return;
@@ -470,10 +454,11 @@ export class TreeViewController extends Controller<HTMLElement> {
         event.preventDefault();
         this.#moveBy(item, -1);
         break;
-      // Logical, not physical: APG describes these as "to the child level" and
-      // "to the parent level" — a spatial move — so they follow the writing
-      // direction, exactly as horizontal roving does. `isRtl()` is the shared
-      // detector; never introduce a second one.
+      // Logical, not physical: APG's Right Arrow opens a node or moves focus to its
+      // first child node, and its Left Arrow closes a node or moves focus to its
+      // parent node. Those are moves along the indentation, so they follow the
+      // writing direction, exactly as horizontal roving does. `isRtl()` is the
+      // shared detector; never introduce a second one.
       //
       // Direction comes from the tree, not from `item`: the tree is what lays
       // the rows out, and a row may carry its own `dir` (an LTR path inside an
@@ -663,9 +648,8 @@ export class TreeViewController extends Controller<HTMLElement> {
    *
    * ARIA is explicit that the state carries down: "The state of being disabled
    * applies to the current element *and all focusable descendant elements* of the
-   * element on which the `aria-disabled` attribute is applied." A tree is the only
-   * pattern here whose items nest, so it is the only place the inheritance is
-   * observable — but the rule is the shared one.
+   * element on which the `aria-disabled` attribute is applied." Items nest in a
+   * tree, so a disabled parent row disables every row beneath it.
    *
    * The walk stops at the controller element: an `aria-disabled` on the tree root
    * would otherwise disable every row, and a disabled *tree* is the consumer's
@@ -687,10 +671,11 @@ export class TreeViewController extends Controller<HTMLElement> {
    */
   #select(item: HTMLElement, reason: StateReason = "user"): void {
     if (this.#isDisabled(item)) return;
+    const generation = this.#connectionGeneration;
     for (const candidate of this.itemTargets) {
-      setAttributeIfChanged(candidate, "aria-selected", candidate === item ? "true" : "false");
+      this.#writeSelection(candidate, candidate === item ? "true" : "false");
     }
-    this.#dropOwnRecords();
+    this.#flushMutations();
     // Settled before anything is reported, so a listener that moves the selection
     // again is measured against this one.
     const selection = this.#selection();
@@ -703,7 +688,7 @@ export class TreeViewController extends Controller<HTMLElement> {
     }
     const token = this.#moves.record();
     this.#mirrorField(true);
-    if (!this.#moves.isLatest(token)) return;
+    if (generation !== this.#connectionGeneration || !this.#moves.isLatest(token)) return;
     this.dispatch("select", { detail: { item, reason } });
   }
 
@@ -814,7 +799,7 @@ export class TreeViewController extends Controller<HTMLElement> {
     }
     const selected = visible.find((item) => item.getAttribute("aria-selected") === "true");
     const next = selected ?? visible[0];
-    this.#roving.setActive(items.findIndex((item) => item === next));
+    this.#roving.setActive((items as readonly (HTMLElement | undefined)[]).indexOf(next));
   }
 
   /**
@@ -865,6 +850,15 @@ export class TreeViewController extends Controller<HTMLElement> {
         text += node.textContent ?? "";
       }
       return text;
+    });
+  }
+  /**
+   * Records one changed selection attribute before this controller's mutation watcher
+   * receives it.
+   */
+  #writeSelection(target: HTMLElement, value: string | null): void {
+    setAttributeIfChanged(target, "aria-selected", value, () => {
+      this.#observer.claim(target, "aria-selected", value);
     });
   }
 }

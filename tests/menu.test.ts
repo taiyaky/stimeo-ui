@@ -2,6 +2,8 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MenuController } from "../src/controllers/menu_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { keyEvent, press as pressKey, typeKey } from "./helpers/keyboard";
+import { recordListeners } from "./helpers/listeners";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -55,6 +57,40 @@ describe("MenuController", () => {
   const root = () =>
     document.querySelector<HTMLElement>("[data-controller='stimeo--menu']") as HTMLElement;
 
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Home/End chord (%s, %s)", async (key, _modifier, init) => {
+    trigger().click();
+    const current = items()[1];
+    if (!current) throw new Error("Expected middle item");
+    current.focus();
+    const element = root();
+    const events: Event[] = [];
+    for (const name of ["stimeo--menu:open", "stimeo--menu:close"]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = pressKey(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(menu().hidden).toBe(false);
+    expect(pressKey(current, key).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(items()[key === "Home" ? 0 : 2]);
+  });
+
   it("starts closed", () => {
     expect(menu().hidden).toBe(true);
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
@@ -68,22 +104,25 @@ describe("MenuController", () => {
   });
 
   it("opens and focuses the last item on ArrowUp", () => {
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    pressKey(trigger(), "ArrowUp", { bubbles: true });
     expect(menu().hidden).toBe(false);
     expect(document.activeElement).toBe(items()[2]);
+  });
+
+  it("leaves End on the trigger of an open menu to the browser", () => {
+    trigger().click();
+    expect(menu().hidden).toBe(false);
+    const event = pressKey(trigger(), "End");
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(trigger());
   });
 
   it("leaves a modified arrow on the trigger to the browser", () => {
     // A chorded arrow belongs to the browser, so the menu neither claims the press
     // nor opens. Cancelable, or `defaultPrevented` could not report the claim.
     trigger().focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    trigger().dispatchEvent(event);
+    const event = keyEvent("ArrowDown", { altKey: true, bubbles: true, cancelable: true });
+    pressKey(trigger(), event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(menu().hidden).toBe(true);
@@ -92,30 +131,26 @@ describe("MenuController", () => {
   });
 
   it("opens and focuses the first item on ArrowDown", () => {
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(trigger(), "ArrowDown", { bubbles: true });
     expect(menu().hidden).toBe(false);
     expect(document.activeElement).toBe(items()[0]);
   });
 
   it("claims ArrowDown and ArrowUp on the trigger", () => {
-    const down = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      bubbles: true,
-      cancelable: true,
-    });
-    trigger().dispatchEvent(down);
+    const down = keyEvent("ArrowDown", { bubbles: true, cancelable: true });
+    pressKey(trigger(), down);
     expect(down.defaultPrevented).toBe(true);
 
     trigger().click(); // close again
-    const up = new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true });
-    trigger().dispatchEvent(up);
+    const up = keyEvent("ArrowUp", { bubbles: true, cancelable: true });
+    pressKey(trigger(), up);
     expect(up.defaultPrevented).toBe(true);
     expect(menu().hidden).toBe(false);
   });
 
   it("does not handle Enter/Space on the trigger (left to the native button click)", () => {
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    pressKey(trigger(), "Enter", { bubbles: true });
+    pressKey(trigger(), " ", { bubbles: true });
     // keydown alone does not open; the browser's synthesized click would.
     expect(menu().hidden).toBe(true);
   });
@@ -126,13 +161,8 @@ describe("MenuController", () => {
     trigger().click(); // open, focus the first item
     expect(document.activeElement).toBe(items()[0]);
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    items()[0]?.dispatchEvent(event);
+    const event = keyEvent("ArrowDown", { altKey: true, bubbles: true, cancelable: true });
+    pressKey(items()[0] as HTMLElement, event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(items()[0]);
@@ -141,18 +171,18 @@ describe("MenuController", () => {
 
   it("moves focus between items with ArrowDown (wrapping)", () => {
     trigger().click();
-    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(items()[0] as HTMLElement, "ArrowDown", { bubbles: true });
     expect(document.activeElement).toBe(items()[1]);
     items()[2]?.focus();
-    items()[2]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    pressKey(items()[2] as HTMLElement, "ArrowDown", { bubbles: true });
     expect(document.activeElement).toBe(items()[0]);
   });
 
   it("claims ArrowUp, Home and End on an item", () => {
     trigger().click();
     for (const key of ["ArrowUp", "Home", "End"]) {
-      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-      items()[0]?.dispatchEvent(event);
+      const event = keyEvent(key, { bubbles: true, cancelable: true });
+      pressKey(items()[0] as HTMLElement, event);
       expect(event.defaultPrevented, key).toBe(true);
     }
   });
@@ -163,16 +193,14 @@ describe("MenuController", () => {
     // item itself can handle it.
     items()[0]?.parentElement?.addEventListener("keydown", (event) => event.stopPropagation());
 
-    items()[0]?.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
-    );
+    pressKey(items()[0] as HTMLElement, "ArrowDown", { bubbles: true, cancelable: true });
 
     expect(document.activeElement).toBe(items()[1]);
   });
 
   it("closes on Escape and returns focus to the trigger", () => {
     trigger().click();
-    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    pressKey(items()[0] as HTMLElement, "Escape", { bubbles: true });
     expect(menu().hidden).toBe(true);
     expect(document.activeElement).toBe(trigger());
   });
@@ -180,7 +208,7 @@ describe("MenuController", () => {
   it("defers Tab closing so the browser can move focus first", async () => {
     trigger().click();
     items()[0]?.focus();
-    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    pressKey(items()[0] as HTMLElement, "Tab", { bubbles: true });
     // Still open at the synchronous point: hiding the focused item before the
     // browser's default Tab action would restart traversal at the document head.
     expect(menu().hidden).toBe(false);
@@ -196,7 +224,7 @@ describe("MenuController", () => {
       trigger().click();
       items()[0]?.focus();
       const tab = () =>
-        items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+        !pressKey(items()[0] as HTMLElement, "Tab", { bubbles: true }).defaultPrevented;
       tab();
       tab();
 
@@ -209,7 +237,7 @@ describe("MenuController", () => {
   it("discards a pending Tab close when the menu is reopened in the same task", async () => {
     trigger().click();
     items()[0]?.focus();
-    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    pressKey(items()[0] as HTMLElement, "Tab", { bubbles: true });
     trigger().click(); // close synchronously …
     trigger().click(); // … and reopen before the deferred close fires
     expect(menu().hidden).toBe(false);
@@ -224,7 +252,7 @@ describe("MenuController", () => {
     if (!(controller instanceof MenuController)) throw new Error("menu controller not found");
     trigger().click();
     items()[0]?.focus();
-    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    pressKey(items()[0] as HTMLElement, "Tab", { bubbles: true });
 
     controller.open();
     await tick();
@@ -236,7 +264,7 @@ describe("MenuController", () => {
   it("discards a pending Tab close when another path closes the menu first", async () => {
     trigger().click();
     items()[0]?.focus();
-    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    pressKey(items()[0] as HTMLElement, "Tab", { bubbles: true });
     (document.getElementById("outside") as HTMLElement).click();
     expect(menu().hidden).toBe(true);
 
@@ -305,9 +333,7 @@ describe("MenuController", () => {
     child.addEventListener("keydown", (event) => event.preventDefault());
     child.focus();
 
-    child.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
-    );
+    pressKey(child, "ArrowDown", { bubbles: true, cancelable: true });
 
     expect(document.activeElement).toBe(child);
   });
@@ -319,9 +345,7 @@ describe("MenuController", () => {
     child.addEventListener("keydown", (event) => event.preventDefault());
     child.focus();
 
-    child.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
-    );
+    pressKey(child, "ArrowDown", { bubbles: true, cancelable: true });
 
     expect(menu().hidden).toBe(true);
     expect(document.activeElement).toBe(child);
@@ -373,7 +397,7 @@ describe("MenuController", () => {
   it("cancels a pending Tab close on disconnect", async () => {
     trigger().click();
     items()[0]?.focus();
-    items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    pressKey(items()[0] as HTMLElement, "Tab", { bubbles: true });
 
     const controller = application.getControllerForElementAndIdentifier(root(), "stimeo--menu");
     if (!controller) throw new Error("menu controller not found");
@@ -389,36 +413,22 @@ describe("MenuController", () => {
     if (!controller) throw new Error("menu controller not found");
     controller.disconnect();
 
-    const capture = (options?: boolean | EventListenerOptions): boolean =>
-      typeof options === "boolean" ? options : (options?.capture ?? false);
-    const spies = [root(), document].map((target) => ({
-      add: vi.spyOn(target, "addEventListener"),
-      remove: vi.spyOn(target, "removeEventListener"),
-    }));
+    const ledger = recordListeners();
+    const held = () => [...ledger.live(root()), ...ledger.live(document)];
     try {
       controller.connect();
+      expect(held().length).toBeGreaterThan(0);
+
       controller.disconnect();
 
-      // Each registration, keyed the way `removeEventListener` matches it.
-      const added = spies.flatMap(({ add }) =>
-        add.mock.calls.map(([type, listener, options]) => [type, listener, capture(options)]),
-      );
-      const removed = spies.flatMap(({ remove }) =>
-        remove.mock.calls.map(([type, listener, options]) => [type, listener, capture(options)]),
-      );
-      expect(added.length).toBeGreaterThan(0);
-      expect(removed).toHaveLength(added.length);
-      expect(removed).toEqual(expect.arrayContaining(added));
+      expect(held()).toEqual([]);
     } finally {
-      for (const { add, remove } of spies) {
-        add.mockRestore();
-        remove.mockRestore();
-      }
+      ledger.restore();
     }
   });
 
   const itemKey = (index: number, key: string) =>
-    items()[index]?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    !pressKey(items()[index] as HTMLElement, key, { bubbles: true }).defaultPrevented;
 
   it("moves focus up between items with ArrowUp (wrapping to the last)", () => {
     trigger().click(); // open, focus item 0
@@ -572,20 +582,14 @@ describe("MenuController", () => {
 
       expect(trigger().getAttribute("aria-expanded")).toBe("false");
       trigger().focus();
-      const press = new KeyboardEvent("keydown", {
-        key: "Escape",
-        bubbles: true,
-        cancelable: true,
-      });
-      trigger().dispatchEvent(press);
+      const press = keyEvent("Escape", { bubbles: true, cancelable: true });
+      pressKey(trigger(), press);
       expect(press.defaultPrevented).toBe(false);
     });
 
     it("lets a pending Tab close close the menu that took over", async () => {
       trigger().click();
-      (items()[0] as HTMLButtonElement).dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
-      );
+      pressKey(items()[0] as HTMLButtonElement, "Tab", { bubbles: true });
       const successor = staleMenu(true);
       menu().replaceWith(successor);
       await tick();
@@ -707,7 +711,8 @@ describe("MenuController", () => {
       onlyTrigger.remove();
       onlyMenu.remove();
 
-      // Drive the callbacks directly: happy-dom delivers target callbacks unreliably.
+      // The test stays synchronous, so it calls the Stimulus target callbacks directly
+      // instead of waiting for the MutationObserver delivery, and a throw fails this case.
       expect(() => controller().triggerTargetDisconnected(onlyTrigger)).not.toThrow();
       expect(() => controller().menuTargetDisconnected(onlyMenu)).not.toThrow();
     });
@@ -867,7 +872,7 @@ describe("MenuController", () => {
     });
 
     it("reports an arrow-key open as user", () => {
-      trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      pressKey(trigger(), "ArrowDown", { bubbles: true });
 
       expect(capture.reasons()).toEqual(["user"]);
     });
@@ -902,7 +907,7 @@ describe("MenuController", () => {
       trigger().click();
       capture.clear();
 
-      items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      pressKey(items()[0] as HTMLElement, "Escape", { bubbles: true });
 
       expect(capture.reasons()).toEqual(["escape"]);
     });
@@ -911,7 +916,7 @@ describe("MenuController", () => {
       trigger().click();
       capture.clear();
 
-      items()[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+      pressKey(items()[0] as HTMLElement, "Tab", { bubbles: true });
       expect(capture.seen).toEqual([]);
       await tick();
 
@@ -982,7 +987,7 @@ describe("MenuController", () => {
       if (!(instance instanceof MenuController)) throw new Error("menu controller not found");
       root().addEventListener("stimeo--menu:open", () => instance.close());
 
-      trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+      pressKey(trigger(), "ArrowUp", { bubbles: true });
 
       expect(menu().hidden).toBe(true);
       expect(menu().contains(document.activeElement)).toBe(false);
@@ -1038,7 +1043,7 @@ describe("MenuController disabled items", () => {
     Array.from(document.querySelectorAll<HTMLButtonElement>("[data-stimeo--menu-target='item']"));
   const menu = () => document.getElementById("menu") as HTMLElement;
   const itemKey = (index: number, key: string) =>
-    items()[index]?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    !pressKey(items()[index] as HTMLElement, key, { bubbles: true }).defaultPrevented;
 
   it("keeps an aria-disabled first item in the roving order", () => {
     trigger().click();
@@ -1053,9 +1058,7 @@ describe("MenuController disabled items", () => {
     items()[1]?.focus();
 
     itemKey(1, "ArrowDown");
-    disabledItem.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
-    );
+    pressKey(disabledItem, "Enter", { bubbles: true, cancelable: true });
     disabledItem.click(); // happy-dom does not synthesize click from Enter
 
     expect(document.activeElement).toBe(disabledItem);
@@ -1070,7 +1073,7 @@ describe("MenuController disabled items", () => {
   });
 
   it("focuses the last navigable item on ArrowUp from the trigger", () => {
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    pressKey(trigger(), "ArrowUp", { bubbles: true });
     expect(document.activeElement).toBe(items()[4]); // Rename, not the disabled Archive
   });
 
@@ -1082,7 +1085,7 @@ describe("MenuController disabled items", () => {
     expect(document.activeElement).toBe(items()[0]); // Edit (aria-disabled)
   });
 
-  it("blocks aria-disabled click activation before consumer handlers", () => {
+  it("blocks aria-disabled click activation before the handlers inside the controller element", () => {
     trigger().click();
     const disabledItem = items()[2] as HTMLButtonElement;
     let consumerActivations = 0;
@@ -1117,13 +1120,727 @@ describe("MenuController disabled items", () => {
 
     expect(consumerActivations).toBe(1);
   });
+
+  /**
+   * `activate` refuses an item that cannot be activated on every path that reaches it.
+   * A refused call leaves the menu open, dispatches nothing, moves no focus and leaves
+   * the event unclaimed. The click is the reference row: the capture pass stops it on
+   * an `aria-disabled` item and the platform does not deliver it to a natively disabled
+   * one. A `probe` event stands for any other binding, read on the item itself and on
+   * an ancestor it bubbles to.
+   */
+  describe("activation refused on every path", () => {
+    let capture: ReturnType<typeof captureStateEvents>;
+
+    beforeEach(() => {
+      capture = captureStateEvents("stimeo--menu");
+    });
+
+    afterEach(() => {
+      capture.stop();
+    });
+
+    const routes = ["click", "probe on the item", "probe bubbled to the menu"] as const;
+    type Route = (typeof routes)[number];
+
+    /** The fixture item for each constraint; a `hidden` item is made so here. */
+    const constrained = {
+      "aria-disabled": () => items()[2] as HTMLButtonElement,
+      "natively disabled": () => items()[3] as HTMLButtonElement,
+      hidden: () => {
+        const item = items()[4] as HTMLButtonElement;
+        item.hidden = true;
+        return item;
+      },
+    } as const;
+    type Constraint = keyof typeof constrained;
+    const constraints = Object.keys(constrained) as Constraint[];
+
+    const root = () => menu().parentElement as HTMLElement;
+
+    const controller = () => {
+      const instance = application.getControllerForElementAndIdentifier(root(), "stimeo--menu");
+      if (!(instance instanceof MenuController)) throw new Error("menu controller not found");
+      return instance;
+    };
+
+    /** Delivers one gesture on `item` along `route` and returns the event dispatched. */
+    const deliver = (route: Route, item: HTMLButtonElement): Event => {
+      if (route === "click") {
+        const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+        item.dispatchEvent(click);
+        return click;
+      }
+      const receiver = route === "probe on the item" ? item : menu();
+      receiver.addEventListener("probe", (event) => controller().activate(event), { once: true });
+      const probe = new Event("probe", { bubbles: true, cancelable: true });
+      item.dispatchEvent(probe);
+      return probe;
+    };
+
+    const expectClosedBySelect = () => {
+      expect(menu().hidden).toBe(true);
+      expect(trigger().getAttribute("aria-expanded")).toBe("false");
+      expect(capture.names()).toEqual(["close"]);
+      expect(capture.reasons()).toEqual(["select"]);
+      expect(document.activeElement).toBe(trigger());
+    };
+
+    it.each(routes)("closes as select for an enabled item reached by %s", (route) => {
+      trigger().click();
+      capture.clear();
+
+      const event = deliver(route, items()[1] as HTMLButtonElement);
+
+      expectClosedBySelect();
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it.each(
+      constraints.flatMap((constraint) => routes.map((route) => [constraint, route] as const)),
+    )("does nothing for the %s item reached by %s", (constraint, route) => {
+      const item = constrained[constraint]();
+      trigger().click();
+      const focused = document.activeElement;
+      capture.clear();
+      const above = vi.fn();
+      root().addEventListener("probe", above);
+
+      const event = deliver(route, item);
+
+      root().removeEventListener("probe", above);
+      expect(menu().hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(capture.seen).toEqual([]);
+      expect(document.activeElement).toBe(focused);
+      // Only the capture pass cancels anything, and only a click on an aria-disabled item.
+      expect(event.defaultPrevented).toBe(route === "click" && constraint === "aria-disabled");
+      // A refused probe still bubbles past its receiver to the controller element.
+      expect(above).toHaveBeenCalledTimes(route === "click" ? 0 : 1);
+    });
+
+    it("closes as select for a call with no event while an aria-disabled item has focus", () => {
+      trigger().click();
+      expect(document.activeElement).toBe(items()[0]);
+      capture.clear();
+
+      controller().activate();
+
+      expectClosedBySelect();
+    });
+
+    it("closes as select for an event that resolves to no item", () => {
+      trigger().click();
+      capture.clear();
+      menu().addEventListener("probe", (event) => controller().activate(event), { once: true });
+
+      menu().dispatchEvent(new Event("probe", { bubbles: true }));
+
+      expectClosedBySelect();
+    });
+
+    it("leaves a refused event unclaimed for a later action that finds the item enabled", () => {
+      const item = constrained.hidden();
+      trigger().click();
+      capture.clear();
+      // The item's own action refuses the hidden item; its row then shows the item, and
+      // the menu's action, reached later by the same event, finds it enabled.
+      item.addEventListener("probe", (event) => controller().activate(event), { once: true });
+      (item.parentElement as HTMLElement).addEventListener(
+        "probe",
+        () => {
+          item.hidden = false;
+        },
+        { once: true },
+      );
+      menu().addEventListener("probe", (event) => controller().activate(event), { once: true });
+
+      item.dispatchEvent(new Event("probe", { bubbles: true }));
+
+      expectClosedBySelect();
+    });
+
+    it("keeps refusing a click that started on a hidden item once its row shows it", () => {
+      const item = constrained.hidden();
+      trigger().click();
+      const focused = document.activeElement;
+      capture.clear();
+      // The row handler runs after the item's own action and before the delegate; both
+      // act on the verdict the capture pass took when the click started.
+      (item.parentElement as HTMLElement).addEventListener(
+        "click",
+        () => {
+          item.hidden = false;
+        },
+        { once: true },
+      );
+
+      item.click();
+
+      expect(menu().hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(capture.seen).toEqual([]);
+      expect(document.activeElement).toBe(focused);
+    });
+
+    it("judges the item a click started on even when its handler detaches it", () => {
+      const item = constrained.hidden();
+      trigger().click();
+      const focused = document.activeElement;
+      capture.clear();
+      // A detached target resolves to no item; the delegate still reads the one the
+      // capture pass recorded, which refuses activation.
+      item.addEventListener("click", () => item.remove(), { once: true });
+
+      item.click();
+
+      expect(menu().hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(capture.seen).toEqual([]);
+      expect(document.activeElement).toBe(focused);
+    });
+  });
+});
+
+/**
+ * A click is judged once, in the capture pass, before the handlers inside the
+ * controller element run, and every path that activates on that click acts on that
+ * verdict when the item it resolves is among those the verdict was taken for. A consumer
+ * handler that marks the item unavailable while the click runs — a guard against a
+ * second submission — therefore does not take back the activation the click started. An
+ * item the verdict was not taken for — a handler moved the target into another item — is
+ * judged when the action runs, as is any other event.
+ */
+describe("MenuController activation judged when a click starts", () => {
+  let application: Application;
+  let capture: ReturnType<typeof captureStateEvents>;
+
+  beforeEach(async () => {
+    // The items carry no click action of their own; a test binds one after its own
+    // handler, so that handler runs first on the item.
+    document.body.innerHTML = `
+      <div data-controller="stimeo--menu">
+        <button id="menu-trigger" data-stimeo--menu-target="trigger"
+                data-action="click->stimeo--menu#toggle keydown->stimeo--menu#onTriggerKeydown"
+                aria-haspopup="menu" aria-expanded="false" aria-controls="menu">File</button>
+        <ul id="menu" role="menu" aria-labelledby="menu-trigger"
+            data-stimeo--menu-target="menu" hidden>
+          <li role="none"><button id="save" role="menuitem" tabindex="-1"
+              data-stimeo--menu-target="item"><span id="save-label">Save</span></button></li>
+          <li role="none"><button id="export" role="menuitem" tabindex="-1" aria-disabled="true"
+              data-stimeo--menu-target="item">Export</button></li>
+          <li role="none"><button id="print" role="menuitem" tabindex="-1"
+              data-stimeo--menu-target="item">Print</button></li>
+        </ul>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--menu", MenuController);
+    await tick();
+    capture = captureStateEvents("stimeo--menu");
+  });
+
+  afterEach(() => {
+    capture.stop();
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const trigger = () => document.getElementById("menu-trigger") as HTMLButtonElement;
+  const menu = () => document.getElementById("menu") as HTMLElement;
+  const save = () => document.getElementById("save") as HTMLButtonElement;
+  const row = () => save().parentElement as HTMLElement;
+
+  const controller = () => {
+    const instance = application.getControllerForElementAndIdentifier(
+      menu().parentElement as HTMLElement,
+      "stimeo--menu",
+    );
+    if (!(instance instanceof MenuController)) throw new Error("menu controller not found");
+    return instance;
+  };
+
+  const paths = ["the delegate", "the item's own action"] as const;
+  type Path = (typeof paths)[number];
+
+  const marks = {
+    disabled: (item: HTMLButtonElement) => {
+      item.disabled = true;
+    },
+    "aria-disabled": (item: HTMLButtonElement) => item.setAttribute("aria-disabled", "true"),
+  } as const;
+  type Mark = keyof typeof marks;
+  const markNames = Object.keys(marks) as Mark[];
+
+  /**
+   * Readies `path` on Save after `handler` was added, so the handler runs first on the
+   * item. For the item's own action the row keeps the click from the delegate, so that
+   * action decides alone.
+   */
+  const wire = async (path: Path, handler: (event: Event) => void): Promise<void> => {
+    save().addEventListener("click", handler);
+    if (path === "the delegate") return;
+    save().setAttribute("data-action", "click->stimeo--menu#activate");
+    await tick();
+    row().addEventListener("click", (event) => event.stopPropagation());
+  };
+
+  const expectClosedBySelect = () => {
+    expect(menu().hidden).toBe(true);
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(capture.names()).toEqual(["close"]);
+    expect(capture.reasons()).toEqual(["select"]);
+    expect(document.activeElement).toBe(trigger());
+  };
+
+  const expectUntouched = (focused: Element | null) => {
+    expect(menu().hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(capture.seen).toEqual([]);
+    expect(document.activeElement).toBe(focused);
+  };
+
+  it.each(markNames.flatMap((mark) => paths.map((path) => [mark, path] as const)))(
+    "closes as select when a handler marks the item %s during its click, through %s",
+    async (mark, path) => {
+      const command = vi.fn(() => marks[mark](save()));
+      await wire(path, command);
+      trigger().click();
+      capture.clear();
+
+      save().click();
+
+      expect(command).toHaveBeenCalledOnce();
+      expectClosedBySelect();
+    },
+  );
+
+  it.each(paths)("closes as select through %s when the handler changes nothing", async (path) => {
+    const command = vi.fn();
+    await wire(path, command);
+    trigger().click();
+    capture.clear();
+
+    save().click();
+
+    expect(command).toHaveBeenCalledOnce();
+    expectClosedBySelect();
+  });
+
+  it.each(paths)(
+    "keeps refusing through %s a click that started on a hidden item a handler shows",
+    async (path) => {
+      const command = vi.fn(() => {
+        save().hidden = false;
+      });
+      await wire(path, command);
+      trigger().click();
+      save().hidden = true;
+      const focused = document.activeElement;
+      capture.clear();
+
+      save().click();
+
+      expect(command).toHaveBeenCalledOnce();
+      expectUntouched(focused);
+    },
+  );
+
+  it.each(markNames)(
+    "refuses a probe whose handler marks the item %s before the action runs",
+    (mark) => {
+      trigger().click();
+      const focused = document.activeElement;
+      capture.clear();
+      save().addEventListener("probe", () => marks[mark](save()));
+      save().addEventListener("probe", (event) => controller().activate(event));
+
+      save().dispatchEvent(new Event("probe", { bubbles: true }));
+
+      expectUntouched(focused);
+    },
+  );
+
+  it.each([
+    ["refuses", "an aria-disabled", "export"],
+    ["closes for", "an enabled", "print"],
+  ] as const)(
+    "%s %s item a handler moves the click target into before the item's own action",
+    async (outcome, _state, destination) => {
+      const label = document.getElementById("save-label") as HTMLElement;
+      // The capture pass judged Save; the action then resolves the item the target now
+      // lies in, which it judges when it runs.
+      label.addEventListener("click", () => document.getElementById(destination)?.append(label));
+      await wire("the item's own action", () => {});
+      trigger().click();
+      const focused = document.activeElement;
+      capture.clear();
+
+      label.click();
+
+      if (outcome === "refuses") expectUntouched(focused);
+      else expectClosedBySelect();
+    },
+  );
+});
+
+/**
+ * Items nested in one another. An activation is refused when any item this menu owns
+ * that holds the event's target refuses it, so a `hidden`, natively `disabled` or
+ * `aria-disabled` inner item refuses what lands inside it on every path — the delegate,
+ * an action on either item, or one on the menu — and an outer item that refuses refuses
+ * what lands inside it too. A click any `aria-disabled` item holds is stopped before
+ * the handlers inside the controller element run. What lands on the outer item
+ * outside the inner one is judged on the outer item alone.
+ */
+describe("MenuController with a nested item pair", () => {
+  let application: Application;
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const byId = (id: string) => document.getElementById(id) as HTMLElement;
+  const trigger = () => byId("menu-trigger");
+  const menu = () => byId("menu");
+
+  const controller = () => {
+    const instance = application.getControllerForElementAndIdentifier(
+      menu().parentElement as HTMLElement,
+      "stimeo--menu",
+    );
+    if (!(instance instanceof MenuController)) throw new Error("menu controller not found");
+    return instance;
+  };
+
+  /** Mounts the pair, with `inner` and `outer` as the attributes each item carries. */
+  const mountPair = async (inner: string, outer: string, innerActions = ""): Promise<void> => {
+    document.body.innerHTML = `
+      <div data-controller="stimeo--menu">
+        <button id="menu-trigger" data-stimeo--menu-target="trigger"
+                data-action="click->stimeo--menu#toggle keydown->stimeo--menu#onTriggerKeydown"
+                aria-haspopup="menu" aria-expanded="false" aria-controls="menu">File</button>
+        <div id="menu" role="menu" aria-labelledby="menu-trigger"
+             data-stimeo--menu-target="menu" hidden>
+          <div id="outer" role="menuitem" tabindex="-1" ${outer} data-stimeo--menu-target="item">
+            <button id="inner" role="menuitem" tabindex="-1" ${inner} ${innerActions}
+                    data-stimeo--menu-target="item"><span id="label">Run</span></button>
+          </div>
+        </div>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--menu", MenuController);
+    await tick();
+  };
+
+  it("swallows a click on the aria-disabled inner item", async () => {
+    await mountPair(
+      'aria-disabled="true"',
+      "",
+      'data-action="click->stimeo--menu#activate keydown->stimeo--menu#onItemKeydown"',
+    );
+    trigger().click();
+    const inner = byId("inner");
+    const command = vi.fn();
+    inner.addEventListener("click", command);
+    const capture = captureStateEvents("stimeo--menu");
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+
+    inner.dispatchEvent(click);
+    capture.stop();
+
+    expect(command).not.toHaveBeenCalled();
+    expect(click.defaultPrevented).toBe(true);
+    expect(capture.names()).toEqual([]);
+    expect(menu().hidden).toBe(false);
+  });
+
+  /** The state the inner item carries; `enabled` with an enabled outer is the positive control. */
+  const INNER = {
+    enabled: "",
+    "aria-disabled": 'aria-disabled="true"',
+    hidden: "hidden",
+    disabled: "disabled",
+  } as const;
+  type Inner = keyof typeof INNER;
+
+  /** The state the outer item carries; its `aria-disabled` reaches the inner item too. */
+  const OUTER = { enabled: "", "aria-disabled": 'aria-disabled="true"', hidden: "hidden" } as const;
+  type Outer = keyof typeof OUTER;
+
+  /**
+   * Where an event lands and what receives it: the delegate on the controller element,
+   * or an action on an item or on the menu. `label` is the text holder inside the inner
+   * item. A natively `disabled` button is dispatched no click of its own, while happy-dom
+   * delivers one dispatched on content inside it, so a click inside the inner item lands
+   * on the label.
+   */
+  const ROUTES = {
+    "a click inside the inner, through the delegate": {
+      kind: "click",
+      at: "label",
+      receiver: "delegate",
+    },
+    "a click inside the inner, received by the inner": {
+      kind: "click",
+      at: "label",
+      receiver: "inner",
+    },
+    "a click inside the inner, received by the outer": {
+      kind: "click",
+      at: "label",
+      receiver: "outer",
+    },
+    "a probe inside the inner, received by the inner": {
+      kind: "probe",
+      at: "label",
+      receiver: "inner",
+    },
+    "a probe inside the inner, received by the outer": {
+      kind: "probe",
+      at: "label",
+      receiver: "outer",
+    },
+    "a probe inside the inner, received by the menu": {
+      kind: "probe",
+      at: "label",
+      receiver: "menu",
+    },
+    "a click on the outer, through the delegate": {
+      kind: "click",
+      at: "outer",
+      receiver: "delegate",
+    },
+    "a probe on the outer": { kind: "probe", at: "outer", receiver: "outer" },
+  } as const;
+  type Route = keyof typeof ROUTES;
+
+  /** Whether `route` lands inside the inner item. */
+  const insideInner = (route: Route): boolean => ROUTES[route].at !== "outer";
+
+  /** Whether an item holding the route's target refuses activation. */
+  const refuses = (inner: Inner, outer: Outer, route: Route): boolean =>
+    outer !== "enabled" || (insideInner(route) && inner !== "enabled");
+
+  /** Whether the capture pass stops `route`: a click an `aria-disabled` item holds. */
+  const stops = (inner: Inner, outer: Outer, route: Route): boolean =>
+    ROUTES[route].kind === "click" &&
+    (outer === "aria-disabled" || (insideInner(route) && inner === "aria-disabled"));
+
+  const ROWS = (Object.keys(INNER) as Inner[]).flatMap((inner) =>
+    (Object.keys(OUTER) as Outer[]).flatMap((outer) =>
+      (Object.keys(ROUTES) as Route[]).map((route) => ({
+        inner,
+        outer,
+        route,
+        outcome: refuses(inner, outer, route) ? "refuses" : "activates",
+      })),
+    ),
+  );
+
+  /**
+   * Delivers `route`. A consumer command listens where the event lands, so a click the
+   * capture pass stops shows as a command that never ran. A click received by an item
+   * goes no further than the menu, so that item's action decides alone.
+   */
+  const deliver = (route: Route) => {
+    const { kind, at, receiver } = ROUTES[route];
+    const command = vi.fn();
+    byId(at).addEventListener(kind, command);
+    if (receiver !== "delegate") {
+      byId(receiver).addEventListener(kind, (event) => controller().activate(event));
+      if (kind === "click") menu().addEventListener("click", (event) => event.stopPropagation());
+    }
+    const event =
+      kind === "click"
+        ? new MouseEvent("click", { bubbles: true, cancelable: true })
+        : new Event("probe", { bubbles: true, cancelable: true });
+    byId(at).dispatchEvent(event);
+    return { event, command };
+  };
+
+  it.each(ROWS)(
+    "$outcome the $inner inner item in the $outer outer item through $route",
+    async ({ inner, outer, route }) => {
+      await mountPair(INNER[inner], OUTER[outer]);
+      trigger().click();
+      const focused = document.activeElement;
+      const capture = captureStateEvents("stimeo--menu");
+
+      const { event, command } = deliver(route);
+      capture.stop();
+
+      const stopped = stops(inner, outer, route);
+      expect(event.defaultPrevented).toBe(stopped);
+      expect(command).toHaveBeenCalledTimes(stopped ? 0 : 1);
+      if (refuses(inner, outer, route)) {
+        expect(capture.seen).toEqual([]);
+        expect(menu().hidden).toBe(false);
+        expect(trigger().getAttribute("aria-expanded")).toBe("true");
+        expect(document.activeElement).toBe(focused);
+      } else {
+        expect(capture.names()).toEqual(["close"]);
+        expect(capture.reasons()).toEqual(["select"]);
+        expect(menu().hidden).toBe(true);
+        expect(document.activeElement).toBe(trigger());
+      }
+    },
+  );
+});
+
+/**
+ * `aria-disabled="true"` on an ancestor disables the items inside it, as ARIA defines the
+ * state for every focusable descendant: a click on such an item is stopped before the
+ * handlers inside the controller element run, and any other event is refused. The
+ * items stay in the roving order.
+ */
+describe("MenuController aria-disabled inherited from an ancestor", () => {
+  let application: Application;
+  let capture: ReturnType<typeof captureStateEvents>;
+
+  beforeEach(async () => {
+    document.body.innerHTML = `
+      <section id="outer">
+        <div id="root" data-controller="stimeo--menu">
+          <button id="menu-trigger" data-stimeo--menu-target="trigger"
+                  data-action="click->stimeo--menu#toggle keydown->stimeo--menu#onTriggerKeydown"
+                  aria-haspopup="menu" aria-expanded="false" aria-controls="menu">Edit</button>
+          <div id="menu" role="menu" aria-labelledby="menu-trigger"
+               data-stimeo--menu-target="menu" hidden>
+            <div id="group" role="group" aria-label="Clipboard">
+              <button id="cut" role="menuitem" tabindex="-1"
+                      data-stimeo--menu-target="item">Cut</button>
+              <button id="copy" role="menuitem" tabindex="-1"
+                      data-stimeo--menu-target="item">Copy</button>
+            </div>
+            <button id="rename" role="menuitem" tabindex="-1"
+                    data-stimeo--menu-target="item">Rename</button>
+          </div>
+        </div>
+      </section>`;
+    application = Application.start();
+    application.register("stimeo--menu", MenuController);
+    await tick();
+    capture = captureStateEvents("stimeo--menu");
+  });
+
+  afterEach(() => {
+    capture.stop();
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const byId = (id: string) => document.getElementById(id) as HTMLElement;
+  const trigger = () => byId("menu-trigger") as HTMLButtonElement;
+  const menu = () => byId("menu");
+
+  const controller = () => {
+    const instance = application.getControllerForElementAndIdentifier(byId("root"), "stimeo--menu");
+    if (!(instance instanceof MenuController)) throw new Error("menu controller not found");
+    return instance;
+  };
+
+  const ancestors = ["group", "menu", "root", "outer"] as const;
+  const routes = ["click", "probe on the item", "probe bubbled to the menu"] as const;
+  type Route = (typeof routes)[number];
+
+  /** Delivers one gesture on `item` along `route` and returns the event dispatched. */
+  const deliver = (route: Route, item: HTMLElement): Event => {
+    if (route === "click") {
+      const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+      item.dispatchEvent(click);
+      return click;
+    }
+    const receiver = route === "probe on the item" ? item : menu();
+    receiver.addEventListener("probe", (event) => controller().activate(event), { once: true });
+    const probe = new Event("probe", { bubbles: true, cancelable: true });
+    item.dispatchEvent(probe);
+    return probe;
+  };
+
+  const expectClosedBySelect = () => {
+    expect(menu().hidden).toBe(true);
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(capture.names()).toEqual(["close"]);
+    expect(capture.reasons()).toEqual(["select"]);
+    expect(document.activeElement).toBe(trigger());
+  };
+
+  /** Opens the menu with focus on `item`, then forgets the open. */
+  const openOn = (item: HTMLElement) => {
+    controller().open();
+    item.focus();
+    capture.clear();
+  };
+
+  it.each(ancestors.flatMap((ancestor) => routes.map((route) => [ancestor, route] as const)))(
+    "refuses an item under an aria-disabled #%s reached by %s",
+    (ancestor, route) => {
+      byId(ancestor).setAttribute("aria-disabled", "true");
+      const copy = byId("copy");
+      openOn(copy);
+      const command = vi.fn();
+      copy.addEventListener("click", command);
+      const above = vi.fn();
+      byId("root").addEventListener("probe", above);
+
+      const event = deliver(route, copy);
+
+      byId("root").removeEventListener("probe", above);
+      expect(menu().hidden).toBe(false);
+      expect(trigger().getAttribute("aria-expanded")).toBe("true");
+      expect(capture.seen).toEqual([]);
+      expect(document.activeElement).toBe(copy);
+      // The capture pass stops the click before the consumer's handler and cancels it.
+      expect(command).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(route === "click");
+      expect(above).toHaveBeenCalledTimes(route === "click" ? 0 : 1);
+    },
+  );
+
+  it.each(routes)("activates an item outside the aria-disabled group reached by %s", (route) => {
+    byId("group").setAttribute("aria-disabled", "true");
+    openOn(byId("rename"));
+
+    const event = deliver(route, byId("rename"));
+
+    expectClosedBySelect();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it.each(ancestors.flatMap((ancestor) => routes.map((route) => [ancestor, route] as const)))(
+    'activates an item under #%s carrying aria-disabled="false" reached by %s',
+    (ancestor, route) => {
+      byId(ancestor).setAttribute("aria-disabled", "false");
+      openOn(byId("copy"));
+
+      deliver(route, byId("copy"));
+
+      expectClosedBySelect();
+    },
+  );
+
+  it("keeps the items of an aria-disabled group in the roving order", () => {
+    byId("group").setAttribute("aria-disabled", "true");
+    trigger().click();
+    expect(document.activeElement).toBe(byId("cut"));
+
+    pressKey(byId("cut"), "ArrowDown", { bubbles: true });
+    expect(document.activeElement).toBe(byId("copy"));
+    pressKey(byId("copy"), "ArrowDown", { bubbles: true });
+    expect(document.activeElement).toBe(byId("rename"));
+    pressKey(byId("rename"), "Home", { bubbles: true });
+    expect(document.activeElement).toBe(byId("cut"));
+    pressKey(byId("cut"), "End", { bubbles: true });
+    expect(document.activeElement).toBe(byId("rename"));
+  });
 });
 
 /**
  * Item handling is delegated from the controller element, so membership in the
  * `item` target is enough — no per-element `data-action` required. This is what
- * makes an item that only becomes one at runtime (Overflow Menu banks toolbar
- * controls into a menu the author never wrote them inside) operable.
+ * makes an item that only becomes one at runtime (`stimeo--overflow-menu` banks
+ * toolbar controls into a menu the author never wrote them inside) operable.
  */
 describe("MenuController delegated item handling", () => {
   let application: Application;
@@ -1139,7 +1856,7 @@ describe("MenuController delegated item handling", () => {
           <li role="none"><button role="menuitem" tabindex="-1"
               data-stimeo--menu-target="item">Edit</button></li>
           <li role="none"><button role="menuitem" tabindex="-1"
-              data-stimeo--menu-target="item"><span id="label">Duplicate</span></button></li>
+              data-stimeo--menu-target="item"><span id="label" tabindex="-1">Duplicate</span></button></li>
           <li role="none"><button role="menuitem" tabindex="-1"
               data-stimeo--menu-target="item">Delete</button></li>
         </ul>
@@ -1158,23 +1875,23 @@ describe("MenuController delegated item handling", () => {
   const menu = () => document.getElementById("menu") as HTMLElement;
   const items = () =>
     Array.from(document.querySelectorAll<HTMLButtonElement>("[data-stimeo--menu-target='item']"));
-  const key = (el: Element, k: string) =>
-    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+  const key = (el: HTMLElement, k: string) =>
+    !pressKey(el, k, { bubbles: true, cancelable: true }).defaultPrevented;
 
   it("moves roving focus from an item that has no per-element action", () => {
     trigger().click();
     expect(document.activeElement).toBe(items()[0]);
 
-    key(items()[0] as Element, "ArrowDown");
+    key(items()[0] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(items()[1]);
 
-    key(items()[1] as Element, "ArrowUp");
+    key(items()[1] as HTMLElement, "ArrowUp");
     expect(document.activeElement).toBe(items()[0]);
   });
 
   it("jumps to the last item on End without a per-element action", () => {
     trigger().click();
-    key(items()[0] as Element, "End");
+    key(items()[0] as HTMLElement, "End");
     expect(document.activeElement).toBe(items()[2]);
   });
 
@@ -1204,7 +1921,7 @@ describe("MenuController delegated item handling", () => {
     await tick(); // Stimulus registers the new target
 
     const added = document.getElementById("added") as HTMLButtonElement;
-    key(items()[2] as Element, "ArrowDown");
+    key(items()[2] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(added);
 
     added.click();
@@ -1218,7 +1935,7 @@ describe("MenuController delegated item handling", () => {
     (items()[1] as HTMLButtonElement).focus();
 
     key(label, "ArrowDown");
-    expect(document.activeElement).toBe(items()[1]); // the descendant kept the key
+    expect(document.activeElement).toBe(label); // the descendant kept the key
   });
 
   it("closes when an item removes itself in its own click handler", () => {
@@ -1267,7 +1984,7 @@ describe("MenuController delegated item handling", () => {
     if (!controller) throw new Error("menu controller not found");
 
     controller.disconnect();
-    const unclaimed = key(items()[0] as Element, "ArrowDown");
+    const unclaimed = key(items()[0] as HTMLElement, "ArrowDown");
 
     expect(unclaimed).toBe(true);
     expect(document.activeElement).toBe(items()[0]);
@@ -1317,15 +2034,15 @@ describe("MenuController per-element and delegated bindings together", () => {
   const items = () =>
     Array.from(document.querySelectorAll<HTMLButtonElement>("[data-stimeo--menu-target='item']"));
   /** Cancelable, and returned, so the claim itself is assertable — not just its effect. */
-  const key = (el: Element, k: string) => {
-    const event = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true });
-    el.dispatchEvent(event);
+  const key = (el: HTMLElement, k: string) => {
+    const event = keyEvent(k, { bubbles: true, cancelable: true });
+    pressKey(el, event);
     return event;
   };
 
   it("lets the action claim a focus-moving key so the delegate stands down", () => {
     trigger().click();
-    const event = key(items()[0] as Element, "ArrowDown");
+    const event = key(items()[0] as HTMLElement, "ArrowDown");
     // The claim is the mechanism the single step depends on; assert it directly, or
     // the step below would also pass with both handlers running on the same index.
     expect(event.defaultPrevented).toBe(true);
@@ -1334,13 +2051,13 @@ describe("MenuController per-element and delegated bindings together", () => {
 
   it("moves one step per ArrowUp with both bindings present", () => {
     trigger().click();
-    key(items()[0] as Element, "ArrowUp");
+    key(items()[0] as HTMLElement, "ArrowUp");
     expect(document.activeElement).toBe(items()[2]); // wrapped once, not twice
   });
 
   it("defers the Tab close to a single pending task", async () => {
     trigger().click();
-    const event = key(items()[0] as Element, "Tab");
+    const event = key(items()[0] as HTMLElement, "Tab");
     expect(event.defaultPrevented).toBe(false); // Tab is deliberately left unclaimed
     expect(menu().hidden).toBe(false); // still open in the same task
     await tick();
@@ -1428,8 +2145,9 @@ describe("MenuController without a menu target", () => {
       controller.close();
     }).not.toThrow();
 
-    const press = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    document.dispatchEvent(press);
+    const press = keyEvent("Escape", { bubbles: true, cancelable: true });
+    // No menu target can own focus; the document probe checks that no layer registered.
+    typeKey(document, press);
     expect(press.defaultPrevented).toBe(false);
   });
 });

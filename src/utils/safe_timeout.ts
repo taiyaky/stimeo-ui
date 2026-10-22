@@ -10,9 +10,9 @@
  * in `disconnect()` tears them all down.
  *
  * These are intentionally low-level primitives: they own *registration and
- * cleanup only*. Higher-level policy (pause/resume, remaining-time accounting)
- * stays in the individual controllers so per-widget semantics are not flattened
- * into a lowest-common-denominator helper.
+ * cleanup only*. One pending timer per key is `KeyedTimers`
+ * (`keyed_timers.ts`), and a timer a person can hold open, with its remaining-time
+ * accounting, is `PausableTimers` (`pausable_timers.ts`).
  */
 
 export { MAX_TIMER_DELAY_MS } from "./timer_bounds";

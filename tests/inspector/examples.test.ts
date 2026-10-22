@@ -113,8 +113,7 @@ describe("buildExamplesIndex", () => {
  * manifest — the exact operation `scripts/postbuild.ts` performs at build
  * time, sharing its `collectDemoSources` walk. A drift (new controller
  * without demo, renamed demo dir, or a demo breaking the checker) fails here
- * before it fails the build. The walk resolves whatever demos the current tree
- * supplies, so the contract holds for any subset of them.
+ * before it fails the build.
  */
 describe("buildExamplesIndex (real demo sidecars)", () => {
   const here = dirname(fileURLToPath(import.meta.url));

@@ -1071,7 +1071,7 @@ describe("PaginationController pending page writes", () => {
     instance.next();
     expect(instance.pageValue).toBe(2);
   });
-  it("renders without a next button", () => {
+  it("advances through next() without a next target", () => {
     const instance = application.getControllerForElementAndIdentifier(
       root(),
       "stimeo--pagination",
@@ -1183,7 +1183,7 @@ describe("PaginationController target API", () => {
     document.body.innerHTML = "";
   });
 
-  it("retains the existing DOM Event success as a positive control", () => {
+  it("selects a page from a DOM click, as the positive control", () => {
     const reports: Array<{ reason?: string }> = [];
     element("api-root").addEventListener("stimeo--pagination:change", (event) => {
       reports.push((event as CustomEvent<{ reason?: string }>).detail);
@@ -1194,7 +1194,7 @@ describe("PaginationController target API", () => {
   });
 
   it.each([false, true])(
-    "accepts an owned target or its descendant (%s) after an Event positive control",
+    "accepts an owned target or its descendant (%s) through the element API",
     (descendant) => {
       const reports: Array<{ reason?: string }> = [];
       element("api-root").addEventListener("stimeo--pagination:change", (event) => {

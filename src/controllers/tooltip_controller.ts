@@ -121,7 +121,10 @@ export class TooltipController extends Controller<HTMLElement> {
     this.#reporting = true;
   }
 
-  /** Clears timers, the Escape-stack membership, and scroll listeners so nothing outlives the element. */
+  /**
+   * Clears timers, the Escape-stack membership, and scroll listeners so nothing outlives
+   * the element.
+   */
   override disconnect(): void {
     this.#reporting = false;
     this.#cancelTimers();

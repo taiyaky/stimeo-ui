@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rangeFraction } from "../../src/utils/range";
+import { clampRange, rangeFraction } from "../../src/utils/range";
 
 /**
  * Unit tests for the range normalization shared by progress, meter, slider, and
@@ -52,5 +52,20 @@ describe("rangeFraction", () => {
     expect(rangeFraction(50, 0, Number.NaN)).toBe(0);
     expect(rangeFraction(50, Number.NEGATIVE_INFINITY, 100)).toBe(0);
     expect(rangeFraction(50, 0, Number.POSITIVE_INFINITY)).toBe(0);
+  });
+});
+
+/** Bounds keep their declared order, including empty and inverted ranges. */
+describe("clampRange", () => {
+  it.each([
+    [45, 20, 120, 45],
+    [-10, 20, 120, 20],
+    [250, 20, 120, 120],
+    [20, 20, 120, 20],
+    [120, 20, 120, 120],
+    [90, 5, 5, 5],
+    [50, 80, 20, 20],
+  ])("clamps %j within [%j, %j]", (value, min, max, expected) => {
+    expect(clampRange(value, min, max)).toBe(expected);
   });
 });

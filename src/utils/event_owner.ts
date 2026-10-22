@@ -21,6 +21,9 @@
  * not *whether the node belongs to this controller at all* — a component with
  * nested instances of itself decides that first (by comparing the closest
  * annotated ancestor) and passes the candidates it owns.
+ *
+ * Candidates can nest, and then more than one holds the node: {@link ownerIndex}
+ * and {@link ownerOf} answer the first one listed, {@link ownersOf} all of them.
  */
 
 /**
@@ -49,4 +52,20 @@ export function ownerOf<T extends Element>(
   node: EventTarget | null | undefined,
 ): T | null {
   return candidates[ownerIndex(candidates, node)] ?? null;
+}
+
+/**
+ * Every candidate that is, or contains, `node`, in array order.
+ *
+ * Empty when none does, when `node` is absent, and when it is an `EventTarget`
+ * that is not a `Node`. A caller asking whether any owner of a node refuses
+ * something reads the whole list, since an owner nested in another one holds the
+ * node too.
+ */
+export function ownersOf<T extends Element>(
+  candidates: readonly T[],
+  node: EventTarget | null | undefined,
+): T[] {
+  if (!(node instanceof Node)) return [];
+  return candidates.filter((candidate) => candidate.contains(node));
 }

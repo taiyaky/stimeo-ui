@@ -92,7 +92,7 @@ describe("AspectRatioController", () => {
     await expectNoA11yViolations(root());
   });
 
-  // --- Speech-order regression -----------------------------------------------
+  // --- Speech-order check ----------------------------------------------------
 
   it("leaves the accessible child content announceable (layout helper is invisible to AT)", async () => {
     await start(markup());

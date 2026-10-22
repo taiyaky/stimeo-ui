@@ -2,6 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, describe, expect, it } from "vitest";
 import { EditableController } from "../src/controllers/editable_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { keyEvent, press as pressKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -48,7 +49,7 @@ describe("EditableController", () => {
       "[data-stimeo--editable-target='input']",
     ) as HTMLInputElement;
   const key = (el: HTMLElement, init: KeyboardEventInit) =>
-    el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ...init }));
+    !pressKey(el, init.key ?? "", { bubbles: true, ...init }).defaultPrevented;
 
   it("starts in display mode with the input hidden", async () => {
     await mount();
@@ -68,7 +69,7 @@ describe("EditableController", () => {
   });
 
   it("keeps editing when hiding the display reports its own departure", async () => {
-    // A real click focuses the display first, so hiding it to enter edit mode
+    // When a click focuses the display first, hiding it to enter edit mode
     // reports a focusout with nowhere to go. Reading that as "the user left"
     // would commit and close the editor the moment it opened.
     await mount();
@@ -138,8 +139,8 @@ describe("EditableController", () => {
     input().value = "Still editing";
     root().addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
 
-    const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
-    const notCanceled = input().dispatchEvent(event);
+    const event = keyEvent("Enter", { bubbles: true, cancelable: true });
+    const notCanceled = !pressKey(input(), event).defaultPrevented;
 
     expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
     expect(root().dataset.mode).toBe("editing");
@@ -159,8 +160,8 @@ describe("EditableController", () => {
     input().value = "Kept";
     root().addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
 
-    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    const notCanceled = input().dispatchEvent(event);
+    const event = keyEvent("Escape", { bubbles: true, cancelable: true });
+    const notCanceled = !pressKey(input(), event).defaultPrevented;
 
     expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
     expect(root().dataset.mode).toBe("editing");
@@ -169,8 +170,8 @@ describe("EditableController", () => {
 
   it("consumes the F2 that enters edit mode", async () => {
     await mount();
-    const event = new KeyboardEvent("keydown", { key: "F2", bubbles: true, cancelable: true });
-    display().dispatchEvent(event);
+    const event = keyEvent("F2", { bubbles: true, cancelable: true });
+    pressKey(display(), event);
     expect(event.defaultPrevented).toBe(true);
     expect(root().dataset.mode).toBe("editing");
   });
@@ -178,18 +179,14 @@ describe("EditableController", () => {
   it("consumes the Enter that saves and the Escape that cancels", async () => {
     await mount();
     display().click();
-    const saveKey = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
-    input().dispatchEvent(saveKey);
+    const saveKey = keyEvent("Enter", { bubbles: true, cancelable: true });
+    pressKey(input(), saveKey);
     expect(saveKey.defaultPrevented).toBe(true);
     expect(root().dataset.mode).toBe("display");
 
     display().click();
-    const cancelKey = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
-    input().dispatchEvent(cancelKey);
+    const cancelKey = keyEvent("Escape", { bubbles: true, cancelable: true });
+    pressKey(input(), cancelKey);
     expect(cancelKey.defaultPrevented).toBe(true);
     expect(root().dataset.mode).toBe("display");
   });
@@ -543,6 +540,44 @@ describe("EditableController", () => {
     expect(root().dataset.mode).toBe("display");
   });
 
+  // Target callbacks are driven directly so observer delivery cannot decide
+  // whether a released field still shields the editor's keyboard commands.
+  it("ignores composition on a released input while tracking its replacement", async () => {
+    await mount(false);
+    display().click();
+    const departed = input();
+    const fresh = departed.cloneNode(true) as HTMLInputElement;
+    const controller = application.getControllerForElementAndIdentifier(
+      root(),
+      "stimeo--editable",
+    ) as EditableController;
+    departed.removeAttribute("data-stimeo--editable-target");
+    departed.after(fresh);
+    controller.inputTargetDisconnected(departed);
+    controller.inputTargetConnected(fresh);
+    fresh.value = "Updated";
+
+    departed.focus();
+    departed.dispatchEvent(new CompositionEvent("compositionstart"));
+    fresh.focus();
+    controller.onKeydown(keyEvent("Enter"));
+
+    expect(root().dataset.mode).toBe("display");
+    expect(display().textContent).toBe("Updated");
+
+    controller.edit();
+    fresh.value = "Confirmed";
+    fresh.dispatchEvent(new CompositionEvent("compositionstart"));
+    controller.onKeydown(keyEvent("Enter"));
+    expect(root().dataset.mode).toBe("editing");
+    expect(display().textContent).toBe("Updated");
+
+    fresh.dispatchEvent(new CompositionEvent("compositionend"));
+    controller.onKeydown(keyEvent("Enter"));
+    expect(root().dataset.mode).toBe("display");
+    expect(display().textContent).toBe("Confirmed");
+  });
+
   it("hides a display element that replaces the live one mid-edit", async () => {
     await mount(false);
     display().click();
@@ -887,6 +922,22 @@ describe("EditableController", () => {
     expect(root().dataset.mode).toBe("display");
   });
 
+  it("still saves on blur when the display element is gone", async () => {
+    await mount(true);
+    display().click();
+    input().value = "typed";
+    display().remove();
+    await tick();
+
+    const changes: Array<{ value: string; previous: string }> = [];
+    root().addEventListener("stimeo--editable:change", (event) => {
+      changes.push((event as CustomEvent).detail);
+    });
+    input().dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    expect(changes).toEqual([{ value: "typed", previous: "Original" }]);
+    expect(root().dataset.mode).toBe("display");
+  });
+
   // --- Guards outside edit mode --------------------------------------------------
 
   it("does nothing when the editing control has not rendered yet", async () => {
@@ -1030,6 +1081,10 @@ describe("EditableController", () => {
     display().click();
     input().dispatchEvent(new CompositionEvent("compositionstart"));
     const instance = controllerFor();
+    // Moving the controller element without moveBefore takes focus from the field; in
+    // Chromium the move ends the conversion with no compositionend. The controller disconnects
+    // and connects again.
+    instance.element.parentElement?.append(instance.element);
     instance.disconnect();
     instance.connect();
 

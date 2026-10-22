@@ -4,9 +4,9 @@
  * A control that becomes redundant while the user is standing on it cannot be
  * removed from the page immediately: hiding a focused element (or turning it
  * into a native `disabled` one) drops focus to `<body>`, stranding a keyboard
- * user mid-widget. The fix every affected controller reached for is the same —
- * keep the element reachable, hold the destructive update, listen for `blur`,
- * and apply it then.
+ * user mid-widget. Every affected controller handles it the same way — keep the
+ * element reachable, hold the destructive update, listen for `blur`, and apply
+ * it then.
  *
  * {@link BlurDeferral} owns *only* the registry part of that: which elements are
  * currently holding an update back, attaching and detaching the `blur` listener,

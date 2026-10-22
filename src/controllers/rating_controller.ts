@@ -1,6 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
 import { commitField, writeField } from "../utils/field_mirror";
 import { isRtl } from "../utils/logical_scroll";
@@ -207,6 +207,7 @@ export class RatingController extends Controller<HTMLElement> {
   /** Arrow/Home/End/Space/Delete keyboard control, clamped without wrapping. */
   onKeydown(event: KeyboardEvent): void {
     if (event.defaultPrevented || isReservedArrowChord(event) || this.readonlyValue) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
 
     const current = this.#normalize(this.#safeValue);
     let next: number | null = null;

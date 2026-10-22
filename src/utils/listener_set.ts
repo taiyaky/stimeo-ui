@@ -1,3 +1,25 @@
+/** What {@link ListenerSet.add} passes on besides the signal it supplies itself. */
+export type ListenerOptions = Omit<AddEventListenerOptions, "signal">;
+
+/**
+ * The event map a target's own `addEventListener` types its handlers with: the
+ * window's, a document's, an HTML or SVG element's, any other element's, or a
+ * media query list's. Other targets name none.
+ */
+type EventMapOf<T extends EventTarget> = T extends Window
+  ? WindowEventMap
+  : T extends Document
+    ? DocumentEventMap
+    : T extends HTMLElement
+      ? HTMLElementEventMap
+      : T extends SVGElement
+        ? SVGElementEventMap
+        : T extends Element
+          ? ElementEventMap
+          : T extends MediaQueryList
+            ? MediaQueryListEventMap
+            : Record<never, never>;
+
 /**
  * Owns every listener a controller attaches for one connected lifetime and
  * releases them together, so an event name is spelled once and the release
@@ -9,8 +31,8 @@
  * signal a registration was created with releases it whatever it was made of,
  * so the release site names nothing.
  *
- * One set per lifetime, held as a field and never rebuilt. {@link
- * ListenerSet.dispose} is the only thing that closes a generation, and it opens
+ * One set per lifetime, held as a field and never rebuilt.
+ * {@link ListenerSet.dispose} is the only thing that closes a generation, and it opens
  * the next one in the same step, so the lifecycle hooks can call `add` and
  * `dispose` in any order any number of times, and no `add` ever meets an
  * already aborted signal — a DOM that registers a listener on such a signal
@@ -27,11 +49,17 @@
  * swapped target) is rebound by calling `dispose()` and then `add()` again from
  * the rebind, not by a second set.
  *
+ * A lifetime shorter than the connection — while a Value holds, until a first
+ * load, while a subscription is open — gets a set of its own, which the end of
+ * that lifetime disposes. A controller therefore holds one set per lifetime: the
+ * connection's, and one for each swapped receiver or shorter span.
+ *
  * The set must own every registration of a tuple it holds: a listener the same
  * target already carries for the same type, callback and capture flag keeps the
  * right to remove it, and this set's `add` for that tuple is discarded. A
- * subscription shared between instances behind a participant count, or one that
- * lives for less than the connection, keeps its own pair of calls.
+ * subscription shared between instances behind a participant count, listeners of
+ * several elements that come and go one at a time, and those one gesture holds
+ * keep their own pair of calls or a signal of their own.
  *
  * @example
  * ```ts
@@ -56,15 +84,22 @@ export class ListenerSet {
    * Attaches `handler` to the open generation, exactly as the caller spelled it.
    *
    * The set supplies the signal, so `options` carries everything else the DOM
-   * accepts — `capture` included, which has to match at release time and no
-   * longer has a second place to drift from.
+   * accepts — `capture` included. A removal by hand would have to repeat that
+   * flag; aborting the signal releases the listener without it.
+   *
+   * A `type` the target's own event map names types `handler` with that event,
+   * as the target's `addEventListener` does, so a handler written for a
+   * `KeyboardEvent` is passed as it is; any other `type` takes an
+   * `EventListener`.
    */
-  add(
-    target: EventTarget,
-    type: string,
-    handler: EventListener,
-    options?: Omit<AddEventListenerOptions, "signal">,
-  ): void {
+  add<T extends EventTarget, K extends keyof EventMapOf<T> & string>(
+    target: T,
+    type: K,
+    handler: (event: EventMapOf<T>[K]) => void,
+    options?: ListenerOptions,
+  ): void;
+  add(target: EventTarget, type: string, handler: EventListener, options?: ListenerOptions): void;
+  add(target: EventTarget, type: string, handler: EventListener, options?: ListenerOptions): void {
     target.addEventListener(type, handler, { ...options, signal: this.#abort.signal });
   }
 

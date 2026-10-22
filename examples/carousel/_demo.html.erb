@@ -65,7 +65,7 @@
       data-stimeo--carousel-target="next">›</button>
   </div>
 
-  <div class="carousel__dots" role="tablist"
+  <div class="carousel__dots" role="tablist" data-stimeo--carousel-target="pickerList"
     aria-label="<%= t("components.carousel.demo.tablist") %>">
     <% t("components.carousel.demo.slides").each_with_index do |slide, i| %>
       <button
@@ -82,6 +82,6 @@
 </section>
 
 <%# On-screen explanation of the deliberate autoplay accessibility behavior, so the
-    pause-on-hover / hard-stop-on-focus is understood as intentional (WCAG 2.2.2), not a bug.
+    hover and focus suspensions are understood as intentional (WCAG 2.2.2).
     Kept outside the <section> so reading it doesn't itself pause the carousel. %>
 <p class="carousel__hint"><%= t("components.carousel.demo.hint") %></p>

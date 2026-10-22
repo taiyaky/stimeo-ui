@@ -7,6 +7,7 @@ import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { delay, tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /**
  * Behavioral tests for {@link PasswordRevealController}: `type` toggling,
@@ -644,18 +645,15 @@ describe("PasswordRevealController", () => {
   // --- `autoHide` belongs to one reveal ---------------------------------------------
 
   /**
-   * Rewrites `autoHide` and delivers its Value callback directly when the controller
-   * defines one, since happy-dom does not reliably run it for an attribute write.
+   * Rewrites the `autoHide` declaration and waits for Stimulus to deliver it, so the
+   * assertions that follow see whatever the controller does with the change.
    */
-  const declareAutoHide = (value: number) => {
-    controllerEl().setAttribute("data-stimeo--password-reveal-auto-hide-value", String(value));
-    const owner = application.getControllerForElementAndIdentifier(
+  const declareAutoHide = (value: number) =>
+    writeValueAttribute(
       controllerEl(),
-      "stimeo--password-reveal",
+      "data-stimeo--password-reveal-auto-hide-value",
+      String(value),
     );
-    const callback: unknown = Reflect.get(owner ?? {}, "autoHideValueChanged");
-    if (typeof callback === "function") callback.call(owner);
-  };
 
   it.each([
     { direction: "shrinks", next: 20 },
@@ -669,7 +667,7 @@ describe("PasswordRevealController", () => {
         toggle().click();
         vi.advanceTimersByTime(50);
 
-        declareAutoHide(next);
+        await declareAutoHide(next);
         vi.advanceTimersByTime(149);
         expect(input().type).toBe("text");
         vi.advanceTimersByTime(1);
@@ -719,14 +717,14 @@ describe("PasswordRevealController", () => {
     vi.useFakeTimers();
     try {
       toggle().click(); // revealed with no re-mask promised
-      declareAutoHide(20);
+      await declareAutoHide(20);
       vi.advanceTimersByTime(1000);
       expect(input().type).toBe("text");
       expect(toggle().getAttribute("aria-pressed")).toBe("true");
       expect(toggles).toEqual([true]);
 
       toggle().click(); // masked: a change while masked arms nothing either
-      declareAutoHide(30);
+      await declareAutoHide(30);
       vi.advanceTimersByTime(1000);
       expect(input().type).toBe("password");
       expect(toggles).toEqual([true, false]);
@@ -1035,7 +1033,8 @@ describe("PasswordRevealController", () => {
   });
 
   it("says nothing when it masks for the cache", async () => {
-    // The page is about to be frozen; there is no consumer left to tell.
+    // Masking for the cache is not a toggle the user made, so no `toggle` reports it,
+    // whether the page is being left or stays live.
     await start();
     toggle().click();
     const seen: boolean[] = [];
@@ -1417,13 +1416,14 @@ describe("PasswordRevealController", () => {
     expect(inputEl.type).toBe("text");
 
     // Disconnect (as a Turbo navigation would) must cancel the pending auto-hide
-    // timer. Drive disconnect() directly rather than via element removal so the
-    // assertion doesn't race the async MutationObserver teardown under load.
+    // timer. The case calls disconnect() directly, so it checks the controller's own
+    // teardown rather than the removal Stimulus observes.
     const controller = application.getControllerForElementAndIdentifier(
       controllerEl(),
       "stimeo--password-reveal",
     ) as PasswordRevealController;
-    expect(controller).toBeTruthy(); // the controller must be obtained, so disconnect() is actually exercised
+    // the controller must be obtained, so disconnect() is actually exercised
+    expect(controller).toBeTruthy();
     controller.disconnect();
     await delay(40);
     // The cancelled timer must not have re-masked the input.

@@ -9,7 +9,7 @@
  *
  * It is intentionally **policy-free**. Orientation, wrapping vs. clamping,
  * selection-follows-focus, typeahead, and `Home`/`End` semantics differ per APG
- * pattern (Radio Group, Toolbar, Rating, …); folding them into one helper would
+ * pattern (Radio Group, Toolbar, Tabs, …); folding them into one helper would
  * flatten those widgets to a lowest common denominator and lose each pattern's
  * correctness. Those decisions therefore stay in each controller, which calls
  * {@link RovingTabindex.setActive} with an index it computed itself (optionally

@@ -40,8 +40,8 @@ import { TemplateRow } from "../utils/template_row";
  *
  * There is no single established APG pattern; this composes a labeled text input
  * with a roving-tabindex list of removable chips, mapping to WCAG 2.1.1, 2.4.7,
- * 4.1.2, 4.1.3, and 1.3.1. Unlike {@link MultiSelectController} (pick from a
- * candidate list) the user types arbitrary strings.
+ * 4.1.2, 4.1.3, and 1.3.1. Unlike `stimeo--multi-select` (pick from a candidate
+ * list) the user types arbitrary strings.
  *
  * Behavior provided:
  * - `Enter` or the configured delimiter commits the trimmed input as a tag.
@@ -59,8 +59,9 @@ import { TemplateRow } from "../utils/template_row";
  *   DOM/Turbo tag changes dispatch `stimeo--tags-input:reconcile`; authored
  *   templates route localized addition/removal text to the shared announcer.
  * - The remove buttons form one roving Tab stop: `ArrowLeft`/`ArrowRight` move
- *   between them (right past the end returns to the input), `Delete`/`Backspace`
+ *   between them (past the logical end returns to the input), `Delete`/`Backspace`
  *   delete the focused tag, and `Backspace` on an empty input deletes the last.
+ *   The current `tags` container defines horizontal direction for the chips and input boundary.
  * - Removing from a chip moves focus to its neighbor (else the input); removing
  *   via empty-input `Backspace` keeps focus in the input for continued editing.
  * `change` and `reconcile` dispatch `{ tags: string[] }`; `reject` dispatches
@@ -124,7 +125,7 @@ export class TagsInputController extends Controller<HTMLElement> {
   /** Collapses one target/Value mutation batch into one final-DOM repair pass. */
   readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileTags());
   readonly #chipRow = new ChipRow({
-    directionElement: this.element,
+    getDirectionElement: () => this.#chipDirectionElement,
     getItems: () => this.tagTargets,
     getButton: (tag) =>
       matchingPart<HTMLButtonElement>(tag, `button${this.#rows.selector("remove")}`),
@@ -233,8 +234,11 @@ export class TagsInputController extends Controller<HTMLElement> {
       }
       return;
     }
-    // Same normalisation as the chip handler below, read from the same element.
-    if (logicalArrowKey(event.key, this.element) === "ArrowLeft" && this.inputTarget.value === "") {
+    // The tags container defines the same logical boundary as its chip buttons.
+    if (
+      logicalArrowKey(event.key, this.#chipDirectionElement) === "ArrowLeft" &&
+      this.inputTarget.value === ""
+    ) {
       if (this.#chipRow.length > 0) {
         event.preventDefault();
         this.#chipRow.focusLast();
@@ -303,6 +307,11 @@ export class TagsInputController extends Controller<HTMLElement> {
       return;
     }
     if (!this.#chipRow.focusAfterRemoval(index)) this.#focusInput();
+  }
+
+  /** Current tags container, or the root while the target is absent. */
+  get #chipDirectionElement(): HTMLElement {
+    return this.hasTagsTarget ? this.tagsTarget : this.element;
   }
 
   /** Moves focus to the current input when one exists. */

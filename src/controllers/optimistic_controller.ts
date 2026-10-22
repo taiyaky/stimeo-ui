@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { DetachGate } from "../utils/detach_gate";
 import { ListenerSet } from "../utils/listener_set";
+import { SubmissionOwner } from "../utils/submission_owner";
 import { TransientHooks } from "../utils/transient_hooks";
 
 /** The hook a connection may find written by an earlier, now-gone one. */
@@ -19,20 +20,7 @@ const AUTHORED_ABSENT = "absent";
 const AUTHORED_VALUE = "value:";
 
 /**
- * Stands in for the submission a synthetic lifecycle event does not name. Turbo
- * puts a `formSubmission` on both events, so this only ever pairs hand-dispatched
- * events with each other — one shared instance, so a start and its end match.
- */
-const SYNTHETIC_SUBMISSION = {};
-
-/** The submission a Turbo lifecycle event belongs to. */
-function submissionOf(event: Event): unknown {
-  const detail = (event as CustomEvent<{ formSubmission?: unknown }>).detail;
-  return detail?.formSubmission ?? SYNTHETIC_SUBMISSION;
-}
-
-/**
- * Headless **optimistic UI** for Turbo form submissions — the one server-bound
+ * Headless **optimistic UI** for Turbo form submissions — a server-bound
  * behavior that needs no Action Cable: it wraps a Turbo form
  * and applies a *declared* optimistic state the moment the submission starts,
  * keeps it when the server confirms, and **rolls it back** when the submission
@@ -51,11 +39,14 @@ function submissionOf(event: Event): unknown {
  *
  * On `turbo:submit-start`, every `show` target is unhidden and every `hide`
  * target hidden, the element gains `data-optimistic="true"` + `aria-busy="true"`,
- * and the submission named by the event takes ownership of that state. On
- * `turbo:submit-end`: the terminal of any *other* submission is ignored; the
- * owner's terminal clears the pending hook and, on success, dispatches `commit`
+ * and the event's source and submission token take ownership of that state. On
+ * `turbo:submit-end`: only the same source and token can resolve it once. A missing
+ * or null token pairs synthetic events from the same source, separately from
+ * explicit tokens. The owner's terminal clears the pending hook and, with
+ * `success === true`, dispatches `commit`
  * (the toggled state stays — the server response owns the final DOM), or on
- * failure restores the authored markup and dispatches `rollback`.
+ * failure restores the authored markup and dispatches `rollback`. Ownership is
+ * released before either event is dispatched.
  *
  * **Every write records what it displaced.** A target this controller hides or
  * reveals carries the authored `hidden` value in `data-optimistic-toggled`, and
@@ -86,9 +77,7 @@ export class OptimisticController extends Controller<HTMLElement> {
   declare readonly showTargets: HTMLElement[];
   declare readonly hideTargets: HTMLElement[];
 
-  /** The submission that owns the applied optimistic state, if any. */
-  #pending: unknown = null;
-
+  readonly #submission = new SubmissionOwner();
   readonly #gate = new DetachGate();
   readonly #listeners = new ListenerSet();
 
@@ -111,14 +100,15 @@ export class OptimisticController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#connected = false;
     this.#listeners.dispose();
-    // Ownership outlives an in-page move: only a real detach forgets it.
+    // Ownership outlives an in-page move or a `data-turbo-permanent` carry; a real detach
+    // forgets it.
     this.#gate.disconnected(this, () => {
-      this.#pending = null;
+      this.#submission.clear();
     });
   }
 
   readonly #onSubmitStart = (event: Event): void => {
-    this.#pending = submissionOf(event);
+    this.#submission.begin(event);
     // Turbo owns `aria-busy` on a form and marks it before this event, so what is
     // there now is Turbo's, not the author's. Recording it would put Turbo's value
     // back on a page restored mid-submit, where no terminal ever arrives to clear it.
@@ -132,12 +122,8 @@ export class OptimisticController extends Controller<HTMLElement> {
   };
 
   readonly #onSubmitEnd = (event: Event): void => {
-    // A terminal always names a submission, so an element holding none (nothing
-    // started, or this one already resolved) falls out here too.
-    if (submissionOf(event) !== this.#pending) return;
-    this.#pending = null;
-
-    const success = (event as CustomEvent<{ success?: boolean }>).detail?.success === true;
+    const success = this.#submission.resolve(event);
+    if (success === null) return;
     if (success) {
       // Keep the toggled faces (the server response owns the final DOM) but drop
       // their records, so a later failure cannot revert a confirmed state.
@@ -179,8 +165,8 @@ export class OptimisticController extends Controller<HTMLElement> {
    * there now belongs to whoever wrote it — Turbo owns `aria-busy` on a form and
    * clears it before the terminal arrives, and a consumer may have moved a face
    * mid-flight — so the record is dropped without touching the attribute. A
-   * marker this build did not write names no authored value, so the attribute
-   * goes back to being absent.
+   * marker value that is neither `absent` nor `value:…` names no authored value, so
+   * the attribute goes back to being absent.
    */
   #restore(element: Element, attribute: string, marker: string, written: string | null): void {
     const recorded = element.getAttribute(marker);

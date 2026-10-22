@@ -49,6 +49,7 @@ const fixtures: MorphFixture[] = [
     html: '<span id="out" data-stimeo--clipboard-target="feedback">server fallback</span>',
     selector: "#out",
     output: "text",
+    omittedAttributes: ["data-stimeo--clipboard-feedback-text"],
   },
   {
     id: "countdown",

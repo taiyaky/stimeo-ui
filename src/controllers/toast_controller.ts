@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { type ActionSource, actionSource } from "../utils/action_source";
 import { ownerOf } from "../utils/event_owner";
+import { HoverRecheck } from "../utils/hover_recheck";
 import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
@@ -117,10 +118,9 @@ export class ToastController extends Controller<HTMLElement> {
   #spared: HTMLElement[] = [];
 
   /** The next pointer movement, listened for while a hover hold waits on it. */
-  readonly #pointer = new ListenerSet();
-
-  /** Toasts whose hover hold waits for the next pointer movement to be confirmed. */
-  readonly #awaitingPointer = new Set<HTMLElement>();
+  readonly #pointer = new HoverRecheck<HTMLElement>(this.element.ownerDocument, (item) =>
+    this.#release(item, "hover", null),
+  );
 
   /**
    * Pending one-shot `requestAnimationFrame` handles (the entering→visible flip).
@@ -131,6 +131,8 @@ export class ToastController extends Controller<HTMLElement> {
 
   /** The stable list that owns delegated listeners for dynamically added items. */
   #delegatedList: HTMLElement | null = null;
+  /** The delegated listeners on that list; another list releases them first. */
+  readonly #listListeners = new ListenerSet();
 
   /** Whether the controller is between `connect()` and `disconnect()`. */
   #connected = false;
@@ -179,7 +181,6 @@ export class ToastController extends Controller<HTMLElement> {
     this.#reapply.disconnect();
     this.#spared = [];
     this.#pointer.dispose();
-    this.#awaitingPointer.clear();
     for (const handle of this.#rafHandles.values()) {
       window.cancelAnimationFrame(handle);
     }
@@ -449,7 +450,7 @@ export class ToastController extends Controller<HTMLElement> {
    */
   #afterMove(item: HTMLElement): void {
     if (!item.contains(document.activeElement)) this.#release(item, "focus", null);
-    if (this.#dismiss.isHeld(item)) this.#awaitPointer(item);
+    if (this.#dismiss.isHeld(item)) this.#pointer.wait(item);
   }
 
   /**
@@ -461,30 +462,8 @@ export class ToastController extends Controller<HTMLElement> {
     if (item.contains(document.activeElement)) this.#dismiss.pause(item, "focus");
     if (!item.matches(":hover")) return;
     this.#dismiss.pause(item, "hover");
-    this.#awaitPointer(item);
+    this.#pointer.wait(item);
   }
-
-  /** Leaves `item`'s hover hold to be confirmed or let go on the next pointer movement. */
-  #awaitPointer(item: HTMLElement): void {
-    this.#awaitingPointer.add(item);
-    this.#pointer.add(document, "pointermove", this.#onPointerMove, {
-      capture: true,
-      passive: true,
-    });
-  }
-
-  /**
-   * Reads `:hover` once the pointer has moved, when the answer is current, and lets go of
-   * the hover hold of every waiting toast the pointer is not over. Listens once.
-   */
-  readonly #onPointerMove = (): void => {
-    this.#pointer.dispose();
-    const waiting = [...this.#awaitingPointer];
-    this.#awaitingPointer.clear();
-    for (const item of waiting) {
-      if (!item.matches(":hover")) this.#release(item, "hover", null);
-    }
-  };
 
   /**
    * Drops a toast's timer and holds as it leaves, and stops waiting on the pointer for it.
@@ -493,8 +472,7 @@ export class ToastController extends Controller<HTMLElement> {
   #letGo(item: HTMLElement): void {
     if (this.#dismiss.isHeld(item)) this.#limitLater(null);
     this.#dismiss.clear(item);
-    this.#awaitingPointer.delete(item);
-    if (this.#awaitingPointer.size === 0) this.#pointer.dispose();
+    this.#pointer.cancel(item);
   }
 
   /** Resolves a current owned item from an action's origin or binding host. */
@@ -560,11 +538,10 @@ export class ToastController extends Controller<HTMLElement> {
    * Removes the oldest toasts while the list shows more than `maxValue`, passing
    * over every toast hover or focus holds.
    *
-   * Public (not `#private`) as a deterministic seam: enforcement normally runs
-   * as each toast is taken on in `itemTargetConnected`, a Stimulus callback delivered
-   * through a MutationObserver, which a DOM-only environment does not reliably fire —
-   * so it can also be invoked directly. It counts only the toasts taken on. It is not a
-   * user-wired action.
+   * Public (not `#private`) as a deterministic seam: the limit is applied as each toast
+   * is taken on in `itemTargetConnected`, a callback Stimulus delivers through a
+   * MutationObserver, and this method applies it synchronously, without waiting for that
+   * delivery. It counts only the toasts taken on. It is not a user-wired action.
    */
   enforceMaxLimit(): void {
     this.#enforceMax();
@@ -613,17 +590,13 @@ export class ToastController extends Controller<HTMLElement> {
 
     this.#delegatedList = list;
     for (const type of DELEGATED_EVENTS) {
-      this.#delegatedList.addEventListener(type, this.#onListEvent);
+      this.#listListeners.add(list, type, this.#onListEvent);
     }
   }
 
   /** Releases every delegated listener from the exact list that owns it. */
   #disconnectDelegatedEvents(): void {
-    if (!this.#delegatedList) return;
-
-    for (const type of DELEGATED_EVENTS) {
-      this.#delegatedList.removeEventListener(type, this.#onListEvent);
-    }
+    this.#listListeners.dispose();
     this.#delegatedList = null;
   }
 

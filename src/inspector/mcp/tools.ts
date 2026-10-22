@@ -590,6 +590,11 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
           values: { ...STRING_ARRAY, description: "Restrict the attribute to these values." },
           min: { type: "integer", description: "Smallest permitted count (inclusive)." },
           max: { type: "integer", description: "Largest permitted count (inclusive)." },
+          severity: { type: "string", enum: ["error", "warning"] },
+          excludeTemplateContents: {
+            type: "boolean",
+            description: "Exclude targets and containers across template contents from the scope.",
+          },
           when: VALUE_CONDITION_SCHEMA,
           suggestion: { type: "string" },
         },

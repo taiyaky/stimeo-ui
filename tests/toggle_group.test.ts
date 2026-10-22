@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToggleGroupController } from "../src/controllers/toggle_group_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents, type StateEventCapture } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -67,24 +68,167 @@ describe("ToggleGroupController", () => {
   const pressed = (scope = root()) =>
     items(scope).map((candidate) => candidate.getAttribute("aria-pressed"));
   const tabindexes = (scope = root()) => items(scope).map((candidate) => candidate.tabIndex);
-  const key = (
-    candidate: HTMLElement,
-    value: string,
-    init: KeyboardEventInit = {},
-  ): KeyboardEvent => {
-    const event = new KeyboardEvent("keydown", {
-      key: value,
-      bubbles: true,
-      cancelable: true,
-      ...init,
-    });
-    candidate.dispatchEvent(event);
-    return event;
-  };
+
+  it("releases a queued author default before a requested morph repair", async () => {
+    await start(
+      group(`<div role="button" data-value="bare"
+      data-stimeo--toggle-group-target="item">Bare</div>`),
+    );
+    const candidate = items()[0] as HTMLElement;
+    root().dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    candidate.setAttribute("aria-pressed", "false");
+    candidate.setAttribute("contenteditable", "true");
+    await tick();
+    expect(candidate.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("repairs a pressed default removed by a synchronous custom-element reaction", async () => {
+    let armed = false;
+    let reacted = false;
+    customElements.define(
+      "reactive-pressed-default",
+      class extends HTMLElement {
+        static observedAttributes = ["aria-pressed"];
+
+        attributeChangedCallback(
+          _name: string,
+          _before: string | null,
+          after: string | null,
+        ): void {
+          if (!armed || after !== "false") return;
+          armed = false;
+          reacted = true;
+          this.removeAttribute("aria-pressed");
+        }
+      },
+    );
+    await start(
+      group(`<reactive-pressed-default role="button" data-value="bare"
+      data-stimeo--toggle-group-target="item">Bare</reactive-pressed-default>`),
+    );
+    const candidate = items()[0] as HTMLElement;
+    armed = true;
+    candidate.removeAttribute("aria-pressed");
+    await tick();
+    expect(reacted).toBe(true);
+    expect(candidate.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("releases a custom element's repeated default before notifying listeners", async () => {
+    let armed = false;
+    let reacted = false;
+    customElements.define(
+      "reactive-pressed-ownership",
+      class extends HTMLElement {
+        static observedAttributes = ["aria-pressed"];
+
+        attributeChangedCallback(
+          _name: string,
+          _before: string | null,
+          after: string | null,
+        ): void {
+          if (!armed || after !== "false") return;
+          armed = false;
+          reacted = true;
+          this.setAttribute("aria-pressed", "false");
+        }
+      },
+    );
+    await start(
+      group(`${item("selected", "true", 0)}
+      <reactive-pressed-ownership role="button" data-value="bare"
+      data-stimeo--toggle-group-target="item">Bare</reactive-pressed-ownership>`),
+    );
+    const candidate = items()[1] as HTMLElement;
+    root().addEventListener(
+      "stimeo--toggle-group:reconcile",
+      () => {
+        controller().toggle(candidate);
+        candidate.setAttribute("contenteditable", "true");
+        controller().disconnect();
+        controller().connect();
+      },
+      { once: true },
+    );
+    armed = true;
+    candidate.removeAttribute("aria-pressed");
+    items()[0]?.setAttribute("aria-pressed", "false");
+    await tick();
+    expect(reacted).toBe(true);
+    expect(candidate.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("excludes its generated children from repair while observing author replacements", async () => {
+    await start(
+      group(`<div role="button" aria-pressed="false" tabindex="0" data-value="bare"
+      data-stimeo--toggle-group-target="item">Bare</div>
+      <div data-stimeo--toggle-group-target="fields"></div>`),
+    );
+    const candidate = items()[0] as HTMLElement;
+    controller().toggle(candidate);
+    const reads = vi.spyOn(candidate, "getAttribute");
+    try {
+      await tick();
+      expect(reads.mock.calls.filter(([name]) => name === "contenteditable")).toHaveLength(0);
+      root().querySelector('[data-stimeo--toggle-group-target="fields"]')?.replaceChildren();
+      await tick();
+      expect(
+        reads.mock.calls.filter(([name]) => name === "contenteditable").length,
+      ).toBeGreaterThan(0);
+      expect(root().querySelector<HTMLInputElement>("input")?.value).toBe("bare");
+    } finally {
+      reads.mockRestore();
+    }
+  });
+
+  it("retains its pressed default across reconnect until the item stands down", async () => {
+    await start(
+      group(`<button type="button" data-value="bare"
+      data-stimeo--toggle-group-target="item">Bare</button>`),
+    );
+    const candidate = items()[0];
+    if (!(candidate instanceof HTMLButtonElement)) throw new Error("Expected button item");
+    controller().toggle(candidate);
+    controller().disconnect();
+    controller().connect();
+    candidate.type = "submit";
+    await tick();
+    expect(candidate.hasAttribute("aria-pressed")).toBe(false);
+  });
 
   it("uses the first nonzero pressed item as the initial Tab stop", async () => {
     await start(group(`${item("bold", "false")}${item("italic", "true")}${item("underline")}`));
     expect(tabindexes()).toEqual([-1, 0, -1]);
+  });
+
+  it("preserves an authored pressed value written while disconnected", async () => {
+    await start(
+      group(`<button type="button" data-value="bare"
+      data-stimeo--toggle-group-target="item">Bare</button>`),
+    );
+    const candidate = items()[0];
+    if (!(candidate instanceof HTMLButtonElement)) throw new Error("Expected button item");
+    controller().disconnect();
+    candidate.setAttribute("aria-pressed", "true");
+    controller().connect();
+    candidate.type = "submit";
+    await tick();
+    expect(candidate.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("releases a pressed default when the author repeats the user's value", async () => {
+    await start(
+      group(`<button type="button" data-value="bare"
+      data-stimeo--toggle-group-target="item">Bare</button>`),
+    );
+    const candidate = items()[0];
+    if (!(candidate instanceof HTMLButtonElement)) throw new Error("Expected button item");
+    controller().toggle(candidate);
+    candidate.setAttribute("aria-pressed", "true");
+    await tick();
+    candidate.type = "submit";
+    await tick();
+    expect(candidate.getAttribute("aria-pressed")).toBe("true");
   });
 
   it("falls back to the first item when none is pressed", async () => {
@@ -101,7 +245,7 @@ describe("ToggleGroupController", () => {
 
   it("preserves the sole runtime Tab stop across a reconnect", async () => {
     await start();
-    key(items()[0] as HTMLElement, "End");
+    pressKey(items()[0] as HTMLElement, "End");
     expect(tabindexes()).toEqual([-1, -1, 0]);
 
     const retained = root();
@@ -158,57 +302,106 @@ describe("ToggleGroupController", () => {
     const candidates = items();
     candidates[0]?.focus();
 
-    key(candidates[0] as HTMLElement, "ArrowDown");
+    pressKey(candidates[0] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(candidates[1]);
-    key(candidates[1] as HTMLElement, "ArrowUp");
+    pressKey(candidates[1] as HTMLElement, "ArrowUp");
     expect(document.activeElement).toBe(candidates[0]);
-    key(candidates[0] as HTMLElement, "ArrowRight");
+    pressKey(candidates[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(candidates[1]);
-    key(candidates[1] as HTMLElement, "ArrowLeft");
+    pressKey(candidates[1] as HTMLElement, "ArrowLeft");
     expect(document.activeElement).toBe(candidates[0]);
     expect(pressed()).toEqual(["true", "false", "false"]);
   });
 
   it("wraps arrow navigation at both ends", async () => {
     await start();
-    key(items()[0] as HTMLElement, "ArrowLeft");
+    pressKey(items()[0] as HTMLElement, "ArrowLeft");
     expect(document.activeElement).toBe(items()[2]);
-    key(items()[2] as HTMLElement, "ArrowRight");
+    pressKey(items()[2] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(items()[0]);
   });
 
   it("reverses horizontal arrows under RTL without reversing vertical arrows", async () => {
     await start();
     root().style.direction = "rtl";
-    key(items()[0] as HTMLElement, "ArrowLeft");
+    pressKey(items()[0] as HTMLElement, "ArrowLeft");
     expect(document.activeElement).toBe(items()[1]);
-    key(items()[1] as HTMLElement, "ArrowRight");
+    pressKey(items()[1] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(items()[0]);
-    key(items()[0] as HTMLElement, "ArrowDown");
+    pressKey(items()[0] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(items()[1]);
   });
 
   it("jumps to the first and last navigable items with unmodified Home and End", async () => {
     await start();
-    key(items()[0] as HTMLElement, "End");
+    pressKey(items()[0] as HTMLElement, "End");
     expect(document.activeElement).toBe(items()[2]);
-    key(items()[2] as HTMLElement, "Home");
+    pressKey(items()[2] as HTMLElement, "Home");
     expect(document.activeElement).toBe(items()[0]);
   });
 
   it("consumes the navigation keys it handles", async () => {
     await start();
     const keys = ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End"];
-    const prevented = keys.map((name) => key(items()[1] as HTMLElement, name).defaultPrevented);
+    const prevented = keys.map(
+      (name) => pressKey(items()[1] as HTMLElement, name).defaultPrevented,
+    );
     expect(prevented).toEqual([true, true, true, true, true, true]);
+  });
+
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("preserves a modified non-arrow key (%s, %s)", async (key, _modifier, init) => {
+    await start(
+      group(`${item("bold", "true", 0)}${item("italic")}${item("underline")}
+        <div data-stimeo--toggle-group-target="fields"></div>`),
+    );
+    const current = items()[1];
+    if (!current) throw new Error("Expected middle item");
+    current.focus();
+    const element = root();
+    const field = element.querySelector<HTMLInputElement>("input[name='values[]']");
+    if (!field) throw new Error("Expected pressed-value form field");
+    const events: Event[] = [];
+    for (const name of [
+      "stimeo--toggle-group:change",
+      "stimeo--toggle-group:reconcile",
+      "input",
+      "change",
+    ]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = pressKey(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(field.value).toBe("bold");
+    expect(pressed()).toEqual(["true", "false", "false"]);
+    expect(tabindexes()).toEqual([-1, 0, -1]);
+    expect(pressKey(current, key).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(items()[key === "Home" ? 0 : 2]);
+    expect(pressed()).toEqual(["true", "false", "false"]);
+    expect(field.value).toBe("bold");
   });
 
   it("leaves modified arrows and Home/End chords to the browser", async () => {
     await start();
     items()[0]?.focus();
-    const arrow = key(items()[0] as HTMLElement, "ArrowRight", { altKey: true });
-    const home = key(items()[0] as HTMLElement, "Home", { ctrlKey: true });
-    const end = key(items()[0] as HTMLElement, "End", { metaKey: true });
+    const arrow = pressKey(items()[0] as HTMLElement, "ArrowRight", { altKey: true });
+    const home = pressKey(items()[0] as HTMLElement, "Home", { ctrlKey: true });
+    const end = pressKey(items()[0] as HTMLElement, "End", { metaKey: true });
     expect([arrow.defaultPrevented, home.defaultPrevented, end.defaultPrevented]).toEqual([
       false,
       false,
@@ -221,13 +414,15 @@ describe("ToggleGroupController", () => {
   it("yields a key already consumed by a descendant widget", async () => {
     await start();
     items()[0]?.focus();
+    /** A generic descendant claims the key without native-control semantics. */
     const inner = document.createElement("span");
+    inner.tabIndex = -1;
     items()[0]?.append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
 
-    const claimed = key(inner, "ArrowRight");
+    const claimed = pressKey(inner, "ArrowRight");
     expect(claimed.defaultPrevented).toBe(true);
-    expect(document.activeElement).toBe(items()[0]);
+    expect(document.activeElement).toBe(inner);
   });
 
   it("yields navigation and activation to a key the platform marks as composing", async () => {
@@ -236,12 +431,12 @@ describe("ToggleGroupController", () => {
         data-stimeo--toggle-group-target="item">Grid</div>${item("list")}`),
     );
     const candidates = items();
-    key(candidates[0] as HTMLElement, "ArrowRight", { isComposing: true });
-    key(candidates[0] as HTMLElement, "Enter", { isComposing: true });
+    pressKey(candidates[0] as HTMLElement, "ArrowRight", { isComposing: true });
+    pressKey(candidates[0] as HTMLElement, "Enter", { isComposing: true });
     expect(document.activeElement).not.toBe(candidates[1]);
     expect(pressed()).toEqual(["false", "false"]);
 
-    key(candidates[0] as HTMLElement, "Enter");
+    pressKey(candidates[0] as HTMLElement, "Enter");
     expect(pressed()).toEqual(["true", "false"]);
   });
 
@@ -251,10 +446,10 @@ describe("ToggleGroupController", () => {
     for (const activationKey of [" ", "Enter"]) {
       first.setAttribute("aria-pressed", "false");
       await tick();
-      const initial = key(first, activationKey);
+      const initial = pressKey(first, activationKey);
       expect(initial.defaultPrevented).toBe(false);
       expect(first.getAttribute("aria-pressed")).toBe("false");
-      const repeated = key(first, activationKey, { repeat: true });
+      const repeated = pressKey(first, activationKey, { repeat: true });
       expect(repeated.defaultPrevented).toBe(true);
       expect(first.getAttribute("aria-pressed")).toBe("false");
     }
@@ -270,7 +465,8 @@ describe("ToggleGroupController", () => {
     await start();
     // `tabindex` writes are not observed, so they schedule no pass that would repair the stop.
     for (const candidate of items()) candidate.tabIndex = -1;
-    const tab = key(items()[1] as HTMLElement, "Tab");
+    /** The unfocused key measures Tab-stop repair without first delivering focusin. */
+    const tab = typeKey(items()[1] as HTMLElement, "Tab");
     expect(tab.defaultPrevented).toBe(false);
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
@@ -307,7 +503,7 @@ describe("ToggleGroupController", () => {
         data-action="keydown->stimeo--toggle-group#onKeydown
                      keydown->stimeo--toggle-group#onKeydown">Grid</div>`),
     );
-    key(items()[0] as HTMLElement, " ");
+    pressKey(items()[0] as HTMLElement, " ");
     expect(pressed()).toEqual(["true"]);
   });
 
@@ -317,7 +513,7 @@ describe("ToggleGroupController", () => {
       .querySelector("span")
       ?.addEventListener("keydown", (event) => event.stopPropagation());
 
-    const navigation = key(items()[1] as HTMLElement, "ArrowLeft");
+    const navigation = pressKey(items()[1] as HTMLElement, "ArrowLeft");
     expect(navigation.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(items()[0]);
   });
@@ -329,14 +525,15 @@ describe("ToggleGroupController", () => {
     );
     const decoration = root().querySelector("span") as HTMLElement;
     decoration.click();
-    const navigation = key(decoration, "ArrowRight");
+    /** An inert action origin must remain outside the widget's focus model. */
+    const navigation = typeKey(decoration, "ArrowRight");
     expect(pressed()).toEqual(["true"]);
     expect(tabindexes()).toEqual([0]);
     expect(navigation.defaultPrevented).toBe(false);
     expect(document.activeElement).not.toBe(items()[0]);
   });
 
-  it("isolates public actions and delegated events from a nested Toggle Group", async () => {
+  it("isolates actions and delegated events from a nested stimeo--toggle-group", async () => {
     await start(
       group(`<div role="button" aria-pressed="false" tabindex="0" data-value="outer"
           data-stimeo--toggle-group-target="item" ${action}>
@@ -351,7 +548,7 @@ describe("ToggleGroupController", () => {
     expect(pressed(outerRoot)).toEqual(["false"]);
     expect(pressed(innerRoot)).toEqual(["true"]);
 
-    key(inner, "Enter");
+    pressKey(inner, "Enter");
     expect(pressed(outerRoot)).toEqual(["false"]);
     expect(pressed(innerRoot)).toEqual(["false"]);
   });
@@ -428,7 +625,7 @@ describe("ToggleGroupController", () => {
 
     items()[3]?.click();
     expect(pressed()).toEqual(["true", "false", "false", "true"]);
-    key(items()[3] as HTMLElement, "ArrowRight");
+    pressKey(items()[3] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(items()[0]);
   });
 
@@ -456,7 +653,7 @@ describe("ToggleGroupController", () => {
     );
     const inserted = root().querySelector("#immediate-navigation") as HTMLButtonElement;
     inserted.focus();
-    key(inserted, "ArrowLeft");
+    pressKey(inserted, "ArrowLeft");
     expect(document.activeElement).toBe(items()[2]);
   });
 
@@ -501,7 +698,7 @@ describe("ToggleGroupController", () => {
 
   it("keeps the current runtime Tab stop when another item is added", async () => {
     await start();
-    key(items()[0] as HTMLElement, "End");
+    pressKey(items()[0] as HTMLElement, "End");
     root().insertAdjacentHTML(
       "beforeend",
       `<button type="button" data-value="strike"
@@ -513,7 +710,7 @@ describe("ToggleGroupController", () => {
 
   it("recovers the Tab stop when the active item is removed or replaced", async () => {
     await start();
-    key(items()[0] as HTMLElement, "ArrowRight");
+    pressKey(items()[0] as HTMLElement, "ArrowRight");
     const removed = items()[1] as HTMLElement;
     removed.remove();
     await tick();
@@ -546,7 +743,7 @@ describe("ToggleGroupController", () => {
     await tick();
     candidates[1]?.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
     expect(tabindexes()).toEqual([0, -1, -1]);
-    key(candidates[0] as HTMLElement, "ArrowRight");
+    pressKey(candidates[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(candidates[2]);
 
     candidates[2]?.parentElement?.setAttribute("hidden", "");
@@ -554,7 +751,7 @@ describe("ToggleGroupController", () => {
     expect(tabindexes()).toEqual([0, -1, -1]);
     (candidates[1] as HTMLButtonElement).disabled = false;
     await tick();
-    key(candidates[0] as HTMLElement, "ArrowRight");
+    pressKey(candidates[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(candidates[1]);
   });
 
@@ -618,16 +815,16 @@ describe("ToggleGroupController", () => {
     second.addEventListener("click", consumer);
     root().addEventListener("stimeo--toggle-group:change", changes);
 
-    key(items()[0] as HTMLElement, "ArrowRight");
+    pressKey(items()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(second);
     second.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    const activation = key(second, " ");
+    const activation = pressKey(second, " ");
     expect(activation.defaultPrevented).toBe(true);
     expect(pressed()).toEqual(["true", "false", "false"]);
     expect(consumer).not.toHaveBeenCalled();
     expect(changes).not.toHaveBeenCalled();
 
-    key(second, "ArrowRight");
+    pressKey(second, "ArrowRight");
     expect(document.activeElement).toBe(items()[2]);
   });
 
@@ -645,9 +842,9 @@ describe("ToggleGroupController", () => {
 
     const click = new MouseEvent("click", { bubbles: true, cancelable: true });
     second.dispatchEvent(click);
-    const space = key(second, " ");
-    const enter = key(second, "Enter");
-    key(second, "ArrowLeft");
+    const space = pressKey(second, " ");
+    const enter = pressKey(second, "Enter");
+    pressKey(second, "ArrowLeft");
 
     expect([click.defaultPrevented, space.defaultPrevented, enter.defaultPrevented]).toEqual([
       true,
@@ -668,7 +865,7 @@ describe("ToggleGroupController", () => {
     const outside = vi.fn();
     document.addEventListener("keydown", outside);
 
-    const enter = key(grid, "Enter");
+    const enter = pressKey(grid, "Enter");
     document.removeEventListener("keydown", outside);
 
     expect(enter.defaultPrevented).toBe(true);
@@ -681,7 +878,7 @@ describe("ToggleGroupController", () => {
     root().setAttribute("aria-disabled", "true");
     items()[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     expect(pressed()).toEqual(["true", "false", "false"]);
-    key(items()[0] as HTMLElement, "ArrowRight");
+    pressKey(items()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(items()[1]);
   });
 
@@ -693,11 +890,11 @@ describe("ToggleGroupController", () => {
           data-stimeo--toggle-group-target="item">List</div>`),
     );
     const first = items()[0] as HTMLElement;
-    expect(key(first, " ").defaultPrevented).toBe(true);
+    expect(pressKey(first, " ").defaultPrevented).toBe(true);
     expect(pressed()).toEqual(["true", "false"]);
-    key(first, " ", { repeat: true });
+    pressKey(first, " ", { repeat: true });
     expect(pressed()).toEqual(["true", "false"]);
-    key(first, "Enter");
+    pressKey(first, "Enter");
     expect(pressed()).toEqual(["false", "false"]);
   });
 
@@ -714,7 +911,7 @@ describe("ToggleGroupController", () => {
 
     const linkClick = new MouseEvent("click", { bubbles: true, cancelable: true });
     link?.dispatchEvent(linkClick);
-    const linkEnter = key(link as HTMLElement, "Enter");
+    const linkEnter = pressKey(link as HTMLElement, "Enter");
     submit?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     expect(linkClick.defaultPrevented).toBe(false);
     expect(linkEnter.defaultPrevented).toBe(false);
@@ -891,7 +1088,7 @@ describe("ToggleGroupController", () => {
     expect([candidate.tabIndex, candidate.getAttribute("aria-pressed")]).toEqual([0, "false"]);
   });
 
-  it("isolates sibling and nested Toggle Group instances", async () => {
+  it("isolates sibling and nested stimeo--toggle-group instances", async () => {
     await start(`${group(item("outer", "false", 0))}${group(item("sibling", "false", 0))}`);
     items(root(1))[0]?.click();
     expect(pressed(root(0))).toEqual(["false"]);
@@ -914,7 +1111,7 @@ describe("ToggleGroupController", () => {
     document.body.innerHTML = group(item("only", "false", null));
     await tick();
     expect(tabindexes()).toEqual([0]);
-    key(items()[0] as HTMLElement, "ArrowRight");
+    pressKey(items()[0] as HTMLElement, "ArrowRight");
     expect(document.activeElement).toBe(items()[0]);
     items()[0]?.click();
     expect(pressed()).toEqual(["true"]);
@@ -947,8 +1144,8 @@ describe("ToggleGroupController", () => {
 
     const click = new MouseEvent("click", { bubbles: true, cancelable: true });
     list.dispatchEvent(click);
-    const enter = key(list, "Enter");
-    const arrow = key(grid, "ArrowRight");
+    const enter = pressKey(list, "Enter");
+    const arrow = pressKey(grid, "ArrowRight");
     list.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
 
     expect([click.defaultPrevented, enter.defaultPrevented, arrow.defaultPrevented]).toEqual([
@@ -1802,7 +1999,7 @@ describe("ToggleGroupController target API", () => {
     document.body.innerHTML = "";
   });
 
-  it("retains the existing DOM Event success as a positive control", () => {
+  it("toggles an item from a DOM click as the positive control", () => {
     const reports: Array<{ reason?: string }> = [];
     element("api-root").addEventListener("stimeo--toggle-group:change", (event) => {
       reports.push((event as CustomEvent<{ reason?: string }>).detail);
@@ -1813,7 +2010,7 @@ describe("ToggleGroupController target API", () => {
   });
 
   it.each([false, true])(
-    "accepts an owned target or its descendant (%s) after an Event positive control",
+    "accepts an owned target or its descendant (%s) through the element API",
     (descendant) => {
       const reports: Array<{ reason?: string }> = [];
       element("api-root").addEventListener("stimeo--toggle-group:change", (event) => {

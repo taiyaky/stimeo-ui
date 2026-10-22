@@ -7,8 +7,8 @@ import type { KeyboardRules } from "./types";
  * contract, and it holds at runtime. What markup CAN break is **focus
  * reachability**: div-based operation points that keyboard users can only reach
  * when the author makes them focusable. These rules list exactly the targets
- * whose documented contract authors `tabindex` because the controller never
- * writes it:
+ * whose markup contract in the controller's class TSDoc authors `tabindex`
+ * because the controller never writes it:
  *
  * - It moves focus (`element.focus()`, which silently no-ops on a
  *   non-focusable element) or relies on the element being in the Tab order,
@@ -16,13 +16,12 @@ import type { KeyboardRules } from "./types";
  * - it does **not** initialize a roving tabindex on connect.
  *
  * Deliberately absent: every roving composite that assigns `tabindex` on
- * connect (tabs, toolbar, radio group, tree view, menubar, data grid,
- * calendar, date range picker, carousel), `stimeo--switch` (it defaults its
- * own `tabindex`), activedescendant patterns whose options are never focused
- * (combobox / listbox / command palette options), and targets whose contract
- * is a natively focusable element with no authored `tabindex` (dialog
- * triggers, combobox inputs) — a native element passes trivially, so a rule
- * would carry no signal.
+ * connect (`stimeo--tabs`, `stimeo--toolbar`, `stimeo--radio-group`, …),
+ * `stimeo--switch` (it defaults its own `tabindex`), activedescendant patterns
+ * whose options are never focused (combobox / listbox / command palette
+ * options), and targets whose contract is a natively focusable element with no
+ * authored `tabindex` (dialog triggers, combobox inputs) — a native element
+ * passes trivially, so a rule would carry no signal.
  *
  * Each entry declares {@link KeyboardRequirement.reach}: `"tab"` for steady
  * Tab stops (the controller never touches their `tabindex`, so the authored

@@ -27,7 +27,7 @@ describe("announce", () => {
   });
 
   it("says nothing when the consumer supplied no wording", () => {
-    // The library ships no English strings, so an unset template is opt-out.
+    // The helper adds no wording of its own, so an empty or blank message announces nothing.
     announce("");
     announce("   ");
     expect(seen).toEqual([]);
@@ -44,5 +44,37 @@ describe("fillTemplate", () => {
   it("leaves an unknown placeholder as authored", () => {
     // A typo stays visible rather than turning into a hole in the sentence.
     expect(fillTemplate("{percent}% — {typo}", { percent: 40 })).toBe("40% — {typo}");
+  });
+
+  it("leaves inherited property names as authored", () => {
+    expect(fillTemplate("{constructor} / {toString} / {valueOf}", {})).toBe(
+      "{constructor} / {toString} / {valueOf}",
+    );
+    const values: Record<string, string | number> = Object.setPrototypeOf(
+      { count: 0 },
+      { name: "Inherited" },
+    );
+    expect(fillTemplate("{name} / {count}", values)).toBe("{name} / 0");
+  });
+
+  it("accepts explicitly provided property names and prototype-free dictionaries", () => {
+    expect(fillTemplate("{constructor} / {toString}", { constructor: 0, toString: "" })).toBe(
+      "0 / ",
+    );
+    const values: Record<string, string | number> = Object.setPrototypeOf({ count: 3 }, null);
+    expect(fillTemplate("{count} / {missing}", values)).toBe("3 / {missing}");
+  });
+
+  it("fills every occurrence without reinterpreting inserted names", () => {
+    const name = "$& $` $' $$ {count}";
+    expect(fillTemplate("{name} / {count} / {name}", { name, count: 2 })).toBe(
+      `${name} / 2 / ${name}`,
+    );
+  });
+
+  it("keeps names outside the placeholder grammar as authored", () => {
+    expect(fillTemplate("{_name} / {first_name} / {1name} / {name2}", { name2: "Bob" })).toBe(
+      "{_name} / {first_name} / {1name} / Bob",
+    );
   });
 });

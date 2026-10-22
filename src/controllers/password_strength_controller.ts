@@ -61,7 +61,7 @@ const MIN_LEVELS = 2;
 /**
  * Headless password-strength behavior: scores the field with a lightweight
  * zero-dependency heuristic and drives a meter plus a visible level readout. No
- * dedicated APG pattern; the meter display follows {@link MeterController}.
+ * dedicated APG pattern; the meter display follows `stimeo--meter`.
  *
  * Markup contract (identifier: `stimeo--password-strength`):
  *   <div data-controller="stimeo--password-strength"

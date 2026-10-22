@@ -19,9 +19,8 @@ import { NumberValueReader } from "../utils/number_value";
  * There is no dedicated APG widget; the current step is expressed with
  * `aria-current="step"` on the operable `<button>`. Each step `<li>` also gets a
  * `data-state` (`complete`/`current`/`upcoming`) derived from the current index.
- * For a read-only progress display use
- * {@link StepIndicatorController | Step Indicator}; for panel switching use
- * {@link TabsController | Tabs}.
+ * For a read-only progress display use `stimeo--step-indicator`; for panel
+ * switching use `stimeo--tabs`.
  *
  * `change` dispatches `{ index: number, previous: number, total: number, step: HTMLElement }`,
  * and `reconcile` dispatches the same

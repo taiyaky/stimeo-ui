@@ -55,11 +55,12 @@ const DEFAULT_ACTIVITY_EVENTS = [
  * with the declaration in force.
  *
  * @remarks
- * Behavior only — it renders no warning UI (pair with Dialog/Confirm) and never
- * touches the server session. Timers are owned by `SafeTimeout` and the
- * listeners are removed on `disconnect()` (Turbo navigation included). Place one on
- * the root element. Every visit reconnects the controller and re-arms the timeout
- * from that moment — `data-turbo-permanent` keeps the element, not the elapsed count.
+ * Behavior only — it renders no warning UI (pair with `stimeo--dialog` or
+ * `stimeo--confirm`) and never touches the server session. Timers are owned by
+ * `SafeTimeout` and the listeners are removed on `disconnect()` (Turbo navigation
+ * included). Place one on the root element. Every visit reconnects the controller and
+ * re-arms the timeout from that moment — `data-turbo-permanent` keeps the element, not
+ * the elapsed count.
  */
 export class IdleController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
@@ -110,7 +111,10 @@ export class IdleController extends Controller<HTMLElement> {
   readonly #activityListeners = new ListenerSet();
   /** The `visibilitychange` listener, held for the whole connection. */
   readonly #visibilityListeners = new ListenerSet();
-  /** Activity types the listeners were last registered for, which a new `events` is compared with. */
+  /**
+   * Activity types the listeners were last registered for, which a new `events` is
+   * compared with.
+   */
   #boundEvents: string[] = [];
 
   readonly #onActivity = (): void => {

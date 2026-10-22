@@ -78,7 +78,7 @@ describe("ProgressController", () => {
   });
 
   // Action params arrive as strings (`data-...-amount-param`); cover the string
-  // form so a regression in the coercion path is caught.
+  // form so a fault in the coercion path is caught.
   it("accepts a string action-param amount", async () => {
     await start();
     instance().setValue({ params: { amount: "60" } } as unknown as Event);
@@ -99,7 +99,7 @@ describe("ProgressController", () => {
       send(invalid);
       expect(root().getAttribute("aria-valuenow")).toBe("25");
     }
-    // A JSON null is nullish and keeps the existing detail fallback.
+    // A JSON null counts as no param, so the event detail supplies the value.
     send("null");
     expect(root().getAttribute("aria-valuenow")).toBe("80");
     root().removeAttribute(attr);
@@ -195,7 +195,7 @@ describe("ProgressController", () => {
     // `aria-valuetext` outranks `aria-valuenow` for assistive tech, so a left-over
     // one would announce the stale value that dropping `aria-valuenow` avoids.
     expect(root().hasAttribute("aria-valuetext")).toBe(false);
-    expect(root().hasAttribute("data-stimeo--progress-owns-valuetext")).toBe(false);
+    expect(root().hasAttribute("data-stimeo--progress-aria-valuetext-lease")).toBe(false);
     expect(root().getAttribute("data-state")).toBe("indeterminate");
 
     root().setAttribute("data-stimeo--progress-indeterminate-value", "false");
@@ -228,7 +228,7 @@ describe("ProgressController", () => {
       'data-stimeo--progress-value-value="40" data-stimeo--progress-value-text-value="{value} of 100 MB, {percent}% uploaded"',
     );
     expect(root().getAttribute("aria-valuetext")).toBe("40 of 100 MB, 40% uploaded");
-    expect(root().hasAttribute("data-stimeo--progress-owns-valuetext")).toBe(true);
+    expect(root().hasAttribute("data-stimeo--progress-aria-valuetext-lease")).toBe(true);
   });
 
   // `aria-valuetext` is shared: the consumer may author it instead of giving a
@@ -237,7 +237,7 @@ describe("ProgressController", () => {
   it("keeps a consumer-authored aria-valuetext through an indeterminate toggle", async () => {
     await start('data-stimeo--progress-value-value="40" aria-valuetext="Uploading photos"');
     expect(root().getAttribute("aria-valuetext")).toBe("Uploading photos");
-    expect(root().hasAttribute("data-stimeo--progress-owns-valuetext")).toBe(false);
+    expect(root().hasAttribute("data-stimeo--progress-aria-valuetext-lease")).toBe(false);
 
     root().setAttribute("data-stimeo--progress-indeterminate-value", "true");
     await tick();
@@ -254,7 +254,7 @@ describe("ProgressController", () => {
     root().removeAttribute("data-stimeo--progress-value-text-value");
     instance().setValue({ params: { amount: 60 } } as unknown as Event);
     expect(root().hasAttribute("aria-valuetext")).toBe(false);
-    expect(root().hasAttribute("data-stimeo--progress-owns-valuetext")).toBe(false);
+    expect(root().hasAttribute("data-stimeo--progress-aria-valuetext-lease")).toBe(false);
   });
 
   it("ignores missing and non-numeric updates", async () => {
@@ -330,7 +330,7 @@ describe("ProgressController", () => {
   });
 
   it("stays silent when no announcement wording is set", async () => {
-    // The library ships no English strings, so announcing is opt-in.
+    // `announceText` defaults to empty: with no wording from the consumer, nothing is announced.
     const seen: string[] = [];
     const spy = (event: Event) => {
       seen.push((event as CustomEvent<{ message: string }>).detail.message);

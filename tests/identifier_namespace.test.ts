@@ -4,6 +4,7 @@ import { CurrencyInputController } from "../src/controllers/currency_input_contr
 import { NestedFormController } from "../src/controllers/nested_form_controller";
 import { PaginationController } from "../src/controllers/pagination_controller";
 import { TagsInputController } from "../src/controllers/tags_input_controller";
+import { press as pressKey } from "./helpers/keyboard";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -56,7 +57,7 @@ describe("attributes follow the registered identifier", () => {
       `[data-${ALIAS}-target='input']`,
     ) as HTMLInputElement;
     input.value = "Rails";
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    pressKey(input, "Enter");
     await tick();
 
     const row = document.querySelector<HTMLElement>(`[data-${ALIAS}-target='tags']`) as HTMLElement;

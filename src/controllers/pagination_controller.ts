@@ -70,8 +70,9 @@ import { targetSelector } from "../utils/target_selector";
  *   Once connected, a batch that moves the current page away from the one shown
  *   dispatches `stimeo--pagination:reconcile` once; the initial render reports
  *   nothing.
- * - A navigation that moves the published page dispatches `stimeo--pagination:change`, whose `detail.total`
- *   is the same clamped total the boundary state is derived from.
+ * - A navigation that moves the published page dispatches
+ *   `stimeo--pagination:change`, whose `detail.total` is the same clamped total
+ *   the boundary state is derived from.
  *
  * The boundary `disabled` is **owned**: the controller marks what it disabled
  * with `data-stimeo--pagination-boundary-disabled` and releases only that. A

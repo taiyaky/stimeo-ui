@@ -105,7 +105,9 @@ describe("morph lifecycle phases", () => {
     await morph(root);
     expect(root.dataset.state).toBe("complete");
     expect(status.textContent).toBe("Done");
-    expect(status.getAttribute("data-stimeo--countdown-owns-status")).toBe("Done");
+    expect(JSON.parse(status.getAttribute("data-stimeo--countdown-owns-status") ?? "null")).toEqual(
+      ["text", expect.any(String), "Done"],
+    );
     await vi.advanceTimersByTimeAsync(2000);
     expect(dispatch).not.toHaveBeenCalled();
     status.textContent = "Server status";
@@ -145,7 +147,9 @@ describe("morph lifecycle phases", () => {
     await morph(root);
     expect(root.dataset.state).toBe("complete");
     expect(status.textContent).toBe("Done");
-    expect(status.getAttribute("data-stimeo--countdown-owns-status")).toBe("Done");
+    expect(JSON.parse(status.getAttribute("data-stimeo--countdown-owns-status") ?? "null")).toEqual(
+      ["text", expect.any(String), "Done"],
+    );
     expect(dispatch).not.toHaveBeenCalled();
   });
 
@@ -163,6 +167,7 @@ describe("morph lifecycle phases", () => {
     const dispatch = vi.spyOn(instance, "dispatch");
     root.removeAttribute("data-state");
     output(root).textContent = "Ready";
+    output(root).removeAttribute("data-stimeo--clipboard-feedback-text");
     await morph(root);
     expect(root.dataset.state).toBe("copied");
     expect(output(root).textContent).toBe("Copied");
@@ -221,6 +226,7 @@ describe("morph lifecycle phases", () => {
     await instance.copy();
     expect(output(root).textContent).toBe("Copied");
     output(root).textContent = "Replacement";
+    output(root).removeAttribute("data-stimeo--clipboard-feedback-text");
     const dispatch = vi.spyOn(instance, "dispatch");
     await morph(root);
     expect(output(root).textContent).toBe("Copied");

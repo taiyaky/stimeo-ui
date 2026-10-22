@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import { AttributeLease } from "../utils/attribute_lease";
 import { CompositionTracker } from "../utils/composition_tracker";
+import { ListenerSet } from "../utils/listener_set";
 
 /**
  * Headless, accessible inline-editing behavior.
@@ -108,8 +109,9 @@ export class EditableController extends Controller<HTMLElement> {
     // Entering edit mode hides the display element, and hiding the element that
     // holds focus reports a departure with nowhere to go. That hand-off is the
     // edit starting, not the user leaving it, and the input is focused moments
-    // later in the same task. The display is hidden for the whole edit, so it
-    // can never be the source of a real departure from one.
+    // later in the same task. The display is hidden for the whole edit, so while
+    // the page keeps `[hidden]` at `display: none` it cannot be the source of a
+    // real departure from one.
     const from = event.target;
     if (this.hasDisplayTarget && from instanceof Node && this.displayTarget.contains(from)) return;
     // Focus reaching another element inside this controller has not left the
@@ -120,13 +122,16 @@ export class EditableController extends Controller<HTMLElement> {
     if (this.submitOnBlurValue) this.#commit(false);
   };
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /** Establishes the initial display mode (display shown, input hidden). */
   override connect(): void {
     this.#connected = true;
     // The tracker is idempotent, so observing here and in the target callback
     // keeps IME tracking correct whichever of the two the framework runs first.
     if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
-    this.element.addEventListener("focusout", this.#onFocusOut);
+    this.#listeners.add(this.element, "focusout", this.#onFocusOut);
     this.#revertValue = null;
     this.#setMode("display");
   }
@@ -135,7 +140,7 @@ export class EditableController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#connected = false;
     this.#composition.disconnect();
-    this.element.removeEventListener("focusout", this.#onFocusOut);
+    this.#listeners.dispose();
   }
 
   /** Tracks an input added initially or after connect (e.g. a Turbo swap). */

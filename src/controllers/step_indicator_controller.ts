@@ -18,7 +18,7 @@ import { NumberValueReader } from "../utils/number_value";
  * There is no dedicated APG widget; the current position is expressed with
  * `aria-current="step"`. This indicator is **read only** — it never moves focus
  * and the steps are not operable. For an interactive wizard whose steps are
- * `<button>`s, use {@link StepperController | Stepper}.
+ * `<button>`s, use `stimeo--stepper`.
  *
  * `change` dispatches `{ index: number, previous: number, total: number }`.
  *
@@ -32,9 +32,9 @@ import { NumberValueReader } from "../utils/number_value";
  * - Reflects `index` onto each step's `data-state` and `aria-current`.
  * - Re-derives every step when the step set changes at runtime.
  * - `setIndex` (bound to an event whose `detail.index` is the 0-based position)
- *   moves the indicator and dispatches `stimeo--step-indicator:change`. A
- *   {@link StepperController | Stepper} dispatches exactly that shape, so the two
- *   compose with one `data-action` and no glue.
+ *   moves the indicator and dispatches `stimeo--step-indicator:change`.
+ *   `stimeo--stepper:change` carries the 0-based position as `detail.index`, so
+ *   the two compose with one `data-action` and no glue.
  */
 export class StepIndicatorController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */

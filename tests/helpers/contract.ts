@@ -18,8 +18,6 @@ import { matchesNumberBounds, type NumberBounds } from "../../src/utils/number_b
  *    *can* be reflected. TypeScript `private` would leave internal helpers on
  *    the prototype, indistinguishable from public actions, and make the reverse
  *    direction unsound.
- *
- * Call this from the suite that owns a manifest-reflected controller registry.
  */
 
 /** Lifecycle methods Stimulus calls; never user actions. */

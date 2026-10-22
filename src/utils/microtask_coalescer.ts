@@ -70,6 +70,11 @@ export class MicrotaskCoalescer {
     this.#generation += 1;
   }
 
+  /** Whether a requested pass has yet to run. */
+  get pending(): boolean {
+    return this.#queued;
+  }
+
   /** Requests one pass after the batch settles. Idempotent; inert outside the window. */
   schedule(): void {
     if (!this.#active || this.#queued) return;

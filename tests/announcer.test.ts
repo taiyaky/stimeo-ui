@@ -6,6 +6,7 @@ import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, installRecyclingTimers, tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /**
  * Behavioral tests for {@link AnnouncerController}: routing to the polite vs
@@ -142,13 +143,16 @@ describe("AnnouncerController", () => {
     announce({ message: "Saved" });
     await vi.advanceTimersByTimeAsync(0);
     expect(polite().textContent).toBe("Saved");
+    expect(polite().hasAttribute("data-stimeo--announcer-announced")).toBe(true);
     // Re-announcing the same text first clears the region so the atomic region
     // is observed changing, then re-sets it on the next task.
     announce({ message: "Saved" });
     await vi.advanceTimersByTimeAsync(0);
     expect(polite().textContent).toBe("");
+    expect(polite().hasAttribute("data-stimeo--announcer-announced")).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(polite().textContent).toBe("Saved");
+    expect(polite().hasAttribute("data-stimeo--announcer-announced")).toBe(true);
     vi.useRealTimers();
   });
 
@@ -160,6 +164,17 @@ describe("AnnouncerController", () => {
     await tick();
     // Region keeps the text without the clear-then-reset cycle.
     expect(polite().textContent).toBe("Saved");
+  });
+
+  it("still writes an identical message in place when dedupeReannounce is false", async () => {
+    await start(`data-stimeo--announcer-dedupe-reannounce-value="false"`);
+    announce({ message: "Saved" });
+    await tick();
+    const shown = polite().firstChild;
+    announce({ message: "Saved" });
+    await tick();
+    expect(polite().textContent).toBe("Saved");
+    expect(polite().firstChild).not.toBe(shown);
   });
 
   it("auto-clears the region after clearAfter", async () => {
@@ -187,6 +202,23 @@ describe("AnnouncerController", () => {
     announce({ message: "Persisted" });
     await tick();
     expect(polite().textContent).toBe("Persisted");
+  });
+
+  it.each([false, true])("expires only the plain message it owns (child=%s)", async (child) => {
+    vi.useFakeTimers();
+    mount('data-stimeo--announcer-clear-after-value="1000"');
+    await vi.advanceTimersByTimeAsync(0);
+    announce({ message: "Saved" });
+    await vi.advanceTimersByTimeAsync(0);
+    const region = polite();
+    const authored = document.createElement("span");
+    if (child) {
+      authored.textContent = "Saved";
+      region.replaceChildren(authored);
+    }
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(region.textContent).toBe(child ? "Saved" : "");
+    if (child) expect(region.firstElementChild).toBe(authored);
   });
 
   it("keeps the current announcement when a later event carries no message", async () => {
@@ -285,15 +317,11 @@ describe("AnnouncerController", () => {
   // --- `clearAfter` belongs to one written message ---------------------------------
 
   /**
-   * Rewrites `clearAfter` and delivers its Value callback directly when the controller
-   * defines one, since happy-dom does not reliably run it for an attribute write.
+   * Rewrites the `clearAfter` declaration and waits for Stimulus to deliver it, so the
+   * assertions that follow see whatever the controller does with the change.
    */
-  const declareClearAfter = (value: number) => {
-    root().setAttribute("data-stimeo--announcer-clear-after-value", String(value));
-    const owner = controller();
-    const callback: unknown = Reflect.get(owner, "clearAfterValueChanged");
-    if (typeof callback === "function") callback.call(owner);
-  };
+  const declareClearAfter = (value: number) =>
+    writeValueAttribute(root(), "data-stimeo--announcer-clear-after-value", String(value));
 
   it.each([
     { direction: "shrinks", next: 50 },
@@ -307,7 +335,7 @@ describe("AnnouncerController", () => {
 
       announce({ message: "First" });
       await vi.advanceTimersByTimeAsync(100);
-      declareClearAfter(next);
+      await declareClearAfter(next);
       await vi.advanceTimersByTimeAsync(899); // t=999
       expect(polite().textContent).toBe("First");
       await vi.advanceTimersByTimeAsync(1); // t=1000, the deadline "First" was written with
@@ -329,7 +357,7 @@ describe("AnnouncerController", () => {
 
     announce({ message: "Standing" }); // written with no clear promised
     await vi.advanceTimersByTimeAsync(0);
-    declareClearAfter(20);
+    await declareClearAfter(20);
     await vi.advanceTimersByTimeAsync(1000);
     expect(polite().textContent).toBe("Standing");
     expect(assertive().textContent).toBe("");
@@ -345,7 +373,7 @@ describe("AnnouncerController", () => {
 
     announce({ message: "Saved" }); // clear due at t=1000
     await vi.advanceTimersByTimeAsync(100);
-    declareClearAfter(0);
+    await declareClearAfter(0);
     announce({ message: "Saved" }); // written again, with no clear promised
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(2000);
@@ -651,6 +679,20 @@ describe("AnnouncerController", () => {
     expect(root().querySelector("[aria-live]")).toBeNull();
   });
 
+  it("reads what is announced while an in-page move holds it disconnected", async () => {
+    vi.useFakeTimers();
+    mount(`data-stimeo--announcer-clear-after-value="0"`);
+    await vi.advanceTimersByTimeAsync(0);
+
+    controller().disconnect();
+    announce({ message: "During" });
+    controller().connect();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(polite().textContent).toBe("During");
+    vi.useRealTimers();
+  });
+
   it("keeps what was queued across an in-page move and reads it before what follows", async () => {
     vi.useFakeTimers();
     mount(`data-stimeo--announcer-clear-after-value="0"`);
@@ -796,8 +838,9 @@ describe("AnnouncerController", () => {
       const regions = () => [...document.querySelectorAll<HTMLElement>(`[aria-live="${level}"]`)];
 
       /**
-       * Delivers the target callback directly as well, since happy-dom does not
-       * reliably run it for a nested insertion or removal.
+       * Calls the target callback directly as well, so each case schedules the reconcile
+       * pass itself instead of waiting for Stimulus to report the nested insertion or
+       * removal.
        */
       const deliver = (change: "connected" | "disconnected") => {
         const owner = controller();
@@ -854,6 +897,24 @@ describe("AnnouncerController", () => {
       restored.register("stimeo--announcer", AnnouncerController),
     );
   };
+
+  it.each(["owned", "authored", "child", "missing", "invalid"] as const)(
+    "restores a message clone without erasing %s content",
+    async (scenario) => {
+      await start('data-stimeo--announcer-clear-after-value="0"');
+      announce({ message: "Saved" });
+      await tick();
+      if (scenario === "authored") polite().textContent = "Author revised";
+      if (scenario === "child") polite().innerHTML = "<span>Saved</span>";
+      if (scenario === "missing") polite().removeAttribute("data-stimeo--announcer-announced");
+      if (scenario === "invalid") polite().setAttribute("data-stimeo--announcer-announced", "");
+      await restore();
+      expect(polite().textContent).toBe(
+        scenario === "owned" ? "" : scenario === "authored" ? "Author revised" : "Saved",
+      );
+      if (scenario === "child") expect(polite().firstElementChild?.tagName).toBe("SPAN");
+    },
+  );
 
   it("marks a region while it holds a message it wrote", async () => {
     vi.useFakeTimers();

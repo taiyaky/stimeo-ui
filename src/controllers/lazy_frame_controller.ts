@@ -1,12 +1,14 @@
 import { Controller } from "@hotwired/stimulus";
 import { IntersectionWatcher } from "../utils/intersection_watcher";
+import { ListenerSet } from "../utils/listener_set";
 
 /**
  * Headless **lazy frame**: defers a `<turbo-frame>`'s load until it nears the viewport
  * (or focus reaches it), to keep the initial render light. Turbo's own `loading="lazy"`
  * observes with no margin, so the frame loads only once it is already in view; this
- * drives an explicit `IntersectionObserver` with a configurable `rootMargin`, plus a focus fallback so keyboard /
- * assistive-tech users trigger the load too (no APG pattern).
+ * drives an explicit `IntersectionObserver` with a configurable `rootMargin`, plus a
+ * focus fallback so keyboard / assistive-tech users trigger the load too (no APG
+ * pattern).
  *
  * Markup contract (identifier: `stimeo--lazy-frame`):
  *   <turbo-frame id="comments" data-controller="stimeo--lazy-frame"
@@ -70,9 +72,11 @@ export class LazyFrameController extends Controller<HTMLElement> {
 
   /**
    * Focus reaching the frame starts the FIRST load before it intersects (keyboard / AT).
-   * `#load` releases this listener, so focus never reaches an already-loaded frame.
+   * `#load` releases this listener, so focus on an already-loaded frame starts nothing.
    */
   readonly #onFocus = (): void => this.#load();
+  /** The focus fallback, held from arming until the first load or the watch stops. */
+  readonly #focusListeners = new ListenerSet();
 
   /**
    * Follows the held URL at runtime: one that arrives arms the frame, one that is
@@ -131,7 +135,7 @@ export class LazyFrameController extends Controller<HTMLElement> {
   /** Attaches the triggers that still have a job to do. */
   #arm(): void {
     if (!this.urlValue) return;
-    if (!this.#loaded) this.element.addEventListener("focusin", this.#onFocus);
+    if (!this.#loaded) this.#focusListeners.add(this.element, "focusin", this.#onFocus);
     this.#observe();
   }
 
@@ -176,7 +180,7 @@ export class LazyFrameController extends Controller<HTMLElement> {
     this.element.setAttribute("data-lazy-loaded", "true");
     this.dispatch("load", { detail: { url: this.urlValue } });
     // The focus fallback exists to start the first load; it has nothing left to do.
-    this.element.removeEventListener("focusin", this.#onFocus);
+    this.#focusListeners.dispose();
     if (this.onceValue) this.#watcher.stop();
   }
 
@@ -205,6 +209,6 @@ export class LazyFrameController extends Controller<HTMLElement> {
 
   #stopObserving(): void {
     this.#watcher.stop();
-    this.element.removeEventListener("focusin", this.#onFocus);
+    this.#focusListeners.dispose();
   }
 }

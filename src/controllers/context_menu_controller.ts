@@ -1,8 +1,12 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { isAriaDisabled } from "../utils/aria_disabled";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
+import { ClickVerdicts } from "../utils/click_verdicts";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
+import { ownerOf, ownersOf } from "../utils/event_owner";
+import { ListenerSet } from "../utils/listener_set";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { type StateReason, stateReasonFor } from "../utils/state_reason";
 
@@ -12,7 +16,8 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  * Markup contract (identifier: `stimeo--context-menu`):
  *   <div data-controller="stimeo--context-menu">
  *     <div data-stimeo--context-menu-target="region" tabindex="0"
- *          aria-haspopup="menu" aria-controls="ctx"
+ *          role="group" aria-label="Files"
+ *          aria-keyshortcuts="Shift+F10" aria-controls="ctx"
  *          data-action="contextmenu->stimeo--context-menu#open
  *                       keydown->stimeo--context-menu#onRegionKeydown">…</div>
  *     <ul id="ctx" role="menu" data-stimeo--context-menu-target="menu" hidden>
@@ -38,12 +43,25 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  * required). Viewport-edge flip/shift is delegated to the opt-in
  * `stimeo-ui/positioning` module, which this controller never imports.
  *
+ * The region's role and name are the author's: a `role="group"` with
+ * `aria-label`, or an element that has a role of its own (a table row, a list
+ * item, a button), chosen to match what the region holds. The controller writes
+ * no role. The author also points `aria-controls` at the menu and advertises the
+ * opening key with `aria-keyshortcuts="Shift+F10"`. The region carries no
+ * `aria-haspopup`, whatever its role. On a role that supports it, such as a
+ * button, the attribute conveys what ARIA 1.2's note says its visual
+ * counterparts, such as a downward-pointing triangle, signal: that activating
+ * the control (a click, `Enter`) displays a popup. This menu opens on a
+ * `contextmenu` event or the `Shift+F10` / `ContextMenu` key instead, so the
+ * attribute would point to the wrong gesture. On a role that does not, such as
+ * `generic`, `group`, `row` or `listitem`, it would be a global use of the
+ * attribute, which ARIA 1.2 deprecates.
+ *
  * Open state is exposed on the region as `data-state` (`open`/`closed`) — a CSS
- * hook, not an ARIA one. `aria-expanded` is deliberately *not* set on the region
- * because it is a generic container, not a role that supports that state (doing so
- * is an ARIA violation); the region's static `aria-haspopup="menu"` advertises the
- * popup, and assistive tech perceives the open state when focus moves into the
- * `role="menu"`.
+ * hook, not an ARIA one. `aria-expanded` is deliberately *not* set on the region:
+ * the role is the author's, and ARIA 1.2 lists neither `generic` nor `group`
+ * among the roles that support that state. Assistive tech perceives the open
+ * state when focus moves into the `role="menu"`.
  *
  * Behavior provided:
  * - `contextmenu` on the region suppresses the browser menu and opens this one at
@@ -51,8 +69,17 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  * - On open, focus moves to the first item; the region's `data-state` syncs.
  * - Roving focus inside the menu: `ArrowUp`/`ArrowDown` (wrapping), `Home`/`End`.
  * - Activating an enabled item (click / native `Enter`/`Space` on the button)
- *   closes the menu and restores focus to the region. `aria-disabled` activation
- *   is blocked before consumer click handlers run.
+ *   closes the menu and restores focus to the region. An item that is `hidden`,
+ *   natively `disabled`, or `aria-disabled="true"` itself or through an ancestor
+ *   is not activated on any path, and a click on an `aria-disabled` one is also
+ *   stopped, in a capture listener on the controller element, before the click
+ *   handlers inside that element run. Items can nest, and an event is
+ *   refused when any item holding its target refuses. A click is judged once, in
+ *   that capture pass, so a consumer handler that disables the item while the
+ *   click runs does not take back the activation. The verdict holds only for an
+ *   item that held the click's target when it was taken: an item it was not taken
+ *   for — a handler moved the target into another one — is judged when
+ *   {@link activate} runs, as is any other event.
  * - `Escape` closes and restores focus to the region. While open the menu is a
  *   layer on the shared `EscapeLayer` stack; it claims a press only while
  *   focus is inside the controller or fell to the body, so one keypress closes
@@ -72,10 +99,11 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *   normalization in {@link connect}, a region or a menu that takes over, and
  *   {@link disconnect} are all silent.
  *
- * Roving focus skips `hidden` and natively `disabled` items. An
- * `aria-disabled="true"` item stays reachable by arrow keys — APG marks that
- * attribute precisely for controls that must remain discoverable — while its
- * activation is suppressed, so it announces itself and does nothing.
+ * Roving focus skips `hidden` and natively `disabled` items. An item that
+ * `aria-disabled="true"` reaches, on the item or an ancestor, stays reachable by
+ * arrow keys — APG marks that attribute precisely for controls that must remain
+ * discoverable — while its activation is suppressed, so it announces itself and
+ * does nothing.
  */
 export class ContextMenuController extends Controller<HTMLElement> {
   /** The custom properties that carry the coordinate the menu was opened at, x then y. */
@@ -110,12 +138,18 @@ export class ContextMenuController extends Controller<HTMLElement> {
   /** Whether state moves are reported: set once `connect()` settled the baseline. */
   #reporting = false;
 
+  /** The activation verdict the capture pass took for a click, with the items it judged. */
+  readonly #clickVerdicts = new ClickVerdicts();
+
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /** Starts closed and registers delegated activation and outside-pointer listeners. */
   override connect(): void {
     this.#closeMenu("api");
-    this.element.addEventListener("click", this.#onItemClickCapture, true);
-    document.addEventListener("click", this.#onOutsidePointer, true);
-    document.addEventListener("contextmenu", this.#onOutsidePointer, true);
+    this.#listeners.add(this.element, "click", this.#onItemClickCapture, { capture: true });
+    this.#listeners.add(document, "click", this.#onOutsidePointer, { capture: true });
+    this.#listeners.add(document, "contextmenu", this.#onOutsidePointer, { capture: true });
     this.#connected = true;
     this.#reporting = true;
   }
@@ -126,9 +160,7 @@ export class ContextMenuController extends Controller<HTMLElement> {
     this.#reporting = false;
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
-    this.element.removeEventListener("click", this.#onItemClickCapture, true);
-    document.removeEventListener("click", this.#onOutsidePointer, true);
-    document.removeEventListener("contextmenu", this.#onOutsidePointer, true);
+    this.#listeners.dispose();
   }
 
   /** Brings a region that arrives after connect to the open state. */
@@ -199,6 +231,7 @@ export class ContextMenuController extends Controller<HTMLElement> {
     // nested menu) must not ALSO act on it — composition depends on this yield.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     const items = this.#navigableItems;
     const currentIndex = items.indexOf(event.currentTarget as HTMLButtonElement);
 
@@ -236,9 +269,35 @@ export class ContextMenuController extends Controller<HTMLElement> {
     }
   }
 
-  /** Closes after an item is activated and restores focus to the region. */
-  activate(): void {
+  /**
+   * Closes after an item is activated and restores focus to the region. An event
+   * whose target lies in an item that is `hidden`, natively `disabled`, or
+   * `aria-disabled="true"` itself or through an ancestor does nothing: the menu
+   * stays open, nothing is dispatched and focus stays where it is. Every item
+   * holding the target counts, so an item nested in another one refuses for both,
+   * wherever the action is bound. A click is judged as its capture pass found the
+   * items, before the handlers inside the controller element ran, when the
+   * item this resolves was among them; an item that was not, and any other event, is
+   * judged when this runs.
+   * An event that resolves to no item, and a call with no event, always close.
+   */
+  activate(event?: Event): void {
+    const item = ownerOf(this.itemTargets, event?.target);
+    if (item !== null && this.#refuses(item, event)) return;
     this.#closeAndRestore("select");
+  }
+
+  /**
+   * Whether the activation `event` asks of `item` is refused: the verdict the capture
+   * pass took for the click when `item` was among the items holding its target,
+   * otherwise whether any item holding the event's target refuses activation now.
+   */
+  #refuses(item: HTMLButtonElement, event: Event | undefined): boolean {
+    const recorded = this.#clickVerdicts.for(event, item);
+    if (recorded !== undefined) return recorded;
+    return ownersOf(this.itemTargets, event?.target).some((owner) =>
+      this.#isActivationDisabled(owner),
+    );
   }
 
   /** Opens the menu at viewport coordinates `(x, y)` and focuses the first item. */
@@ -326,16 +385,22 @@ export class ContextMenuController extends Controller<HTMLElement> {
   };
 
   /**
-   * Captures clicks so `aria-disabled` commands cannot reach consumer handlers.
-   * Native Enter/Space activation also synthesizes a click and is blocked here.
+   * Judges each click on an item before the handlers inside the controller
+   * element run: records whether any item holding the target refuses activation, with
+   * all of those items, so {@link activate} acts on this one verdict for any of them,
+   * and stops a click that `aria-disabled` reaches — an item's own state or an
+   * ancestor's — so the command cannot reach those handlers. Every item that holds the
+   * target counts, so an `aria-disabled` item nested in an enabled one stops the click
+   * too. Native Enter/Space activation also synthesizes a click and is blocked here.
    */
   readonly #onItemClickCapture = (event: MouseEvent): void => {
-    const target = event.target;
-    if (!(target instanceof Node)) return;
-    const disabled = this.itemTargets.some(
-      (item) => item.getAttribute("aria-disabled") === "true" && item.contains(target),
+    const items = ownersOf(this.itemTargets, event.target);
+    this.#clickVerdicts.record(
+      event,
+      items,
+      items.some((item) => this.#isActivationDisabled(item)),
     );
-    if (!disabled) return;
+    if (!items.some((item) => isAriaDisabled(item))) return;
     event.preventDefault();
     event.stopImmediatePropagation();
   };
@@ -350,17 +415,25 @@ export class ContextMenuController extends Controller<HTMLElement> {
    * form control. CSS-only visibility is not detectable here and is the
    * consumer's responsibility.
    *
-   * **`aria-disabled="true"` stays reachable.** APG separates the two attributes
-   * by intent: `disabled` is for controls whose existence can be inferred from a
-   * neighbour (a greyed Next next to a Prev), while `aria-disabled` marks a
-   * control that must stay *discoverable* — and it names menu items as the
-   * example. Skipping it would hide the command's existence from a keyboard user
-   * entirely. Activation is suppressed separately, so the item announces itself
-   * and does nothing.
+   * **`aria-disabled="true"` stays reachable**, on the item or an ancestor. APG
+   * separates the two attributes by intent: `disabled` is for controls whose
+   * existence can be inferred from a neighbour (a greyed Next next to a Prev), while
+   * `aria-disabled` marks a control that must stay *discoverable* — and it names
+   * menu items as the example. Skipping it would hide the command's existence from a
+   * keyboard user entirely. Activation is suppressed separately, so the item
+   * announces itself and does nothing.
    */
   #isNavigable(item: HTMLButtonElement): boolean {
     if (item.hasAttribute("hidden")) return false;
     return !item.disabled;
+  }
+
+  /**
+   * Whether an item refuses activation: one roving focus skips (`hidden`, natively
+   * `disabled`), or one that `aria-disabled="true"` reaches.
+   */
+  #isActivationDisabled(item: HTMLButtonElement): boolean {
+    return !this.#isNavigable(item) || isAriaDisabled(item);
   }
 
   /** Whether the menu is currently visible. */

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 
-/** Source suffix shared by every public core controller module. */
+/** Source suffix shared by every core controller module. */
 const CONTROLLER_SUFFIX = "_controller.ts";
 
 /**

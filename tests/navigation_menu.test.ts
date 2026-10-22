@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NavigationMenuController } from "../src/controllers/navigation_menu_controller";
 import { EscapeLayer } from "../src/utils/escape_layer";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { press as keyboardPress, keyEvent, typeKey } from "./helpers/keyboard";
+import { recordListeners } from "./helpers/listeners";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -88,12 +90,12 @@ describe("NavigationMenuController", () => {
   });
 
   it("moves focus between triggers with ArrowRight/ArrowLeft, keeping Tab order", () => {
-    byId("t1").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    keyboardPress(byId("t1"), "ArrowRight");
     expect(document.activeElement).toBe(byId("t2"));
     // tabindex is untouched (no roving) — triggers stay in the natural Tab order.
     expect(byId("t1").hasAttribute("tabindex")).toBe(false);
     expect(byId("t2").hasAttribute("tabindex")).toBe(false);
-    byId("t2").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    keyboardPress(byId("t2"), "ArrowLeft");
     expect(document.activeElement).toBe(byId("t1"));
   });
 
@@ -103,24 +105,21 @@ describe("NavigationMenuController", () => {
     // so a claimed press is yielded whether or not it carries a modifier.
     byId("t1").focus();
     const inner = document.createElement("span");
+    inner.tabIndex = 0;
     byId("t1").append(inner);
     inner.addEventListener("keydown", (event) => event.preventDefault());
 
-    const claimed = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    const notCanceled = inner.dispatchEvent(claimed);
+    const claimed = keyEvent("ArrowRight");
+    const notCanceled = !keyboardPress(inner, claimed).defaultPrevented;
 
     expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
-    expect(document.activeElement).toBe(byId("t1"));
+    expect(document.activeElement).toBe(inner);
   });
 
   it("consumes the arrow press (no sideways page scroll) and wraps at both ends", () => {
     const press = (id: string, key: string, init: KeyboardEventInit = {}): KeyboardEvent => {
-      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
-      byId(id).dispatchEvent(event);
+      const event = keyEvent(key, { ...init });
+      keyboardPress(byId(id), event);
       return event;
     };
 
@@ -136,13 +135,8 @@ describe("NavigationMenuController", () => {
 
   it("leaves a modified arrow to the browser (Alt+Left/Right is history navigation)", () => {
     byId("t1").focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    byId("t1").dispatchEvent(event);
+    const event = keyEvent("ArrowRight", { altKey: true });
+    keyboardPress(byId("t1"), event);
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(byId("t1"));
   });
@@ -150,7 +144,7 @@ describe("NavigationMenuController", () => {
   it("closes on Escape and returns focus to the trigger", () => {
     byId("t1").focus();
     byId("t1").click();
-    byId("t1").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    keyboardPress(byId("t1"), "Escape");
     expect(panelHidden("p1")).toBe(true);
     expect(document.activeElement).toBe(byId("t1"));
   });
@@ -158,12 +152,8 @@ describe("NavigationMenuController", () => {
   it("consumes the Escape it owns", () => {
     byId("t1").focus();
     byId("t1").click();
-    const event = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
-    byId("t1").dispatchEvent(event);
+    const event = keyEvent("Escape");
+    keyboardPress(byId("t1"), event);
     // Owning the press marks it handled so outer layers skip the same Escape.
     expect(event.defaultPrevented).toBe(true);
     expect(panelHidden("p1")).toBe(true);
@@ -172,13 +162,9 @@ describe("NavigationMenuController", () => {
   it("ignores an Escape already handled by an inner layer", () => {
     byId("t1").focus();
     byId("t1").click();
-    const handled = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
+    const handled = keyEvent("Escape");
     handled.preventDefault();
-    byId("t1").dispatchEvent(handled);
+    keyboardPress(byId("t1"), handled);
     expect(panelHidden("p1")).toBe(false);
     expect(document.activeElement).toBe(byId("t1"));
   });
@@ -194,8 +180,9 @@ describe("NavigationMenuController", () => {
     (document.activeElement as HTMLElement | null)?.blur();
     expect(panelHidden("p1")).toBe(false);
 
-    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    document.body.dispatchEvent(event);
+    const event = keyEvent("Escape");
+    // Keep the indeterminate body focus while the document Escape fallback handles the key.
+    typeKey(document, event);
     expect(event.defaultPrevented).toBe(true);
     expect(panelHidden("p1")).toBe(true);
     expect(document.activeElement).toBe(byId("t1"));
@@ -207,18 +194,20 @@ describe("NavigationMenuController", () => {
     expect(panelHidden("p1")).toBe(true);
   });
 
-  it("reverses the horizontal arrows under RTL", async () => {
-    // Logical direction: the triggers are an ordered row, so which one is "next"
-    // follows the writing direction. `dir="rtl"` is the authoring contract, but
-    // happy-dom does not resolve it into the computed style, so the direction is
-    // set on the style directly.
-    //
-    // Three triggers, not the default two: with two, wrapping makes ArrowLeft and
-    // ArrowRight land on the same one and the case cannot tell them apart.
-    disconnectAndStopApplication(application);
-    document.body.innerHTML = `
+  it.each([false, true])(
+    "reverses horizontal arrows using an optional list (%s)",
+    async (withList) => {
+      // Logical direction: the triggers are an ordered row, so which one is "next"
+      // follows the writing direction. `dir="rtl"` is the authoring contract, but
+      // happy-dom does not resolve it into the computed style, so the direction is
+      // set on the style directly.
+      //
+      // Three triggers, not the default two: with two, wrapping makes ArrowLeft and
+      // ArrowRight land on the same one and the case cannot tell them apart.
+      disconnectAndStopApplication(application);
+      document.body.innerHTML = `
       <nav data-controller="stimeo--navigation-menu" aria-label="Main">
-        <ul>
+        <ul ${withList ? 'data-stimeo--navigation-menu-target="list"' : ""}>
           <li><button id="r1" data-stimeo--navigation-menu-target="trigger"
               data-action="keydown->stimeo--navigation-menu#onTriggerKeydown">One</button></li>
           <li><button id="r2" data-stimeo--navigation-menu-target="trigger"
@@ -227,23 +216,38 @@ describe("NavigationMenuController", () => {
               data-action="keydown->stimeo--navigation-menu#onTriggerKeydown">Three</button></li>
         </ul>
       </nav>`;
-    application = Application.start();
-    application.register("stimeo--navigation-menu", NavigationMenuController);
-    await tick();
-    (document.querySelector("nav[data-controller]") as HTMLElement).style.direction = "rtl";
+      application = Application.start();
+      application.register("stimeo--navigation-menu", NavigationMenuController);
+      await tick();
+      const nav = document.querySelector<HTMLElement>("nav[data-controller]") as HTMLElement;
+      const list = nav.querySelector<HTMLElement>("ul") as HTMLElement;
+      const directionElement = withList ? list : nav;
+      directionElement.style.direction = "rtl";
+      byId("r1").style.direction = "ltr";
 
-    const arrow = (id: string, key: string) =>
-      byId(id).dispatchEvent(
-        new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
-      );
+      const arrow = (id: string, key: string) => keyboardPress(byId(id), key);
 
-    byId("r1").focus();
-    arrow("r1", "ArrowLeft"); // "next" under RTL
-    expect(document.activeElement).toBe(byId("r2"));
+      byId("r1").focus();
+      arrow("r1", "ArrowLeft"); // "next" under RTL
+      expect(document.activeElement).toBe(byId("r2"));
 
-    arrow("r2", "ArrowRight"); // "previous" — back to r1, not on to r3
-    expect(document.activeElement).toBe(byId("r1"));
-  });
+      arrow("r2", "ArrowRight"); // "previous" — back to r1, not on to r3
+      expect(document.activeElement).toBe(byId("r1"));
+
+      directionElement.style.direction = "ltr";
+      arrow("r1", "ArrowRight");
+      expect(document.activeElement).toBe(byId("r2"));
+
+      if (withList) {
+        const replacement = list.cloneNode(true) as HTMLElement;
+        replacement.style.direction = "rtl";
+        list.replaceWith(replacement);
+        await tick();
+        arrow("r1", "ArrowLeft");
+        expect(document.activeElement).toBe(byId("r2"));
+      }
+    },
+  );
 
   it("stays open when an inside click removes the clicked node first", () => {
     // The failure mode that decides the listener phase. On bubble, the inner handler
@@ -292,7 +296,7 @@ describe("NavigationMenuController", () => {
     controller?.disconnect();
     document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(panelHidden("p1")).toBe(false); // a surviving listener would have closed it
-    byId("t1").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    keyboardPress(byId("t1"), "Escape");
     expect(panelHidden("p1")).toBe(false);
   });
 
@@ -373,7 +377,7 @@ describe("NavigationMenuController", () => {
 
       byId("t1").click();
       capture.clear();
-      byId("t1").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      keyboardPress(byId("t1"), "Escape");
 
       expect(capture.reasons()).toEqual(["escape"]);
     });
@@ -393,7 +397,7 @@ describe("NavigationMenuController", () => {
       byId("t1").click();
       capture.clear();
 
-      byId("t1").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+      keyboardPress(byId("t1"), "ArrowRight");
 
       // The arrow moves the focus, it does not open or close anything.
       expect(panelHidden("p1")).toBe(false);
@@ -601,7 +605,7 @@ describe("NavigationMenuController with openOnHover", () => {
       });
       try {
         enter("t1");
-        vi.advanceTimersByTime(150);
+        vi.advanceTimersByTime(300);
         // A close/open round-trip on the already-open panel would show up here.
         expect(observer.takeRecords()).toEqual([]);
       } finally {
@@ -654,7 +658,7 @@ describe("NavigationMenuController with openOnHover", () => {
       // The guard that refuses a re-open lives on this path only: the click
       // action never reaches it (it toggles instead).
       enter("t1");
-      vi.advanceTimersByTime(150);
+      vi.advanceTimersByTime(300);
 
       expect(byId("p1").hidden).toBe(false);
       expect(capture.seen).toEqual([]);
@@ -676,7 +680,7 @@ describe("NavigationMenuController with openOnHover", () => {
       enter("t1");
       vi.advanceTimersByTime(150);
       byId("t1").focus();
-      byId("t1").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      keyboardPress(byId("t1"), "Escape");
 
       expect(byId("p1").hidden).toBe(true);
       expect(dismissed).toEqual([]);
@@ -693,7 +697,7 @@ describe("NavigationMenuController with openOnHover", () => {
       vi.advanceTimersByTime(150);
       byId("t1").focus();
       enter("t1");
-      byId("t1").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      keyboardPress(byId("t1"), "Escape");
       expect(byId("p1").hidden).toBe(true);
 
       vi.advanceTimersByTime(300);
@@ -759,16 +763,22 @@ describe("NavigationMenuController with openOnHover", () => {
     }
   });
 
-  it("forgets a trigger that leaves the targets, so a later teardown leaves it alone", () => {
+  it("releases the hover listeners of a trigger that leaves the targets", () => {
     const departed = byId("t1");
-    departed.removeAttribute("data-stimeo--navigation-menu-target");
-    controller().triggerTargetDisconnected();
-    const remove = vi.spyOn(departed, "removeEventListener");
-
     controller().disconnect();
+    const ledger = recordListeners();
+    try {
+      controller().connect();
+      expect(ledger.live(departed).map(({ type }) => type)).toEqual(["mouseenter", "mouseleave"]);
 
-    expect(remove).not.toHaveBeenCalled();
-    remove.mockRestore();
+      departed.removeAttribute("data-stimeo--navigation-menu-target");
+      controller().triggerTargetDisconnected();
+
+      expect(ledger.live(departed)).toEqual([]);
+      expect(ledger.live(byId("t2")).map(({ type }) => type)).toEqual(["mouseenter", "mouseleave"]);
+    } finally {
+      ledger.restore();
+    }
   });
 
   it("hands a trigger's hover edges to a hoverArea that starts wrapping it", () => {
@@ -836,8 +846,8 @@ describe("NavigationMenuController with a trigger or panel arriving alone", () =
       `<button id="t2" data-stimeo--navigation-menu-target="trigger"
                aria-expanded="false" aria-controls="p2">Company</button>`,
     );
-    // happy-dom's MutationObserver delivery is unreliable, so drive the Stimulus
-    // target callback deterministically.
+    // The test stays synchronous, so it calls the Stimulus target callback directly
+    // instead of waiting for the MutationObserver delivery.
     controller().triggerTargetConnected();
 
     vi.useFakeTimers();
@@ -1123,12 +1133,37 @@ describe("NavigationMenuController with openOnHover and hoverArea", () => {
       // Moving off the wrapped trigger (back onto the link in the same <li>)
       // must not schedule a close — the trigger's edges defer to the wrapper.
       byId("t1").dispatchEvent(new MouseEvent("mouseleave"));
-      vi.advanceTimersByTime(150);
+      vi.advanceTimersByTime(300);
       expect(byId("p1").hidden).toBe(false);
     } finally {
       vi.useRealTimers();
     }
   });
+
+  it.each(["disabled", "hidden", "aria-disabled"] as const)(
+    "never opens the %s trigger from the hoverArea that wraps it",
+    (constraint) => {
+      // The wrapper stays hoverable whatever its trigger carries, so the hover
+      // reaches the controller and the refusal has to be the controller's.
+      const trigger = byId("t2");
+      if (constraint === "aria-disabled") trigger.setAttribute("aria-disabled", "true");
+      else trigger.toggleAttribute(constraint, true);
+      vi.useFakeTimers();
+      try {
+        byId("area2").dispatchEvent(new MouseEvent("mouseenter"));
+        vi.advanceTimersByTime(300);
+        expect(byId("p2").hidden).toBe(true);
+        expect(trigger.getAttribute("aria-expanded")).toBe("false");
+
+        // The neighbouring area's enabled trigger opens through the same wiring.
+        byId("area1").dispatchEvent(new MouseEvent("mouseenter"));
+        vi.advanceTimersByTime(300);
+        expect(byId("p1").hidden).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 });
 
 describe("NavigationMenuController hover-region continuity (relatedTarget)", () => {
@@ -1273,8 +1308,8 @@ describe("NavigationMenuController with targets changing after connect", () => {
          </div>
        </li>`,
     );
-    // happy-dom's MutationObserver delivery is unreliable, so drive the Stimulus
-    // target callback deterministically.
+    // The test stays synchronous, so it calls the Stimulus target callback directly
+    // instead of waiting for the MutationObserver delivery.
     controller().hoverAreaTargetConnected();
 
     vi.useFakeTimers();
@@ -1394,8 +1429,8 @@ describe("NavigationMenuController with unavailable triggers", () => {
 
   const byId = (id: string) => document.getElementById(id) as HTMLElement;
   const press = (id: string, key: string): KeyboardEvent => {
-    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-    byId(id).dispatchEvent(event);
+    const event = keyEvent(key);
+    keyboardPress(byId(id), event);
     return event;
   };
 
@@ -1442,50 +1477,721 @@ describe("NavigationMenuController with unavailable triggers", () => {
     expect(byId("mp4").hidden).toBe(true);
   });
 
-  it("keeps an aria-disabled trigger shut when hover opening is on", async () => {
+  /** Each constraint and the fixture trigger that carries it. */
+  const CONSTRAINED = { "aria-disabled": "m4", disabled: "m2", hidden: "m3" } as const;
+  type Constraint = keyof typeof CONSTRAINED;
+  const CONSTRAINTS = Object.keys(CONSTRAINED) as Constraint[];
+  const ROUTES = ["click", "element", "probe"] as const;
+  type Route = (typeof ROUTES)[number];
+
+  /** The panel `id`'s trigger controls. */
+  const panelOf = (id: string): HTMLElement => byId(byId(id).getAttribute("aria-controls") ?? "");
+
+  const instance = (): NavigationMenuController => {
+    const root = document.querySelector("[data-controller='stimeo--navigation-menu']");
+    const found =
+      root && application.getControllerForElementAndIdentifier(root, "stimeo--navigation-menu");
+    if (!(found instanceof NavigationMenuController)) throw new Error("Expected nav controller");
+    return found;
+  };
+
+  /** Records the nav's state events; scoped to its root, which each test replaces. */
+  const captureNav = () =>
+    captureStateEvents(
+      "stimeo--navigation-menu",
+      ["open", "close"],
+      document.querySelector("nav") ?? document,
+    );
+
+  /**
+   * Drives `toggle` on `id` through one route: a DOM click, the element API, or a
+   * non-click Event handed to the action. The engine dispatches no click on a
+   * natively `disabled` button; a script's `click()` still reaches a `hidden` one.
+   * The probe bubbles and is cancelable, and is returned, so a row can show the
+   * action left it alone.
+   */
+  const drive = (id: string, route: Route): Event | null => {
+    const trigger = byId(id);
+    if (route === "click") {
+      trigger.click();
+      return null;
+    }
+    if (route === "element") {
+      instance().toggle(trigger);
+      return null;
+    }
+    const probe = new Event("probe", { bubbles: true, cancelable: true });
+    trigger.addEventListener("probe", (event) => instance().toggle(event), { once: true });
+    trigger.dispatchEvent(probe);
+    return probe;
+  };
+
+  it.each(CONSTRAINTS.flatMap((constraint) => ROUTES.map((route) => [constraint, route] as const)))(
+    "refuses to open the %s trigger through %s, leaving the open panel alone",
+    async (constraint, route) => {
+      const id = CONSTRAINED[constraint];
+      byId("m1").focus();
+      byId("m1").click();
+      const capture = captureNav();
+      const reached = vi.fn();
+      instance().element.addEventListener("probe", reached);
+
+      const probe = drive(id, route);
+      await tick();
+      capture.stop();
+
+      // The refusal neither cancels the probe nor stops it short of the nav root.
+      if (probe) {
+        expect(probe.defaultPrevented).toBe(false);
+        expect(reached).toHaveBeenCalledOnce();
+      }
+      expect(capture.seen).toEqual([]);
+      expect(byId("m1").getAttribute("aria-expanded")).toBe("true");
+      expect(byId("mp1").hidden).toBe(false);
+      expect(byId(id).getAttribute("aria-expanded")).toBe("false");
+      expect(panelOf(id).hidden).toBe(true);
+      expect(document.activeElement).toBe(byId("m1"));
+    },
+  );
+
+  it.each(ROUTES)("still opens an enabled trigger through %s", async (route) => {
+    byId("m1").focus();
+    byId("m1").click();
+    const capture = captureNav();
+
+    drive("m5", route);
+    await tick();
+    capture.stop();
+
+    const reason = route === "element" ? "api" : "user";
+    expect(capture.names()).toEqual(["close", "open"]);
+    expect(capture.reasons()).toEqual([reason, reason]);
+    expect(byId("mp1").hidden).toBe(true);
+    expect(byId("m5").getAttribute("aria-expanded")).toBe("true");
+    expect(byId("mp5").hidden).toBe(false);
+    expect(document.activeElement).toBe(byId("m1"));
+  });
+
+  it.each(
+    CONSTRAINTS.flatMap((constraint) =>
+      (["element", "probe"] as const).map((route) => [constraint, route] as const),
+    ),
+  )("still closes an open panel whose trigger turned %s, through %s", async (constraint, route) => {
+    // Opening is the activation the constraint forbids, so a panel already open
+    // behind a constrained trigger still closes through that trigger.
+    byId("m1").click();
+    if (constraint === "aria-disabled") byId("m1").setAttribute("aria-disabled", "true");
+    else byId("m1").toggleAttribute(constraint, true);
+    const capture = captureNav();
+
+    drive("m1", route);
+    await tick();
+    capture.stop();
+
+    expect(capture.names()).toEqual(["close"]);
+    expect(capture.reasons()).toEqual([route === "element" ? "api" : "user"]);
+    expect(byId("m1").getAttribute("aria-expanded")).toBe("false");
+    expect(byId("mp1").hidden).toBe(true);
+  });
+
+  it.each(CONSTRAINTS)("keeps the %s trigger shut when hover opening is on", async (constraint) => {
     // The hover path reaches `#openPanel` without going through `toggle`, so it
     // needs the guard in its own right. Re-mounted because hover opening is a
     // Value the shared fixture does not set, and the open is behind the hover
     // delay — advancing the timer is what makes this case discriminate at all.
     await remountWithHover();
+    const id = CONSTRAINED[constraint];
+    let delivered = 0;
+    byId(id).addEventListener("mouseenter", () => delivered++);
+    const capture = captureNav();
 
     vi.useFakeTimers();
     try {
       // Well past `hoverDelay` (150), not exactly it: a negative assertion that
       // advances by the current default goes quietly hollow the day the default
-      // changes. The other "did not happen" cases in this file use 300 too.
-      byId("m4").dispatchEvent(new MouseEvent("mouseenter"));
+      // changes. The other "did not happen" cases in this file that run on the
+      // default delay use 300 too.
+      byId(id).dispatchEvent(new MouseEvent("mouseenter"));
       vi.advanceTimersByTime(300);
 
-      expect(byId("m4").getAttribute("aria-expanded")).toBe("false");
-      expect(byId("mp4").hidden).toBe(true);
+      // The engine delivers `mouseenter` to a natively disabled button too, so the
+      // hover handler ran and the refusal is the controller's.
+      expect(delivered).toBe(1);
+      expect(byId(id).getAttribute("aria-expanded")).toBe("false");
+      expect(panelOf(id).hidden).toBe(true);
+      expect(capture.seen).toEqual([]);
+
+      // The same wiring opens an enabled trigger.
+      byId("m5").dispatchEvent(new MouseEvent("mouseenter"));
+      vi.advanceTimersByTime(300);
+
+      expect(byId("mp5").hidden).toBe(false);
+      expect(capture.names()).toEqual(["open"]);
     } finally {
+      capture.stop();
       vi.useRealTimers();
     }
   });
 
-  it("leaves an open panel alone when hover lands on an aria-disabled trigger", async () => {
-    // `#openFromHover` rescues focus out of the panel it is about to hide *before*
-    // opening the next one. When the next one refuses to open, that rescue has
-    // bought nothing — focus leaves a panel that stays open. The guard therefore
-    // has to run before the rescue, not only inside `#openPanel`.
-    await remountWithHover();
+  it.each(CONSTRAINTS)(
+    "drops a pending hover open when toggle refuses the %s trigger",
+    async (constraint) => {
+      // Every explicit activation cancels the hover reservation, a refused one
+      // included; the refusal itself opens nothing and reports nothing.
+      await remountWithHover();
+      const capture = captureNav();
 
-    vi.useFakeTimers();
+      vi.useFakeTimers();
+      try {
+        byId("m1").dispatchEvent(new MouseEvent("mouseenter"));
+        instance().toggle(byId(CONSTRAINED[constraint]));
+        vi.advanceTimersByTime(300);
+
+        expect(byId("mp1").hidden).toBe(true);
+        expect(byId("m1").getAttribute("aria-expanded")).toBe("false");
+        expect(capture.seen).toEqual([]);
+      } finally {
+        capture.stop();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(CONSTRAINTS)(
+    "leaves an open panel alone when hover lands on the %s trigger",
+    async (constraint) => {
+      // `#openFromHover` rescues focus out of the panel it is about to hide *before*
+      // opening the next one. When the next one refuses to open, that rescue has
+      // bought nothing — focus leaves a panel that stays open. The guard therefore
+      // has to run before the rescue.
+      await remountWithHover();
+
+      vi.useFakeTimers();
+      try {
+        byId("m1").dispatchEvent(new MouseEvent("mouseenter"));
+        vi.advanceTimersByTime(300);
+        byId("mp1").querySelector("a")?.focus();
+        const inside = document.activeElement;
+
+        byId(CONSTRAINED[constraint]).dispatchEvent(new MouseEvent("mouseenter"));
+        vi.advanceTimersByTime(300);
+
+        expect(byId("mp1").hidden).toBe(false); // nothing was hidden…
+        expect(document.activeElement).toBe(inside); // …so nothing had to move
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+});
+
+/**
+ * A click is judged once, when it starts: a capture listener takes the verdict
+ * before any consumer handler on the trigger runs, and `toggle` keeps it when the
+ * trigger it resolves is among those the verdict was taken for. A consumer command
+ * that marks its own trigger busy during that click (`disabled` or `aria-disabled`
+ * while it runs) therefore still gets the open it started, exactly as when its
+ * handler changes nothing. A trigger the verdict was not taken for — a handler that
+ * ran first moved the target out of it — is judged when `toggle` runs, as is any
+ * other event.
+ */
+describe("NavigationMenuController judging a click when it starts", () => {
+  let application: Application;
+
+  /**
+   * Mounts `html` and runs `prepare` before Stimulus binds the actions, so a
+   * listener `prepare` adds to a trigger runs ahead of the controller's action there.
+   */
+  const mountWith = async (prepare: () => void, html = markup()): Promise<void> => {
+    document.body.innerHTML = html;
+    prepare();
+    application = Application.start();
+    application.register("stimeo--navigation-menu", NavigationMenuController);
+    await tick();
+  };
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const byId = (id: string) => document.getElementById(id) as HTMLElement;
+
+  const instance = (): NavigationMenuController => {
+    const root = document.querySelector("[data-controller='stimeo--navigation-menu']");
+    const found =
+      root && application.getControllerForElementAndIdentifier(root, "stimeo--navigation-menu");
+    if (!(found instanceof NavigationMenuController)) throw new Error("Expected nav controller");
+    return found;
+  };
+
+  /** What a consumer command writes on its own trigger; `none` is the positive control. */
+  const MARKS = ["none", "disabled", "aria-disabled"] as const;
+  type Mark = (typeof MARKS)[number];
+
+  /** Adds a consumer command on `id` that marks its own trigger with `mark` each time it runs. */
+  const addCommand = (id: string, mark: Mark, command: () => void, type = "click"): void => {
+    const trigger = byId(id);
+    trigger.addEventListener(type, () => {
+      command();
+      if (mark === "aria-disabled") trigger.setAttribute("aria-disabled", "true");
+      else if (mark === "disabled") trigger.toggleAttribute("disabled", true);
+    });
+  };
+
+  it.each(MARKS)("opens the panel of a trigger whose click marks it %s", async (mark) => {
+    const command = vi.fn();
+    await mountWith(() => addCommand("t2", mark, command));
+    byId("t1").click();
+    const capture = captureStateEvents("stimeo--navigation-menu");
+
+    byId("t2").click();
+    await tick();
+    capture.stop();
+
+    expect(command).toHaveBeenCalledOnce();
+    expect(capture.names()).toEqual(["close", "open"]);
+    expect(capture.reasons()).toEqual(["user", "user"]);
+    expect(byId("p1").hidden).toBe(true);
+    expect(byId("t2").getAttribute("aria-expanded")).toBe("true");
+    expect(byId("p2").hidden).toBe(false);
+  });
+
+  it.each(MARKS)(
+    "judges a non-click event when toggle runs, after a command marked the trigger %s",
+    async (mark) => {
+      const command = vi.fn();
+      await mountWith(() => addCommand("t2", mark, command, "probe"));
+      byId("t1").click();
+      byId("t2").addEventListener("probe", (event) => instance().toggle(event));
+      const capture = captureStateEvents("stimeo--navigation-menu");
+
+      byId("t2").dispatchEvent(new Event("probe", { bubbles: true, cancelable: true }));
+      await tick();
+      capture.stop();
+
+      expect(command).toHaveBeenCalledOnce();
+      expect(capture.names()).toEqual(mark === "none" ? ["close", "open"] : []);
+      expect(byId("t2").getAttribute("aria-expanded")).toBe(mark === "none" ? "true" : "false");
+      expect(byId("p1").hidden).toBe(mark === "none");
+    },
+  );
+
+  // A trigger nested in another trigger is the shape where more than one trigger holds
+  // the click target. The capture listener records a verdict for both, and the click is
+  // refused when either one refuses activation, so the action bound on the inner
+  // trigger refuses it whichever of the two is `hidden`.
+  it.each(["outer", "inner"] as const)(
+    "refuses the inner trigger of a nested pair when toggle runs (%s hidden)",
+    async (hiddenOne) => {
+      await mountWith(
+        () => {},
+        `<nav data-controller="stimeo--navigation-menu" aria-label="Main">
+          <div id="outer" data-stimeo--navigation-menu-target="trigger"
+               aria-expanded="false" aria-controls="outer-panel">
+            <span id="inner" data-stimeo--navigation-menu-target="trigger"
+                  aria-expanded="false" aria-controls="inner-panel"
+                  data-action="click->stimeo--navigation-menu#toggle">Run</span>
+          </div>
+          <div id="outer-panel" data-stimeo--navigation-menu-target="panel" hidden>Outer</div>
+          <div id="inner-panel" data-stimeo--navigation-menu-target="panel" hidden>Inner</div>
+        </nav>`,
+      );
+      byId(hiddenOne).hidden = true;
+      const capture = captureStateEvents("stimeo--navigation-menu");
+
+      byId("inner").click();
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual([]);
+      expect(byId("inner-panel").hidden).toBe(true);
+    },
+  );
+
+  it("releases its click capture listener on disconnect", async () => {
+    await mountWith(() => {});
+    const controller = instance();
+    controller.disconnect();
+    const ledger = recordListeners();
     try {
-      byId("m1").dispatchEvent(new MouseEvent("mouseenter"));
-      vi.advanceTimersByTime(300);
-      byId("mp1").querySelector("a")?.focus();
-      const inside = document.activeElement;
+      controller.connect();
+      const clicks = ledger.live(controller.element, "click").filter(({ capture }) => capture);
+      expect(clicks).toHaveLength(1);
 
-      byId("m4").dispatchEvent(new MouseEvent("mouseenter"));
-      vi.advanceTimersByTime(300);
+      controller.disconnect();
 
-      expect(byId("mp1").hidden).toBe(false); // nothing was hidden…
-      expect(document.activeElement).toBe(inside); // …so nothing had to move
+      expect(clicks.filter(({ live }) => live)).toEqual([]);
     } finally {
-      vi.useRealTimers();
+      ledger.restore();
     }
+  });
+});
+
+/**
+ * Triggers nested in one another. An operation is refused when any trigger this nav
+ * owns that holds the operation's target refuses activation — the target being the
+ * event's target, the element handed to `toggle`, or the trigger a hover lands on. A
+ * `hidden`, natively `disabled` or `aria-disabled` inner trigger therefore refuses what
+ * lands inside it whichever trigger receives the action, and an outer trigger that
+ * refuses refuses what lands inside it too. What lands on the outer trigger outside the
+ * inner one is judged on the outer trigger alone.
+ */
+describe("NavigationMenuController with nested triggers", () => {
+  let application: Application;
+
+  afterEach(() => {
+    vi.useRealTimers();
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const byId = (id: string) => document.getElementById(id) as HTMLElement;
+  const expanded = (id: string) => byId(id).getAttribute("aria-expanded");
+
+  const instance = (): NavigationMenuController => {
+    const root = document.querySelector("[data-controller='stimeo--navigation-menu']");
+    const found =
+      root && application.getControllerForElementAndIdentifier(root, "stimeo--navigation-menu");
+    if (!(found instanceof NavigationMenuController)) throw new Error("Expected nav controller");
+    return found;
+  };
+
+  /**
+   * The state the inner trigger carries; `enabled` with an enabled outer is the positive
+   * control.
+   */
+  const INNER = {
+    enabled: "",
+    "aria-disabled": 'aria-disabled="true"',
+    hidden: "hidden",
+    disabled: "disabled",
+  } as const;
+  type Inner = keyof typeof INNER;
+
+  /** The state the outer trigger carries; its `aria-disabled` reaches the inner trigger too. */
+  const OUTER = { enabled: "", "aria-disabled": 'aria-disabled="true"', hidden: "hidden" } as const;
+  type Outer = keyof typeof OUTER;
+
+  /**
+   * Where an operation lands and which trigger receives the action; `label` is the text
+   * holder inside the inner trigger, `element` hands the landing trigger to `toggle`,
+   * and `hover` is a `mouseenter` on it. A natively `disabled` button is dispatched no
+   * click of its own, while happy-dom delivers one dispatched on content inside it, so
+   * a click inside the inner trigger lands on the label.
+   */
+  const ROUTES = {
+    "a click inside the inner, received by the inner": {
+      kind: "click",
+      at: "label",
+      receiver: "inner",
+    },
+    "a click inside the inner, received by the outer": {
+      kind: "click",
+      at: "label",
+      receiver: "outer",
+    },
+    "the inner as the element": { kind: "element", at: "inner", receiver: "inner" },
+    "a probe inside the inner, received by the inner": {
+      kind: "probe",
+      at: "label",
+      receiver: "inner",
+    },
+    "a probe inside the inner, received by the outer": {
+      kind: "probe",
+      at: "label",
+      receiver: "outer",
+    },
+    "a hover on the inner": { kind: "hover", at: "inner", receiver: "inner" },
+    "a click on the outer": { kind: "click", at: "outer", receiver: "outer" },
+    "the outer as the element": { kind: "element", at: "outer", receiver: "outer" },
+    "a probe on the outer": { kind: "probe", at: "outer", receiver: "outer" },
+    "a hover on the outer": { kind: "hover", at: "outer", receiver: "outer" },
+  } as const;
+  type Route = keyof typeof ROUTES;
+
+  /** Whether `route` lands inside the inner trigger. */
+  const insideInner = (route: Route): boolean => ROUTES[route].at !== "outer";
+
+  /** Whether a trigger holding the route's target refuses activation. */
+  const refuses = (inner: Inner, outer: Outer, route: Route): boolean =>
+    outer !== "enabled" || (insideInner(route) && inner !== "enabled");
+
+  const ROWS = (Object.keys(INNER) as Inner[]).flatMap((inner) =>
+    (Object.keys(OUTER) as Outer[]).flatMap((outer) =>
+      (Object.keys(ROUTES) as Route[]).map((route) => ({
+        inner,
+        outer,
+        route,
+        outcome: refuses(inner, outer, route) ? "refuses" : "opens",
+      })),
+    ),
+  );
+
+  /** Mounts a trigger nested in another trigger, each controlling its own panel. */
+  const mountPair = async (inner: Inner, outer: Outer): Promise<void> => {
+    document.body.innerHTML = `
+      <nav data-controller="stimeo--navigation-menu" aria-label="Main"
+           data-stimeo--navigation-menu-open-on-hover-value="true">
+        <div id="outer" ${OUTER[outer]} data-stimeo--navigation-menu-target="trigger"
+             aria-expanded="false" aria-controls="outer-panel">
+          <button id="inner" ${INNER[inner]} data-stimeo--navigation-menu-target="trigger"
+                  aria-expanded="false"
+                  aria-controls="inner-panel"><span id="label">Run</span></button>
+        </div>
+        <div id="outer-panel" data-stimeo--navigation-menu-target="panel" hidden>Outer</div>
+        <div id="inner-panel" data-stimeo--navigation-menu-target="panel" hidden>Inner</div>
+      </nav>`;
+    application = Application.start();
+    application.register("stimeo--navigation-menu", NavigationMenuController);
+    await tick();
+  };
+
+  /**
+   * Delivers `route` to `toggle`, or hovers. A consumer command listens where an event
+   * lands; the nav stops no click, so every click and probe reaches it.
+   */
+  const drive = (route: Route) => {
+    const { kind, at, receiver } = ROUTES[route];
+    const command = vi.fn();
+    if (kind === "element") {
+      instance().toggle(byId(at));
+      return { event: null, command };
+    }
+    if (kind === "hover") {
+      vi.useFakeTimers();
+      byId(at).dispatchEvent(new MouseEvent("mouseenter"));
+      // Well past the default `hoverDelay` of 150.
+      vi.advanceTimersByTime(300);
+      vi.useRealTimers();
+      return { event: null, command };
+    }
+    byId(at).addEventListener(kind, command);
+    byId(receiver).addEventListener(kind, (event) => instance().toggle(event));
+    const event =
+      kind === "click"
+        ? new MouseEvent("click", { bubbles: true, cancelable: true })
+        : new Event("probe", { bubbles: true, cancelable: true });
+    byId(at).dispatchEvent(event);
+    return { event, command };
+  };
+
+  const REASONS = { click: "user", probe: "user", element: "api", hover: "pointer" } as const;
+
+  it.each(ROWS)(
+    "$outcome the $inner inner trigger in the $outer outer trigger through $route",
+    async ({ inner, outer, route }) => {
+      await mountPair(inner, outer);
+      const capture = captureStateEvents("stimeo--navigation-menu");
+
+      const { event, command } = drive(route);
+      await tick();
+      capture.stop();
+
+      if (event) {
+        expect(event.defaultPrevented).toBe(false);
+        expect(command).toHaveBeenCalledOnce();
+      }
+      const { kind, at, receiver } = ROUTES[route];
+      const opened = kind === "element" || kind === "hover" ? at : receiver;
+      const shut = opened === "inner" ? "outer" : "inner";
+      if (refuses(inner, outer, route)) {
+        expect(capture.seen).toEqual([]);
+        expect(expanded("outer")).toBe("false");
+        expect(expanded("inner")).toBe("false");
+        expect(byId("outer-panel").hidden).toBe(true);
+        expect(byId("inner-panel").hidden).toBe(true);
+      } else {
+        expect(capture.names()).toEqual(["open"]);
+        expect(capture.reasons()).toEqual([REASONS[kind]]);
+        expect(expanded(opened)).toBe("true");
+        expect(byId(`${opened}-panel`).hidden).toBe(false);
+        expect(expanded(shut)).toBe("false");
+        expect(byId(`${shut}-panel`).hidden).toBe(true);
+      }
+    },
+  );
+
+  it.each(["enabled", "hidden"] as const)(
+    "judges a probe dispatched at the text inside the %s inner trigger by the triggers holding it",
+    async (inner) => {
+      await mountPair(inner, "enabled");
+      const text = byId("label").firstChild as Text;
+      // Pinned: the target is a node that is not an element.
+      expect(text.nodeType).toBe(Node.TEXT_NODE);
+      byId("outer").addEventListener("probe", (event) => instance().toggle(event));
+      const capture = captureStateEvents("stimeo--navigation-menu");
+
+      text.dispatchEvent(new Event("probe", { bubbles: true }));
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual(inner === "hidden" ? [] : ["open"]);
+      expect(byId("outer-panel").hidden).toBe(inner === "hidden");
+    },
+  );
+});
+
+/**
+ * `aria-disabled="true"` extends to every focusable descendant, so a trigger inside
+ * an element that carries it never opens, through a click, an element, any other
+ * event or hover, as if it carried the attribute itself. Its click is not swallowed,
+ * and it stays an arrow-key destination.
+ */
+describe("NavigationMenuController under an aria-disabled ancestor", () => {
+  let application: Application;
+
+  /** One trigger and its panel in their own list item. */
+  const entry = (id: string, label: string) => `
+    <li id="${id}-li">
+      <button id="${id}" data-stimeo--navigation-menu-target="trigger"
+              aria-expanded="false" aria-controls="${id}-panel"
+              data-action="click->stimeo--navigation-menu#toggle
+                           keydown->stimeo--navigation-menu#onTriggerKeydown">${label}</button>
+      <div id="${id}-panel" data-stimeo--navigation-menu-target="panel" hidden>
+        <a href="/${id}">${label}</a>
+      </div>
+    </li>`;
+
+  beforeEach(async () => {
+    const hover = 'data-stimeo--navigation-menu-open-on-hover-value="true"';
+    document.body.innerHTML = `
+      <div id="ni-outer">
+        <nav id="ni-nav" data-controller="stimeo--navigation-menu" aria-label="Main" ${hover}>
+          <ul>${entry("ni-one", "One")}${entry("ni-two", "Two")}</ul>
+        </nav>
+      </div>
+      <nav id="ni-other" data-controller="stimeo--navigation-menu" aria-label="Other" ${hover}>
+        <ul>${entry("ni-three", "Three")}</ul>
+      </nav>`;
+    application = Application.start();
+    application.register("stimeo--navigation-menu", NavigationMenuController);
+    await tick();
+  });
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const byId = (id: string) => document.getElementById(id) as HTMLElement;
+  const expanded = (id: string) => byId(id).getAttribute("aria-expanded");
+
+  const ROUTES = ["click", "element", "probe", "hover"] as const;
+  type Route = (typeof ROUTES)[number];
+
+  /** The trigger outside each aria-disabled ancestor, which keeps working beside it. */
+  const CONTROLS = { "ni-two-li": "ni-one", "ni-nav": "ni-three", "ni-outer": "ni-three" } as const;
+  type Ancestor = keyof typeof CONTROLS;
+  const ROWS = (Object.keys(CONTROLS) as Ancestor[]).flatMap((ancestor) =>
+    ROUTES.map((route) => [ancestor, route] as const),
+  );
+
+  /** What a click or a probe showed on the page: cancelled, handled on the trigger, reached. */
+  interface Seen {
+    prevented: boolean;
+    handled: number;
+    reached: number;
+  }
+
+  /**
+   * Drives `toggle` on `id` through `route`, or hovers it past the delay. A click
+   * and a probe are cancelable and bubble; a consumer handler on the trigger and a
+   * listener on the document report whether each got past the trigger.
+   */
+  const drive = (id: string, route: Route): Seen | null => {
+    const trigger = byId(id);
+    const root = trigger.closest("[data-controller~='stimeo--navigation-menu']");
+    const controller =
+      root && application.getControllerForElementAndIdentifier(root, "stimeo--navigation-menu");
+    if (!(controller instanceof NavigationMenuController))
+      throw new Error("Expected nav controller");
+    if (route === "element") {
+      controller.toggle(trigger);
+      return null;
+    }
+    if (route === "hover") {
+      vi.useFakeTimers();
+      try {
+        trigger.dispatchEvent(new MouseEvent("mouseenter"));
+        vi.advanceTimersByTime(300);
+      } finally {
+        vi.useRealTimers();
+      }
+      return null;
+    }
+    const seen = { prevented: false, handled: 0, reached: 0 };
+    const handler = () => seen.handled++;
+    const reached = () => seen.reached++;
+    const type = route === "click" ? "click" : "probe";
+    trigger.addEventListener(type, handler);
+    if (route === "probe") {
+      trigger.addEventListener("probe", (event) => controller.toggle(event), { once: true });
+    }
+    document.addEventListener(type, reached);
+    const event =
+      route === "click"
+        ? new MouseEvent("click", { bubbles: true, cancelable: true })
+        : new Event("probe", { bubbles: true, cancelable: true });
+    trigger.dispatchEvent(event);
+    document.removeEventListener(type, reached);
+    trigger.removeEventListener(type, handler);
+    seen.prevented = event.defaultPrevented;
+    return seen;
+  };
+
+  /** The reason each route reports for an open. */
+  const REASONS = { click: "user", element: "api", probe: "user", hover: "pointer" } as const;
+
+  it.each(ROWS)(
+    "never opens a trigger under an aria-disabled %s through %s",
+    async (ancestor, route) => {
+      byId("ni-one").click(); // opens One before the ancestor turns aria-disabled
+      byId(ancestor).setAttribute("aria-disabled", "true");
+      const capture = captureStateEvents("stimeo--navigation-menu");
+
+      const seen = drive("ni-two", route);
+      await tick();
+      capture.stop();
+
+      // The nav leaves the click itself alone; only the open is refused.
+      if (route === "click" || route === "probe") {
+        expect(seen).toEqual({ prevented: false, handled: 1, reached: 1 });
+      }
+      expect(capture.seen).toEqual([]);
+      expect(expanded("ni-one")).toBe("true");
+      expect(byId("ni-one-panel").hidden).toBe(false);
+      expect(expanded("ni-two")).toBe("false");
+      expect(byId("ni-two-panel").hidden).toBe(true);
+    },
+  );
+
+  it.each(ROWS)(
+    "still opens the trigger outside an aria-disabled %s through %s",
+    async (ancestor, route) => {
+      byId(ancestor).setAttribute("aria-disabled", "true");
+      const control = CONTROLS[ancestor];
+      const capture = captureStateEvents("stimeo--navigation-menu");
+
+      drive(control, route);
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual(["open"]);
+      expect(capture.reasons()).toEqual([REASONS[route]]);
+      expect(expanded(control)).toBe("true");
+      expect(byId(`${control}-panel`).hidden).toBe(false);
+    },
+  );
+
+  it("keeps triggers under an aria-disabled nav reachable with the arrow keys", () => {
+    byId("ni-nav").setAttribute("aria-disabled", "true");
+
+    keyboardPress(byId("ni-one"), "ArrowRight");
+    expect(document.activeElement).toBe(byId("ni-two"));
+
+    keyboardPress(byId("ni-two"), "ArrowLeft");
+    expect(document.activeElement).toBe(byId("ni-one"));
   });
 });
 
@@ -1529,12 +2235,8 @@ describe("NavigationMenuController with a single, unmatched trigger", () => {
 
   it("leaves the arrow press alone when there is nowhere to move", () => {
     byId("s1").focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    byId("s1").dispatchEvent(event);
+    const event = keyEvent("ArrowRight");
+    keyboardPress(byId("s1"), event);
     // Nothing to focus, so the press stays the page's (no dead consumed key).
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(byId("s1"));
@@ -1621,7 +2323,7 @@ describe("NavigationMenuController target API", () => {
     document.body.innerHTML = "";
   });
 
-  it("retains the existing DOM Event success as a positive control", () => {
+  it("opens a panel from a DOM click as the positive control", () => {
     const reports: Array<{ reason?: string }> = [];
     element("api-root").addEventListener("stimeo--navigation-menu:open", (event) => {
       reports.push((event as CustomEvent<{ reason?: string }>).detail);
@@ -1632,7 +2334,7 @@ describe("NavigationMenuController target API", () => {
   });
 
   it.each([false, true])(
-    "accepts an owned target or its descendant (%s) after an Event positive control",
+    "accepts an owned target or its descendant (%s) through the element API",
     (descendant) => {
       const reports: Array<{ reason?: string }> = [];
       element("api-root").addEventListener("stimeo--navigation-menu:open", (event) => {
@@ -1704,6 +2406,36 @@ describe("NavigationMenuController target API", () => {
     expect(reports.map((detail) => detail.reason)).toEqual([reason]);
   });
 
+  it.each(
+    (["aria-disabled", "disabled", "hidden"] as const).flatMap((constraint) =>
+      [false, true].map((descendant) => [constraint, descendant] as const),
+    ),
+  )(
+    "refuses the %s trigger through the element API, from the trigger or its descendant (%s)",
+    async (constraint, descendant) => {
+      const trigger = element("api-b");
+      if (constraint === "aria-disabled") trigger.setAttribute("aria-disabled", "true");
+      else trigger.toggleAttribute(constraint, true);
+      element("api-outside").focus();
+      const capture = captureStateEvents(
+        "stimeo--navigation-menu",
+        ["open", "close"],
+        element("api-root"),
+      );
+      const source = descendant ? trigger.querySelector("span") : trigger;
+      if (!(source instanceof HTMLElement)) throw new Error("Missing API source");
+
+      instance().toggle(source);
+      await tick();
+      capture.stop();
+
+      expect(capture.seen).toEqual([]);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      expect(element("api-panel-b").hidden).toBe(true);
+      expect(document.activeElement).toBe(element("api-outside"));
+    },
+  );
+
   it("rejects a nested origin even when the Event handler belongs to an owned outer target", () => {
     const nested = document.createElement("div");
     nested.setAttribute("data-controller", "stimeo--navigation-menu");
@@ -1752,19 +2484,13 @@ describe("NavigationMenuController target API", () => {
     };
     window.addEventListener("error", captureError);
     try {
-      expect(() =>
-        element("api-a").dispatchEvent(
-          new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-        ),
-      ).not.toThrow();
+      expect(() => keyboardPress(element("api-a"), "Escape")).not.toThrow();
       expect(errors).toEqual([]);
       expect(document.activeElement).toBe(element("api-a"));
       expect(element("api-panel-a").hidden).toBe(true);
       instance().toggle(element("api-b"));
       element("api-b").focus();
-      element("api-b").dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-      );
+      keyboardPress(element("api-b"), "Escape");
       expect(element("api-panel-b").hidden).toBe(true);
       expect(document.activeElement).toBe(element("api-b"));
       expect(errors).toEqual([]);
@@ -1845,4 +2571,153 @@ describe("NavigationMenuController target API", () => {
       vi.useRealTimers();
     }
   });
+});
+
+/**
+ * The trigger `toggle` resolves is the one the action is bound to (the event's
+ * `currentTarget`), whatever the event's target has become since. A handler that moves
+ * the target out of a refused trigger before `toggle` runs leaves the trigger itself
+ * to judge, so it still does not open.
+ */
+describe("NavigationMenuController when the target leaves the resolved trigger", () => {
+  let application: Application;
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it.each([
+    ["aria-disabled", 'aria-disabled="true"', []],
+    ["hidden", "hidden", []],
+    ["disabled", "disabled", []],
+    ["enabled", "", ["open"]],
+  ] as const)(
+    "judges the %s trigger when a handler moves the probe target out of it",
+    async (_state, helpState, reported) => {
+      document.body.innerHTML = `
+        <nav id="nav" data-controller="stimeo--navigation-menu" aria-label="Main">
+          <button id="help" ${helpState} data-stimeo--navigation-menu-target="trigger"
+                  aria-expanded="false"
+                  aria-controls="help-panel"><span id="label">Help</span></button>
+          <div id="help-panel" data-stimeo--navigation-menu-target="panel" hidden>Help</div>
+        </nav>`;
+      application = Application.start();
+      application.register("stimeo--navigation-menu", NavigationMenuController);
+      await tick();
+      const controller = application.getControllerForElementAndIdentifier(
+        document.getElementById("nav") as HTMLElement,
+        "stimeo--navigation-menu",
+      ) as NavigationMenuController;
+      const nav = document.getElementById("nav") as HTMLElement;
+      const help = document.getElementById("help") as HTMLElement;
+      const label = document.getElementById("label") as HTMLElement;
+      label.addEventListener("probe", () => nav.append(label));
+      help.addEventListener("probe", (event) => controller.toggle(event));
+      const capture = captureStateEvents("stimeo--navigation-menu");
+
+      label.dispatchEvent(new Event("probe", { bubbles: true }));
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual(reported);
+    },
+  );
+
+  it.each([
+    ["aria-disabled", 'aria-disabled="true"', []],
+    ["enabled", "", ["open"]],
+  ] as const)(
+    "judges the %s trigger whose click target a document capture handler moves into another",
+    async (_state, helpState, reported) => {
+      document.body.innerHTML = `
+        <nav id="nav" data-controller="stimeo--navigation-menu" aria-label="Main">
+          <button id="help" ${helpState} data-stimeo--navigation-menu-target="trigger"
+                  aria-expanded="false"
+                  aria-controls="help-panel"><span id="label">Help</span></button>
+          <div id="help-panel" data-stimeo--navigation-menu-target="panel" hidden>Help</div>
+          <button id="docs" data-stimeo--navigation-menu-target="trigger"
+                  aria-expanded="false" aria-controls="docs-panel">Docs</button>
+          <div id="docs-panel" data-stimeo--navigation-menu-target="panel" hidden>Docs</div>
+        </nav>`;
+      application = Application.start();
+      application.register("stimeo--navigation-menu", NavigationMenuController);
+      await tick();
+      const controller = application.getControllerForElementAndIdentifier(
+        document.getElementById("nav") as HTMLElement,
+        "stimeo--navigation-menu",
+      ) as NavigationMenuController;
+      const help = document.getElementById("help") as HTMLElement;
+      const docs = document.getElementById("docs") as HTMLElement;
+      const label = document.getElementById("label") as HTMLElement;
+      // Runs before the controller's own capture pass, so the click is recorded for Docs.
+      const move = () => docs.append(label);
+      document.addEventListener("click", move, { capture: true });
+      help.addEventListener("click", (event) => controller.toggle(event));
+      const capture = captureStateEvents("stimeo--navigation-menu");
+
+      label.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      document.removeEventListener("click", move, { capture: true });
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual(reported);
+    },
+  );
+});
+
+/**
+ * A click on a nested pair of triggers is judged for both when it starts, so a handler
+ * that marks either one `aria-disabled` during the click does not undo the open that
+ * click started, whichever trigger `toggle` is bound to.
+ */
+describe("NavigationMenuController with a nested pair marked during a click", () => {
+  let application: Application;
+  const element = (id: string) => document.getElementById(id) as HTMLElement;
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  it.each([
+    ["no trigger", "inner", "none"],
+    ["the inner trigger", "inner", "inner"],
+    ["the inner trigger", "outer", "inner"],
+    ["the outer trigger", "inner", "outer"],
+    ["the outer trigger", "outer", "outer"],
+  ] as const)(
+    "opens when a handler marks %s aria-disabled, with toggle on the %s trigger",
+    async (_marked, receiver, marked) => {
+      document.body.innerHTML = `
+        <nav id="nav" data-controller="stimeo--navigation-menu" aria-label="Main">
+          <div id="outer" data-stimeo--navigation-menu-target="trigger"
+               aria-expanded="false" aria-controls="outer-panel">
+            <button id="inner" data-stimeo--navigation-menu-target="trigger"
+                    aria-expanded="false"
+                    aria-controls="inner-panel"><span id="label">Run</span></button>
+          </div>
+          <div id="outer-panel" data-stimeo--navigation-menu-target="panel" hidden>Outer</div>
+          <div id="inner-panel" data-stimeo--navigation-menu-target="panel" hidden>Inner</div>
+        </nav>`;
+      application = Application.start();
+      application.register("stimeo--navigation-menu", NavigationMenuController);
+      await tick();
+      const controller = application.getControllerForElementAndIdentifier(
+        element("nav"),
+        "stimeo--navigation-menu",
+      ) as NavigationMenuController;
+      element("label").addEventListener("click", () => {
+        if (marked !== "none") element(marked).setAttribute("aria-disabled", "true");
+      });
+      element(receiver).addEventListener("click", (event) => controller.toggle(event));
+      const capture = captureStateEvents("stimeo--navigation-menu");
+
+      element("label").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await tick();
+      capture.stop();
+
+      expect(capture.names()).toEqual(["open"]);
+    },
+  );
 });

@@ -78,6 +78,23 @@ describe("CountdownController", () => {
     expect(root().getAttribute("data-state")).toBe("running");
   });
 
+  it.each(["label", "original"] as const)(
+    "releases its live completion showing the %s when the DOM record is omitted",
+    async (shown) => {
+      await start(
+        'data-stimeo--countdown-deadline-value="2026-06-06T00:00:01Z" data-stimeo--countdown-complete-label-value="Time up"',
+      );
+      slot("status").textContent = "Waiting";
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(slot("status").textContent).toBe("Time up");
+      slot("status").removeAttribute("data-stimeo--countdown-owns-status");
+      if (shown === "original") slot("status").textContent = "Waiting";
+      instance().reset();
+      expect(slot("status").textContent).toBe("");
+      expect(slot("status").hasAttribute("data-stimeo--countdown-owns-status")).toBe(false);
+    },
+  );
+
   it("renders whole days into the days slot", async () => {
     await start('data-stimeo--countdown-deadline-value="2026-06-08T03:04:05Z"');
     expect(slot("days").textContent).toBe("2");
@@ -705,8 +722,8 @@ describe("CountdownController", () => {
     expect(slot("status").textContent).toBe("");
     root().setAttribute("data-stimeo--countdown-complete-label-value", "Finished");
     await vi.advanceTimersByTimeAsync(0);
-    // Completing with the empty label wrote no text but held the empty slot with an
-    // empty marker, so the label set later reaches it.
+    // Completing with the empty label wrote no text but held the empty slot with a
+    // record of the empty string, so the label set later reaches it.
     expect(slot("status").textContent).toBe("Finished");
   });
 
@@ -781,9 +798,12 @@ describe("CountdownController", () => {
     await start(`data-stimeo--countdown-deadline-value="2026-06-06T00:00:02Z" ${LABEL}="Time up"`);
     vi.advanceTimersByTime(2000);
     expect(slot("status").textContent).toBe("Time up");
-    // The marker holds the text itself: the slot is this controller's only while
-    // the two still agree.
-    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Time up");
+    // The record carries the last text; ownership requires that text alone.
+    expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "Time up",
+    ]);
     instance().reset();
     expect(slot("status").hasAttribute(OWNS_STATUS)).toBe(false);
   });
@@ -802,7 +822,11 @@ describe("CountdownController", () => {
     // so connect() is what brings the status it wrote up to the label in force.
     expect(root().getAttribute("data-state")).toBe("complete");
     expect(slot("status").textContent).toBe("Finished");
-    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Finished");
+    expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "Finished",
+    ]);
     // Following the label is a repaint, never a second milestone.
     expect(events).toEqual([]);
     expect(spoken).toEqual([]);
@@ -929,7 +953,11 @@ describe("CountdownController", () => {
     instance().start();
     expect(root().getAttribute("data-state")).toBe("running");
     expect(slot("status").textContent).toBe("Doors open at 7");
-    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Time up");
+    expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "Time up",
+    ]);
   });
 
   it("keeps a completion whose deadline moves but stays past", async () => {
@@ -968,17 +996,21 @@ describe("CountdownController", () => {
     expect(slot("status").textContent).toBe("Bring your ticket");
   });
 
-  it("owns the empty slot with an empty marker, even after the consumer empties it again", async () => {
+  it("owns the empty slot with a record of the empty string, even after the consumer empties it again", async () => {
     await start(`${DEADLINE}="2026-06-06T00:00:02Z"`);
     vi.advanceTimersByTime(2000);
-    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("");
+    expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "",
+    ]);
     // While the slot shows the consumer's text, the text is theirs.
     slot("status").textContent = "Doors open at 7";
     root().setAttribute(LABEL, "Finished");
     await vi.advanceTimersByTimeAsync(0);
     expect(slot("status").textContent).toBe("Doors open at 7");
-    // Emptied again, it is the empty slot the empty marker holds, so the next label
-    // reaches it.
+    // Emptied again, the slot matches the empty string the record holds, so the next
+    // label reaches it.
     slot("status").textContent = "";
     root().setAttribute(LABEL, "Time up");
     await vi.advanceTimersByTimeAsync(0);
@@ -994,7 +1026,11 @@ describe("CountdownController", () => {
     await vi.advanceTimersByTimeAsync(0);
     // The marker still holds "Time up", which the emptied slot does not show.
     expect(slot("status").textContent).toBe("");
-    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Time up");
+    expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "Time up",
+    ]);
   });
 
   it("leaves the status a restored completion brings alone on reset", async () => {
@@ -1030,7 +1066,11 @@ describe("CountdownController", () => {
     vi.advanceTimersByTime(2000);
     const status = query(`[data-${alias}-target='status']`);
     expect(status.textContent).toBe("Time up");
-    expect(status.getAttribute(`data-${alias}-owns-status`)).toBe("Time up");
+    expect(JSON.parse(status.getAttribute(`data-${alias}-owns-status`) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "Time up",
+    ]);
     expect(status.hasAttribute(OWNS_STATUS)).toBe(false);
   });
 
@@ -1083,7 +1123,11 @@ describe("CountdownController", () => {
       vi.advanceTimersByTime(2000);
       slot("status").insertAdjacentHTML("beforeend", ICON);
       // The text still matches the marker; the element is what makes the slot theirs.
-      expect(slot("status").getAttribute(OWNS_STATUS)).toBe(slot("status").textContent);
+      expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+        "text",
+        expect.any(String),
+        slot("status").textContent,
+      ]);
       const authored = slot("status").outerHTML;
       await resync();
       // Neither written nor emptied, and the marker stays where it is.
@@ -1097,7 +1141,11 @@ describe("CountdownController", () => {
     async (_, resync) => {
       await start(`${DEADLINE}="2026-06-06T00:00:02Z"`);
       vi.advanceTimersByTime(2000);
-      expect(slot("status").getAttribute(OWNS_STATUS)).toBe("");
+      expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+        "text",
+        expect.any(String),
+        "",
+      ]);
       slot("status").insertAdjacentHTML("beforeend", ICON);
       const authored = slot("status").outerHTML;
       await resync();
@@ -1131,7 +1179,11 @@ describe("CountdownController", () => {
     root().setAttribute(LABEL, "Again");
     await vi.advanceTimersByTimeAsync(0);
     expect(slot("status").textContent).toBe("Again");
-    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Again");
+    expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "Again",
+    ]);
     instance().reset();
     expect(slot("status").textContent).toBe("");
     expect(slot("status").hasAttribute(OWNS_STATUS)).toBe(false);
@@ -1147,7 +1199,11 @@ describe("CountdownController", () => {
     // Completion puts the label in force into the slot, text and element alike, and
     // claims it with the marker.
     expect(slot("status").innerHTML).toBe("Time up");
-    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Time up");
+    expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "Time up",
+    ]);
   });
 
   /**
@@ -1170,7 +1226,7 @@ describe("CountdownController", () => {
   it("owns the status a restored page marks as its own, and follows the label into it", async () => {
     await restore(
       "2026-06-05T23:59:59Z",
-      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}="Time up">Time up</span>`,
+      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}='["text","","Time up"]'>Time up</span>`,
     );
     expect(root().getAttribute("data-state")).toBe("complete");
     // Ownership is read from the marker the page carries, not from what this instance
@@ -1178,35 +1234,47 @@ describe("CountdownController", () => {
     root().setAttribute(LABEL, "Finished");
     await vi.advanceTimersByTimeAsync(0);
     expect(slot("status").textContent).toBe("Finished");
-    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Finished");
+    expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "Finished",
+    ]);
   });
 
-  it("owns the empty status a restored page claims with an empty marker", async () => {
+  it("owns the empty status a restored page claims with a record of the empty string", async () => {
     await restore(
       "2026-06-05T23:59:59Z",
-      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}=""></span>`,
+      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}='["text","",""]'></span>`,
     );
     root().setAttribute(LABEL, "Finished");
     await vi.advanceTimersByTimeAsync(0);
     expect(slot("status").textContent).toBe("Finished");
-    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Finished");
+    expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "Finished",
+    ]);
   });
 
   it("leaves a restored status whose text differs from its marker alone", async () => {
     await restore(
       "2026-06-05T23:59:59Z",
-      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}="Time up">Doors open at 7</span>`,
+      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}='["text","","Time up"]'>Doors open at 7</span>`,
     );
     root().setAttribute(LABEL, "Finished");
     await vi.advanceTimersByTimeAsync(0);
     expect(slot("status").textContent).toBe("Doors open at 7");
-    expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Time up");
+    expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+      "text",
+      expect.any(String),
+      "Time up",
+    ]);
   });
 
   it("takes back the text a restored page marks as its own once the deadline moved forward", async () => {
     await restore(
       "2026-06-06T00:00:10Z",
-      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}="Time up">Time up</span>`,
+      `<span data-stimeo--countdown-target="status" ${OWNS_STATUS}='["text","","Time up"]'>Time up</span>`,
     );
     // The deadline is ahead of now, so the completion is handed back paused, and the
     // text the marker claims goes with it.
@@ -1314,9 +1382,9 @@ describe("CountdownController", () => {
 
   describe("interval changed at runtime", () => {
     /**
-     * Rewrites `interval` in place, the way a Turbo morph or a script does, then delivers
-     * the callback directly: happy-dom can deliver the observer's own call late or drop
-     * it, and the contract under test is what the callback does.
+     * Rewrites `interval` in place, the way a Turbo morph or a script does, then calls
+     * `intervalValueChanged()` directly, so the case asserts what the callback does
+     * without depending on when the value observer delivers its own call.
      */
     const declareInterval = async (raw: string) => {
       root().setAttribute("data-stimeo--countdown-interval-value", raw);
@@ -1496,7 +1564,7 @@ describe("CountdownController", () => {
     const staleStatus = () => {
       const fresh = slot("status").cloneNode(true) as HTMLElement;
       fresh.textContent = "Old label";
-      fresh.setAttribute(OWNS_STATUS, "Old label");
+      fresh.setAttribute(OWNS_STATUS, '["text","","Old label"]');
       return fresh;
     };
 
@@ -1543,7 +1611,11 @@ describe("CountdownController", () => {
 
       expect(slot("status")).toBe(successor);
       expect(successor.textContent).toBe("Time up");
-      expect(successor.getAttribute(OWNS_STATUS)).toBe("Time up");
+      expect(JSON.parse(successor.getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+        "text",
+        expect.any(String),
+        "Time up",
+      ]);
     });
 
     it("takes its text back out of a status that stays after an earlier one leaves", async () => {
@@ -1642,7 +1714,11 @@ describe("CountdownController", () => {
       await settle();
 
       expect(template.textContent).toBe("Time up");
-      expect(template.getAttribute(OWNS_STATUS)).toBe("Time up");
+      expect(JSON.parse(template.getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+        "text",
+        expect.any(String),
+        "Time up",
+      ]);
     });
 
     it("gives a status that stops being one its claim back, keeping the text", async () => {
@@ -1681,7 +1757,11 @@ describe("CountdownController", () => {
       departed.removeAttribute(TARGET);
       await settle();
 
-      expect(departed.getAttribute(OWNS_STATUS)).toBe("Time up");
+      expect(JSON.parse(departed.getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+        "text",
+        expect.any(String),
+        "Time up",
+      ]);
       expect(departed.textContent).toBe("Doors open at 7");
     });
 
@@ -1710,7 +1790,11 @@ describe("CountdownController", () => {
       await settle();
 
       expect(slot("status")).toBe(moving);
-      expect(moving.getAttribute(OWNS_STATUS)).toBe("Time up");
+      expect(JSON.parse(moving.getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+        "text",
+        expect.any(String),
+        "Time up",
+      ]);
       expect(writes).toEqual([]);
     });
 
@@ -1722,7 +1806,11 @@ describe("CountdownController", () => {
       root().remove();
       await settle();
 
-      expect(kept.getAttribute(OWNS_STATUS)).toBe("Time up");
+      expect(JSON.parse(kept.getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+        "text",
+        expect.any(String),
+        "Time up",
+      ]);
       expect(kept.textContent).toBe("Time up");
     });
 
@@ -1736,7 +1824,11 @@ describe("CountdownController", () => {
       await settle();
 
       expect(slot("seconds").textContent).toBe("42");
-      expect(slot("status").getAttribute(OWNS_STATUS)).toBe("Time up");
+      expect(JSON.parse(slot("status").getAttribute(OWNS_STATUS) ?? "null")).toEqual([
+        "text",
+        expect.any(String),
+        "Time up",
+      ]);
       expect(slot("status").textContent).toBe("Time up");
     });
   });

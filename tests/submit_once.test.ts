@@ -5,6 +5,7 @@ import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /** Behavioral and lifecycle coverage for the form-scoped submit-once contract. */
 describe("SubmitOnceController", () => {
@@ -182,7 +183,7 @@ describe("SubmitOnceController", () => {
       '<input id="image-submit" type="image" value="commit" alt="Send">',
     );
     const image = control("#image-submit") as HTMLInputElement;
-    /** Browsers omit image submitters from the collection exposed by this form. */
+    // Browsers omit image submitters from the collection exposed by this form.
     vi.spyOn(form(), "elements", "get").mockReturnValue(
       [] as unknown as HTMLFormControlsCollection,
     );
@@ -278,16 +279,11 @@ describe("SubmitOnceController", () => {
   // --- `timeout` belongs to one submission session ---------------------------------
 
   /**
-   * Rewrites `timeout` on `host` and delivers its Value callback directly when the
-   * controller defines one, since happy-dom does not reliably run it for an attribute
-   * write.
+   * Rewrites the `timeout` declaration on `host` and waits for Stimulus to deliver it, so
+   * the assertions that follow see whatever the controller does with the change.
    */
-  const declareTimeout = (value: number, host: Element = form()) => {
-    host.setAttribute("data-stimeo--submit-once-timeout-value", String(value));
-    const owner = controller(host);
-    const callback: unknown = Reflect.get(owner, "timeoutValueChanged");
-    if (typeof callback === "function") callback.call(owner);
-  };
+  const declareTimeout = (value: number, host: Element = form()) =>
+    writeValueAttribute(host, "data-stimeo--submit-once-timeout-value", String(value));
 
   it.each([
     { direction: "shrinks", next: 50 },
@@ -307,7 +303,7 @@ describe("SubmitOnceController", () => {
       turboStart(button);
       await vi.advanceTimersByTimeAsync(100);
 
-      declareTimeout(next, query("#root"));
+      await declareTimeout(next, query("#root"));
       await vi.advanceTimersByTimeAsync(899);
       expect(button.disabled).toBe(true);
       await vi.advanceTimersByTimeAsync(1);
@@ -365,7 +361,7 @@ describe("SubmitOnceController", () => {
 
     turboStart(alphaButton, query<HTMLFormElement>("#alpha"));
     await vi.advanceTimersByTimeAsync(100);
-    declareTimeout(300, root);
+    await declareTimeout(300, root);
     turboStart(betaButton, query<HTMLFormElement>("#beta")); // due at t=400
 
     await vi.advanceTimersByTimeAsync(299);
@@ -385,14 +381,14 @@ describe("SubmitOnceController", () => {
     for (const type of ["start", "end", "reconcile"]) {
       form().addEventListener(`stimeo--submit-once:${type}`, () => events.push(type));
     }
-    declareTimeout(20);
+    await declareTimeout(20);
     await vi.advanceTimersByTimeAsync(1000);
     expect(events).toEqual([]);
 
     // A session started with no watchdog is not given one by a later declaration.
-    declareTimeout(0);
+    await declareTimeout(0);
     turboStart(button);
-    declareTimeout(20);
+    await declareTimeout(20);
     await vi.advanceTimersByTimeAsync(1000);
     expect(button.disabled).toBe(true);
     expect(form().getAttribute("aria-busy")).toBe("true");
@@ -681,9 +677,48 @@ describe("SubmitOnceController", () => {
     expect(button.disabled).toBe(false);
     expect(button.getAttribute("aria-busy")).toBe("false");
     expect(button.textContent).toBe("Consumer label");
+    expect(button.hasAttribute("data-stimeo--submit-once-label")).toBe(false);
     expect(form().getAttribute("data-submitting")).toBe("consumer");
     expect(form().getAttribute("aria-busy")).toBe("false");
   });
+
+  it.each(["button", "input"] as const)(
+    "restores independent labels when an external %s moves between active forms",
+    async (kind) => {
+      document.body.innerHTML = `
+        <div id="root" data-controller="stimeo--submit-once"
+             data-stimeo--submit-once-busy-label-value="Working A">
+          <form id="first"></form><form id="second"></form>
+          ${
+            kind === "button"
+              ? '<button id="send" type="submit" form="first">Send</button>'
+              : '<input id="send" type="submit" form="first" value="Send">'
+          }
+        </div>`;
+      await startApplication();
+      const first = query<HTMLFormElement>("#first");
+      const second = query<HTMLFormElement>("#second");
+      const submitter = control("#send");
+      const label = () =>
+        submitter instanceof HTMLInputElement ? submitter.value : submitter.textContent;
+      turboStart(submitter, first);
+      expect(label()).toBe("Working A");
+      submitter.setAttribute("form", "second");
+      submitter.disabled = false;
+      query<HTMLElement>("#root").setAttribute(
+        "data-stimeo--submit-once-busy-label-value",
+        "Working B",
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      turboStart(submitter, second);
+      expect(label()).toBe("Working B");
+      turboEnd(second);
+      expect(label()).toBe("Working A");
+      turboEnd(first);
+      expect(label()).toBe("Send");
+      expect(submitter.hasAttribute("data-stimeo--submit-once-label")).toBe(false);
+    },
+  );
 
   it("isolates simultaneous sessions when mounted above multiple forms", async () => {
     document.body.innerHTML = `
@@ -1035,12 +1070,12 @@ describe("SubmitOnceController", () => {
     const input = control("#input-submit") as HTMLInputElement;
 
     turboStart(button);
-    expect(button.getAttribute("data-stimeo--submit-once-label")).toBe('["Send","Working"]');
+    expect(button.getAttribute("data-stimeo--submit-once-label")).toBe('["text","Send","Working"]');
     turboEnd();
     expect(button.hasAttribute("data-stimeo--submit-once-label")).toBe(false);
 
     turboStart(input);
-    expect(input.getAttribute("data-stimeo--submit-once-label")).toBe('["Go","Working"]');
+    expect(input.getAttribute("data-stimeo--submit-once-label")).toBe('["value","Go","Working"]');
     turboEnd();
     expect(input.hasAttribute("data-stimeo--submit-once-label")).toBe(false);
   });
@@ -1178,7 +1213,7 @@ describe("SubmitOnceController", () => {
     document.body.innerHTML = `
       <div id="root" data-controller="stimeo--submit-once">
         <div data-controller="stimeo--submit-once">
-          <form id="inner"><button id="inner-send" type="submit" data-stimeo--submit-once-label='["Kept","Busy"]'>Busy</button></form>
+          <form id="inner"><button id="inner-send" type="submit" data-stimeo--submit-once-label='["text","Kept","Busy"]'>Busy</button></form>
         </div>
       </div>`;
     await startApplication();

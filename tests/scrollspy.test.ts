@@ -95,6 +95,8 @@ describe("ScrollspyController", () => {
     document.body.innerHTML = "";
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    // An exception Stimulus caught during the case or its teardown fails the case.
+    expect(stimulusErrors).toEqual([]);
   });
 
   /** Runs the frames queued so far (one pass — a frame queued by one is not re-run). */
@@ -139,11 +141,10 @@ describe("ScrollspyController", () => {
   const start = async (markup: string = FIXTURE): Promise<void> => {
     document.body.innerHTML = markup;
     application = Application.start();
-    // Keep Stimulus exceptions visible in every case (a silent handler would
-    // swallow a controller error and leave the assertion to fail obscurely).
+    // Collects Stimulus exceptions, and `afterEach` fails a case that left one (a silent
+    // handler would swallow a controller error and leave the assertion to fail obscurely).
     application.handleError = (error) => {
       stimulusErrors.push(error);
-      console.error("=== REAL STIMULUS ERROR ===", error.message, error.stack);
     };
     application.register("stimeo--scrollspy", ScrollspyController);
     await tick();
@@ -1438,7 +1439,7 @@ describe("ScrollspyController", () => {
     await expectNoA11yViolations(requireElement("#scrollspy"));
   });
 
-  // --- Speech-order regression ------------------------------------------------
+  // --- Speech-order check -----------------------------------------------------
 
   it("announces the active link's current-location state in document order", async () => {
     await start();
@@ -1466,7 +1467,7 @@ describe("ScrollspyController", () => {
     ]);
   });
 
-  // --- Disconnect teardown regression ----------------------------------------
+  // --- Disconnect teardown check ---------------------------------------------
 
   it("cleans up observers upon disconnection", async () => {
     await start();
@@ -1477,7 +1478,8 @@ describe("ScrollspyController", () => {
 
     expect(observers[0]?.disconnectCount).toBe(0);
 
-    // Directly invoke disconnect to avoid flaky async MutationObserver lifecycle in happy-dom
+    // The case calls disconnect() directly, so it checks the controller's own teardown
+    // without waiting for the MutationObserver delivery of an element removal.
     controller.disconnect();
 
     expect(observers[0]?.disconnectCount).toBe(1);
@@ -1590,7 +1592,7 @@ describe("ScrollspyController", () => {
     expect(window.scrollTo).toHaveBeenCalledOnce();
   });
 
-  it("target API retains an existing section focus move when focus starts inside", async () => {
+  it("target API moves focus to the section when focus starts inside", async () => {
     await start(
       FIXTURE.replace(
         'id="scrollspy"',

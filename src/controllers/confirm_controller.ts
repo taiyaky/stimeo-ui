@@ -102,7 +102,10 @@ export class ConfirmController extends Controller<HTMLElement> {
   #continuing: HTMLFormElement | null = null;
   /** Whether a prompt may open: set by `connect()`, cleared first thing in `disconnect()`. */
   #connected = false;
-  /** Counts prompts asked, so one a later prompt overtook while it cancelled the previous stands down. */
+  /**
+   * Counts prompts asked, so one a later prompt overtook while it cancelled the previous
+   * stands down.
+   */
   #asked = 0;
   /** The dialog the open state was last applied to. */
   #dialog: HTMLElement | null = null;

@@ -1,10 +1,16 @@
 import { Application } from "@hotwired/stimulus";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyMask, InputMaskController } from "../src/controllers/input_mask_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
-import { disconnectAndStopApplication } from "./helpers/stimulus";
-import { tick } from "./helpers/timing";
+import { dispatchFormData } from "./helpers/form_data";
+import { composeDraft } from "./helpers/ime";
+import {
+  disconnectAndStopApplication,
+  reconnectKeepingFocus,
+  restoreFromCache,
+} from "./helpers/stimulus";
+import { flushMicrotasks, tick } from "./helpers/timing";
 
 /**
  * Behavioral tests for {@link InputMaskController} and the pure {@link applyMask}:
@@ -662,6 +668,613 @@ describe("InputMaskController", () => {
     ]);
   });
 
+  it("formats under a pattern change the composition held once a script ends it without compositionend", async () => {
+    await start(ZIP);
+    const log = record();
+    const field = input();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "12３";
+    field.setSelectionRange(3, 3);
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    field.setAttribute("data-stimeo--input-mask-pattern-value", "99/99");
+    controller().patternValueChanged();
+    // Stimulus delivers its own callback too; both land mid-composition.
+    await tick();
+    expect(field.value).toBe("12３");
+
+    // A script writes the field, and the engine drops the conversion without compositionend.
+    field.value = "1234";
+    field.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "5",
+      }),
+    );
+    await tick();
+
+    // The page wrote the text, so the format it gets is a reconciliation.
+    expect(field.value).toBe("12/34");
+    expect(log.map((entry) => entry.event)).toEqual(["reconcile"]);
+  });
+
+  it.each([
+    ["as an edit, with nothing held", false, "123-4567", ["change"]],
+    [
+      "after the pattern change the composition held, as reconciled",
+      true,
+      "123-45-67",
+      ["reconcile"],
+    ],
+  ])(
+    "formats a write that ended the composition, with the input a script sends after it, %s",
+    async (_name, held, shown, events) => {
+      await start(ZIP);
+      const log = record();
+      const field = input();
+      field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      field.value = "１２";
+      field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+      if (held) {
+        field.setAttribute("data-stimeo--input-mask-pattern-value", "999-99-99");
+        controller().patternValueChanged();
+        await tick();
+      }
+
+      // A script writes the field and tells listeners; the engine drops the conversion.
+      type("1234567");
+
+      expect(field.value).toBe(shown);
+      expect(log.map((entry) => entry.event)).toEqual(events);
+    },
+  );
+
+  it("holds nothing for a composition after one whose commit took the re-format it held", async () => {
+    await start(ZIP);
+    const field = input();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "１２";
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    field.setAttribute("data-stimeo--input-mask-pattern-value", "999-99-99");
+    controller().patternValueChanged();
+    await tick();
+    field.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    const log = record();
+
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "12-３";
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    // A script writes the field and tells listeners; the engine drops the conversion.
+    type("1234567");
+
+    expect(field.value).toBe("123-45-67");
+    expect(log.map((entry) => entry.event)).toEqual(["change"]);
+  });
+
+  it.each([
+    ["a cancelled conversion", "123", "123", []],
+    ["a confirmation the mask rejects a character of", "123あ", "123-", ["change"]],
+  ])(
+    "reports %s after the field moved keeping focus as with no move",
+    async (_name, confirmed, shown, events) => {
+      await start(ZIP);
+      type("123");
+      const log = record();
+      const field = input();
+      field.focus();
+      field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      field.value = "123４";
+      field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+
+      // moveBefore keeps focus and the conversion; the controller reconnects around it.
+      const instance = controller();
+      instance.disconnect();
+      instance.connect();
+      await tick();
+      expect(field.value).toBe("123４");
+
+      field.value = confirmed;
+      field.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+      await tick();
+
+      expect(field.value).toBe(shown);
+      expect(log.map((entry) => entry.event)).toEqual(events);
+    },
+  );
+
+  it.each([
+    ["pattern", "data-stimeo--input-mask-pattern-value", "99-99"],
+    ["tokens", "data-stimeo--input-mask-tokens-value", '{"9":"[0-4]"}'],
+    ["unmaskToHidden", "data-stimeo--input-mask-unmask-to-hidden-value", "false"],
+  ])(
+    "holds a re-format for a %s that changed with a move keeping focus, as it does with no move",
+    async (_name, attribute, value) => {
+      await start(ZIP);
+      type("123");
+      const log = record();
+      const field = input();
+      field.focus();
+      field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      field.value = "123４";
+      field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+
+      // The morph that moves the field also changes its mask.
+      reconnectKeepingFocus(controller(), () => field.setAttribute(attribute, value));
+      await tick();
+      expect(field.value).toBe("123４");
+
+      // A script writes the field and tells listeners, which ends the conversion.
+      type("1234");
+
+      expect(log.map((entry) => entry.event)).toEqual(["reconcile"]);
+    },
+  );
+
+  it("holds nothing for a pattern changed and changed back mid-composition", async () => {
+    await start(ZIP);
+    type("123");
+    const log = record();
+    const field = input();
+    field.focus();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "123４";
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    field.setAttribute("data-stimeo--input-mask-pattern-value", "99-99");
+    await tick();
+    field.setAttribute("data-stimeo--input-mask-pattern-value", "999-9999");
+    await tick();
+
+    type("1234");
+
+    expect(log.map((entry) => entry.event)).toEqual(["change"]);
+  });
+
+  it("restores the authored nonempty snapshot after readonly is released before composition", async () => {
+    await start(ZIP.replace('id="i"', 'id="i" value="xyz" readonly'));
+    expect(input().value).toBe("xyz");
+    expect(hidden().value).toBe("");
+    expect(input().hasAttribute("data-mask-empty")).toBe(false);
+    input().readOnly = false;
+    input().focus();
+    input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(input(), "xyz５");
+    input().setSelectionRange(1, 2, "backward");
+    const events: string[] = [];
+    for (const type of [
+      "stimeo--input-mask:change",
+      "stimeo--input-mask:reconcile",
+      "input",
+      "change",
+    ]) {
+      input().addEventListener(type, () => events.push(type));
+    }
+    input().setAttribute("data-mask-empty", "true");
+    input().setAttribute("data-mask-complete", "true");
+    hidden().value = "page";
+    input().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(input().hasAttribute("data-mask-empty")).toBe(false);
+    expect(input().hasAttribute("data-mask-complete")).toBe(false);
+    expect(hidden().value).toBe("");
+    expect(input().value).toBe("xyz５");
+    expect([input().selectionStart, input().selectionEnd, input().selectionDirection]).toEqual([
+      1,
+      2,
+      "backward",
+    ]);
+    expect(events).toEqual([]);
+  });
+
+  for (const pass of ["morph", "reconnect"] as const) {
+    it.each([
+      ["1234567", "123-4567", true],
+      ["12", "12", false],
+      ["", "", false],
+    ] as const)(
+      `restores committed derived output for %s in the declarations in force while a composing ${pass} holds a change`,
+      async (raw, formatted, complete) => {
+        await start(ZIP);
+        type(raw);
+        input().focus();
+        const events = record();
+        input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+        composeDraft(input(), `${formatted}５`);
+        input().setSelectionRange(1, 1);
+        input().setAttribute("data-stimeo--input-mask-pattern-value", "99-99");
+        controller().patternValueChanged();
+        hidden().value = "";
+        input().toggleAttribute("data-mask-complete", !complete);
+        input().toggleAttribute("data-mask-empty", raw !== "");
+
+        if (pass === "morph") {
+          input().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+        } else reconnectKeepingFocus(controller());
+        await tick();
+
+        expect(hidden().value).toBe(raw);
+        expect(input().hasAttribute("data-mask-complete")).toBe(complete);
+        expect(input().hasAttribute("data-mask-empty")).toBe(raw === "");
+        expect(input().value).toBe(`${formatted}５`);
+        expect([input().selectionStart, input().selectionEnd]).toEqual([1, 1]);
+        expect(events).toEqual([]);
+
+        input().value = "1234";
+        input().dispatchEvent(new Event("compositionend", { bubbles: true }));
+        expect(hidden().value).toBe("1234");
+        expect(input().value).toBe("12-34");
+        expect(events).toEqual([
+          { event: "change", detail: { masked: "12-34", unmasked: "1234", complete: true } },
+        ]);
+      },
+    );
+  }
+
+  it("restores the hooks but keeps a withdrawn sink empty while a composing pass holds synchronization off", async () => {
+    await start(ZIP);
+    type("1234567");
+    input().focus();
+    input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(input(), "123-4567５");
+    input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    controller().unmaskToHiddenValueChanged();
+    expect(hidden().value).toBe("");
+    input().removeAttribute("data-mask-complete");
+    input().setAttribute("data-mask-empty", "true");
+    input().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(hidden().value).toBe("");
+    expect(input().hasAttribute("data-mask-complete")).toBe(true);
+    expect(input().hasAttribute("data-mask-empty")).toBe(false);
+    expect(input().value).toBe("123-4567５");
+    input().value = "5";
+    input().dispatchEvent(new Event("compositionend", { bubbles: true }));
+    expect(hidden().value).toBe("");
+    expect(input().value).toBe("5");
+  });
+
+  it("does not reclaim a sink another mask wrote while a composing pass holds a change", async () => {
+    await start(`<div>${ZIP}${maskField("other")}</div>`);
+    type("1234567");
+    input().focus();
+    input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(input(), "123-4567５");
+    fill("#other", "7654321");
+    input().setAttribute("data-stimeo--input-mask-pattern-value", "99-99");
+    controller().patternValueChanged();
+    input().removeAttribute("data-mask-complete");
+    input().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(hidden().value).toBe("7654321");
+    expect(input().hasAttribute("data-mask-complete")).toBe(true);
+    expect(input().value).toBe("123-4567５");
+  });
+
+  it("writes a sink withdrawn and resumed mid-composition once a script ends the composition without compositionend", async () => {
+    await start(ZIP);
+    type("1234567");
+    const log = record();
+    const field = input();
+    field.focus();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    composeDraft(field, "123-4567５");
+    field.setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    controller().unmaskToHiddenValueChanged();
+    field.setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "true");
+    controller().unmaskToHiddenValueChanged();
+    await tick();
+    expect(hidden().value).toBe("");
+
+    // A script writes the field, and the engine drops the conversion without compositionend.
+    field.value = "7654321";
+    field.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "9",
+      }),
+    );
+    await tick();
+
+    expect(field.value).toBe("765-4321");
+    expect(hidden().value).toBe("7654321");
+    expect(log).toEqual([
+      { event: "reconcile", detail: { masked: "765-4321", unmasked: "7654321", complete: true } },
+    ]);
+  });
+
+  it("writes a sink a composing reconnect withdrew once a script ends the composition without compositionend", async () => {
+    await start(ZIP);
+    type("1234567");
+    const log = record();
+    const field = input();
+    field.focus();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    composeDraft(field, "123-4567５");
+    reconnectKeepingFocus(controller(), () =>
+      field.setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false"),
+    );
+    await tick();
+    expect(hidden().value).toBe("");
+    field.setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "true");
+    controller().unmaskToHiddenValueChanged();
+    await tick();
+    expect(hidden().value).toBe("");
+
+    // A script writes the field, and the engine drops the conversion without compositionend.
+    field.value = "7654321";
+    field.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "9",
+      }),
+    );
+    await tick();
+
+    expect(field.value).toBe("765-4321");
+    expect(hidden().value).toBe("7654321");
+    expect(log).toEqual([
+      { event: "reconcile", detail: { masked: "765-4321", unmasked: "7654321", complete: true } },
+    ]);
+  });
+
+  it("owes no format after a mid-composition synchronization toggle that withdrew no sink", async () => {
+    await start(`
+      <input id="i" type="text" data-controller="stimeo--input-mask"
+             data-stimeo--input-mask-pattern-value="999-9999"
+             data-action="input->stimeo--input-mask#format">`);
+    type("1234567");
+    const log = record();
+    const field = input();
+    field.focus();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    composeDraft(field, "123-4567５");
+    field.setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    controller().unmaskToHiddenValueChanged();
+    field.setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "true");
+    controller().unmaskToHiddenValueChanged();
+    await tick();
+
+    // A script writes the field, and the engine drops the conversion without compositionend.
+    field.value = "7654321";
+    field.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "9",
+      }),
+    );
+    await tick();
+
+    expect(field.value).toBe("7654321");
+    expect(log).toEqual([]);
+  });
+
+  it("keeps the raw value of the pattern in force while a composing pass holds the pattern's removal", async () => {
+    await start(ZIP);
+    type("1234567");
+    const events = record();
+    input().focus();
+    input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(input(), "123-4567５");
+    input().setAttribute("data-stimeo--input-mask-pattern-value", "");
+    controller().patternValueChanged();
+    expect(hidden().value).toBe("1234567");
+    hidden().value = "";
+    input().removeAttribute("data-mask-complete");
+    input().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(hidden().value).toBe("1234567");
+    expect(input().hasAttribute("data-mask-complete")).toBe(true);
+    expect(input().value).toBe("123-4567５");
+    expect(events).toEqual([]);
+
+    // The removal applies at the commit: the field passes through and the sink is taken back.
+    input().value = "1234567５";
+    input().dispatchEvent(new Event("compositionend", { bubbles: true }));
+    expect(input().value).toBe("1234567５");
+    expect(hidden().value).toBe("");
+    expect(input().hasAttribute("data-mask-complete")).toBe(false);
+  });
+
+  it("does not reclaim a sink another mask wrote while its own field composes", async () => {
+    await start(`<div>${ZIP}${maskField("other")}</div>`);
+    type("1234567");
+    input().focus();
+    input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(input(), "123-4567５");
+    fill("#other", "7654321");
+    expect(hidden().value).toBe("7654321");
+    input().removeAttribute("data-mask-complete");
+    input().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(hidden().value).toBe("7654321");
+    expect(input().hasAttribute("data-mask-complete")).toBe(true);
+    expect(input().value).toBe("123-4567５");
+  });
+
+  it("does not restore the previous or new sink after pairing changes during composition", async () => {
+    await start(ZIP);
+    type("1234567");
+    input().focus();
+    input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(input(), "123-4567５");
+    hidden().setAttribute("data-stimeo--input-mask-unmask", "other");
+    hidden().value = "";
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<input id="new-sink" type="hidden" value="page" data-stimeo--input-mask-unmask="i">',
+    );
+    input().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(hidden().value).toBe("");
+    expect(query<HTMLInputElement>("#new-sink").value).toBe("page");
+    input().value = "5";
+    input().dispatchEvent(new Event("compositionend", { bubbles: true }));
+    expect(hidden().value).toBe("");
+    expect(query<HTMLInputElement>("#new-sink").value).toBe("5");
+  });
+
+  it("does not revive a retracted sink when synchronization changes away and back during composition", async () => {
+    await start(ZIP);
+    type("1234567");
+    input().focus();
+    input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(input(), "123-4567５");
+    const owner = controller();
+    input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    owner.unmaskToHiddenValueChanged();
+    expect(hidden().value).toBe("");
+    input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "true");
+    owner.unmaskToHiddenValueChanged();
+    input().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+    await tick();
+
+    expect(hidden().value).toBe("");
+    expect(input().value).toBe("123-4567５");
+    input().value = "5";
+    input().dispatchEvent(new Event("compositionend", { bubbles: true }));
+    expect(hidden().value).toBe("5");
+  });
+
+  it.each(["", "123"])(
+    "restores pass-through hooks for %s without reviving a patterned raw output",
+    async (value) => {
+      await start(ZIP);
+      type("1234567");
+      input().setAttribute("data-stimeo--input-mask-pattern-value", "");
+      controller().patternValueChanged();
+      type(value);
+      expect(hidden().value).toBe("");
+      input().focus();
+      input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      composeDraft(input(), `${value}５`);
+      input().setAttribute("data-mask-complete", "true");
+      input().toggleAttribute("data-mask-empty", value !== "");
+      input().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await tick();
+
+      expect(input().hasAttribute("data-mask-complete")).toBe(false);
+      expect(input().hasAttribute("data-mask-empty")).toBe(value === "");
+      expect(hidden().value).toBe("");
+      expect(input().value).toBe(`${value}５`);
+    },
+  );
+
+  for (const pass of ["morph", "reconnect"] as const) {
+    it.each([
+      ["1234567", "123-4567", true],
+      ["12", "12", false],
+      ["", "", false],
+    ] as const)(
+      `restores committed derived output for %s during an unchanged composing ${pass}`,
+      async (raw, formatted, complete) => {
+        await start(ZIP);
+        type(raw);
+        input().focus();
+        const events = record();
+        input().dispatchEvent(new Event("compositionstart", { bubbles: true }));
+        composeDraft(input(), `${formatted}５`);
+        input().setSelectionRange(1, 1);
+        hidden().value = "";
+        input().removeAttribute("data-mask-complete");
+        input().toggleAttribute("data-mask-empty", raw !== "");
+
+        if (pass === "morph") {
+          input().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+        } else reconnectKeepingFocus(controller());
+        await tick();
+
+        expect(hidden().value).toBe(raw);
+        expect(input().hasAttribute("data-mask-complete")).toBe(complete);
+        expect(input().hasAttribute("data-mask-empty")).toBe(raw === "");
+        expect(input().value).toBe(`${formatted}５`);
+        expect([input().selectionStart, input().selectionEnd]).toEqual([1, 1]);
+        expect(events).toEqual([]);
+
+        input().value = "5";
+        input().dispatchEvent(new Event("compositionend", { bubbles: true }));
+        expect(hidden().value).toBe("5");
+        expect(events).toEqual([
+          { event: "change", detail: { masked: "5", unmasked: "5", complete: false } },
+        ]);
+      },
+    );
+  }
+
+  it("holds nothing for a morph that changes nothing mid-composition, so a script's write reports as an edit", async () => {
+    await start(ZIP);
+    type("123");
+    const log = record();
+    const field = input();
+    field.focus();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "123４";
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+
+    field.dispatchEvent(new CustomEvent("turbo:morph-element", { bubbles: true }));
+    await tick();
+    // A script writes the field and tells listeners, which ends the conversion.
+    type("1234");
+
+    expect(log.map((entry) => entry.event)).toEqual(["change"]);
+  });
+
+  it("holds nothing when a move keeping focus changes nothing, with Values left at their defaults", async () => {
+    await start(ZIP);
+    type("123");
+    const log = record();
+    const field = input();
+    field.focus();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "123４";
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+
+    reconnectKeepingFocus(controller());
+    await tick();
+    type("1234");
+
+    expect(log.map((entry) => entry.event)).toEqual(["change"]);
+  });
+
+  it("keeps the caret where the user put it when a held re-format applies once a write ended the composition", async () => {
+    await start(ZIP);
+    const field = input();
+    field.focus();
+    field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    field.value = "12３";
+    field.setSelectionRange(3, 3);
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    field.setAttribute("data-stimeo--input-mask-pattern-value", "999-999");
+    controller().patternValueChanged();
+
+    // A script writes the field, and the engine drops the conversion without compositionend.
+    field.value = "123456";
+    field.setSelectionRange(2, 2); // after the 2, where a click put it
+    field.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        inputType: "insertText",
+        isComposing: false,
+        data: "9",
+      }),
+    );
+    await tick();
+
+    expect(field.value).toBe("123-456");
+    expect(field.selectionStart).toBe(2);
+  });
+
   it("reports a pattern change that waited out a cancelled composition as reconciled", async () => {
     await start(ZIP);
     type("1234567");
@@ -800,6 +1413,607 @@ describe("InputMaskController", () => {
     expect(hidden().value).toBe("");
     type("7654321");
     expect(hidden().value).toBe("");
+  });
+
+  it("clears a sink disabled between connections and resumes it when enabled again", async () => {
+    await start(`<form id="zip">${ZIP}</form>`);
+    hidden().name = "zip";
+    type("1234567");
+    const instance = controller();
+    const log = record();
+    const form = query<HTMLFormElement>("#zip");
+    expect(dispatchFormData(form).get("zip")).toBe("1234567");
+
+    reconnectKeepingFocus(instance, () => {
+      input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    });
+    await tick();
+
+    expect(controller()).toBe(instance);
+    expect(input().value).toBe("123-4567");
+    expect(hidden().value).toBe("");
+    expect(dispatchFormData(form).get("zip")).toBe("");
+    expect(log).toEqual([]);
+
+    reconnectKeepingFocus(instance, () => {
+      input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "true");
+    });
+    expect(hidden().value).toBe("1234567");
+    reconnectKeepingFocus(instance, () => {
+      input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    });
+    expect(hidden().value).toBe("");
+    expect(log).toEqual([]);
+  });
+
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    "keeps a moving composition when sink synchronization is %s and the conversion commits %s",
+    async (enabled, committed) => {
+      await start(`<form id="zip">${ZIP}</form>`);
+      hidden().name = "zip";
+      type("123");
+      const field = input();
+      field.focus();
+      field.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      composeDraft(field, "123４");
+      field.setSelectionRange(4, 4);
+      const instance = controller();
+      const log = record();
+
+      reconnectKeepingFocus(instance, () => {
+        field.setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", String(enabled));
+      });
+      await tick();
+
+      expect(controller()).toBe(instance);
+      expect(document.activeElement).toBe(field);
+      expect(field.value).toBe("123４");
+      expect(field.selectionStart).toBe(4);
+      expect(hidden().value).toBe(enabled ? "123" : "");
+      expect(dispatchFormData(query<HTMLFormElement>("#zip")).get("zip")).toBe(
+        enabled ? "123" : "",
+      );
+      expect(log).toEqual([]);
+
+      field.value = committed ? "123４５" : "123";
+      const end = new Event("compositionend", { bubbles: true });
+      Object.defineProperty(end, "data", { value: committed ? "４５" : "" });
+      field.dispatchEvent(end);
+      await tick();
+
+      expect(field.value).toBe(committed ? "123-45" : "123");
+      expect(hidden().value).toBe(enabled ? (committed ? "12345" : "123") : "");
+      expect(log).toEqual(
+        committed
+          ? [
+              {
+                event: "change",
+                detail: { masked: "123-45", unmasked: "12345", complete: false },
+              },
+            ]
+          : [],
+      );
+    },
+  );
+
+  it("clears a sink synchronized before the enabled Value callback arrives", async () => {
+    await start(
+      ZIP.replace(
+        'data-controller="stimeo--input-mask"',
+        'data-controller="stimeo--input-mask" data-stimeo--input-mask-unmask-to-hidden-value="false"',
+      ),
+    );
+    input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "true");
+    type("9876543");
+    expect(hidden().value).toBe("9876543");
+    const instance = controller();
+    const log = record();
+
+    reconnectKeepingFocus(instance, () => {
+      input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    });
+    await tick();
+
+    expect(controller()).toBe(instance);
+    expect(input().value).toBe("987-6543");
+    expect(hidden().value).toBe("");
+    expect(log).toEqual([]);
+  });
+
+  it("leaves a fresh disabled instance's authored sink value intact", async () => {
+    await start(
+      ZIP.replace(
+        'data-controller="stimeo--input-mask"',
+        'data-controller="stimeo--input-mask" data-stimeo--input-mask-unmask-to-hidden-value="false"',
+      ).replace('id="hidden"', 'id="hidden" value="page-owned"'),
+    );
+    type("1234567");
+    expect(input().value).toBe("123-4567");
+    expect(hidden().value).toBe("page-owned");
+  });
+
+  it("leaves the authored sink of a disabled cache copy intact", async () => {
+    await start(ZIP);
+    type("1234567");
+    input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    controller().unmaskToHiddenValueChanged();
+    hidden().value = "page-owned";
+    const previous = controller();
+
+    application = await restoreFromCache(application, (restored) => {
+      restored.register("stimeo--input-mask", InputMaskController);
+    });
+
+    expect(controller()).not.toBe(previous);
+    expect(input().value).toBe("123-4567");
+    expect(hidden().value).toBe("page-owned");
+  });
+
+  it("does not clear a sink twice after disabling synchronization during a composition", async () => {
+    await start(ZIP);
+    type("123");
+    const field = input();
+    field.focus();
+    field.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    composeDraft(field, "123４");
+    field.setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    controller().unmaskToHiddenValueChanged();
+    expect(hidden().value).toBe("");
+    hidden().value = "page-owned";
+
+    reconnectKeepingFocus(controller());
+    await tick();
+
+    expect(field.value).toBe("123４");
+    expect(hidden().value).toBe("page-owned");
+  });
+
+  it("keeps a page-written sink when a later reconnect leaves synchronization off", async () => {
+    await start(ZIP);
+    type("1234567");
+    const instance = controller();
+    reconnectKeepingFocus(instance, () => {
+      input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    });
+    await tick();
+    expect(hidden().value).toBe("");
+    hidden().value = "page-owned";
+
+    reconnectKeepingFocus(instance);
+    await tick();
+
+    expect(controller()).toBe(instance);
+    expect(hidden().value).toBe("page-owned");
+  });
+
+  const TWO_SINKS = `
+    <form id="f">
+      <div id="a">
+        <input id="i" type="text" data-controller="stimeo--input-mask"
+               data-stimeo--input-mask-pattern-value="999-9999"
+               data-action="input->stimeo--input-mask#format">
+        <input id="sink-a" type="hidden" name="a" data-stimeo--input-mask-unmask>
+      </div>
+      <div id="b">
+        <input id="sink-b" type="hidden" name="b" value="page-b" data-stimeo--input-mask-unmask>
+      </div>
+    </form>`;
+  const sinkA = () => query<HTMLInputElement>("#sink-a");
+  const sinkB = () => query<HTMLInputElement>("#sink-b");
+
+  it("empties the sink it wrote, not the one a moved field resolves to", async () => {
+    await start(TWO_SINKS);
+    type("1234567");
+    const instance = controller();
+    expect(sinkA().value).toBe("1234567");
+
+    query("#b").prepend(input());
+    input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    await tick();
+
+    expect(controller()).toBe(instance);
+    expect(sinkA().value).toBe("");
+    expect(sinkB().value).toBe("page-b");
+    expect([...dispatchFormData(query<HTMLFormElement>("#f")).entries()]).toEqual([
+      ["a", ""],
+      ["b", "page-b"],
+    ]);
+  });
+
+  it("moves its raw value to the sink a synchronizing field resolves to after a move", async () => {
+    await start(TWO_SINKS);
+    type("1234567");
+    const instance = controller();
+
+    query("#b").prepend(input());
+    await tick();
+
+    expect(controller()).toBe(instance);
+    expect(sinkA().value).toBe("");
+    expect(sinkB().value).toBe("1234567");
+  });
+
+  const maskField = (id: string) => `
+    <input id="${id}" type="text" data-controller="stimeo--input-mask"
+           data-stimeo--input-mask-pattern-value="999-9999"
+           data-action="input->stimeo--input-mask#format">`;
+  const PAIRS = `
+    <form id="f">
+      <div id="c1">${maskField("a")}<input id="s1" type="hidden" name="s1" data-stimeo--input-mask-unmask></div>
+      <div id="c2">${maskField("b")}<input id="s2" type="hidden" name="s2" data-stimeo--input-mask-unmask></div>
+    </form>`;
+
+  it.each([false, true])(
+    "keeps the raw value another field wrote into the sink it left (same value: %s)",
+    async (same) => {
+      await start(PAIRS);
+      fill("#a", "1112222");
+      fill("#b", same ? "1112222" : "3334444");
+
+      query("#c2").prepend(query("#a"));
+      query("#c1").prepend(query("#b"));
+      await tick();
+
+      expect([...dispatchFormData(query<HTMLFormElement>("#f")).entries()]).toEqual([
+        ["s1", same ? "1112222" : "3334444"],
+        ["s2", "1112222"],
+      ]);
+    },
+  );
+
+  it("empties its own sink though another field keeps the same raw value elsewhere", async () => {
+    await start(PAIRS);
+    fill("#a", "1112222");
+    fill("#b", "1112222");
+
+    query("#a").setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    await tick();
+
+    expect(query<HTMLInputElement>("#s1").value).toBe("");
+    expect(query<HTMLInputElement>("#s2").value).toBe("1112222");
+  });
+
+  it("lets the field that wrote a shared sink last take its value back", async () => {
+    await start(`
+      <div>${maskField("a")}${maskField("b")}
+        <input id="hidden" type="hidden" data-stimeo--input-mask-unmask>
+      </div>`);
+    fill("#a", "1112222");
+    fill("#b", "3334444");
+    fill("#a", "5556666");
+    expect(hidden().value).toBe("5556666");
+
+    query("#a").setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    await tick();
+
+    expect(hidden().value).toBe("");
+  });
+
+  it("empties a shared sink when the field whose value it holds stops", async () => {
+    await start(`
+      <div>
+        <input id="a" type="text" data-controller="stimeo--input-mask"
+               data-stimeo--input-mask-pattern-value="999-9999"
+               data-action="input->stimeo--input-mask#format">
+        <input id="b" type="text" data-controller="stimeo--input-mask"
+               data-stimeo--input-mask-pattern-value="999-9999"
+               data-action="input->stimeo--input-mask#format">
+        <input id="hidden" type="hidden" data-stimeo--input-mask-unmask>
+      </div>`);
+    fill("#a", "1112222");
+    fill("#b", "3334444");
+    expect(hidden().value).toBe("3334444");
+
+    query("#b").setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    await tick();
+
+    expect(hidden().value).toBe("");
+  });
+
+  it("takes back its raw value when the field leaves the page", async () => {
+    await start(ZIP);
+    type("1234567");
+    expect(hidden().value).toBe("1234567");
+
+    input().remove();
+    await tick();
+
+    expect(hidden().value).toBe("");
+    const writers = (globalThis as unknown as Record<symbol, WeakMap<Element, object>>)[
+      Symbol.for("stimeo-ui.input-mask-raw-writer.registry.v1")
+    ];
+    expect(writers?.has(hidden())).toBe(false);
+  });
+
+  it("keeps the raw value a mask of another application wrote into the sink it left", async () => {
+    document.body.innerHTML = `
+      <div id="root-1">${maskField("i")}</div>
+      <div id="root-2"></div>
+      <input id="hidden" type="hidden" data-stimeo--input-mask-unmask="i">`;
+    application = Application.start(query("#root-1"));
+    const other = Application.start(query("#root-2"));
+    for (const app of [application, other]) app.register("stimeo--input-mask", InputMaskController);
+    try {
+      await tick();
+      type("1234567");
+      expect(hidden().value).toBe("1234567");
+
+      query("#root-2").append(input());
+      await tick();
+
+      expect(
+        other.getControllerForElementAndIdentifier(input(), "stimeo--input-mask"),
+      ).not.toBeNull();
+      expect(input().value).toBe("123-4567");
+      expect(hidden().value).toBe("1234567");
+    } finally {
+      disconnectAndStopApplication(other);
+    }
+  });
+
+  it("keeps the raw value a mask from another copy of the library wrote into the sink it left", async () => {
+    document.body.innerHTML = `
+      <div id="root-1">${maskField("i")}</div>
+      <div id="root-2"></div>
+      <input id="hidden" type="hidden" data-stimeo--input-mask-unmask="i">`;
+    application = Application.start(query("#root-1"));
+    application.register("stimeo--input-mask", InputMaskController);
+    vi.resetModules();
+    const copy = await import("../src/controllers/input_mask_controller");
+    expect(copy.InputMaskController).not.toBe(InputMaskController);
+    const other = Application.start(query("#root-2"));
+    other.register("stimeo--input-mask", copy.InputMaskController);
+    try {
+      await tick();
+      type("1234567");
+      expect(hidden().value).toBe("1234567");
+
+      query("#root-2").append(input());
+      await tick();
+
+      expect(
+        other.getControllerForElementAndIdentifier(input(), "stimeo--input-mask"),
+      ).toBeInstanceOf(copy.InputMaskController);
+      expect(hidden().value).toBe("1234567");
+    } finally {
+      disconnectAndStopApplication(other);
+    }
+  });
+
+  it("writes a sink that arrives after the field connected, on the next task", async () => {
+    await start(
+      ZIP.replace(/<input id="hidden"[^>]*>/, "").replace('id="i"', 'id="i" value="1234567"'),
+    );
+    expect(input().value).toBe("123-4567");
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<input id="hidden" type="hidden" data-stimeo--input-mask-unmask>',
+    );
+    expect(hidden().value).toBe("");
+
+    await tick();
+
+    expect(hidden().value).toBe("1234567");
+  });
+
+  it("does not write a sink that arrives after the field has left the page", async () => {
+    document.body.innerHTML = ZIP.replace(/<input id="hidden"[^>]*>/, "").replace(
+      'id="i"',
+      'id="i" value="1234567"',
+    );
+    application = Application.start();
+    application.register("stimeo--input-mask", InputMaskController);
+    await flushMicrotasks();
+    await flushMicrotasks();
+    const field = input();
+    expect(field.value).toBe("123-4567");
+    field.remove();
+    await flushMicrotasks();
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<input id="hidden" type="hidden" data-stimeo--input-mask-unmask="i">',
+    );
+
+    await tick();
+
+    expect(hidden().value).toBe("");
+  });
+
+  it("keeps its raw value while Turbo carries a permanent field to the next page", async () => {
+    await start(`
+      <div id="carried" data-turbo-permanent>${maskField("i")}</div>
+      <input id="hidden" type="hidden" data-stimeo--input-mask-unmask="i">`);
+    type("1234567");
+    const instance = controller();
+    const carried = query("#carried");
+
+    carried.remove();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect(hidden().value).toBe("1234567");
+    document.body.prepend(carried);
+    await tick();
+
+    expect(controller()).toBe(instance);
+    expect(hidden().value).toBe("1234567");
+  });
+
+  const AWAY = `
+    <form id="origin">
+      <div id="home">
+        <input id="i" type="text" data-controller="stimeo--input-mask"
+               data-stimeo--input-mask-pattern-value="999-9999"
+               data-action="input->stimeo--input-mask#format">
+      </div>
+      <input id="hidden" type="hidden" name="raw" data-stimeo--input-mask-unmask>
+    </form>
+    <form id="away"></form>`;
+
+  it.each([false, true])(
+    "leaves no raw value behind while away in a form without a sink (synchronizing: %s)",
+    async (synchronizing) => {
+      await start(AWAY);
+      type("1234567");
+      const instance = controller();
+      expect(hidden().value).toBe("1234567");
+
+      query("#away").append(input());
+      if (!synchronizing) {
+        input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+      }
+      await tick();
+      expect(controller()).toBe(instance);
+      expect(hidden().value).toBe("");
+
+      query("#home").append(input());
+      await tick();
+
+      expect(controller()).toBe(instance);
+      expect(hidden().value).toBe(synchronizing ? "1234567" : "");
+      expect(dispatchFormData(query<HTMLFormElement>("#origin")).get("raw")).toBe(
+        synchronizing ? "1234567" : "",
+      );
+    },
+  );
+
+  it("empties the sink it wrote, not one the page paired with it later", async () => {
+    await start(ZIP);
+    type("1234567");
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<input id="paired" type="hidden" value="page-owned" data-stimeo--input-mask-unmask="i">',
+    );
+
+    input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    await tick();
+
+    expect(hidden().value).toBe("");
+    expect(query<HTMLInputElement>("#paired").value).toBe("page-owned");
+  });
+
+  it.each([false, true])(
+    "leaves a value the page wrote over its raw value when it stops (reconnecting: %s)",
+    async (reconnecting) => {
+      await start(ZIP);
+      type("1234567");
+      const instance = controller();
+      hidden().value = "page-owned";
+
+      const disable = () => {
+        input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+      };
+      if (reconnecting) reconnectKeepingFocus(instance, disable);
+      else disable();
+      await tick();
+
+      expect(controller()).toBe(instance);
+      expect(hidden().value).toBe("page-owned");
+    },
+  );
+
+  it("does not take back a matching value the page wrote after it took its own back", async () => {
+    await start(ZIP);
+    type("1234567");
+    const instance = controller();
+    input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    await tick();
+    expect(hidden().value).toBe("");
+    hidden().value = "1234567";
+
+    reconnectKeepingFocus(instance);
+    await tick();
+
+    expect(controller()).toBe(instance);
+    expect(hidden().value).toBe("1234567");
+  });
+
+  const PASS_THROUGH = ZIP.replace('data-stimeo--input-mask-pattern-value="999-9999"', "").replace(
+    'id="hidden"',
+    'id="hidden" value="page-owned"',
+  );
+
+  it.each([false, true])(
+    "leaves the page's sink to a pass-through field that stops synchronizing (reconnecting: %s)",
+    async (reconnecting) => {
+      await start(PASS_THROUGH);
+      type("1234567");
+      const instance = controller();
+      expect(hidden().value).toBe("page-owned");
+
+      const disable = () => {
+        input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+      };
+      if (reconnecting) reconnectKeepingFocus(instance, disable);
+      else disable();
+      await tick();
+
+      expect(controller()).toBe(instance);
+      expect(input().value).toBe("1234567");
+      expect(hidden().value).toBe("page-owned");
+    },
+  );
+
+  it.each([false, true])(
+    "takes back the raw value it wrote while it has no pattern (reconnecting: %s)",
+    async (reconnecting) => {
+      await start(ZIP);
+      type("1234567");
+      const instance = controller();
+      expect(hidden().value).toBe("1234567");
+
+      const unmask = () => input().removeAttribute("data-stimeo--input-mask-pattern-value");
+      if (reconnecting) reconnectKeepingFocus(instance, unmask);
+      else unmask();
+      await tick();
+
+      expect(controller()).toBe(instance);
+      expect(input().value).toBe("123-4567");
+      expect(hidden().value).toBe("");
+
+      input().setAttribute("data-stimeo--input-mask-pattern-value", "999-9999");
+      await tick();
+
+      expect(hidden().value).toBe("1234567");
+    },
+  );
+
+  it("leaves a sink the page added alone when the field has written none", async () => {
+    await start(ZIP.replace(/<input id="hidden"[^>]*>/, ""));
+    type("1234567");
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<input id="hidden" type="hidden" value="page-owned" data-stimeo--input-mask-unmask>',
+    );
+
+    input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    await tick();
+
+    expect(hidden().value).toBe("page-owned");
+  });
+
+  it("keeps a sink the page adds once its own sink left and it stopped", async () => {
+    await start(ZIP);
+    type("1234567");
+    expect(hidden().value).toBe("1234567");
+    const instance = controller();
+    hidden().remove();
+    input().setAttribute("data-stimeo--input-mask-unmask-to-hidden-value", "false");
+    await tick();
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<input id="hidden" type="hidden" value="page-owned" data-stimeo--input-mask-unmask>',
+    );
+
+    reconnectKeepingFocus(instance);
+    await tick();
+
+    expect(controller()).toBe(instance);
+    expect(hidden().value).toBe("page-owned");
   });
 
   it("refills the sink with the current raw value when unmaskToHidden turns back on", async () => {

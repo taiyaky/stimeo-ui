@@ -2,6 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import { announce, fillTemplate } from "../utils/announce";
 import { AttributeLease } from "../utils/attribute_lease";
 import { firstTabStop, isTabStop } from "../utils/focus_candidate";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -13,7 +14,10 @@ const REMOVE_PART = "remove";
 /** Target name of the hidden `_destroy` input. */
 const DESTROY_FLAG_PART = "destroyFlag";
 
-/** `_destroy` values Rails treats as truthy; the flag value is the destruction truth source. */
+/**
+ * `_destroy` values counted as destroyed: the `"1"` this controller writes and `"true"`.
+ * The flag value is the destruction truth source.
+ */
 const DESTROYED_VALUES = new Set(["1", "true"]);
 
 /**
@@ -154,18 +158,21 @@ export class NestedFormController extends Controller<HTMLElement> {
     if (row) this.#removeRow(row);
   };
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     this.#tabindex.reclaim(this.element);
     this.#warnedMissing = false;
     this.#warnedTemplate = false;
-    this.element.addEventListener("click", this.#onClick);
+    this.#listeners.add(this.element, "click", this.#onClick);
     this.#reconcile.observe(this.element);
     if (!this.hasListTarget || !this.hasTemplateTarget) this.#warnMissing();
     this.#refresh();
   }
 
   override disconnect(): void {
-    this.element.removeEventListener("click", this.#onClick);
+    this.#listeners.dispose();
     this.#observer?.disconnect();
     this.#observer = null;
     this.#reconcile.disconnect();

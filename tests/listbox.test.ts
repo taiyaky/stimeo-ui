@@ -2,7 +2,7 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ListboxController } from "../src/controllers/listbox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
-import { press } from "./helpers/keyboard";
+import { keyEvent, press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
@@ -71,8 +71,90 @@ describe("ListboxController", () => {
     Array.from(document.querySelectorAll<HTMLElement>("[data-stimeo--listbox-target='option']"));
   const selected = () => options().map((option) => option.getAttribute("aria-selected"));
   const active = () => trigger().getAttribute("aria-activedescendant");
-  const triggerKey = (key: string) =>
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Home/End chord (%s, %s)", async (key, _modifier, init) => {
+    options()[1]?.click();
+    pressKey(trigger(), "ArrowDown");
+    const current = trigger();
+    current.focus();
+    const element = root();
+    const events: Event[] = [];
+    for (const name of ["stimeo--listbox:change", "stimeo--listbox:reconcile", "input", "change"]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = pressKey(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(active()).toBe("opt-2");
+    expect(selected()).toEqual(["false", "true", "false"]);
+    expect(field().value).toBe("banana");
+    expect(listEl().hidden).toBe(false);
+    expect(current.getAttribute("aria-expanded")).toBe("true");
+    expect(pressKey(current, key).defaultPrevented).toBe(true);
+    expect(active()).toBe(key === "Home" ? "opt-1" : "opt-3");
+    expect(field().value).toBe("banana");
+  });
+
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )(
+    "yields an unassigned Home/End chord (%s, %s) before active-option repair",
+    async (key, _modifier, init) => {
+      options()[1]?.click();
+      pressKey(trigger(), "ArrowDown");
+      const current = trigger();
+      current.focus();
+      current.setAttribute("aria-activedescendant", "missing-option");
+      const element = root();
+      const events: Event[] = [];
+      for (const name of [
+        "stimeo--listbox:change",
+        "stimeo--listbox:reconcile",
+        "input",
+        "change",
+      ]) {
+        element.addEventListener(name, (event) => events.push(event));
+      }
+      const before = element.outerHTML;
+      // Dispatch the retained key target without a new focus transition before reconciliation.
+      const rejected = typeKey(current, key, init);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(current);
+      expect(element.outerHTML).toBe(before);
+      expect(events).toEqual([]);
+      expect(active()).toBe("missing-option");
+      expect(field().value).toBe("banana");
+      expect(selected()).toEqual(["false", "true", "false"]);
+      expect(typeKey(current, key).defaultPrevented).toBe(true);
+      expect(active()).toBe(key === "Home" ? "opt-1" : "opt-3");
+      expect(field().value).toBe("banana");
+    },
+  );
 
   it("element API reentry reports the newest native-field commit with its own reason", () => {
     const element = document.querySelector<HTMLElement>("[data-controller='stimeo--listbox']");
@@ -281,7 +363,7 @@ describe("ListboxController", () => {
     // happy-dom has no layout: the rect/size INPUTS of the scroll math are
     // modeled here as an 80px viewport over the options.
     trigger().focus();
-    triggerKey("ArrowDown"); // open, active opt-1
+    pressKey(trigger(), "ArrowDown"); // open, active opt-1
     Object.defineProperties(listEl(), {
       scrollHeight: { value: 200, configurable: true },
       clientHeight: { value: 80, configurable: true },
@@ -289,15 +371,15 @@ describe("ListboxController", () => {
     vi.spyOn(listEl(), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 100, 80));
     const cherry = options()[2] as HTMLElement;
     vi.spyOn(cherry, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 100, 100, 40));
-    triggerKey("ArrowDown"); // opt-2 (zero-rect mock -> visible, no scroll)
+    pressKey(trigger(), "ArrowDown"); // opt-2 (zero-rect mock -> visible, no scroll)
     expect(listEl().scrollTop).toBe(0);
-    triggerKey("ArrowDown"); // opt-3: bottom 140 > list bottom 80 -> +60
+    pressKey(trigger(), "ArrowDown"); // opt-3: bottom 140 > list bottom 80 -> +60
     expect(listEl().scrollTop).toBe(60);
   });
 
   it("opens with ArrowDown and activates the first option (focus stays on trigger)", () => {
     trigger().focus();
-    triggerKey("ArrowDown");
+    pressKey(trigger(), "ArrowDown");
     expect(listEl().hidden).toBe(false);
     expect(active()).toBe("opt-1");
     expect(document.activeElement).toBe(trigger());
@@ -307,30 +389,22 @@ describe("ListboxController", () => {
     // Enter, Space and ArrowUp reach the same open path as ArrowDown. Exercising
     // one representative key leaves the other three branches free to be deleted.
     for (const key of ["Enter", " ", "ArrowUp", "ArrowDown"]) {
-      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-      trigger().dispatchEvent(event);
+      const event = pressKey(trigger(), key);
       expect(listEl().hidden, `${key} should open the list`).toBe(false);
       expect(event.defaultPrevented, `${key} should be claimed`).toBe(true);
-      triggerKey("Escape");
+      pressKey(trigger(), "Escape");
     }
   });
 
   it("leaves a modified arrow to the browser", () => {
     // This listbox is select-only — multi-select is out of scope — so no
     // modifier is claimed by any of its bindings and every chord goes to the
-    // browser. The local `triggerKey` helper builds a non-cancelable event,
-    // which could not report a claim either way, so the event is built here.
+    // browser.
     trigger().focus();
-    triggerKey("ArrowDown"); // open, active opt-1
+    pressKey(trigger(), "ArrowDown"); // open, active opt-1
     expect(active()).toBe("opt-1");
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    trigger().dispatchEvent(event);
+    const event = pressKey(trigger(), "ArrowDown", { altKey: true });
 
     expect(event.defaultPrevented).toBe(false);
     expect(active()).toBe("opt-1");
@@ -339,13 +413,7 @@ describe("ListboxController", () => {
     // Shift and Control are claimed by the APG multi-select models, which this
     // select-only listbox does not implement — so they are not claimed here.
     for (const modifier of ["shiftKey", "ctrlKey"] as const) {
-      const chord = new KeyboardEvent("keydown", {
-        key: "ArrowDown",
-        [modifier]: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      trigger().dispatchEvent(chord);
+      const chord = pressKey(trigger(), "ArrowDown", { [modifier]: true });
       expect(chord.defaultPrevented).toBe(false);
       expect(active()).toBe("opt-1");
     }
@@ -359,39 +427,39 @@ describe("ListboxController", () => {
     };
     open();
     for (const key of ["ArrowDown", "ArrowUp", "Home", "End", "b"]) {
-      expect(press(trigger(), key).defaultPrevented, `${key} should be claimed`).toBe(true);
+      expect(pressKey(trigger(), key).defaultPrevented, `${key} should be claimed`).toBe(true);
     }
     for (const key of ["Enter", " ", "Escape"]) {
       open();
-      expect(press(trigger(), key).defaultPrevented, `${key} should be claimed`).toBe(true);
+      expect(pressKey(trigger(), key).defaultPrevented, `${key} should be claimed`).toBe(true);
       expect(listEl().hidden, `${key} should close the list`).toBe(true);
     }
     open();
-    expect(press(trigger(), "Tab").defaultPrevented).toBe(false);
+    expect(pressKey(trigger(), "Tab").defaultPrevented).toBe(false);
   });
 
   it("moves the active option with arrows, wrapping, and Home/End", () => {
-    triggerKey("ArrowDown"); // open, active opt-1
-    triggerKey("ArrowDown");
+    pressKey(trigger(), "ArrowDown"); // open, active opt-1
+    pressKey(trigger(), "ArrowDown");
     expect(active()).toBe("opt-2");
-    triggerKey("ArrowUp");
+    pressKey(trigger(), "ArrowUp");
     expect(active()).toBe("opt-1");
-    triggerKey("ArrowUp"); // wrap to last
+    pressKey(trigger(), "ArrowUp"); // wrap to last
     expect(active()).toBe("opt-3");
-    triggerKey("End");
+    pressKey(trigger(), "End");
     expect(active()).toBe("opt-3");
-    triggerKey("Home");
+    pressKey(trigger(), "Home");
     expect(active()).toBe("opt-1");
   });
 
   it("activates by typeahead and resets the buffer after a pause", () => {
     vi.useFakeTimers();
     try {
-      triggerKey("ArrowDown"); // open
-      triggerKey("c");
+      pressKey(trigger(), "ArrowDown"); // open
+      pressKey(trigger(), "c");
       expect(active()).toBe("opt-3"); // Cherry
       vi.advanceTimersByTime(600); // buffer resets after the typeahead timeout
-      triggerKey("b");
+      pressKey(trigger(), "b");
       expect(active()).toBe("opt-2"); // a fresh "b" now matches Banana
     } finally {
       vi.useRealTimers();
@@ -399,20 +467,20 @@ describe("ListboxController", () => {
   });
 
   it("clears the typeahead buffer when closed", () => {
-    triggerKey("ArrowDown"); // open
-    triggerKey("c"); // buffer "c" -> Cherry
+    pressKey(trigger(), "ArrowDown"); // open
+    pressKey(trigger(), "c"); // buffer "c" -> Cherry
     expect(active()).toBe("opt-3");
-    triggerKey("Escape"); // close resets the buffer
-    triggerKey("ArrowDown"); // re-open
-    triggerKey("b"); // a stale "cb" would not match; a fresh "b" reaches Banana
+    pressKey(trigger(), "Escape"); // close resets the buffer
+    pressKey(trigger(), "ArrowDown"); // re-open
+    pressKey(trigger(), "b"); // a stale "cb" would not match; a fresh "b" reaches Banana
     expect(active()).toBe("opt-2");
   });
 
   it("selects the active option with Enter, syncing label, field, and aria-selected", () => {
     trigger().focus();
-    triggerKey("ArrowDown"); // active opt-1
-    triggerKey("ArrowDown"); // active opt-2
-    triggerKey("Enter");
+    pressKey(trigger(), "ArrowDown"); // active opt-1
+    pressKey(trigger(), "ArrowDown"); // active opt-2
+    pressKey(trigger(), "Enter");
     expect(selected()).toEqual(["false", "true", "false"]);
     expect(valueLabel().textContent).toBe("Banana");
     expect(field().value).toBe("banana");
@@ -422,9 +490,9 @@ describe("ListboxController", () => {
 
   it("commits the active option with Space as well as Enter", () => {
     trigger().focus();
-    triggerKey("ArrowDown"); // open, active opt-1
-    triggerKey("ArrowDown"); // opt-2
-    triggerKey(" ");
+    pressKey(trigger(), "ArrowDown"); // open, active opt-1
+    pressKey(trigger(), "ArrowDown"); // opt-2
+    pressKey(trigger(), " ");
     expect(field().value).toBe("banana");
     expect(listEl().hidden).toBe(true);
   });
@@ -447,30 +515,30 @@ describe("ListboxController", () => {
 
   it("leaves exactly one option marked active as the active one moves", () => {
     trigger().focus();
-    triggerKey("ArrowDown"); // opt-1
-    triggerKey("ArrowDown"); // opt-2
-    triggerKey("ArrowDown"); // opt-3
-    triggerKey("ArrowDown"); // wraps back to opt-1
+    pressKey(trigger(), "ArrowDown"); // opt-1
+    pressKey(trigger(), "ArrowDown"); // opt-2
+    pressKey(trigger(), "ArrowDown"); // opt-3
+    pressKey(trigger(), "ArrowDown"); // wraps back to opt-1
     expect(options().map((option) => option.hasAttribute("data-active"))).toEqual([
       true,
       false,
       false,
     ]);
-    triggerKey("Escape");
+    pressKey(trigger(), "Escape");
     expect(options().some((option) => option.hasAttribute("data-active"))).toBe(false);
   });
 
   it("re-opens with the selected option active", () => {
     trigger().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
     options()[1]?.click(); // select Banana, closes
-    triggerKey("ArrowDown"); // re-open
+    pressKey(trigger(), "ArrowDown"); // re-open
     expect(active()).toBe("opt-2");
   });
 
   it("closes on Escape and returns focus to the trigger", () => {
     trigger().focus();
-    triggerKey("ArrowDown");
-    triggerKey("Escape");
+    pressKey(trigger(), "ArrowDown");
+    pressKey(trigger(), "Escape");
     expect(listEl().hidden).toBe(true);
     expect(active()).toBeNull();
     expect(document.activeElement).toBe(trigger());
@@ -485,7 +553,7 @@ describe("ListboxController", () => {
     listEl().addEventListener("keydown", (event) => instance.onTriggerKeydown(event));
     for (const key of ["Escape", "Enter"]) {
       trigger().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
-      press(listEl(), key);
+      pressKey(listEl(), key);
       expect(listEl().hidden, `${key} should close the list`).toBe(true);
       expect(document.activeElement, `${key} should return focus`).toBe(trigger());
     }
@@ -493,19 +561,18 @@ describe("ListboxController", () => {
 
   it("stays open on an Escape that cancels an IME composition", () => {
     trigger().focus();
-    triggerKey("ArrowDown");
+    pressKey(trigger(), "ArrowDown");
     // A composing press steers the IME conversion and never dismisses the popup.
-    trigger().dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, isComposing: true }),
-    );
+    pressKey(trigger(), "Escape", { isComposing: true });
     expect(listEl().hidden).toBe(false);
   });
 
   it("closes on Tab without forcing focus back", () => {
     trigger().focus();
-    triggerKey("ArrowDown");
+    pressKey(trigger(), "ArrowDown");
     const focusBack = vi.spyOn(trigger(), "focus");
-    triggerKey("Tab");
+    // Focus is already on the trigger; this dispatch measures only controller focus calls.
+    typeKey(trigger(), "Tab");
     expect(listEl().hidden).toBe(true);
     // Tab is the user moving on; pulling focus back to the trigger traps them.
     expect(focusBack).not.toHaveBeenCalled();
@@ -573,14 +640,15 @@ describe("ListboxController", () => {
   });
 
   it("removes aria-activedescendant when closed (never empty string)", () => {
-    triggerKey("ArrowDown");
+    pressKey(trigger(), "ArrowDown");
     expect(trigger().hasAttribute("aria-activedescendant")).toBe(true);
-    triggerKey("Escape");
+    pressKey(trigger(), "Escape");
     expect(trigger().hasAttribute("aria-activedescendant")).toBe(false);
   });
 
   it("releases the document outside-click listener on disconnect", () => {
-    // Invoke disconnect() directly to avoid happy-dom's flaky async teardown.
+    // disconnect() is called directly, so the case measures the controller's own
+    // teardown without removing the element.
     trigger().dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
     expect(listEl().hidden).toBe(false);
     const controller = application.getControllerForElementAndIdentifier(root(), "stimeo--listbox");
@@ -609,12 +677,8 @@ describe("ListboxController", () => {
     document.addEventListener("keydown", claim, true);
     try {
       trigger().focus();
-      const event = new KeyboardEvent("keydown", {
-        key: "ArrowDown",
-        bubbles: true,
-        cancelable: true,
-      });
-      expect(trigger().dispatchEvent(event)).toBe(false);
+      const event = pressKey(trigger(), "ArrowDown");
+      expect(event.defaultPrevented).toBe(true);
     } finally {
       document.removeEventListener("keydown", claim, true);
     }
@@ -669,8 +733,8 @@ describe("ListboxController", () => {
       Array.from(root().querySelectorAll<HTMLElement>("[data-active]"), (option) => option.id);
 
     it("keeps the same active option when a preceding option is removed", async () => {
-      triggerKey("ArrowDown");
-      triggerKey("ArrowDown"); // Banana
+      pressKey(trigger(), "ArrowDown");
+      pressKey(trigger(), "ArrowDown"); // Banana
 
       options()[0]?.remove();
       await tick();
@@ -678,14 +742,14 @@ describe("ListboxController", () => {
       expect(active()).toBe("opt-2");
       expect(activeMarkerIds()).toEqual(["opt-2"]);
 
-      triggerKey("Enter");
+      pressKey(trigger(), "Enter");
       expect(field().value).toBe("banana");
       expect(valueLabel().textContent).toBe("Banana");
     });
 
     it("falls forward when the active target token is removed", async () => {
-      triggerKey("ArrowDown");
-      triggerKey("ArrowDown"); // Banana
+      pressKey(trigger(), "ArrowDown");
+      pressKey(trigger(), "ArrowDown"); // Banana
       const removedActive = options()[1] as HTMLElement;
 
       removedActive.removeAttribute("data-stimeo--listbox-target");
@@ -695,7 +759,7 @@ describe("ListboxController", () => {
       expect(activeMarkerIds()).toEqual(["opt-3"]);
       expect(removedActive.hasAttribute("data-active")).toBe(false);
 
-      triggerKey(" ");
+      pressKey(trigger(), " ");
       expect(field().value).toBe("cherry");
       expect(valueLabel().textContent).toBe("Cherry");
     });
@@ -716,8 +780,8 @@ describe("ListboxController", () => {
     });
 
     it("falls back to the previous survivor when the active option was last", async () => {
-      triggerKey("ArrowDown");
-      triggerKey("End"); // Cherry
+      pressKey(trigger(), "ArrowDown");
+      pressKey(trigger(), "End"); // Cherry
       const removedActive = options()[2] as HTMLElement;
 
       removedActive.remove();
@@ -727,13 +791,13 @@ describe("ListboxController", () => {
       expect(activeMarkerIds()).toEqual(["opt-2"]);
       expect(removedActive.hasAttribute("data-active")).toBe(false);
 
-      triggerKey("Enter");
+      pressKey(trigger(), "Enter");
       expect(field().value).toBe("banana");
     });
 
     it("transfers active identity and commit ownership to a same-id replacement", async () => {
-      triggerKey("ArrowDown");
-      triggerKey("ArrowDown"); // Banana
+      pressKey(trigger(), "ArrowDown");
+      pressKey(trigger(), "ArrowDown"); // Banana
       const original = options()[1] as HTMLElement;
       const replacement = document.createElement("li");
       replacement.id = original.id;
@@ -752,14 +816,14 @@ describe("ListboxController", () => {
       expect(replacement.hasAttribute("data-active")).toBe(true);
       expect(original.hasAttribute("data-active")).toBe(false);
 
-      triggerKey("Enter");
+      pressKey(trigger(), "Enter");
       expect(field().value).toBe("plantain");
       expect(valueLabel().textContent).toBe("Plantain");
     });
 
     it("does not adopt a stale active marker from a different-id replacement", () => {
-      triggerKey("ArrowDown");
-      triggerKey("ArrowDown"); // Banana
+      pressKey(trigger(), "ArrowDown");
+      pressKey(trigger(), "ArrowDown"); // Banana
       const original = options()[1] as HTMLElement;
       const replacement = document.createElement("li");
       replacement.id = "opt-replacement";
@@ -772,7 +836,7 @@ describe("ListboxController", () => {
       replacement.textContent = "Replacement";
 
       original.replaceWith(replacement);
-      triggerKey("Enter");
+      pressKey(trigger(), "Enter");
 
       expect(field().value).toBe("cherry");
       expect(valueLabel().textContent).toBe("Cherry");
@@ -781,7 +845,7 @@ describe("ListboxController", () => {
     it("clears active state and makes commit keys inert after the last option is removed", async () => {
       for (const option of options().slice(1)) option.remove();
       await tick();
-      triggerKey("ArrowDown"); // Apple is the only option.
+      pressKey(trigger(), "ArrowDown"); // Apple is the only option.
       const last = options()[0] as HTMLElement;
       const changes: unknown[] = [];
       root().addEventListener("stimeo--listbox:change", (event) => changes.push(event));
@@ -793,8 +857,8 @@ describe("ListboxController", () => {
       expect(activeMarkerIds()).toEqual([]);
       expect(last.hasAttribute("data-active")).toBe(false);
 
-      triggerKey("Enter");
-      triggerKey(" ");
+      pressKey(trigger(), "Enter");
+      pressKey(trigger(), " ");
       expect(changes).toEqual([]);
       expect(field().value).toBe("");
       expect(listEl().hidden).toBe(false);
@@ -803,11 +867,11 @@ describe("ListboxController", () => {
     it.each(["Enter", " "])(
       "does not commit a shifted option on synchronous %s before target callbacks run",
       (key) => {
-        triggerKey("ArrowDown");
-        triggerKey("ArrowDown"); // Banana
+        pressKey(trigger(), "ArrowDown");
+        pressKey(trigger(), "ArrowDown"); // Banana
 
         options()[0]?.remove();
-        triggerKey(key);
+        pressKey(trigger(), key);
 
         expect(field().value).toBe("banana");
         expect(valueLabel().textContent).toBe("Banana");
@@ -833,10 +897,14 @@ describe("ListboxController", () => {
         .join("");
       document.body.innerHTML = `
         <div data-controller="stimeo--listbox">
-          <button type="button" data-stimeo--listbox-target="trigger" aria-haspopup="listbox"
-                  aria-expanded="false" aria-controls="lb-list2"
-                  data-action="click->stimeo--listbox#toggle keydown->stimeo--listbox#onKeydown">
-            <span data-stimeo--listbox-target="value">Choose…</span>
+          <span id="lb-label2">Favorite fruit</span>
+          <button type="button" role="combobox" aria-haspopup="listbox" aria-expanded="false"
+                  aria-controls="lb-list2"
+                  aria-labelledby="lb-label2 lb-value2"
+                  data-stimeo--listbox-target="trigger"
+                  data-action="click->stimeo--listbox#toggle
+                               keydown->stimeo--listbox#onTriggerKeydown">
+            <span id="lb-value2" data-stimeo--listbox-target="value">Choose…</span>
           </button>
           <ul id="lb-list2" role="listbox" aria-label="Options" hidden
               data-stimeo--listbox-target="list">${opts}</ul>
@@ -857,8 +925,8 @@ describe("ListboxController", () => {
     });
 
     it("gives every option an explicit value", async () => {
-      // An absent `aria-selected` means "not selectable" in ARIA, so a forgotten
-      // attribute hides a selectable option from assistive technology.
+      // APG has every selectable but unselected option carry `aria-selected="false"`;
+      // the controller writes it rather than relying on the role's implicit default.
       await startWith(["", "", ""]);
 
       expect(selected()).toEqual(["false", "false", "false"]);
@@ -873,9 +941,10 @@ describe("ListboxController", () => {
 
     it("does not emit change while describing the initial state", async () => {
       const seen: unknown[] = [];
-      document.addEventListener("change", (event) => seen.push(event));
+      const listener = (event: Event) => seen.push(event);
+      document.addEventListener("change", listener);
       await startWith(["", 'aria-selected="true"', ""]);
-      document.removeEventListener("change", (event) => seen.push(event));
+      document.removeEventListener("change", listener);
 
       expect(seen).toEqual([]);
     });
@@ -915,8 +984,8 @@ describe("ListboxController", () => {
       // The active option is a stable id, not a position index, so prepending an
       // option leaves `aria-activedescendant` and what Enter commits in agreement.
       // This pins the *addition* side of that identity.
-      triggerKey("ArrowDown"); // opens and activates
-      triggerKey("ArrowDown");
+      pressKey(trigger(), "ArrowDown"); // opens and activates
+      pressKey(trigger(), "ArrowDown");
       const active = trigger().getAttribute("aria-activedescendant");
       expect(active).toBeTruthy();
 
@@ -934,7 +1003,7 @@ describe("ListboxController", () => {
       // Strict: assert against the option the active id names, so committing its
       // *neighbour* fails — a mere `!== "late"` check would not.
       const expected = document.getElementById(active as string) as HTMLElement;
-      triggerKey("Enter");
+      pressKey(trigger(), "Enter");
       expect(field().value).toBe(expected.dataset.value);
     });
   });
@@ -1360,33 +1429,31 @@ describe("ListboxController with no options", () => {
     document.querySelector<HTMLElement>("[data-stimeo--listbox-target='trigger']") as HTMLElement;
   const listEl = () =>
     document.querySelector<HTMLElement>("[data-stimeo--listbox-target='list']") as HTMLElement;
-  const key = (k: string) =>
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
 
   it("opens but activates nothing, and navigation keys are inert", () => {
-    key("ArrowDown"); // open
+    pressKey(trigger(), "ArrowDown"); // open
     expect(listEl().hidden).toBe(false);
     expect(trigger().hasAttribute("aria-activedescendant")).toBe(false);
 
-    key("ArrowDown"); // no options -> no-op (no NaN)
-    key("End");
-    key("Enter"); // nothing to commit
+    pressKey(trigger(), "ArrowDown"); // no options -> no-op (no NaN)
+    pressKey(trigger(), "End");
+    pressKey(trigger(), "Enter"); // nothing to commit
     expect(trigger().hasAttribute("aria-activedescendant")).toBe(false);
     expect(listEl().hidden).toBe(false);
 
-    key("Escape"); // still closes cleanly
+    pressKey(trigger(), "Escape"); // still closes cleanly
     expect(listEl().hidden).toBe(true);
   });
 
   it("opens with no active descendant, even one the page wrote onto the trigger", () => {
     trigger().setAttribute("aria-activedescendant", "ghost");
-    key("ArrowDown");
+    pressKey(trigger(), "ArrowDown");
     expect(listEl().hidden).toBe(false);
     expect(trigger().hasAttribute("aria-activedescendant")).toBe(false);
   });
 
   it("navigates into options appended after an empty open", async () => {
-    key("ArrowDown"); // opens with nothing to activate
+    pressKey(trigger(), "ArrowDown"); // opens with nothing to activate
     ["First", "Second"].forEach((label, index) => {
       const option = document.createElement("li");
       option.id = `late-${index}`;
@@ -1401,7 +1468,7 @@ describe("ListboxController with no options", () => {
 
     // ArrowUp with nothing active enters at the END of the list; entering at the
     // top instead is indistinguishable while only one option exists.
-    key("ArrowUp");
+    pressKey(trigger(), "ArrowUp");
     expect(trigger().getAttribute("aria-activedescendant")).toBe("late-1");
   });
 });
@@ -1555,8 +1622,7 @@ describe("ListboxController active-marker writes", () => {
     const items = Array.from(
       document.querySelectorAll<HTMLElement>("[data-stimeo--listbox-target='option']"),
     );
-    const arrowDown = () =>
-      trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    const arrowDown = () => pressKey(trigger, "ArrowDown");
 
     trigger.focus();
     arrowDown(); // opens on the first option
@@ -1627,28 +1693,26 @@ describe("ListboxController typeahead", () => {
   const trigger = () =>
     document.querySelector<HTMLElement>("[data-stimeo--listbox-target='trigger']") as HTMLElement;
   const active = () => trigger().getAttribute("aria-activedescendant");
-  const key = (k: string, init: KeyboardEventInit = {}) =>
-    trigger().dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, ...init }));
 
   it("cycles through the options sharing a first letter when the key repeats", () => {
-    key("ArrowDown"); // open, activates ta-1
-    key("s");
+    pressKey(trigger(), "ArrowDown"); // open, activates ta-1
+    pressKey(trigger(), "s");
     expect(active()).toBe("ta-2"); // search resumes after the active option
-    key("s");
+    pressKey(trigger(), "s");
     expect(active()).toBe("ta-3");
-    key("s");
+    pressKey(trigger(), "s");
     expect(active()).toBe("ta-1"); // wraps
   });
 
   it("resumes narrowing after a repeat instead of stalling on a dead query", () => {
     vi.useFakeTimers();
     try {
-      key("ArrowDown"); // open, activates ta-1
-      key("s");
+      pressKey(trigger(), "ArrowDown"); // open, activates ta-1
+      pressKey(trigger(), "s");
       expect(active()).toBe("ta-2");
-      key("s");
+      pressKey(trigger(), "s");
       expect(active()).toBe("ta-3"); // repeat: the query stays "s"
-      key("e");
+      pressKey(trigger(), "e");
       expect(active()).toBe("ta-3"); // "se" -> Send, the only match
     } finally {
       vi.useRealTimers();
@@ -1658,11 +1722,11 @@ describe("ListboxController typeahead", () => {
   it("narrows to a multi-character prefix while the query is fresh", () => {
     vi.useFakeTimers();
     try {
-      key("ArrowDown"); // open, activates ta-1
-      key("s");
+      pressKey(trigger(), "ArrowDown"); // open, activates ta-1
+      pressKey(trigger(), "s");
       expect(active()).toBe("ta-2"); // Save as…
       vi.advanceTimersByTime(400); // still inside the idle window
-      key("e");
+      pressKey(trigger(), "e");
       expect(active()).toBe("ta-3"); // "se" -> Send
     } finally {
       vi.useRealTimers();
@@ -1670,13 +1734,13 @@ describe("ListboxController typeahead", () => {
   });
 
   it("matches the authored aria-label rather than the visible text", () => {
-    key("ArrowDown"); // open, activates ta-1
-    key("z");
+    pressKey(trigger(), "ArrowDown"); // open, activates ta-1
+    pressKey(trigger(), "z");
     expect(active()).toBe("ta-4");
 
-    key("Escape");
-    key("ArrowDown"); // re-open with a fresh query
-    key("a");
+    pressKey(trigger(), "Escape");
+    pressKey(trigger(), "ArrowDown"); // re-open with a fresh query
+    pressKey(trigger(), "a");
     expect(active()).toBe("ta-1"); // "Archive" is named Zeta, so nothing matches "a"
   });
 
@@ -1685,30 +1749,30 @@ describe("ListboxController typeahead", () => {
     // "Send" here — type-ahead must agree.
     document.querySelector("#ta-3")?.setAttribute("aria-label", "  ");
 
-    key("ArrowDown"); // open, activates ta-1
-    key("s");
+    pressKey(trigger(), "ArrowDown"); // open, activates ta-1
+    pressKey(trigger(), "s");
     expect(active()).toBe("ta-2");
-    key("s");
+    pressKey(trigger(), "s");
     expect(active()).toBe("ta-3"); // still reachable by its own text
   });
 
   it("leaves the active option alone when nothing matches", () => {
-    key("ArrowDown"); // open, activates ta-1
-    key("q");
+    pressKey(trigger(), "ArrowDown"); // open, activates ta-1
+    pressKey(trigger(), "q");
     expect(active()).toBe("ta-1");
   });
 
   it("ignores printable keys pressed with a command modifier", () => {
-    key("ArrowDown"); // open, activates ta-1
-    key("s", { ctrlKey: true });
+    pressKey(trigger(), "ArrowDown"); // open, activates ta-1
+    pressKey(trigger(), "s", { ctrlKey: true });
     expect(active()).toBe("ta-1");
   });
 
   it("drops the pending idle reset on disconnect", () => {
     vi.useFakeTimers();
     try {
-      key("ArrowDown"); // open
-      key("s"); // arms the idle reset
+      pressKey(trigger(), "ArrowDown"); // open
+      pressKey(trigger(), "s"); // arms the idle reset
       expect(vi.getTimerCount()).toBe(1);
 
       disconnectAndStopApplication(application);
@@ -1861,7 +1925,7 @@ describe("ListboxController a selection the page moves", () => {
     expect(writes).toEqual(["banana", "apple"]);
   });
 
-  it("writes the label's ownership markers only when they change", async () => {
+  it("writes the label's ownership record only when it changes", async () => {
     await mount(listbox("banana", { extra: 'data-stimeo--listbox-placeholder-value="Pick"' }));
     const writes: string[] = [];
     const probe = new MutationObserver((records) => {
@@ -1869,7 +1933,7 @@ describe("ListboxController a selection the page moves", () => {
     });
     probe.observe(byId("pm-value"), {
       attributes: true,
-      attributeFilter: ["data-stimeo--listbox-owns-label", "data-stimeo--listbox-original-label"],
+      attributeFilter: ["data-stimeo--listbox-owns-label"],
     });
 
     witnessNoPass();
@@ -1881,7 +1945,7 @@ describe("ListboxController a selection the page moves", () => {
     await tick();
     expect(field().value).toBe("banana");
 
-    // Both passes ran, and neither moved the selection, so the markers already
+    // Both passes ran, and neither moved the selection, so the record already
     // held what they would have written.
     expect(writes).toEqual([]);
 
@@ -1889,7 +1953,7 @@ describe("ListboxController a selection the page moves", () => {
     await tick();
     probe.disconnect();
 
-    // The user's selection changes the label's text, and with it one marker.
+    // The user's selection changes the label's text, and with it the record.
     expect(writes).toEqual(["data-stimeo--listbox-owns-label"]);
   });
 
@@ -2085,7 +2149,6 @@ describe("ListboxController a selection the page moves", () => {
     expect(details).toEqual([{ value: "", option: null }]);
     // Handed back, the label carries none of the controller's bookkeeping.
     expect(byId("pm-value").hasAttribute("data-stimeo--listbox-owns-label")).toBe(false);
-    expect(byId("pm-value").hasAttribute("data-stimeo--listbox-original-label")).toBe(false);
   });
 
   it("shows the placeholder Value once nothing is selected", async () => {
@@ -2511,7 +2574,7 @@ describe("ListboxController settled reports", () => {
     list.hidden = false;
     const trigger = root().querySelector("button") as HTMLButtonElement;
     trigger.setAttribute("aria-activedescendant", first.id);
-    instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "Shift" }));
+    instance.onTriggerKeydown(keyEvent("Shift"));
     expect(trigger.hasAttribute("aria-activedescendant")).toBe(false);
     expect(items().some((item) => item.hasAttribute("data-active"))).toBe(false);
   });
@@ -2526,7 +2589,7 @@ describe("ListboxController settled reports", () => {
     instance.open();
     const trigger = root().querySelector("button") as HTMLButtonElement;
     trigger.setAttribute("aria-activedescendant", (items()[2] as HTMLElement).id);
-    instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "ArrowUp" }));
+    instance.onTriggerKeydown(keyEvent("ArrowUp"));
     expect(trigger.getAttribute("aria-activedescendant")).toBe((items()[1] as HTMLElement).id);
   });
   it("clears an unknown active descendant without choosing an unrelated fallback", () => {
@@ -2540,7 +2603,7 @@ describe("ListboxController settled reports", () => {
     instance.open();
     const trigger = root().querySelector("button") as HTMLButtonElement;
     trigger.setAttribute("aria-activedescendant", "unknown-option");
-    instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "Shift" }));
+    instance.onTriggerKeydown(keyEvent("Shift"));
     expect(trigger.hasAttribute("aria-activedescendant")).toBe(false);
     expect(items().some((item) => item.hasAttribute("data-active"))).toBe(false);
   });
@@ -2554,7 +2617,7 @@ describe("ListboxController settled reports", () => {
         .filter((item) => item.hasAttribute("data-active"))
         .map((item) => item.dataset.value);
     instance.open();
-    instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    instance.onTriggerKeydown(keyEvent("ArrowDown"));
     expect(marked()).toEqual(["b"]);
     const late = document.createElement("li");
     late.setAttribute("role", "option");
@@ -2567,7 +2630,7 @@ describe("ListboxController settled reports", () => {
     instance.optionTargetConnected(late);
     await tick();
     expect(marked()).toEqual(["b"]);
-    instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+    instance.onTriggerKeydown(keyEvent("Enter"));
     expect(submitted()).toBe("b");
   });
   it("ignores a non-opening key while its trigger is absent", () => {
@@ -2576,9 +2639,7 @@ describe("ListboxController settled reports", () => {
       "stimeo--listbox",
     ) as ListboxController;
     root().querySelector("button")?.removeAttribute("data-stimeo--listbox-target");
-    expect(() =>
-      instance.onTriggerKeydown(new KeyboardEvent("keydown", { key: "Shift" })),
-    ).not.toThrow();
+    expect(() => instance.onTriggerKeydown(keyEvent("Shift"))).not.toThrow();
   });
   it("leaves open and close inert after the optional live list disappears", () => {
     const list = root().querySelector('[data-stimeo--listbox-target="list"]') as HTMLElement;

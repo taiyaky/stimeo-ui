@@ -55,10 +55,11 @@ const hookOwners = sharedRegistry(
  *
  * @remarks
  * Behavior only — it ships no color or animation, just the hook (pair with CSS, and
- * with Announcer / Flash for non-visual notice). Under `prefers-reduced-motion: reduce`
- * the emphasis is suppressed entirely (the element simply appears), so no hook or
- * event is emitted. A hook never outlives the connection that set it: the observer and
- * pending timers are torn down on `disconnect()` (Turbo navigation included), and
+ * with `stimeo--announcer` / `stimeo--flash` for non-visual notice). Under
+ * `prefers-reduced-motion: reduce` the emphasis is suppressed entirely (the element
+ * simply appears), so no hook or event is emitted. A hook never outlives the connection
+ * that set it: the observer and pending timers are torn down on `disconnect()` (Turbo
+ * navigation included), and
  * `connect()` clears any hook that arrived with the DOM — a page Turbo restores from its
  * cache, an in-page move — because the timer that would have removed it is gone.
  * An element carries at most one emphasis at a time: highlighting it again — a reorder

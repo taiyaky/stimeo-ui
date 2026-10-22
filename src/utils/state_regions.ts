@@ -1,3 +1,4 @@
+import { setAttributeIfChanged } from "./attribute_write";
 import { sharedRegistry } from "./shared_registry";
 
 /** What a consumer declares once about the regions one boolean state reveals. */
@@ -173,9 +174,8 @@ export class StateRegions {
         const below = hold.linked ? stack[index - 1] : undefined;
         if (below) {
           if (region.hidden !== below.written) region.hidden = below.written;
-        } else if (region.getAttribute("hidden") !== hold.authored) {
-          if (hold.authored === null) region.removeAttribute("hidden");
-          else region.setAttribute("hidden", hold.authored);
+        } else {
+          setAttributeIfChanged(region, "hidden", hold.authored);
         }
       }
       this.#mark(region, stack);
@@ -279,9 +279,7 @@ export class StateRegions {
       );
     });
     for (const [name, recorded] of records) {
-      if (region.getAttribute(name) === recorded) continue;
-      if (recorded === null) region.removeAttribute(name);
-      else region.setAttribute(name, recorded);
+      setAttributeIfChanged(region, name, recorded);
     }
   }
 

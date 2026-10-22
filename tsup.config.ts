@@ -35,9 +35,9 @@ export default defineConfig({
   // annotations, legal comments, the source-map directive); the `.d.ts` files keep the
   // TSDoc. Unminified, so the output still reads as code.
   plugins: [stripCommentsPlugin()],
-  // @floating-ui/dom stays external: it is an OPTIONAL peer pulled in only by the
-  // opt-in `stimeo-ui/positioning` subpath, never by the core. The audit allows
-  // this bare import solely under `positioning/` so the core stays zero-dep.
+  // @floating-ui/dom and @rails/actioncable stay external: each is an OPTIONAL peer
+  // pulled in only by its opt-in subpath (`stimeo-ui/positioning`, `stimeo-ui/cable`),
+  // never by the core.
   external: ["@hotwired/stimulus", "@floating-ui/dom", "@rails/actioncable"],
   outDir: "dist",
 });

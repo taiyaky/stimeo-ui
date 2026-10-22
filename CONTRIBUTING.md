@@ -22,6 +22,10 @@ bun run test
 bun run build
 ```
 
+Type checks run TypeScript 7 through the `@typescript/native` alias. The separate
+`typescript` dependency stays on TypeScript 6 for the compiler API and declaration
+generation. Use `bun run typecheck` so the compiler is selected explicitly.
+
 `bun run test` is the unit suite (Vitest + happy-dom) and covers behavior, ARIA,
 keyboard interaction, machine-detectable a11y, and screen-reader speech order
 (via a virtual screen reader). Please cover your change with unit tests. Only the

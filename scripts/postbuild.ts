@@ -15,7 +15,7 @@ import { finalizeJavaScriptArtifact, type RawSourceMap } from "./source_map";
  * Post-build step for the Inspector CLI.
  *
  * tsup builds `dist/inspector/cli_bin.js`; this script then:
- *   1. Verifies every public core source agrees with the `stimeoControllers`
+ *   1. Verifies every core controller source agrees with the `stimeoControllers`
  *      registry and has both JavaScript and declaration artifacts for the
  *      wildcard package export.
  *   2. Generates the bundled manifest JSON from the reflected controllers,

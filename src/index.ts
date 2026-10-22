@@ -108,6 +108,7 @@ import { TransitionController } from "./controllers/transition_controller";
 import { TreeViewController } from "./controllers/tree_view_controller";
 import type { StateReason } from "./utils/state_reason";
 
+export { prepareInputMaskForm } from "./controllers/input_mask_controller";
 export type { StateReason };
 
 export {

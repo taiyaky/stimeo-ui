@@ -9,8 +9,8 @@ import { runMcpServer } from "./mcp/server";
  *
  * `stimeo mcp` is dispatched here rather than inside {@link runCli} because it
  * is not a run-to-completion command: it starts a resident stdio server that
- * only exits when the client closes stdin. Everything else keeps the original
- * synchronous exit-code contract.
+ * only exits when the client closes stdin. Every other command runs to
+ * completion inside {@link runCli}, whose return value is the exit code.
  */
 const argv = process.argv.slice(2);
 

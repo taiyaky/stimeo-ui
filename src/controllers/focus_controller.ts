@@ -30,9 +30,9 @@ import { FocusTrap } from "../utils/focus_trap";
  * `activate` and `deactivate` dispatch `{}`.
  *
  * @remarks
- * Behavior only — it does not open/close or render an overlay (pair with Dialog) and
- * does not move DOM (pair with Portal). It reuses the shared `FocusTrap`, so it never
- * scroll-locks the page (unlike the modal overlays) and tracks live focusable children
+ * Behavior only — it does not open/close or render an overlay (pair with `stimeo--dialog`)
+ * and does not move DOM (pair with `stimeo--portal`). It reuses the shared `FocusTrap`, so
+ * it never scroll-locks the page (unlike the modal overlays) and tracks live focusable children
  * (dynamic additions are picked up on the next `Tab`). The opener is recorded on
  * activate and refocused on release if still present. Everything is torn down on
  * `disconnect()` (Turbo navigation included) without yanking focus.

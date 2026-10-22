@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComboboxController } from "../src/controllers/combobox_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { composeDraft } from "./helpers/ime";
+import { keyEvent, press as pressKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -62,8 +64,7 @@ describe("ComboboxController", () => {
     input().value = value;
     input().dispatchEvent(new Event("input", { bubbles: true }));
   };
-  const press = (key: string) =>
-    input().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  const press = (key: string) => !pressKey(input(), key, { bubbles: true }).defaultPrevented;
   const clickInput = () => input().dispatchEvent(new MouseEvent("click", { bubbles: true }));
   /** Runs `act`, lets Stimulus deliver the callbacks, and returns the writes to `attributes`. */
   const attributeWrites = async (element: Element, attributes: string[], act: () => void) => {
@@ -291,7 +292,7 @@ describe("ComboboxController", () => {
   });
 
   it("uses an authored active descendant as the starting option for navigation", () => {
-    controller().open();
+    input().focus();
     input().setAttribute("aria-activedescendant", "opt-apricot");
     press("ArrowDown");
     expect(input().getAttribute("aria-activedescendant")).toBe("opt-banana");
@@ -300,9 +301,7 @@ describe("ComboboxController", () => {
   it("keeps navigation safe after the input leaves an open popup", () => {
     controller().open();
     input().remove();
-    expect(() =>
-      controller().onKeydown(new KeyboardEvent("keydown", { key: "ArrowDown" })),
-    ).not.toThrow();
+    expect(() => controller().onKeydown(keyEvent("ArrowDown", {}))).not.toThrow();
     expect(option("opt-apple").getAttribute("aria-selected")).toBe("true");
   });
 
@@ -407,15 +406,13 @@ describe("ComboboxController", () => {
   });
 
   it("shows the popup on Alt+ArrowDown without moving into it", () => {
-    // The one chord this pattern claims: the list appears but no option becomes
-    // active, so the next bare ArrowDown starts from the top.
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    input().dispatchEvent(event);
+    input().focus();
+    controller().close();
+    expect(document.activeElement).toBe(input());
+    // Alt+ArrowDown shows the list without moving into it: no option becomes active,
+    // so the next bare ArrowDown starts from the top.
+    const event = keyEvent("ArrowDown", { altKey: true, bubbles: true, cancelable: true });
+    pressKey(input(), event);
 
     expect(event.defaultPrevented).toBe(true);
     expect(list().hidden).toBe(false);
@@ -428,13 +425,8 @@ describe("ComboboxController", () => {
     press("ArrowDown"); // open with an active option
     expect(list().hidden).toBe(false);
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowUp",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    input().dispatchEvent(event);
+    const event = keyEvent("ArrowUp", { altKey: true, bubbles: true, cancelable: true });
+    pressKey(input(), event);
 
     expect(event.defaultPrevented).toBe(true);
     expect(list().hidden).toBe(true);
@@ -442,16 +434,14 @@ describe("ComboboxController", () => {
   });
 
   it("leaves Alt+ArrowUp to the browser while the popup is closed", () => {
+    input().focus();
+    controller().close();
+    expect(document.activeElement).toBe(input());
     // The pattern binds Alt+Up only while the popup is displayed. With it down
     // there is nothing to close, so the press is not the widget's to swallow.
     expect(list().hidden).toBe(true);
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowUp",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    input().dispatchEvent(event);
+    const event = keyEvent("ArrowUp", { altKey: true, bubbles: true, cancelable: true });
+    pressKey(input(), event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(list().hidden).toBe(true);
@@ -463,13 +453,8 @@ describe("ComboboxController", () => {
     expect(list().hidden).toBe(false);
     const active = input().getAttribute("aria-activedescendant");
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    input().dispatchEvent(event);
+    const event = keyEvent("ArrowDown", { altKey: true, bubbles: true, cancelable: true });
+    pressKey(input(), event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(list().hidden).toBe(false);
@@ -477,17 +462,15 @@ describe("ComboboxController", () => {
   });
 
   it("leaves a ctrl-modified arrow to the browser", () => {
+    input().focus();
+    controller().close();
+    expect(document.activeElement).toBe(input());
     // A bare arrow belongs to the combobox; a chorded one does not. Alt is the
     // only modifier this pattern claims (Alt+Down/Up open and close the popup),
     // so Ctrl passes straight through: the popup stays down, no option becomes
     // active, and the press reaches the browser uncanceled.
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      ctrlKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    input().dispatchEvent(event);
+    const event = keyEvent("ArrowDown", { ctrlKey: true, bubbles: true, cancelable: true });
+    pressKey(input(), event);
 
     expect(event.defaultPrevented).toBe(false);
     expect(list().hidden).toBe(true);
@@ -496,6 +479,9 @@ describe("ComboboxController", () => {
   });
 
   it("activates the last option on ArrowUp from the input (no active option)", () => {
+    input().focus();
+    controller().close();
+    expect(list().hidden).toBe(true);
     press("ArrowUp");
     expect(list().hidden).toBe(false);
     expect(input().getAttribute("aria-activedescendant")).toBe("opt-banana");
@@ -516,9 +502,7 @@ describe("ComboboxController", () => {
     press("ArrowDown"); // active apple
     // The Enter confirming an IME candidate carries isComposing=true: it must
     // not commit the option or close the popup.
-    input().dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }),
-    );
+    pressKey(input(), "Enter", { isComposing: true, bubbles: true });
     expect(input().value).toBe("ap");
     expect(list().hidden).toBe(false);
     // A real Enter then commits.
@@ -532,8 +516,7 @@ describe("ComboboxController", () => {
     press("ArrowDown"); // active apple
 
     input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    input().value = "b";
-    input().dispatchEvent(new InputEvent("input", { bubbles: true }));
+    composeDraft(input(), "b");
 
     // Some browsers omit isComposing on the confirming keydown. The controller's
     // lifecycle state must still protect Enter and defer intermediate filtering.
@@ -613,11 +596,14 @@ describe("ComboboxController", () => {
   });
 
   it("leaves Escape unconsumed while the list is closed", () => {
+    input().focus();
+    controller().close();
+    expect(document.activeElement).toBe(input());
     // With nothing to close the widget owns no dismissable state, so the press
     // stays free for the shared Escape resolver (an enclosing dialog etc.).
     expect(list().hidden).toBe(true);
-    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    input().dispatchEvent(event);
+    const event = keyEvent("Escape", { bubbles: true, cancelable: true });
+    pressKey(input(), event);
     expect(event.defaultPrevented).toBe(false);
   });
 
@@ -682,7 +668,7 @@ describe("ComboboxController", () => {
     await expectNoA11yViolations(root, { rules: { region: { enabled: false } } });
   });
 
-  // Speech-order regression. Captured before AND after moving the active option:
+  // Speech-order check. Captured before AND after moving the active option:
   // the whole ordered array pins aria-expanded, the option set, and the
   // aria-activedescendant / aria-selected flip on ArrowDown.
   it("announces the expanded listbox and the active option in order on ArrowDown", async () => {
@@ -709,11 +695,11 @@ describe("ComboboxController", () => {
     ]);
   });
 
-  // Teardown regression: disconnect() must drop the document-level outside-click
+  // Teardown check: disconnect() must drop the document-level outside-click
   // listener. It leaves the listbox markup as-is, so a surviving listener would
   // still close the detached popup on an outside click — assert it stays open to
-  // prove the listener was removed. Invoked directly to avoid happy-dom's flaky
-  // async MutationObserver lifecycle.
+  // prove the listener was removed. The test stays synchronous, so it calls
+  // disconnect() directly instead of waiting for the MutationObserver delivery.
   it("releases the document outside-click listener on disconnect", () => {
     const root = document.querySelector("[data-controller='stimeo--combobox']") as HTMLElement;
     type("ap");
@@ -726,6 +712,90 @@ describe("ComboboxController", () => {
     document.body.click();
     expect(list().hidden).toBe(false);
   });
+
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+        key,
+        modifier,
+      })),
+    ),
+  )(
+    "yields modified boundary key $modifier+$key without changing popup or input state",
+    async ({ key, modifier }) => {
+      input().focus();
+      pressKey(input(), "ArrowDown");
+      pressKey(input(), "ArrowDown");
+      expect(input().getAttribute("aria-activedescendant")).toBe("opt-apricot");
+      input().value = "sample text";
+      input().setSelectionRange(3, 7);
+      const seen: string[] = [];
+      for (const name of ["stimeo--combobox:selected", "input", "change"]) {
+        root().addEventListener(name, () => seen.push(name));
+      }
+      const before = root().innerHTML;
+      const values = Array.from(root().querySelectorAll<HTMLInputElement>("input")).map(
+        (field) => field.value,
+      );
+      const event = pressKey(input(), key, { [modifier]: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(input());
+      expect(root().innerHTML).toBe(before);
+      expect(
+        Array.from(root().querySelectorAll<HTMLInputElement>("input")).map((field) => field.value),
+      ).toEqual(values);
+      expect(input().value).toBe("sample text");
+      expect(input().selectionStart).toBe(3);
+      expect(input().selectionEnd).toBe(7);
+      expect(input().getAttribute("aria-activedescendant")).toBe("opt-apricot");
+      expect(seen).toEqual([]);
+    },
+  );
+
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+        key,
+        modifier,
+      })),
+    ),
+  )(
+    "yields modified boundary key $modifier+$key before reconciling a replaced active option",
+    async ({ key, modifier }) => {
+      input().focus();
+      pressKey(input(), "ArrowDown");
+      pressKey(input(), "ArrowDown");
+      expect(input().getAttribute("aria-activedescendant")).toBe("opt-apricot");
+      input().value = "sample text";
+      input().setSelectionRange(3, 7);
+      const active = [option("opt-apple"), option("opt-apricot"), option("opt-banana")][1];
+      if (!active) throw new Error("Missing active option");
+      const replacement = active.cloneNode(true) as HTMLElement;
+      replacement.removeAttribute("data-active");
+      replacement.setAttribute("aria-selected", "false");
+      active.replaceWith(replacement);
+      const seen: string[] = [];
+      for (const name of ["stimeo--combobox:selected", "input", "change"]) {
+        root().addEventListener(name, () => seen.push(name));
+      }
+      const before = root().innerHTML;
+      const values = Array.from(root().querySelectorAll<HTMLInputElement>("input")).map(
+        (field) => field.value,
+      );
+      const event = pressKey(input(), key, { [modifier]: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(input());
+      expect(root().innerHTML).toBe(before);
+      expect(
+        Array.from(root().querySelectorAll<HTMLInputElement>("input")).map((field) => field.value),
+      ).toEqual(values);
+      expect(input().value).toBe("sample text");
+      expect(input().selectionStart).toBe(3);
+      expect(input().selectionEnd).toBe(7);
+      expect(input().getAttribute("aria-activedescendant")).toBe("opt-apricot");
+      expect(seen).toEqual([]);
+    },
+  );
 
   it("jumps to the first option on Home and the last on End", () => {
     type("ap"); // Apple, Apricot visible
@@ -751,6 +821,9 @@ describe("ComboboxController", () => {
   });
 
   it("Home/End are inert while the listbox is closed", () => {
+    input().focus();
+    controller().close();
+    expect(document.activeElement).toBe(input());
     press("Home"); // closed → no preventDefault, no activedescendant
     expect(list().hidden).toBe(true);
     expect(input().hasAttribute("aria-activedescendant")).toBe(false);
@@ -804,9 +877,7 @@ describe("ComboboxController", () => {
     document.addEventListener("keydown", claim, true);
     try {
       input().focus();
-      input().dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
-      );
+      pressKey(input(), "ArrowDown", { bubbles: true, cancelable: true });
     } finally {
       document.removeEventListener("keydown", claim, true);
     }
@@ -908,10 +979,9 @@ describe("ComboboxController", () => {
   });
 
   it("no-ops instead of throwing when the list target is absent", () => {
-    // The controller declares this tolerance in three places (open / close /
-    // #isClosed), and each one has to hold on its own: an unguarded dereference
-    // in any of them throws out of the caller. Here the missing target is the
-    // list; the case below covers the missing input.
+    // Every path that reaches the list guards its absence on its own: an unguarded
+    // dereference in any of them throws out of the caller. Here the missing target
+    // is the list; the case below covers the missing input.
     type("ap");
     list().remove();
 
@@ -1030,10 +1100,10 @@ describe("ComboboxController", () => {
     controller().inputTargetConnected(replacement);
     replacement.value = "ap";
     controller().open();
-    controller().onKeydown(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    controller().onKeydown(keyEvent("ArrowDown", {}));
 
     replacement.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+    controller().onKeydown(keyEvent("Enter", {}));
 
     expect(replacement.value).toBe("ap");
     expect(list().hidden).toBe(false);
@@ -1049,8 +1119,8 @@ describe("ComboboxController", () => {
 
     replacement.value = "ap";
     controller().open();
-    controller().onKeydown(new KeyboardEvent("keydown", { key: "ArrowDown" }));
-    controller().onKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+    controller().onKeydown(keyEvent("ArrowDown", {}));
+    controller().onKeydown(keyEvent("Enter", {}));
 
     expect(replacement.value).toBe("apple");
   });
@@ -1100,8 +1170,8 @@ describe("ComboboxController", () => {
     (key) => {
       type("a");
       press("ArrowDown"); // Apple active
-      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-      input().dispatchEvent(event);
+      const event = keyEvent(key, { bubbles: true, cancelable: true });
+      pressKey(input(), event);
 
       expect(event.defaultPrevented).toBe(true);
     },
@@ -1207,7 +1277,8 @@ describe("ComboboxController", () => {
       const only = input();
       only.remove();
 
-      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      // Drive the callback directly, so a throw from it fails this case instead of
+      // surfacing outside the test.
       expect(() => controller().inputTargetDisconnected(only)).not.toThrow();
       await tick();
       expect(list().hidden).toBe(false);
@@ -1701,7 +1772,7 @@ describe("ComboboxController", () => {
       typeInto(host, "zz");
       expect(emptyRegion(host).hidden).toBe(false);
 
-      field(host).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      pressKey(field(host), "Escape", { bubbles: true });
 
       expect(berryList(host).hidden).toBe(true);
       expect(host.hasAttribute("data-stimeo--combobox-empty")).toBe(false);

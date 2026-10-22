@@ -26,7 +26,7 @@ import { TransitionCompletion } from "../utils/transition_completion";
  *   </button>
  *
  * Implements the WAI-ARIA APG **Disclosure** pattern for a single inline region.
- * Unlike {@link AccordionController} it manages exactly one trigger/content pair
+ * Unlike `stimeo--accordion` it manages exactly one trigger/content pair
  * with no sibling coordination, and unlike a dropdown the content expands in
  * flow and never closes on an outside click.
  *

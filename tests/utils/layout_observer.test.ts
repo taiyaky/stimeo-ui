@@ -12,8 +12,10 @@ class FakeResizeObserver implements ResizeObserver {
   static instances: FakeResizeObserver[] = [];
   readonly observed = new Set<Element>();
   disconnected = false;
+  readonly #callback: ResizeObserverCallback;
 
-  constructor(private readonly callback: ResizeObserverCallback) {
+  constructor(callback: ResizeObserverCallback) {
+    this.#callback = callback;
     FakeResizeObserver.instances.push(this);
   }
 
@@ -33,7 +35,7 @@ class FakeResizeObserver implements ResizeObserver {
   /** Test helper: simulate a notification for an element still being observed. */
   trigger(element?: Element): void {
     if (element && !this.observed.has(element)) return;
-    this.callback([], this);
+    this.#callback([], this);
   }
 }
 

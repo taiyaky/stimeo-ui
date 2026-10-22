@@ -4,8 +4,8 @@ import { RovingTabindex } from "./roving_tabindex";
 
 /** Consumer-owned behavior that differs between removable-chip widgets. */
 export interface ChipRowOptions {
-  /** Element whose writing direction defines logical previous/next. */
-  readonly directionElement: HTMLElement;
+  /** Returns the current container whose direction defines logical previous/next. */
+  readonly getDirectionElement: () => HTMLElement;
   /** Returns the current chip elements in navigation order. */
   readonly getItems: () => readonly HTMLElement[];
   /** Resolves the one remove button owned by a chip. Defaults to its first button. */
@@ -26,7 +26,7 @@ export interface ChipRowOptions {
  * deliberately excludes sibling controls such as an authored "Clear all" button.
  */
 export class ChipRow {
-  readonly #directionElement: HTMLElement;
+  readonly #getDirectionElement: () => HTMLElement;
   readonly #getItems: () => readonly HTMLElement[];
   readonly #getButton: (item: HTMLElement) => HTMLButtonElement | null;
   readonly #onRemove: (index: number) => void;
@@ -35,7 +35,7 @@ export class ChipRow {
   #container: HTMLElement | null = null;
 
   constructor(options: ChipRowOptions) {
-    this.#directionElement = options.directionElement;
+    this.#getDirectionElement = options.getDirectionElement;
     this.#getItems = options.getItems;
     this.#getButton =
       options.getButton ?? ((item) => matchingPart<HTMLButtonElement>(item, "button"));
@@ -156,7 +156,7 @@ export class ChipRow {
     const buttons = entry.buttons;
     const index = entry.buttonIndex;
 
-    switch (logicalArrowKey(event.key, this.#directionElement)) {
+    switch (logicalArrowKey(event.key, this.#getDirectionElement())) {
       case "ArrowLeft":
         if (index > 0) {
           event.preventDefault();

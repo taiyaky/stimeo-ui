@@ -360,7 +360,10 @@ interface OrderWalk {
   readonly from: Element | null;
   /** Every stop, in flat-tree order. */
   readonly tree: TabStopElement[];
-  /** How many entries of {@link OrderWalk.tree} come before `from`; `-1` until the walk meets it. */
+  /**
+   * How many entries of {@link OrderWalk.tree} come before `from`; `-1` until the walk
+   * meets it.
+   */
   fromAt: number;
 }
 

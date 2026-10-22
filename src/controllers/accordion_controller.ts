@@ -1,6 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { type StateReason, stateReasonFor } from "../utils/state_reason";
 import { StateRegions } from "../utils/state_regions";
 import { targetSelector } from "../utils/target_selector";
@@ -168,6 +168,7 @@ export class AccordionController extends Controller<HTMLElement> {
     // nested menu) must not ALSO act on it — composition depends on this yield.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     const current = event.currentTarget as HTMLButtonElement;
     if (this.triggerTargets.indexOf(current) === -1) return;
 

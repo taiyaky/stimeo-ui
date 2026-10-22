@@ -2,13 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DetachGate, type DetachGateHost } from "../../src/utils/detach_gate";
 import { flushMicrotasks, tick } from "../helpers/timing";
 
-/**
- * Unit tests for {@link DetachGate}: the synchronous fast path (element left
- * the document / identifier token removed), the microtask probe for the
- * ambiguous remainder, reconnect cancellation, and the orphaned-probe disarm
- * that keeps teardown single-shot.
- */
-
 const IDENTIFIER = "stimeo--x";
 
 /** A minimal host over a real element — no Stimulus application needed. */
@@ -25,6 +18,12 @@ const connectedHost = (): DetachGateHost => {
   return host(el);
 };
 
+/**
+ * Unit tests for {@link DetachGate}: the synchronous fast path (element left
+ * the document / identifier token removed), the microtask probe for the
+ * ambiguous remainder, reconnect cancellation, and the orphaned-probe disarm
+ * that keeps teardown single-shot.
+ */
 describe("DetachGate", () => {
   afterEach(() => {
     document.body.innerHTML = "";

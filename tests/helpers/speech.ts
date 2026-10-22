@@ -1,7 +1,7 @@
 import { virtual } from "@guidepup/virtual-screen-reader";
 
 /**
- * Speech-order regression helper, built on `@guidepup/virtual-screen-reader`.
+ * Speech-order check helper, built on `@guidepup/virtual-screen-reader`.
  *
  * The virtual screen reader walks the **accessibility tree** and simulates what
  * a screen reader would announce — role, accessible name, and state — entirely
@@ -20,7 +20,7 @@ export interface CaptureSpeechOptions {
   container?: Element;
   /**
    * Number of forward (`next()`) movements to perform after the reader starts.
-   * **Prefer this for regression tests.** When omitted, the reader advances until
+   * **Prefer this for speech-order checks.** When omitted, the reader advances until
    * the spoken phrase stops changing (see auto-traverse note on
    * {@link captureSpeech}), which is convenient but lossy when adjacent elements
    * announce identically.

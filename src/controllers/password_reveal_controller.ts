@@ -66,10 +66,11 @@ function maskCopyOf(type: AttributeLease<HTMLInputElement>, input: HTMLInputElem
  * **A revealed credential never comes back from the Turbo cache.** Turbo empties a
  * password field in the copy it caches, and a revealed field is a text field it leaves
  * alone. So the field is masked on `turbo:before-cache`, silently, with what the user
- * typed kept. Turbo also dispatches that event on pages that stay (a promoted frame
- * navigation, a `popstate` without Turbo state, a refresh of a cached URL, a permanent
- * element carried on), where the cost is a re-mask; the alternative is a credential left
- * in plain text in the cache, so this rewind of the live page is kept on purpose.
+ * typed kept. Turbo also dispatches that event while the field stays live (a promoted
+ * frame navigation, a `popstate` without Turbo state, a refresh of a cached URL, or a
+ * `data-turbo-permanent` element carried into the next page), where the cost is a
+ * re-mask; the alternative is a credential left in plain text in the cache, so this
+ * rewind of the live page is kept on purpose.
  * A promoted frame navigation copies the page before the event, so a copy can still
  * carry a revealed field: a new instance that finds one the author wrote as a password
  * field masks it and empties it, as Turbo would have, without dispatching `toggle`. The
@@ -120,10 +121,11 @@ export class PasswordRevealController extends Controller<HTMLElement> {
    * Whether this controller is between `connect()` and `disconnect()`.
    *
    * Target callbacks outlive the controller: Stimulus stops the target observer
-   * after `disconnect()`, so a field leaving after teardown still reaches
-   * {@link PasswordRevealController.inputTargetDisconnected}. Arming from there
-   * would put a timer back that nothing will clear. The element staying in the
-   * document does not answer this — unloading the controller leaves it there.
+   * after `disconnect()`, and stopping it reports the field as disconnected, so
+   * {@link PasswordRevealController.inputTargetDisconnected} runs after teardown.
+   * Arming from there would put a timer back that nothing will clear. The element
+   * staying in the document does not answer this — unloading the controller leaves
+   * it there.
    */
   #connected = false;
 
@@ -255,6 +257,9 @@ export class PasswordRevealController extends Controller<HTMLElement> {
    * visit into the same document, and a copy can come back while no instance is connected
    * on the page being left. The listener holds no page state; it reads only the incoming
    * page and leaves the live one alone.
+   *
+   * @stimeoListenerLifetime document installed once per document and identifier and
+   *   kept for the document's life.
    */
   static #maskRendersInto(document: Document, identifier: string): void {
     const masked = PasswordRevealController.#maskedRenders.get(document) ?? new Set<string>();
@@ -328,8 +333,8 @@ export class PasswordRevealController extends Controller<HTMLElement> {
 
   /**
    * Returns the field to masked on `turbo:before-cache`, so the copy Turbo caches holds no
-   * revealed credential. Turbo also dispatches the event on pages that stay; there the
-   * reveal ends with what the user typed kept, silently and without moving focus.
+   * revealed credential. Turbo also dispatches the event while the field stays live; there
+   * the reveal ends with what the user typed kept, silently and without moving focus.
    */
   readonly #rewindToMasked = (): void => {
     this.#timers.clearAll();

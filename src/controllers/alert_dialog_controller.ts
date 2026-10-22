@@ -159,9 +159,10 @@ export class AlertDialogController extends Controller<HTMLElement> {
 
   /**
    * Applies the open state to the dialog that is now first, when that dialog changed. An
-   * open dialog moves its modal trap onto it, keeping the trap's place among the page's modals
-   * and the opener focus returns to; focus moves inside unless it is already there or a modal
-   * opened over this one takes `Tab`. An open dialog left with no dialog closes without a decision event.
+   * open dialog moves its modal trap onto it, keeping the trap's place among the page's
+   * modals and the opener focus returns to; focus moves inside unless it is already there
+   * or a modal opened over this one takes `Tab`. An open dialog left with no dialog closes
+   * without a decision event.
    */
   #adoptDialog(): void {
     const dialog = this.hasDialogTarget ? this.dialogTarget : null;

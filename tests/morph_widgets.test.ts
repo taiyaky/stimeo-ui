@@ -27,6 +27,7 @@ import { TimePickerController } from "../src/controllers/time_picker_controller"
 import { ToggleGroupController } from "../src/controllers/toggle_group_controller";
 import { ToolbarController } from "../src/controllers/toolbar_controller";
 import { TreeViewController } from "../src/controllers/tree_view_controller";
+import { composeDraft } from "./helpers/ime";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -501,12 +502,15 @@ describe("morph ownership and active input", () => {
       host.addEventListener("stimeo--listbox:reconcile", () => seen.push("reconcile"));
       host.addEventListener("change", () => seen.push("native change"));
       label.removeAttribute("data-stimeo--listbox-owns-label");
-      label.removeAttribute("data-stimeo--listbox-original-label");
       label.textContent = replacement;
       field.value = "lost";
       await morph(host);
       expect(label.textContent).toBe("Apple");
-      expect(label.getAttribute("data-stimeo--listbox-owns-label")).toBe("Apple");
+      expect(JSON.parse(label.getAttribute("data-stimeo--listbox-owns-label") ?? "null")).toEqual([
+        "text",
+        expect.any(String),
+        "Apple",
+      ]);
       expect(field.value).toBe("apple");
       expect(seen).toEqual([]);
       option.setAttribute("aria-selected", "false");
@@ -563,13 +567,73 @@ describe("morph ownership and active input", () => {
       const input =
         host instanceof HTMLInputElement ? host : host.querySelector<HTMLInputElement>("input");
       if (!input) throw new Error("Missing input");
+      const reports: string[] = [];
+      for (const type of ["change", "reconcile"]) {
+        host.addEventListener(`stimeo--${id}:${type}`, () => reports.push(type));
+      }
       input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-      input.value = "３４";
+      composeDraft(input, "３４");
       await morph(host);
       expect(input.value).toBe("３４");
-      input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "３４" }));
+      const confirmation = new Event("compositionend", { bubbles: true });
+      Object.defineProperty(confirmation, "data", { value: "３４" });
+      input.dispatchEvent(confirmation);
       await tick();
-      expect(input.value).not.toBe("３４");
+      // A morph that changed nothing owes no pass: the number entry leaves the confirmed
+      // text to the user's own commit, and the others format it as the composition ends
+      // and report it as the user's edit.
+      if (id === "number-input") {
+        expect(input.value).toBe("３４");
+        expect(reports).toEqual([]);
+      } else {
+        expect(input.value).not.toBe("３４");
+        expect(reports).toEqual(["change"]);
+      }
+    });
+  }
+
+  for (const [id, name, value] of [
+    ["number-input", "max", "20"],
+    ["currency-input", "precision", "3"],
+  ] as const) {
+    it(`${id} applies a ${name} a morph changed mid-composition once the composition ends`, async () => {
+      const host = await mount(id);
+      const input = host.querySelector<HTMLInputElement>("input");
+      if (!input) throw new Error("Missing input");
+      if (id === "currency-input") {
+        // Wired as the controller's TSDoc example wires it: the focused entry settles on blur.
+        input.setAttribute(
+          "data-action",
+          "input->stimeo--currency-input#onInput blur->stimeo--currency-input#format",
+        );
+        await tick();
+      } else {
+        // The change binding of the controller's TSDoc example: the browser's change
+        // confirms the entry.
+        input.setAttribute("data-action", "change->stimeo--number-input#onInput");
+        await tick();
+      }
+      // An IME composes only in the focused field.
+      input.focus();
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      composeDraft(input, "３４");
+      host.setAttribute(`data-stimeo--${id}-${name}-value`, value);
+      await morph(host);
+      expect(input.value).toBe("３４");
+      const confirmation = new Event("compositionend", { bubbles: true });
+      Object.defineProperty(confirmation, "data", { value: "３４" });
+      input.dispatchEvent(confirmation);
+      await tick();
+      // The focused entry keeps the typed form until the user settles it: the number entry
+      // applies the new max when the browser reports the change, the currency entry its
+      // fixed precision on blur.
+      if (id === "number-input") {
+        expect(input.value).toBe("３４");
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      input.blur();
+      await tick();
+      expect(input.value).toBe(id === "number-input" ? "20" : "34.000");
     });
   }
 });

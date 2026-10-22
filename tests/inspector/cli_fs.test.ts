@@ -1,8 +1,12 @@
-import fs from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
+import * as fs from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EXAMPLES_SCHEMA_VERSION } from "../../src/inspector/examples";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual };
+});
 
 const realReadFileSync = fs.readFileSync;
 const realStatSync = fs.statSync;
@@ -24,13 +28,9 @@ function failStat(path: string, error: NodeJS.ErrnoException): void {
 }
 
 /**
- * Loads the CLI after the filesystem is patched. The CLI imports its `node:fs`
- * functions by name, so the patched module object is republished to named
- * imports and the CLI module is evaluated afresh, which binds whichever the
- * runtime hands out.
+ * Loads a fresh CLI against the filesystem exports patched for the current case.
  */
 async function freshCli(): Promise<typeof import("../../src/inspector/cli")> {
-  syncBuiltinESMExports();
   vi.resetModules();
   return await import("../../src/inspector/cli");
 }
@@ -44,7 +44,6 @@ async function freshCli(): Promise<typeof import("../../src/inspector/cli")> {
 describe("CLI filesystem answers", () => {
   afterEach(() => {
     vi.restoreAllMocks();
-    syncBuiltinESMExports();
   });
 
   it("loads the bundled example index when its format version matches this build", async () => {

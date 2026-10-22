@@ -3,9 +3,13 @@
  *
  * Two waiting semantics exist and must not be conflated:
  *
- * - {@link tick} waits one **macrotask** (`setTimeout(0)`). Use it for
- *   "next task" boundaries: Stimulus connecting controllers through its
- *   `MutationObserver`, or work the controller scheduled with `setTimeout`.
+ * - {@link tick} waits one **macrotask** (`setTimeout(0)`), so the microtask
+ *   queue has drained by the time it resolves. Use it to wait for Stimulus
+ *   connecting controllers — for a controller registered in the same turn as
+ *   `Application.start()`, the markup already in the document connects in a
+ *   microtask after that call, once its DOM-ready promise resolves; markup
+ *   inserted later connects when its `MutationObserver` records are
+ *   delivered — or for work the controller scheduled with `setTimeout`.
  * - {@link flushMicrotasks} yields to pending **microtasks** only. Use it to
  *   verify a contract that promises completion within a microtask (e.g.
  *   `queueMicrotask` or a resolved-promise chain): awaiting `tick()` there

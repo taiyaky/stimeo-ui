@@ -184,8 +184,9 @@ describe("CheckboxController", () => {
     // native checkbox exposes its checked/indeterminate state through IDL
     // properties — which real screen readers map to the accessibility tree, yet
     // happy-dom's simulation does not. Forcing `aria-checked` onto a native
-    // checkbox to satisfy the simulation would violate the APG, so this pins the
-    // durable semantics the simulation *can* observe: the group role+name and
+    // checkbox to satisfy the simulation would conflict with ARIA in HTML, which
+    // leaves a native checkbox's state to its `checked` and `indeterminate`, so this
+    // pins the durable semantics the simulation *can* observe: the group role+name and
     // every checkbox role+name, in reading order. A lost role, dropped name, or
     // reordering surfaces as a diff; native tri-state announcement can only be
     // confirmed with a real screen reader.

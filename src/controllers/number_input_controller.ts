@@ -1,18 +1,24 @@
 import { Controller } from "@hotwired/stimulus";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
+import { BlurDeferral } from "../utils/blur_deferral";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { commitField } from "../utils/field_mirror";
 import { toHalfWidth } from "../utils/half_width";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { MoveCounter } from "../utils/move_counter";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
 import { SafeInterval, SafeTimeout } from "../utils/safe_timeout";
-import { snapSteppedValue, stepSteppedValue } from "../utils/stepped_value";
+import { type SteppedRange, snapSteppedValue, stepSteppedValue } from "../utils/stepped_value";
 
 /** Marks a `disabled` state derived and therefore removable by this controller. */
 const OWNED_DISABLED = "data-number-input-disabled";
+
+/** Whether `shown` steps through the same values as `declared`. */
+const sameRange = (shown: SteppedRange | undefined, declared: SteppedRange): boolean =>
+  shown?.min === declared.min && shown.max === declared.max && shown.step === declared.step;
 
 /**
  * Headless, accessible number / spin-button behavior.
@@ -81,9 +87,20 @@ const OWNED_DISABLED = "data-number-input-disabled";
  *   last, which a blank field leaves empty and a missing input leaves as it was.
  *   The same instance keeps that number when it connects again — after an
  *   in-page move, say — and takes a new one without a report from an input that
- *   is present, while a new instance starts with none. Neither event fires on
- *   connect. A runtime change that arrives while the input is composing (IME)
- *   leaves the uncommitted text alone and is applied once the composition ends.
+ *   is present unless that same input still carries focused, unconfirmed typing.
+ *   A new instance starts with none. Neither event fires on connect. A runtime change
+ *   that arrives while the input is composing (IME) leaves the uncommitted text alone.
+ * - Text the user typed or a composition left stays a draft, separate from the
+ *   accepted text, until the field reports change or a widget step confirms it.
+ *   While the same input holds focus and that draft, morphs, reconnections and the
+ *   input leaving the targets and coming back preserve its text and selection, and
+ *   restore only accepted ARIA and button state; the input losing focus while the controller
+ *   cannot see it ends the draft. Range declarations wait:
+ *   confirmation applies the latest range once, reports a changed number as change,
+ *   and adds no reconcile or native report to the browser's own change. A draft that
+ *   returns to the accepted text ends, and a range that waited is reconciled then.
+ *   A different page write ends this draft's protection; an identical write gives
+ *   no evidence of a different origin. A replacement input is reconciled normally.
  * - A text-type spinbutton's text is read through the half-width mapping, so
  *   full-width digits and signs an IME confirms (`３４`, `－５`) count as the number
  *   they show, and the field is written back in half-width.
@@ -115,6 +132,7 @@ export class NumberInputController extends Controller<HTMLElement> {
   static events = ["change", "reconcile"] as const;
 
   declare readonly inputTarget: HTMLInputElement;
+  declare readonly inputTargets: HTMLInputElement[];
   declare readonly hasInputTarget: boolean;
   declare readonly incrementTarget: HTMLButtonElement;
   declare readonly incrementTargets: HTMLButtonElement[];
@@ -139,20 +157,33 @@ export class NumberInputController extends Controller<HTMLElement> {
    */
   static readonly #SUPPRESS_RESET_MS = 250;
 
-  /** Aborts global pointer guards on disconnect so none outlive the element. */
-  #globalGuards: AbortController | null = null;
+  /**
+   * The pointer, focus, typing and morph-value listeners of one connection, released on
+   * `disconnect()` so none outlive the element.
+   */
+  readonly #listeners = new ListenerSet();
   /** Per-target guards allow an old button to be released without touching its replacement. */
   readonly #buttonGuards = new Map<HTMLButtonElement, AbortController>();
   /**
    * Tracks IME lifecycle on the current input, including confirming keys without a
-   * signal, and runs a reconciliation the composition held back once it ends.
+   * signal. A reconciliation that arrives while the input composes is held. The text
+   * the composition leaves — confirmed, cancelled, or left when the engine stopped
+   * composing — is the user's draft while it differs from the accepted text, so the
+   * held reconciliation waits for its confirmation; back at the accepted text it runs
+   * once the composition ends: after `compositionend`, or at once when a write ended
+   * the composition without one.
    */
   readonly #composition = new CompositionTracker({
-    onEnd: () => {
-      if (this.#reconcileHeld) this.#repaint.schedule();
+    onEnd: (event) => {
+      if (this.hasInputTarget && event.target === this.inputTarget) {
+        this.#recordDraft(this.inputTarget);
+      }
+    },
+    onAbandon: () => {
+      if (this.#reconcileHeld) this.#reconcile();
     },
   });
-  /** A reconciliation that arrived while the input was composing. */
+  /** A reconciliation owed once editing ends: the range changed while it ran. */
   #reconcileHeld = false;
   /** Restores authored custom-spinbutton ARIA when a target leaves or the controller stops. */
   readonly #ariaValueNow = new AttributeLease<HTMLInputElement>("aria-valuenow", this.identifier);
@@ -165,6 +196,33 @@ export class NumberInputController extends Controller<HTMLElement> {
    * connecting again.
    */
   #lastValue: number | null = null;
+  /** The text accepted from one input, separate from its unconfirmed typing. */
+  #accepted: { readonly input: HTMLInputElement; readonly text: string } | null = null;
+  /** The last non-composing input's text, retained through a focused reconnection. */
+  #draft: { readonly input: HTMLInputElement; readonly text: string } | null = null;
+  /**
+   * Watches the input a draft is left in while the controller cannot see it — disconnected,
+   * or the input out of its targets — so losing focus meanwhile ends the draft, as it ends
+   * editing in sight, and the field that comes back is the page's. The watch lasts until
+   * that input blurs or the controller sees an input again — across a disconnection too:
+   * nothing else sees that focus leave. The window losing focus keeps the draft and the
+   * watch. In sight, editing follows focus as each pass finds it.
+   */
+  readonly #parked = new BlurDeferral<HTMLInputElement>((input) => {
+    if (document.activeElement === input) this.#parked.defer(input);
+    else if (this.#draft?.input === input) this.#draft = null;
+  });
+  /**
+   * What the ARIA and the buttons show: the input they were shown for, the number
+   * shown, the number the buttons are set for, and the range both were set in. A pass
+   * that meets a conversion in that same input shows it again and compares the range.
+   */
+  #shown: {
+    readonly input: HTMLInputElement;
+    readonly value: number | null;
+    readonly at: number;
+    readonly range: SteppedRange;
+  } | null = null;
   /**
    * Whether `connect()` has run and `disconnect()` has not since. The pass
    * `connect()` runs takes the baseline without reporting it.
@@ -191,16 +249,18 @@ export class NumberInputController extends Controller<HTMLElement> {
   /** Normalizes any initial value and wires the focus/hold pointer guards. */
   override connect(): void {
     this.#repaint.observe(this.element);
-    this.#globalGuards = new AbortController();
-    const { signal } = this.#globalGuards;
     for (const button of this.incrementTargets) this.#wireButton(button, 1);
     for (const button of this.decrementTargets) this.#wireButton(button, -1);
     // A pointer released or focus lost anywhere stops a running hold, even when
     // the button stopped receiving its own pointerup (e.g. it became disabled at
     // the bound, or the pointer was released off it).
-    window.addEventListener("pointerup", this.#onPointerEnd, { signal });
-    window.addEventListener("pointercancel", this.#onPointerEnd, { signal });
-    window.addEventListener("blur", this.#onWindowBlur, { signal });
+    this.#listeners.add(window, "pointerup", this.#onPointerEnd);
+    this.#listeners.add(window, "pointercancel", this.#onPointerEnd);
+    this.#listeners.add(window, "blur", this.#onWindowBlur);
+    this.#listeners.add(this.element, "input", this.#onDraftInput);
+    this.#listeners.add(this.element, "turbo:before-morph-attribute", this.#onBeforeMorphAttribute);
+    // An input that moved here with its conversion has nothing new to read; the pass
+    // waits for the conversion only if the range changed with the move.
     this.#reconcile();
     this.#connected = true;
   }
@@ -208,15 +268,17 @@ export class NumberInputController extends Controller<HTMLElement> {
   /**
    * Releases listeners, derived attributes, timers, and the hold state. The number
    * shown last stays: the pass the next `connect()` runs takes a new one without a
-   * report from an input that is present, and with none it stays the number an
+   * report from a non-editing input that is present; the same focused draft keeps its
+   * accepted number. With none it stays the number an
    * input arriving later is compared with.
    */
   override disconnect(): void {
     this.#connected = false;
     this.#repaint.disconnect();
     this.#composition.disconnect();
-    this.#globalGuards?.abort();
-    this.#globalGuards = null;
+    this.#listeners.dispose();
+    if (this.#draft?.input !== document.activeElement) this.#draft = null;
+    if (this.#draft !== null) this.#parked.deferOnly(this.#draft.input);
     const buttons = new Set([
       ...this.#buttonGuards.keys(),
       ...this.incrementTargets,
@@ -249,7 +311,11 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.#repaint.schedule();
   }
 
-  /** Tracks and reconciles an input inserted or replaced at runtime. */
+  /**
+   * Tracks and reconciles an input inserted or replaced at runtime. One that moved
+   * here keeping its conversion is the same input: the pass shows what it showed and
+   * holds nothing.
+   */
   inputTargetConnected(input: HTMLInputElement): void {
     this.#composition.observe(input);
     this.#repaint.schedule();
@@ -258,10 +324,19 @@ export class NumberInputController extends Controller<HTMLElement> {
   /**
    * Releases ARIA and composition state owned by an input that left the controller.
    * The number it showed stays the baseline, so an input swapped in holding another
-   * number is reported as `reconcile`.
+   * number is reported as `reconcile`. An input that moved keeping focus keeps its
+   * conversion and stays the input, so nothing is released.
    */
   inputTargetDisconnected(input: HTMLInputElement): void {
+    const composing = this.#composition.composingElement() === input;
     this.#composition.unobserve(input);
+    if (
+      composing &&
+      this.#composition.composingElement() === input &&
+      this.inputTargets.includes(input)
+    ) {
+      return;
+    }
     this.#releaseInputAria(input);
     this.#stopHold(false);
     this.#repaint.schedule();
@@ -305,6 +380,48 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.inputTarget.focus();
   }
 
+  /**
+   * Records what the user types or composes in the focused input as a draft, without
+   * making it a numeric confirmation.
+   */
+  readonly #onDraftInput = (event: Event): void => {
+    if (!this.hasInputTarget) return;
+    const input = this.inputTarget;
+    if (event.target !== input || document.activeElement !== input) return;
+    this.#recordDraft(input);
+  };
+
+  /**
+   * Takes `input`'s text as the user's draft while it differs from the accepted text;
+   * back at the accepted text, the draft ends and a held reconciliation resumes.
+   */
+  #recordDraft(input: HTMLInputElement): void {
+    this.#draft =
+      this.#accepted?.input === input && input.value !== this.#accepted.text
+        ? { input, text: input.value }
+        : null;
+    if (this.#draft === null) this.#resumeHeldReconcile();
+  }
+
+  /** A value morph cannot replace text the user is still editing in this input. */
+  readonly #onBeforeMorphAttribute = (event: Event): void => {
+    if (!this.hasInputTarget || event.target !== this.inputTarget) return;
+    const detail = (event as CustomEvent<{ attributeName?: string }>).detail;
+    if (detail?.attributeName === "value" && this.#isEditing(this.inputTarget))
+      event.preventDefault();
+  };
+
+  /** Distinguishes the observed draft from a later, different page write. */
+  #isEditing(input: HTMLInputElement): boolean {
+    return (
+      this.#draft?.input === input &&
+      this.#accepted?.input === input &&
+      document.activeElement === input &&
+      input.value === this.#draft.text &&
+      input.value !== this.#accepted.text
+    );
+  }
+
   /** Clamps and snaps a typed value. Bound via `data-action` (change). */
   onInput(): void {
     if (!this.hasInputTarget) return;
@@ -321,6 +438,14 @@ export class NumberInputController extends Controller<HTMLElement> {
     if (!this.hasInputTarget) return;
     if (this.#composition.isComposing(event)) return;
     if (isReservedArrowChord(event)) return;
+    if (
+      (event.key === "Home" ||
+        event.key === "End" ||
+        event.key === "PageUp" ||
+        event.key === "PageDown") &&
+      hasModifierChord(event)
+    )
+      return;
     let next: number | null = null;
     switch (event.key) {
       case "ArrowUp":
@@ -362,6 +487,10 @@ export class NumberInputController extends Controller<HTMLElement> {
    * Wires a step button: `pointerdown` keeps focus on the input and arms the
    * hold; leaving the button while held stops it (the global listeners cover
    * release/cancel/blur).
+   *
+   * @stimeoListenerLifetime element each button holds a guard of its own, which
+   *   `#unwireButton` aborts when that button leaves and `disconnect()` aborts for all;
+   *   a button already wired is skipped, so a second wiring makes no second guard.
    */
   #wireButton(button: HTMLButtonElement, direction: number): void {
     if (this.#buttonGuards.has(button)) return;
@@ -503,33 +632,79 @@ export class NumberInputController extends Controller<HTMLElement> {
     return this.#commit(stepSteppedValue(this.#currentValue(), count, this.#steppedRange), true);
   }
 
+  /** Schedules a held reconciliation when ordinary editing or composition ends. */
+  #resumeHeldReconcile(): void {
+    if (this.#reconcileHeld) this.#repaint.schedule();
+  }
+
   /**
    * Reflects the current value after a range, step or input change, reporting a
    * number that moved from the one shown last as `reconcile`. While the input is
-   * composing, its text is the IME's: the pass waits for the composition to end
-   * instead of reading and rewriting it. With no input there is nothing to show,
-   * and the number shown last stays the baseline for the input that comes next.
+   * composing, its text is the IME's: the pass shows what it showed again, in the range
+   * it showed it in, so ARIA and the buttons a morph wiped or swapped in come back, and
+   * is owed when the composition ends only if the range changed; a pass with nothing
+   * new to reconcile against holds nothing. An input that comes first again while it
+   * composes, after another input was shown, has shown nothing of its own since: the
+   * pass shows nothing on it and is owed when its composition ends. A conversion going
+   * on in an input that is no longer the first leaves the one first now to be
+   * reconciled at once. With no
+   * input there is nothing to show, and the number shown last stays the baseline for
+   * the input that comes next.
+   *
+   * A draft in the same focused input — typed, or left by a composition — keeps its
+   * accepted number and range: only their display is restored, and no queued pass
+   * reads or normalizes the draft. Returning to the accepted text ends the draft and
+   * resumes any held range. A composition takes over the text while it runs. Once
+   * that text is accepted, a pass with the same text and range only shows it again.
+   * With no input, a draft whose input keeps focus stays, so the same field coming
+   * back is still being edited.
+   *
+   * A field the user is in keeps its caret where it was. The pass can land right
+   * before an edit — a composition the page's write ended shows only then — and
+   * the edit lands where the user put the caret.
    *
    * @stimeoRenderRoot
    */
   #reconcile(): void {
-    if (!this.hasInputTarget) return;
-    if (this.#composition.isComposing()) {
-      this.#reconcileHeld = true;
+    if (!this.hasInputTarget) {
+      // An input that left the targets keeping focus may come back as the same field.
+      if (this.#draft?.input !== document.activeElement) this.#draft = null;
+      if (this.#draft !== null) this.#parked.deferOnly(this.#draft.input);
       return;
     }
-    this.#reconcileHeld = false;
+    this.#parked.releaseAll();
     const previous = this.#lastValue;
-    if (this.inputTarget.value.trim() !== "") {
-      const value = this.#normalize(this.#currentValue());
-      this.#lastValue = value;
-      const move = this.#move;
-      this.#write(value);
-      if (!this.#moves.isLatest(move)) return;
+    const input = this.inputTarget;
+    if (this.#composition.composingElement() === input || this.#isEditing(input)) {
+      const shown = this.#shown?.input === input ? this.#shown : null;
+      this.#reconcileHeld = shown === null || !sameRange(shown.range, this.#steppedRange);
+      // Editing owns the text: a morph that wiped the ARIA gets back what it showed.
+      if (shown !== null) this.#show(shown.value, shown.at, shown.range);
     } else {
-      this.#lastValue = null;
-      this.#reflectEmpty();
+      this.#draft = null;
+      this.#reconcileHeld = false;
+      const shown = this.#shown;
+      if (
+        shown !== null &&
+        this.#accepted?.input === input &&
+        input.value === this.#accepted.text &&
+        sameRange(shown.range, this.#steppedRange)
+      ) {
+        const move = this.#move;
+        this.#show(shown.value, shown.at, shown.range);
+        if (!this.#moves.isLatest(move)) return;
+      } else if (input.value.trim() !== "") {
+        const value = this.#normalize(this.#currentValue());
+        this.#lastValue = value;
+        const move = this.#move;
+        this.#write(value, true);
+        if (!this.#moves.isLatest(move)) return;
+      } else {
+        this.#lastValue = null;
+        this.#reflectEmpty();
+      }
     }
+    // A pass that only showed the number again moved nothing, so this reports nothing.
     this.#reportMove(previous);
   }
 
@@ -545,29 +720,54 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.dispatch("reconcile", { detail: { value } });
   }
 
-  /** Reflects `value` on the input (and ARIA for non-native hosts) and the buttons. */
-  #write(value: number): void {
+  /**
+   * Reflects `value` on the input (and ARIA for non-native hosts) and the buttons.
+   * With `keepCaret`, rewriting the field the user is in keeps the caret where it
+   * was; otherwise the browser places it.
+   */
+  #write(value: number, keepCaret = false): void {
     const input = this.inputTarget;
-    if (input.value !== String(value)) input.value = String(value);
-    this.#syncInputAria(input, value);
-    this.#updateButtons(value);
+    const text = String(value);
+    if (input.value !== text) {
+      const caret = keepCaret && input === document.activeElement ? input.selectionStart : null;
+      input.value = text;
+      // A host that exposes no caret reports none, and takes no selection either.
+      if (caret !== null) {
+        const position = Math.min(caret, text.length);
+        input.setSelectionRange(position, position);
+      }
+    }
+    this.#draft = null;
+    // The latest range is applied here, so no reconciliation is owed any longer.
+    this.#reconcileHeld = false;
+    this.#accepted = { input, text };
+    this.#show(value, value);
+  }
+
+  /** Reflects `value` in ARIA and the buttons, set for `at`, in `range`. */
+  #show(value: number | null, at: number, range = this.#steppedRange): void {
+    this.#shown = { input: this.inputTarget, value, at, range };
+    this.#syncInputAria(this.inputTarget, value, range);
+    this.#updateButtons(at, range);
   }
 
   /** Reflects a blank value without inventing a numeric `aria-valuenow`. */
   #reflectEmpty(): void {
-    this.#syncInputAria(this.inputTarget, null);
-    this.#updateButtons(this.#currentValue());
+    this.#draft = null;
+    this.#reconcileHeld = false;
+    this.#accepted = { input: this.inputTarget, text: this.inputTarget.value };
+    this.#show(null, this.#currentValue());
   }
 
   /** Synchronizes controller-derived ARIA while preserving authored teardown values. */
-  #syncInputAria(input: HTMLInputElement, value: number | null): void {
+  #syncInputAria(input: HTMLInputElement, value: number | null, range: SteppedRange): void {
     if (input.getAttribute("role") !== "spinbutton") {
       this.#releaseInputAria(input);
       return;
     }
     this.#ariaValueNow.write(input, value === null ? null : String(value));
-    this.#ariaValueMin.write(input, Number.isFinite(this.#safeMin) ? String(this.#safeMin) : null);
-    this.#ariaValueMax.write(input, Number.isFinite(this.#safeMax) ? String(this.#safeMax) : null);
+    this.#ariaValueMin.write(input, Number.isFinite(range.min) ? String(range.min) : null);
+    this.#ariaValueMax.write(input, Number.isFinite(range.max) ? String(range.max) : null);
   }
 
   /** Returns all custom-spinbutton ARIA leased on `input`. */
@@ -577,24 +777,24 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.#ariaValueMax.return(input);
   }
 
-  /** Disables a step button at its bound, returning focus to the input first. */
-  #updateButtons(value: number): void {
+  /** Disables a step button at a bound of `range`, returning focus to the input first. */
+  #updateButtons(value: number, range: SteppedRange): void {
     const move = this.#move;
     for (const button of this.incrementTargets) {
-      this.#toggleButton(button, value < this.#safeMax, move);
+      this.#toggleButton(button, value < range.max, move);
       if (!this.#moves.isLatest(move)) return;
     }
     for (const button of this.decrementTargets) {
-      this.#toggleButton(button, value > this.#safeMin, move);
+      this.#toggleButton(button, value > range.min, move);
       if (!this.#moves.isLatest(move)) return;
     }
   }
 
   /**
    * Enables or disables a step button at its bound, never disabling one while it
-   * holds focus. Owns only the `disabled` it sets itself via a marker
-   * (`data-number-input-disabled`, like `conditional-fields`/`submit-once`), so an
-   * author-disabled button (e.g. the whole control disabled) is never re-enabled.
+   * holds focus. Owns only the `disabled` it sets itself, recorded by the
+   * `data-number-input-disabled` marker, so an author-disabled button (e.g. the whole
+   * control disabled) is never re-enabled.
    */
   #toggleButton(button: HTMLButtonElement, enabled: boolean, move: number): void {
     if (enabled) {

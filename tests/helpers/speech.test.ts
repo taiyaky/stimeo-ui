@@ -41,7 +41,7 @@ describe("speech helper", () => {
 
   it("captures all elements via explicit steps even when phrases repeat", async () => {
     // Documents the recommended pattern: adjacent identical announcements would
-    // truncate auto-traverse, so regression tests pass an explicit `steps` count.
+    // truncate auto-traverse, so speech-order checks pass an explicit `steps` count.
     document.body.innerHTML = `
       <button type="button">Delete</button>
       <button type="button">Delete</button>

@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TreeViewController } from "../src/controllers/tree_view_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
+import { press as pressKey, typeKey } from "./helpers/keyboard";
+import { recordListeners } from "./helpers/listeners";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
@@ -69,8 +71,6 @@ describe("TreeViewController", () => {
     Array.from(scope.querySelectorAll<HTMLElement>("[role='treeitem']"));
   const byLabel = (label: string, scope: HTMLElement = document.body) =>
     items(scope).find((it) => it.querySelector("span")?.textContent === label) as HTMLElement;
-  const key = (el: HTMLElement, k: string, init: KeyboardEventInit = {}) =>
-    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, ...init }));
   const click = (el: HTMLElement) => el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   const tabbable = (scope: HTMLElement = document.body) =>
     items(scope).filter((it) => it.tabIndex === 0);
@@ -83,11 +83,9 @@ describe("TreeViewController", () => {
     return seen;
   };
   /**
-   * Removes `element` (with any nested items) and drives the Stimulus target
-   * callbacks by hand, in the DOM order Stimulus reports them. happy-dom fires
-   * the MutationObserver those callbacks ride on unreliably: an item inserted
-   * into a live tree never reaches `itemTargetConnected`, so the callbacks are
-   * invoked directly here.
+   * Removes each element (with any nested items) and drives the Stimulus target
+   * callbacks synchronously, in the DOM order Stimulus reports them, so a test can
+   * assert the outcome without waiting for the MutationObserver delivery.
    */
   const removeItem = (...elements: HTMLElement[]) => {
     const owner = elements[0]?.closest<HTMLElement>("[role='tree']") as HTMLElement;
@@ -101,6 +99,60 @@ describe("TreeViewController", () => {
     for (const element of elements) element.remove();
     for (const gone of removed) instance.itemTargetDisconnected(gone);
   };
+
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Home/End chord (%s, %s)", async (key, _modifier, init) => {
+    await mount(
+      markup.replace(
+        /<\/ul>\s*$/,
+        '<input type="hidden" data-stimeo--tree-view-target="field" /></ul>',
+      ),
+    );
+    const current = byLabel("readme.md");
+    current.setAttribute("data-value", "readme.md");
+    click(current);
+    current.focus();
+    const element = root();
+    const field = element.querySelector<HTMLInputElement>(
+      "[data-stimeo--tree-view-target='field']",
+    );
+    if (!field) throw new Error("Expected tree form field");
+    const events: Event[] = [];
+    for (const name of [
+      "stimeo--tree-view:select",
+      "stimeo--tree-view:toggle",
+      "stimeo--tree-view:reconcile",
+      "input",
+      "change",
+    ]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = pressKey(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(field.value).toBe("readme.md");
+    expect(current.getAttribute("aria-selected")).toBe("true");
+    expect(tabbable()).toEqual([current]);
+    expect(byLabel("src").getAttribute("aria-expanded")).toBe("false");
+    expect(pressKey(current, key).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(byLabel(key === "Home" ? "src" : "package.json"));
+    expect(current.getAttribute("aria-selected")).toBe("true");
+    expect(field.value).toBe("readme.md");
+  });
 
   it.each(["root", "descendant"])(
     "restores group visibility from authored expansion after a %s morph",
@@ -145,27 +197,27 @@ describe("TreeViewController", () => {
 
     it("moves between visible items with ArrowDown/ArrowUp (skipping collapsed children)", () => {
       const src = byLabel("src");
-      key(src, "ArrowDown"); // src -> readme (index.ts is hidden)
+      pressKey(src, "ArrowDown"); // src -> readme (index.ts is hidden)
       expect(document.activeElement).toBe(byLabel("readme.md"));
-      key(byLabel("readme.md"), "ArrowUp");
+      pressKey(byLabel("readme.md"), "ArrowUp");
       expect(document.activeElement).toBe(src);
     });
 
     it("stays put at the first and last visible item", () => {
       const src = byLabel("src");
       src.focus();
-      key(src, "ArrowUp");
+      pressKey(src, "ArrowUp");
       expect(document.activeElement).toBe(src);
-      key(src, "End");
+      pressKey(src, "End");
       expect(document.activeElement).toBe(byLabel("package.json"));
-      key(byLabel("package.json"), "ArrowDown");
+      pressKey(byLabel("package.json"), "ArrowDown");
       expect(document.activeElement).toBe(byLabel("package.json"));
     });
 
     it("expands a collapsed parent with ArrowRight and dispatches toggle", () => {
       const toggles = listen<{ item: HTMLElement; expanded: boolean }>("toggle");
       const src = byLabel("src");
-      key(src, "ArrowRight"); // expand
+      pressKey(src, "ArrowRight"); // expand
       expect(src.getAttribute("aria-expanded")).toBe("true");
       expect(byLabel("index.ts").closest<HTMLElement>("[role='group']")?.hidden).toBe(false);
       expect(toggles).toEqual([{ item: src, expanded: true, reason: "user" }]);
@@ -173,8 +225,8 @@ describe("TreeViewController", () => {
 
     it("steps into the first child with ArrowRight when already expanded", () => {
       const src = byLabel("src");
-      key(src, "ArrowRight"); // expand
-      key(src, "ArrowRight"); // into first child
+      pressKey(src, "ArrowRight"); // expand
+      pressKey(src, "ArrowRight"); // into first child
       expect(document.activeElement).toBe(byLabel("index.ts"));
     });
 
@@ -182,11 +234,11 @@ describe("TreeViewController", () => {
       const toggles = listen<{ item: HTMLElement; expanded: boolean }>("toggle");
       const src = byLabel("src");
       const group = src.querySelector<HTMLElement>("[role='group']") as HTMLElement;
-      key(src, "ArrowRight"); // expand
-      key(src, "ArrowRight"); // focus index.ts
-      key(byLabel("index.ts"), "ArrowLeft"); // leaf -> parent
+      pressKey(src, "ArrowRight"); // expand
+      pressKey(src, "ArrowRight"); // focus index.ts
+      pressKey(byLabel("index.ts"), "ArrowLeft"); // leaf -> parent
       expect(document.activeElement).toBe(src);
-      key(src, "ArrowLeft"); // collapse
+      pressKey(src, "ArrowLeft"); // collapse
       expect(src.getAttribute("aria-expanded")).toBe("false");
       expect(group.hidden).toBe(true);
       expect(toggles).toEqual([
@@ -197,41 +249,41 @@ describe("TreeViewController", () => {
 
     it("does nothing on ArrowRight at a leaf or ArrowLeft at the root", () => {
       const readme = byLabel("readme.md");
-      key(byLabel("src"), "ArrowDown");
-      key(readme, "ArrowRight");
+      pressKey(byLabel("src"), "ArrowDown");
+      pressKey(readme, "ArrowRight");
       expect(readme.hasAttribute("aria-expanded")).toBe(false);
       expect(document.activeElement).toBe(readme);
-      key(readme, "ArrowLeft");
+      pressKey(readme, "ArrowLeft");
       expect(document.activeElement).toBe(readme);
     });
 
     it("jumps to the first/last visible item with Home/End", () => {
       const src = byLabel("src");
-      key(src, "End");
+      pressKey(src, "End");
       expect(document.activeElement).toBe(byLabel("package.json"));
-      key(byLabel("package.json"), "Home");
+      pressKey(byLabel("package.json"), "Home");
       expect(document.activeElement).toBe(src);
     });
 
     it("keeps End on the last visible item once a subtree is expanded", () => {
       const src = byLabel("src");
-      key(src, "ArrowRight"); // expand src: index.ts / utils.ts become visible
-      key(src, "End");
+      pressKey(src, "ArrowRight"); // expand src: index.ts / utils.ts become visible
+      pressKey(src, "End");
       // package.json is still the last visible item; the expanded children are
       // in the middle of the visible set, which is what #visibleItems must model.
       expect(document.activeElement).toBe(byLabel("package.json"));
-      key(byLabel("package.json"), "Home");
+      pressKey(byLabel("package.json"), "Home");
       expect(document.activeElement).toBe(src);
-      key(src, "ArrowDown");
+      pressKey(src, "ArrowDown");
       expect(document.activeElement).toBe(byLabel("index.ts"));
     });
 
     it("selects an item with Enter (single selection)", () => {
       const selects = listen<{ item: HTMLElement }>("select");
-      key(byLabel("src"), "Enter");
+      pressKey(byLabel("src"), "Enter");
       expect(byLabel("src").getAttribute("aria-selected")).toBe("true");
-      key(byLabel("src"), "ArrowDown");
-      key(byLabel("readme.md"), "Enter");
+      pressKey(byLabel("src"), "ArrowDown");
+      pressKey(byLabel("readme.md"), "Enter");
       expect(byLabel("src").getAttribute("aria-selected")).toBe("false");
       expect(byLabel("readme.md").getAttribute("aria-selected")).toBe("true");
       expect(selects).toEqual([
@@ -242,8 +294,8 @@ describe("TreeViewController", () => {
 
     it("selects an item with Space", () => {
       const selects = listen<{ item: HTMLElement }>("select");
-      key(byLabel("src"), "ArrowDown");
-      key(byLabel("readme.md"), " ");
+      pressKey(byLabel("src"), "ArrowDown");
+      pressKey(byLabel("readme.md"), " ");
       expect(byLabel("readme.md").getAttribute("aria-selected")).toBe("true");
       expect(selects).toEqual([{ item: byLabel("readme.md"), reason: "user" }]);
     });
@@ -261,7 +313,7 @@ describe("TreeViewController", () => {
     it("selects nothing when the click lands on a child group's own box", () => {
       const selects = listen<{ item: HTMLElement }>("select");
       const src = byLabel("src");
-      key(src, "ArrowRight"); // expand so the group is visible
+      pressKey(src, "ArrowRight"); // expand so the group is visible
       const group = src.querySelector<HTMLElement>("[role='group']") as HTMLElement;
       click(group); // the indentation band belongs to the group, not to src
       expect(items().some((it) => it.getAttribute("aria-selected") === "true")).toBe(false);
@@ -270,21 +322,33 @@ describe("TreeViewController", () => {
 
     it("ignores keydown bubbling from a nested item to an ancestor handler", () => {
       const src = byLabel("src");
-      key(src, "ArrowRight"); // expand so children are visible
-      key(src, "ArrowRight"); // focus index.ts
+      pressKey(src, "ArrowRight"); // expand so children are visible
+      pressKey(src, "ArrowRight"); // focus index.ts
       // A keydown dispatched on index.ts also bubbles to src's handler; only the
       // nearest item (index.ts) should act, moving to utils.ts (not double-moving).
-      key(byLabel("index.ts"), "ArrowDown");
+      pressKey(byLabel("index.ts"), "ArrowDown");
+      expect(document.activeElement).toBe(byLabel("utils.ts"));
+    });
+
+    it("ignores a non-cancelable keydown from a nested item at the ancestor's handler", () => {
+      const src = byLabel("src");
+      pressKey(src, "ArrowRight"); // expand so children are visible
+      pressKey(src, "ArrowRight"); // focus index.ts
+      // A non-cancelable event cannot carry the nested item's claim to src's handler, so
+      // only the nearest-item check keeps src from moving focus a second time.
+      pressKey(byLabel("index.ts"), "ArrowDown", { cancelable: false });
       expect(document.activeElement).toBe(byLabel("utils.ts"));
     });
 
     it("does not move focus from an item a consumer hid directly", () => {
       const src = byLabel("src");
-      key(src, "ArrowRight"); // expand
-      key(src, "ArrowRight"); // focus index.ts
+      pressKey(src, "ArrowRight"); // expand
+      pressKey(src, "ArrowRight"); // focus index.ts
       const group = src.querySelector<HTMLElement>("[role='group']") as HTMLElement;
       group.hidden = true; // consumer collapses the group behind the controller's back
-      key(byLabel("index.ts"), "ArrowDown");
+      // typeKey dispatches without moving focus, so the hidden item keeps it while the
+      // defensive key path runs.
+      typeKey(byLabel("index.ts"), "ArrowDown");
       // Without the "not in the visible set" guard this warps to the tree's top.
       expect(document.activeElement).toBe(byLabel("index.ts"));
     });
@@ -293,25 +357,19 @@ describe("TreeViewController", () => {
       const src = byLabel("src");
       src.focus();
       const label = src.querySelector("span") as HTMLElement;
-      // A composed widget inside the row that claims the key must not ALSO move
-      // the tree's focus. The row's own handler sees the event after the
-      // label's, with defaultPrevented already set.
+      label.tabIndex = -1;
+      // The generic descendant claims the key before the row receives it;
+      // yielding preserves focus without native-control semantics.
       label.addEventListener("keydown", (event) => event.preventDefault());
-      const handled = key(label, "ArrowDown", { cancelable: true });
-      expect(handled).toBe(false); // the descendant really did claim the key
-      expect(document.activeElement).toBe(src);
+      const handled = pressKey(label, "ArrowDown");
+      expect(handled.defaultPrevented).toBe(true); // the descendant really did claim the key
+      expect(document.activeElement).toBe(label);
     });
 
     it("leaves a modified arrow to the browser (Alt+Left/Right is history navigation)", () => {
       const src = byLabel("src");
       src.focus();
-      const event = new KeyboardEvent("keydown", {
-        key: "ArrowRight",
-        altKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      src.dispatchEvent(event);
+      const event = pressKey(src, "ArrowRight", { altKey: true });
       expect(event.defaultPrevented).toBe(false);
       expect(src.getAttribute("aria-expanded")).toBe("false"); // still collapsed
       expect(document.activeElement).toBe(src);
@@ -325,7 +383,7 @@ describe("TreeViewController", () => {
       (k) => {
         const src = byLabel("src");
         src.focus();
-        expect(key(src, k, { cancelable: true })).toBe(false);
+        expect(pressKey(src, k).defaultPrevented).toBe(true);
       },
     );
 
@@ -340,8 +398,8 @@ describe("TreeViewController", () => {
 
     it("announces the expanded and selected state after they change", async () => {
       const src = byLabel("src");
-      key(src, "ArrowRight"); // expand
-      key(src, "Enter"); // select
+      pressKey(src, "ArrowRight"); // expand
+      pressKey(src, "Enter"); // select
       const phrases = await captureSpeech({ container: root(), steps: 3 });
       // The expanded children are now part of src's computed name, which is what
       // an AT reads from the revealed subtree; the states are the assertion here.
@@ -355,7 +413,7 @@ describe("TreeViewController", () => {
 
     it("has no machine-detectable a11y violations (collapsed and expanded)", async () => {
       await expectNoA11yViolations(root());
-      key(byLabel("src"), "ArrowRight");
+      pressKey(byLabel("src"), "ArrowRight");
       await expectNoA11yViolations(root());
     });
   });
@@ -380,72 +438,72 @@ describe("TreeViewController", () => {
     });
 
     it("moves to the next item whose label starts with the typed character", () => {
-      key(byLabel("alpha"), "b");
+      pressKey(byLabel("alpha"), "b");
       expect(document.activeElement).toBe(byLabel("beta"));
     });
 
     it("accumulates characters typed within the timeout into one prefix", () => {
       const alpha = byLabel("alpha");
-      key(alpha, "a");
+      pressKey(alpha, "a");
       expect(document.activeElement).toBe(byLabel("alpine"));
-      key(byLabel("alpine"), "l");
-      key(byLabel("alpine"), "p");
-      key(byLabel("alpine"), "i");
+      pressKey(byLabel("alpine"), "l");
+      pressKey(byLabel("alpine"), "p");
+      pressKey(byLabel("alpine"), "i");
       // "alpi" matches only alpine, so focus stays there rather than cycling.
       expect(document.activeElement).toBe(byLabel("alpine"));
-      key(byLabel("alpine"), "n");
+      pressKey(byLabel("alpine"), "n");
       expect(document.activeElement).toBe(byLabel("alpine"));
     });
 
     it("keeps concatenating just under the timeout and starts over past it", () => {
-      key(byLabel("alpha"), "a"); // -> alpine
+      pressKey(byLabel("alpha"), "a"); // -> alpine
       vi.advanceTimersByTime(499);
-      key(byLabel("alpine"), "l"); // buffer "al" -> wraps back to alpha
+      pressKey(byLabel("alpine"), "l"); // buffer "al" -> wraps back to alpha
       expect(document.activeElement).toBe(byLabel("alpha"));
       vi.advanceTimersByTime(500); // buffer resets
-      key(byLabel("alpha"), "b"); // a stale "alb" buffer would match nothing
+      pressKey(byLabel("alpha"), "b"); // a stale "alb" buffer would match nothing
       expect(document.activeElement).toBe(byLabel("beta"));
     });
 
     it("cycles through the matches when the same character repeats", () => {
-      key(byLabel("alpha"), "b");
+      pressKey(byLabel("alpha"), "b");
       expect(document.activeElement).toBe(byLabel("beta"));
-      key(byLabel("beta"), "b");
+      pressKey(byLabel("beta"), "b");
       expect(document.activeElement).toBe(byLabel("bravo"));
-      key(byLabel("bravo"), "b");
+      pressKey(byLabel("bravo"), "b");
       expect(document.activeElement).toBe(byLabel("beta"));
     });
 
     it("resumes narrowing after a repeated key instead of stalling on a dead query", () => {
       // A repeated key collapses instead of growing the query, so the character
       // after a repeat narrows from a single character rather than matching nothing.
-      key(byLabel("alpha"), "b");
+      pressKey(byLabel("alpha"), "b");
       expect(document.activeElement).toBe(byLabel("beta"));
-      key(byLabel("beta"), "b");
+      pressKey(byLabel("beta"), "b");
       expect(document.activeElement).toBe(byLabel("bravo"));
-      key(byLabel("bravo"), "e");
+      pressKey(byLabel("bravo"), "e");
       expect(document.activeElement).toBe(byLabel("beta")); // "be", not "bbe"
     });
 
     it("ignores printable keys pressed with a command modifier", () => {
       const alpha = byLabel("alpha");
-      key(alpha, "b", { ctrlKey: true });
-      key(alpha, "b", { metaKey: true });
-      key(alpha, "b", { altKey: true });
+      pressKey(alpha, "b", { ctrlKey: true });
+      pressKey(alpha, "b", { metaKey: true });
+      pressKey(alpha, "b", { altKey: true });
       expect(document.activeElement).not.toBe(byLabel("beta"));
     });
 
     it("never matches an item inside a collapsed group", () => {
       const alpha = byLabel("alpha");
-      key(alpha, "a"); // -> alpine
-      key(byLabel("alpine"), "l"); // "al" -> wraps back to alpha
-      key(byLabel("alpha"), "b"); // "alb" only matches the collapsed album
+      pressKey(alpha, "a"); // -> alpine
+      pressKey(byLabel("alpine"), "l"); // "al" -> wraps back to alpha
+      pressKey(byLabel("alpha"), "b"); // "alb" only matches the collapsed album
       expect(document.activeElement).toBe(byLabel("alpha"));
       expect(byLabel("album").tabIndex).toBe(-1);
     });
 
     it("matches aria-label before the item's own text", () => {
-      key(byLabel("alpha"), "z"); // the item reads "misc" but is named "zeta"
+      pressKey(byLabel("alpha"), "z"); // the item reads "misc" but is named "zeta"
       expect(document.activeElement).toBe(byLabel("misc"));
     });
   });
@@ -497,7 +555,7 @@ describe("TreeViewController", () => {
       );
       const group = root().querySelector<HTMLElement>("[role='group']") as HTMLElement;
       expect(group.hidden).toBe(false);
-      key(byLabel("src"), "ArrowRight"); // already expanded -> step into the child
+      pressKey(byLabel("src"), "ArrowRight"); // already expanded -> step into the child
       expect(document.activeElement).toBe(byLabel("index.ts"));
     });
 
@@ -530,9 +588,9 @@ describe("TreeViewController", () => {
       expect(tabbable()).toHaveLength(1);
       const readme = byLabel("readme.md");
       readme.focus();
-      key(readme, "Home");
+      pressKey(readme, "Home");
       expect(document.activeElement).toBe(readme);
-      key(readme, "ArrowUp");
+      pressKey(readme, "ArrowUp");
       expect(document.activeElement).toBe(readme);
     });
 
@@ -570,7 +628,7 @@ describe("TreeViewController", () => {
       );
       const src = byLabel("src");
       src.focus();
-      key(src, "ArrowRight"); // already expanded -> step into the first child
+      pressKey(src, "ArrowRight"); // already expanded -> step into the first child
       expect(document.activeElement).toBe(byLabel("index.ts"));
       expect(byLabel("hidden.ts").tabIndex).toBe(-1);
       expect(tabbable()).toHaveLength(1);
@@ -615,16 +673,16 @@ describe("TreeViewController", () => {
     it("leaves printable keys typed in a nested input to the input", () => {
       const src = byLabel("src");
       src.focus();
-      const handled = key(input(), "r"); // "r" would typeahead to readme.md
-      expect(handled).toBe(true); // not preventDefault()ed
-      expect(document.activeElement).toBe(src);
+      const handled = pressKey(input(), "r"); // "r" would typeahead to readme.md
+      expect(handled.defaultPrevented).toBe(false); // not preventDefault()ed
+      expect(document.activeElement).toBe(input());
     });
 
     it("does not select or expand from keys raised inside a nested input", () => {
       const selects = listen<{ item: HTMLElement }>("select");
-      key(input(), " ");
-      key(input(), "ArrowRight");
-      key(input(), "ArrowDown");
+      pressKey(input(), " ");
+      pressKey(input(), "ArrowRight");
+      pressKey(input(), "ArrowDown");
       expect(selects).toEqual([]);
       expect(byLabel("src").getAttribute("aria-expanded")).toBe("false");
       expect(byLabel("src").getAttribute("aria-selected")).toBe("false");
@@ -640,7 +698,7 @@ describe("TreeViewController", () => {
     it("ignores a keydown raised while an IME composition is active", () => {
       const src = byLabel("src");
       src.focus();
-      key(src, "r", { isComposing: true });
+      pressKey(src, "r", { isComposing: true });
       expect(document.activeElement).toBe(src);
     });
   });
@@ -675,9 +733,9 @@ describe("TreeViewController", () => {
       const selects = listen<{ item: HTMLElement }>("select");
       const one = byLabel("one");
       one.focus();
-      key(one, "ArrowDown");
+      pressKey(one, "ArrowDown");
       expect(document.activeElement).toBe(one);
-      key(one, "Enter");
+      pressKey(one, "Enter");
       click(one);
       expect(one.getAttribute("aria-selected")).toBe("false");
       expect(byLabel("two").getAttribute("aria-selected")).toBe("false");
@@ -686,8 +744,8 @@ describe("TreeViewController", () => {
 
     it("still establishes a single tab stop on such a tree", async () => {
       await mount(linkMarkup);
-      // connect() only reads and writes `tabindex`, so the roving invariant
-      // holds even where the key and pointer paths stand down.
+      // connect() establishes the single tab stop without going through the key or
+      // pointer paths, so the roving invariant holds even where those paths stand down.
       expect(byLabel("one").tabIndex).toBe(0);
       expect(tabbable()).toHaveLength(1);
     });
@@ -765,7 +823,7 @@ describe("TreeViewController", () => {
       const child = byLabel("index.ts");
       const chevron = chevronOf("src");
       click(chevron); // expand
-      key(src, "ArrowRight"); // the child owns focus and the tab stop
+      pressKey(src, "ArrowRight"); // the child owns focus and the tab stop
       expect(document.activeElement).toBe(child);
 
       let focusAtToggle: Element | null = null;
@@ -792,7 +850,7 @@ describe("TreeViewController", () => {
       const chevron = chevronOf("src");
       const group = src.querySelector<HTMLElement>("[role='group']") as HTMLElement;
       click(chevron); // expand
-      key(src, "ArrowRight"); // the child owns focus and the tab stop
+      pressKey(src, "ArrowRight"); // the child owns focus and the tab stop
       expect(document.activeElement).toBe(child);
       chevron.focus(); // mirror the native mousedown before click
 
@@ -831,7 +889,7 @@ describe("TreeViewController", () => {
 
     it("drops the typeahead buffer and its timer on disconnect", () => {
       vi.useFakeTimers();
-      key(byLabel("src"), "r"); // -> readme.md, arms the 500ms reset timer
+      pressKey(byLabel("src"), "r"); // -> readme.md, arms the 500ms reset timer
       expect(document.activeElement).toBe(byLabel("readme.md"));
       expect(vi.getTimerCount()).toBe(1);
 
@@ -842,12 +900,12 @@ describe("TreeViewController", () => {
       expect(document.activeElement).toBe(byLabel("readme.md")); // nothing fired
 
       instance.connect();
-      key(byLabel("readme.md"), "p"); // a stale "rp" buffer would match nothing
+      pressKey(byLabel("readme.md"), "p"); // a stale "rp" buffer would match nothing
       expect(document.activeElement).toBe(byLabel("package.json"));
     });
 
     it("keeps the roving position across a reconnect", () => {
-      key(byLabel("src"), "End");
+      pressKey(byLabel("src"), "End");
       const instance = controller();
       instance.disconnect();
       instance.connect();
@@ -858,18 +916,19 @@ describe("TreeViewController", () => {
     it("unregisters the focus trackers it registered", () => {
       const instance = controller();
       instance.disconnect();
-      const added = vi.spyOn(root(), "addEventListener");
-      const removed = vi.spyOn(root(), "removeEventListener");
-      instance.connect();
-      const onFocusIn = added.mock.calls.find(([type]) => type === "focusin")?.[1];
-      const onFocusOut = added.mock.calls.find(([type]) => type === "focusout")?.[1];
-      expect(onFocusIn).toBeDefined();
-      expect(onFocusOut).toBeDefined();
+      const ledger = recordListeners();
+      try {
+        instance.connect();
+        expect(ledger.live(root(), "focusin")).toHaveLength(1);
+        expect(ledger.live(root(), "focusout")).toHaveLength(1);
 
-      instance.disconnect();
+        instance.disconnect();
 
-      expect(removed).toHaveBeenCalledWith("focusin", onFocusIn);
-      expect(removed).toHaveBeenCalledWith("focusout", onFocusOut);
+        expect(ledger.live(root(), "focusin")).toEqual([]);
+        expect(ledger.live(root(), "focusout")).toEqual([]);
+      } finally {
+        ledger.restore();
+      }
     });
   });
 
@@ -888,7 +947,7 @@ describe("TreeViewController", () => {
       await mount(markup);
       const src = byLabel("src");
       src.focus();
-      key(src, "ArrowDown"); // readme.md now holds focus and the tab stop
+      pressKey(src, "ArrowDown"); // readme.md now holds focus and the tab stop
       expect(document.activeElement).toBe(byLabel("readme.md"));
       removeItem(byLabel("readme.md"));
       expect(document.activeElement).toBe(byLabel("package.json"));
@@ -900,7 +959,7 @@ describe("TreeViewController", () => {
       await mount(markup);
       const src = byLabel("src");
       src.focus();
-      key(src, "End");
+      pressKey(src, "End");
       expect(document.activeElement).toBe(byLabel("package.json"));
       removeItem(byLabel("package.json"));
       expect(document.activeElement).toBe(byLabel("readme.md"));
@@ -923,8 +982,8 @@ describe("TreeViewController", () => {
       await mount(markup);
       const src = byLabel("src");
       src.focus();
-      key(src, "ArrowRight"); // expand
-      key(src, "ArrowRight"); // focus index.ts
+      pressKey(src, "ArrowRight"); // expand
+      pressKey(src, "ArrowRight"); // focus index.ts
       expect(document.activeElement).toBe(byLabel("index.ts"));
       removeItem(src); // the focused child is removed along with its parent
       expect(document.activeElement).toBe(byLabel("readme.md"));
@@ -989,7 +1048,7 @@ describe("TreeViewController", () => {
       await mount(markup);
       const src = byLabel("src");
       src.focus();
-      key(src, "ArrowDown"); // readme.md
+      pressKey(src, "ArrowDown"); // readme.md
       removeItem(byLabel("readme.md"));
       const instance = controller();
       instance.disconnect();
@@ -1009,8 +1068,8 @@ describe("TreeViewController", () => {
       );
       const alpha = byLabel("alpha");
       alpha.focus();
-      key(alpha, "End");
-      key(byLabel("echo"), "ArrowUp"); // delta holds focus and the tab stop
+      pressKey(alpha, "End");
+      pressKey(byLabel("echo"), "ArrowUp"); // delta holds focus and the tab stop
       const delta = byLabel("delta");
       expect(document.activeElement).toBe(delta);
 
@@ -1062,7 +1121,7 @@ describe("TreeViewController", () => {
       controller().itemTargetConnected();
       const alpha = byLabel("alpha");
       alpha.focus();
-      key(alpha, "End"); // charlie holds focus and the tab stop
+      pressKey(alpha, "End"); // charlie holds focus and the tab stop
       expect(document.activeElement).toBe(byLabel("charlie"));
 
       removeItem(byLabel("charlie"));
@@ -1127,7 +1186,7 @@ describe("TreeViewController", () => {
       const src = byLabel("src");
       src.focus();
       for (const k of ["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Home", "End"]) {
-        key(src, k);
+        pressKey(src, k);
         expect(document.activeElement).toBe(src);
       }
       expect(tabbable()).toHaveLength(1);
@@ -1136,8 +1195,8 @@ describe("TreeViewController", () => {
     it("keeps selection independent between two trees on the page", async () => {
       await mount(`${markup}${markup}`);
       const [first, second] = roots() as [HTMLElement, HTMLElement];
-      key(byLabel("src", first), "Enter");
-      key(byLabel("readme.md", second), "Enter");
+      pressKey(byLabel("src", first), "Enter");
+      pressKey(byLabel("readme.md", second), "Enter");
       expect(byLabel("src", first).getAttribute("aria-selected")).toBe("true");
       expect(byLabel("readme.md", first).getAttribute("aria-selected")).toBe("false");
       expect(byLabel("src", second).getAttribute("aria-selected")).toBe("false");
@@ -1152,8 +1211,8 @@ describe("TreeViewController", () => {
         "beforeend",
         item("added.txt", 'aria-selected="false" tabindex="0"'),
       );
-      // Stimulus registers new targets through a MutationObserver that happy-dom
-      // fires unreliably, so drive the callback directly.
+      // Stimulus reports a new target from a MutationObserver callback, which runs
+      // only after the synchronous lines below, so drive the callback directly.
       controller().itemTargetConnected();
       expect(tabbable()).toHaveLength(1);
       expect(byLabel("src").tabIndex).toBe(0);
@@ -1167,18 +1226,19 @@ describe("TreeViewController", () => {
           ${item("readme.md", 'aria-disabled="true" aria-selected="false" tabindex="-1"')}`),
       );
       const selects = listen<{ item: HTMLElement }>("select");
-      key(byLabel("src"), "ArrowDown");
+      pressKey(byLabel("src"), "ArrowDown");
       expect(document.activeElement).toBe(byLabel("readme.md"));
-      key(byLabel("readme.md"), "Enter");
+      pressKey(byLabel("readme.md"), "Enter");
       click(byLabel("readme.md"));
       expect(byLabel("readme.md").getAttribute("aria-selected")).toBe("false");
       expect(selects).toEqual([]);
     });
 
     it("reverses ArrowRight / ArrowLeft under dir=rtl", async () => {
-      // APG describes these as "to the child level" / "to the parent level" — a
-      // spatial move — so they follow the writing direction, the same reasoning
-      // that made horizontal roving logical.
+      // APG's Right Arrow opens a node or moves focus to its first child node, and
+      // its Left Arrow closes a node or moves focus to its parent node. Those are
+      // moves along the indentation, so they follow the writing direction, exactly
+      // as horizontal roving does.
       await mount(
         tree(
           item(
@@ -1197,10 +1257,10 @@ describe("TreeViewController", () => {
       root().style.direction = "rtl";
 
       // In RTL the *left* arrow is the one that moves toward the child level.
-      key(byLabel("src"), "ArrowLeft");
+      pressKey(byLabel("src"), "ArrowLeft");
       expect(byLabel("src").getAttribute("aria-expanded")).toBe("true");
 
-      key(byLabel("src"), "ArrowRight");
+      pressKey(byLabel("src"), "ArrowRight");
       expect(byLabel("src").getAttribute("aria-expanded")).toBe("false");
     });
 
@@ -1227,7 +1287,7 @@ describe("TreeViewController", () => {
       root().style.direction = "rtl";
       byLabel("src").style.direction = "ltr"; // the row disagrees with its tree
 
-      key(byLabel("src"), "ArrowLeft"); // still "to the child level": the tree decides
+      pressKey(byLabel("src"), "ArrowLeft"); // still "to the child level": the tree decides
       expect(byLabel("src").getAttribute("aria-expanded")).toBe("true");
     });
 
@@ -1249,7 +1309,7 @@ describe("TreeViewController", () => {
       const selects = listen<{ item: HTMLElement }>("select");
 
       click(byLabel("child.ts"));
-      key(byLabel("child.ts"), "Enter");
+      pressKey(byLabel("child.ts"), "Enter");
 
       expect(byLabel("child.ts").getAttribute("aria-selected")).toBe("false");
       expect(selects).toEqual([]);
@@ -1271,7 +1331,7 @@ describe("TreeViewController", () => {
         ),
       );
 
-      key(byLabel("src"), "ArrowRight");
+      pressKey(byLabel("src"), "ArrowRight");
 
       expect(byLabel("src").getAttribute("aria-expanded")).toBe("true");
     });
@@ -1291,7 +1351,7 @@ describe("TreeViewController", () => {
       const ghost = root().querySelector<HTMLElement>(
         "[role='group'] > [role='treeitem']",
       ) as HTMLElement;
-      key(byLabel("src"), "ArrowRight"); // expanded already -> step into the first child
+      pressKey(byLabel("src"), "ArrowRight"); // expanded already -> step into the first child
       expect(document.activeElement).toBe(ghost);
       expect(ghost.tabIndex).toBe(-1); // the tree stays a single Tab stop
       expect(byLabel("src").tabIndex).toBe(0);
@@ -1375,7 +1435,7 @@ describe("TreeViewController", () => {
       const parent = byLabel("src");
       parent.focus();
 
-      key(parent, "ArrowRight"); // steps into the first child, which is the ghost
+      pressKey(parent, "ArrowRight"); // steps into the first child, which is the ghost
 
       const ghost = document.querySelector("#ghost") as HTMLElement;
       expect(ghost.hasAttribute("tabindex")).toBe(false);
@@ -2004,15 +2064,12 @@ describe("TreeViewController typeahead naming", () => {
     document.body.innerHTML = "";
   });
 
-  const key = (el: HTMLElement, k: string) =>
-    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
-
   it("does not let an expanded child's text name its parent", () => {
     const rows = Array.from(document.querySelectorAll<HTMLElement>('[role="treeitem"]'));
     const [parent, child, sibling] = rows;
     if (!parent || !child || !sibling) throw new Error("fixture lost a row");
 
-    key(sibling, "z");
+    pressKey(sibling, "z");
 
     expect(document.activeElement).toBe(child);
     expect(document.activeElement).not.toBe(parent);
@@ -2060,18 +2117,12 @@ describe("TreeViewController settled reports", () => {
   it("leaves composing arrows and activation untouched", () => {
     const first = items()[0] as HTMLElement;
     first.focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      bubbles: true,
-      cancelable: true,
-      isComposing: true,
-    });
     const instance = application.getControllerForElementAndIdentifier(
       root(),
       "stimeo--tree-view",
     ) as TreeViewController;
     first.addEventListener("keydown", (event) => instance.onKeydown(event));
-    first.dispatchEvent(event);
+    const event = pressKey(first, "ArrowDown", { isComposing: true });
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(first);
   });
@@ -2181,8 +2232,8 @@ describe("TreeViewController settled reports", () => {
       "stimeo--tree-view",
     ) as TreeViewController;
     second.addEventListener("keydown", (event) => instance.onKeydown(event));
-    second.dispatchEvent(new KeyboardEvent("keydown", { key: "Home" }));
-    second.dispatchEvent(new KeyboardEvent("keydown", { key: "End" }));
+    pressKey(second, "Home");
+    pressKey(second, "End");
     const last = items()[2] as HTMLElement;
     const external = document.createElement("button");
     document.body.append(external);
@@ -2200,7 +2251,7 @@ describe("TreeViewController settled reports", () => {
       "stimeo--tree-view",
     ) as TreeViewController;
     second.addEventListener("keydown", (event) => instance.onKeydown(event));
-    second.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    pressKey(second, "ArrowRight");
     expect(second.hasAttribute("aria-expanded")).toBe(false);
   });
   it("does not enter a child group the page explicitly hides", () => {
@@ -2216,7 +2267,7 @@ describe("TreeViewController settled reports", () => {
       "stimeo--tree-view",
     ) as TreeViewController;
     first.addEventListener("keydown", (event) => instance.onKeydown(event));
-    first.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    pressKey(first, "ArrowRight");
     expect(document.activeElement).toBe(first);
     expect(first.tabIndex).toBe(0);
   });
@@ -2323,7 +2374,7 @@ describe("TreeViewController target API", () => {
     document.body.innerHTML = "";
   });
 
-  it("retains the existing DOM Event success as a positive control", () => {
+  it("selects an item from a DOM click as the positive control", () => {
     const reports: Array<{ reason?: string }> = [];
     element("api-root").addEventListener("stimeo--tree-view:select", (event) => {
       reports.push((event as CustomEvent<{ reason?: string }>).detail);
@@ -2334,7 +2385,7 @@ describe("TreeViewController target API", () => {
   });
 
   it.each([false, true])(
-    "accepts an owned target or its descendant (%s) after an Event positive control",
+    "accepts an owned target or its descendant (%s) through the element API",
     (descendant) => {
       const reports: Array<{ reason?: string }> = [];
       element("api-root").addEventListener("stimeo--tree-view:select", (event) => {
@@ -2592,14 +2643,13 @@ describe("TreeViewController target API", () => {
       }
     });
     owned.focus();
-    const rejected = new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true });
-    text.dispatchEvent(rejected);
+    /** A text-node origin cannot hold focus and must reach the ownership guard unchanged. */
+    const rejected = typeKey(text, "End");
     expect(targets).toEqual([text]);
     expect(errors).toEqual([]);
     expect(rejected.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(owned);
-    const accepted = new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true });
-    owned.dispatchEvent(accepted);
+    const accepted = pressKey(owned, "End");
     expect(errors).toEqual([]);
     expect(accepted.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(element("api-b"));

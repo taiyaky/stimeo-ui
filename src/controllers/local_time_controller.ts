@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { readDatetime } from "../utils/datetime";
 import { intlFormatter } from "../utils/intl_format";
 import { resolveLocale } from "../utils/locale";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
@@ -27,19 +28,21 @@ function toStyle(value: string): DateTimeStyle | undefined {
  *
  * The server emits UTC (cache-friendly — it never needs to know the viewer's
  * timezone), and the controller reformats the visible text into the viewer's
- * locale/zone on connect. This is the *absolute* localization axis, distinct from
- * {@link RelativeTimeController}'s "3 minutes ago".
+ * locale/zone on connect. A `datetime` without a zone is read as UTC; an explicit
+ * `Z` or numeric offset keeps its meaning. This is the *absolute* localization axis,
+ * distinct from `stimeo--relative-time`'s "3 minutes ago".
  *
  * `format` dispatches `{ formatted }`.
  *
  * @remarks
- * Behavior only. The machine-readable `datetime` (UTC) is left untouched so
- * assistive tech and crawlers keep the canonical value while only the display
+ * Behavior only. The machine-readable `datetime` is left untouched, exactly as written,
+ * so assistive tech and crawlers keep the canonical value while only the display
  * text — and an optional `title` — change. Formatting is a pure function of
  * `datetime` with no module-scope state or timers, so a Turbo Drive cache restore
  * re-runs `connect()` and stays consistent. A `datetime` that does not parse, and
- * a locale or time zone `Intl` rejects, leave the authored absolute text in place;
- * any other failure surfaces rather than being absorbed.
+ * a locale or time zone `Intl` rejects, leave the text already shown in place — the
+ * authored text until the first format; any other failure surfaces rather than being
+ * absorbed.
  *
  * Render inputs are followed at runtime: a morph that swaps a Value or the
  * `datetime` attribute on the live element — which keeps the element, so
@@ -125,7 +128,7 @@ export class LocalTimeController extends Controller<HTMLElement> {
    * Formats the instant in `datetime` against the current Values and writes it out.
    *
    * Formatting from a changed input reports `format`; restoring output alone is
-   * silent. A pass that cannot format preserves the authored fallback.
+   * silent. A pass that cannot format leaves the text already shown.
    *
    * @stimeoRenderRoot
    */
@@ -147,37 +150,12 @@ export class LocalTimeController extends Controller<HTMLElement> {
   }
 
   /**
-   * Parses the UTC `datetime` attribute into a {@link Date}, or `null`. Whitespace
-   * around the attribute value is tolerated.
+   * Reads the `datetime` instant with the strict reader `stimeo--relative-time` also uses;
+   * the attribute is never rewritten.
    */
   #parse(): Date | null {
-    const raw = this.element.getAttribute("datetime");
-    if (!raw) return null;
-    const ms = Date.parse(this.#asUtc(raw.trim()));
-    return Number.isNaN(ms) ? null : new Date(ms);
-  }
-
-  /**
-   * Reads a timezone-less date-time as UTC — the input contract of this
-   * controller — since `Date.parse` would otherwise read `"2026-06-08T12:30:00"` in
-   * the *runtime's* local zone, contradicting "the server emits UTC". Values that
-   * already carry `Z` or a `±hh:mm` offset (and bare `YYYY-MM-DD` dates, already
-   * parsed as UTC) are returned unchanged.
-   *
-   * HTML accepts a space where ISO 8601 wants `T`, and `Date.parse` of that form is
-   * left to each engine, so a whole value shaped that way is normalized to the `T`
-   * separator first. The pattern is anchored: a value trailing anything else — a
-   * zone word such as `"2026-06-08 12:30:00 UTC"` — is handed to `Date.parse` as
-   * authored instead of being turned into a string nothing can parse.
-   */
-  #asUtc(value: string): string {
-    const isoLike = value.replace(
-      /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)$/,
-      "$1T$2",
-    );
-    const hasTime = /T\d{2}:\d{2}/.test(isoLike);
-    const hasZone = /(Z|[+-]\d{2}:?\d{2})$/.test(isoLike);
-    return hasTime && !hasZone ? `${isoLike}Z` : isoLike;
+    const instant = readDatetime(this.element);
+    return instant === null ? null : new Date(instant);
   }
 
   /**
@@ -193,8 +171,8 @@ export class LocalTimeController extends Controller<HTMLElement> {
    * Formats `date` with `Intl.DateTimeFormat`, including each style only when it
    * is a valid keyword (so a consumer can show date-only or time-only by clearing
    * the other). Returns `null` when neither style is usable or the declaration
-   * names a locale or time zone `Intl` rejects, so the caller can leave the
-   * authored text untouched.
+   * names a locale or time zone `Intl` rejects, so the caller can leave the text
+   * already shown untouched.
    */
   #applyFormat(date: Date, dateStyle: string, timeStyle: string): string | null {
     // `toStyle` yields `undefined` for an empty/invalid keyword; assigning it is
@@ -206,9 +184,9 @@ export class LocalTimeController extends Controller<HTMLElement> {
     if (options.dateStyle === undefined && options.timeStyle === undefined) return null;
     if (this.timeZoneValue.length > 0) options.timeZone = this.timeZoneValue;
 
-    // An invalid locale or timeZone must not break the page: the authored
-    // absolute text remains as the graceful fallback. `date` is already known to
-    // be a real instant (`#parse` rejects the rest), so formatting it cannot fail.
+    // An invalid locale or timeZone must not break the page: the text already shown
+    // stays as the graceful fallback. `date` is already known to be a real instant
+    // (`#parse` rejects the rest), so formatting it cannot fail.
     const formatter = intlFormatter(
       Intl.DateTimeFormat,
       resolveLocale(this.element, this.localeValue),

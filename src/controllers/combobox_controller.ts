@@ -1,10 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
 import { syncActiveOption } from "../utils/active_option";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { commitField } from "../utils/field_mirror";
+import { ListenerSet } from "../utils/listener_set";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { MoveCounter } from "../utils/move_counter";
 import { scrollOptionIntoView } from "../utils/option_scroll";
@@ -40,7 +41,7 @@ import { targetSelector } from "../utils/target_selector";
  * list-autocomplete. Focus stays in the input; the active option is tracked with
  * `aria-activedescendant` rather than by moving DOM focus.
  *
- * `selected` dispatches `{ value: string }`.
+ * `selected` dispatches `{ value: string, reason: StateReason }`.
  *
  * @remarks
  * Behavior only. Options are authored in the DOM; the controller filters them by
@@ -112,12 +113,15 @@ export class ComboboxController extends Controller<HTMLElement> {
   /** Owns IME lifecycle state; confirmed text re-filters the list once. */
   readonly #composition = new CompositionTracker({ onEnd: () => this.filter() });
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /** Starts closed with no active option and registers the outside-click listener. */
   override connect(): void {
     if (this.hasInputTarget) this.#composition.observe(this.inputTarget);
     this.close();
     this.#list = this.hasListTarget ? this.listTarget : null;
-    document.addEventListener("click", this.#onOutsideClick, true);
+    this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
     this.#connected = true;
     this.#reconcile.activate();
   }
@@ -127,7 +131,7 @@ export class ComboboxController extends Controller<HTMLElement> {
     this.#connected = false;
     this.#reconcile.cancel();
     this.#composition.disconnect();
-    document.removeEventListener("click", this.#onOutsideClick, true);
+    this.#listeners.dispose();
   }
 
   /** Tracks an input added initially or after connect. */
@@ -248,6 +252,7 @@ export class ComboboxController extends Controller<HTMLElement> {
     // claims below. "Someone already consumed it" outranks it, so it is checked
     // after the yield above.
     if (isReservedArrowChord(event, ["alt"])) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     // The two chords the pattern claims. `Alt+Down` shows the popup *without*
     // moving focus into it, and `Alt+Up` returns focus and closes — which is
     // what separates them from the bare arrows below, where the point is to
@@ -342,9 +347,9 @@ export class ComboboxController extends Controller<HTMLElement> {
   }
 
   /**
-   * Closes the listbox when a click lands outside the combobox. Mirrors the menu
-   * button's outside-click behavior; clicks on an option are inside the element,
-   * so `#select` (not this handler) closes the popup after committing.
+   * Closes the listbox when a click lands outside the combobox. Mirrors
+   * `stimeo--menu`'s outside-click behavior; clicks on an option are inside the
+   * element, so `#select` (not this handler) closes the popup after committing.
    */
   readonly #onOutsideClick = (event: MouseEvent): void => {
     if (!this.#isClosed && !this.element.contains(event.target as Node)) this.close();

@@ -29,8 +29,8 @@ const PLACEMENTS: ReadonlySet<string> = new Set([
  * `anchor`, flipping/shifting it away from viewport edges as the page scrolls or
  * resizes. It is the declarative surface of the opt-in {@link attachPositioning}
  * engine (`@floating-ui/dom`-based), exposing its `autoUpdate` behavior as a
- * controller. No dedicated APG pattern; it is the
- * placement primitive the popup patterns (Tooltip / Menu / Popover …) build on.
+ * controller. No dedicated APG pattern; it is a placement primitive a consumer pairs
+ * with a popup such as `stimeo--tooltip`, `stimeo--menu` or `stimeo--popover`.
  *
  * Markup contract (identifier: `stimeo--anchored`):
  *   <div data-controller="stimeo--anchored"
@@ -40,9 +40,9 @@ const PLACEMENTS: ReadonlySet<string> = new Set([
  *     <div data-stimeo--anchored-target="floating" role="…">…</div>
  *   </div>
  *
- * `active` drives tracking (start/stop) and fires on connect, mirroring Focus
- * Scope's `trapValueChanged`; set it `false` while the floating element is hidden
- * so no measurement runs. The other Values map to {@link PositioningOptions} and
+ * `active` drives tracking (start/stop) and fires on connect, mirroring
+ * `stimeo--focus`'s `trapValueChanged`; set it `false` while the floating element is
+ * hidden so no measurement runs. The other Values map to {@link PositioningOptions} and
  * re-apply live while tracking. A declaration the engine cannot use — a
  * `placement` outside its set, a non-finite `offset` or `padding` — falls back to
  * that Value's default, so a typo never reaches the coordinates or the hook. Only
@@ -58,8 +58,8 @@ const PLACEMENTS: ReadonlySet<string> = new Set([
  *
  * @remarks
  * Behavior only. It does **not** open/close, manage focus, or render an overlay
- * (pair with Dialog / Popover and {@link "../controllers/focus_controller"}), and
- * it does **not** move DOM (pair with Portal). It lives in the opt-in
+ * (pair with `stimeo--dialog` / `stimeo--popover` and `stimeo--focus`), and it does
+ * **not** move DOM (pair with `stimeo--portal`). It lives in the opt-in
  * `stimeo-ui/positioning` subpath so the core `import "stimeo-ui"` stays
  * zero-dependency; only consumers who register it pull in `@floating-ui/dom`. The
  * `autoUpdate` cleanup is released on `disconnect()` (Turbo navigation included)

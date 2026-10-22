@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { typeKey } from "../helpers/keyboard";
 import { separateCopy } from "../helpers/separate_copy";
 
 /**
@@ -157,9 +158,8 @@ describe("two copies of a utility on one page", () => {
     lower.activate(document, { onDismiss: () => dismissed.push("lower") });
     upper.activate(document, { onDismiss: () => dismissed.push("upper") });
 
-    document.body.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
-    );
+    // Registry ownership is independent of focus; dispatch through the document's body.
+    typeKey(document.body, "Escape");
     expect(dismissed).toEqual(["upper"]);
     expect(upper.ownsEscape).toBe(true);
     upper.deactivate();
@@ -175,10 +175,8 @@ describe("two copies of a utility on one page", () => {
         <div id="upper"><button id="upper-first">Upper first</button><button id="upper-last">Upper last</button></div>`;
       return (id: string) => document.getElementById(id) as HTMLElement;
     };
-    const tab = () =>
-      (document.activeElement ?? document.body).dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
-      );
+    /** Keeps the focus established by the active trap, including its shadow-root host. */
+    const tab = () => typeKey(document.activeElement ?? document.body, "Tab");
 
     it("hands Tab to the trap activated last and keeps the one below it background", async () => {
       const { FocusTrap: First } = await focusTraps();

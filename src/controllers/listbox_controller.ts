@@ -1,26 +1,21 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
+import { setAttributeIfChanged } from "../utils/attribute_write";
+import { AuthoredMutationWatcher } from "../utils/authored_mutation_watcher";
 import { commitField, writeField } from "../utils/field_mirror";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { MoveCounter } from "../utils/move_counter";
 import { scrollOptionIntoView } from "../utils/option_scroll";
+import { OwnedText } from "../utils/owned_text";
 import type { StateReason } from "../utils/state_reason";
 import { targetSelector } from "../utils/target_selector";
 import { findTypeaheadMatch, isTypeaheadKey, Typeahead } from "../utils/typeahead";
 
 /** Option attributes a page can rewrite in place that move the published selection. */
 const OBSERVED_ATTRIBUTES = ["aria-selected", "data-value"];
-
-/**
- * Sets `name` on `element` only when its value differs. A same-value write still
- * queues a mutation record for every observer on the page, so an unchanged state
- * writes nothing.
- */
-function setAttributeIfChanged(element: Element, name: string, value: string): void {
-  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
-}
 
 /** The published selection: the selected option and the value its field submits. */
 interface Selection {
@@ -55,13 +50,15 @@ interface Selection {
  * Implements the WAI-ARIA APG **Listbox** pattern in its collapsed
  * (Select-Only Combobox) form. Focus stays on the trigger; the active option is
  * tracked with `aria-activedescendant` rather than by moving DOM focus. For a
- * text-filtered popup use {@link ComboboxController | Combobox}; for multiple
- * selection use {@link MultiSelectController | Multi-Select}.
+ * text-filtered popup use `stimeo--combobox`; for multiple selection use
+ * `stimeo--multi-select`.
  *
- * `change` dispatches `{ value: string, option: HTMLElement }` when the user
- * selects. `reconcile` dispatches `{ value: string, option: HTMLElement | null }`
- * — the shape of `change`, with `option: null` and `value: ""` once nothing is
- * selected — when the page moves the selection instead.
+ * `change` dispatches `{ value: string, option: HTMLElement, reason: StateReason }`
+ * whenever the controller moves the selection itself — `reason` tells a user's
+ * choice from an `api` call. `reconcile` dispatches
+ * `{ value: string, option: HTMLElement | null }` — the `value` and `option` of
+ * `change`, with `option: null` and `value: ""` once nothing is selected — when the
+ * page moves the selection instead.
  *
  * User `change` reports compare the resulting state with the last published
  * state. A pending page write handled in the same script joins that confirmation;
@@ -101,14 +98,18 @@ interface Selection {
  *   selection — updates the label and the field silently and dispatches
  *   `stimeo--listbox:reconcile`: once per batch, and only when the selected
  *   option or its value differs from the selection last settled (on connect, by
- *   the user, or by the previous `reconcile`). Connecting reports nothing. While
+ *   a selection — a user's choice or a `select()` call — or by the previous
+ *   `reconcile`). Connecting reports nothing. While
  *   connected a `MutationObserver` watches the options' `aria-selected` and
  *   `data-value`; `disconnect()` releases it.
  * - `Enter`/`Space` select and close; `Escape` and outside click / `Tab` close;
  *   closing via select/Escape returns focus to the trigger.
  */
 export class ListboxController extends Controller<HTMLElement> {
+  /** Selection labels retain the empty-state wording in the DOM record. */
+  readonly #labelText = new OwnedText(`data-${this.identifier}-owns-label`);
   readonly #moves = new MoveCounter();
+  #connectionGeneration = 0;
   static override targets = ["trigger", "value", "list", "option", "field"];
   static override values = {
     placeholder: { type: String, default: "" },
@@ -140,14 +141,19 @@ export class ListboxController extends Controller<HTMLElement> {
    */
   readonly #reconcile = new MorphRenderWatcher(() => this.#reconcileOptions());
   /** Watches the option attributes a page can rewrite in place; set while connected. */
-  #observer: MutationObserver | null = null;
-  /** The selection last settled: on connect, by the user, or by a reported pass. */
+  readonly #observer = new AuthoredMutationWatcher((records) => {
+    if (this.#concernsOptions(records)) this.#reconcile.schedule();
+  });
+  /** The selection last settled: on connect, by a selection, or by a reported pass. */
   #settled: Selection = { option: null, value: "" };
   /** The list this listbox opened, while it is open; `null` once closed. */
   #shownList: HTMLElement | null = null;
   /** Borrows `hidden` on the list, to give back when an element stops being the list. */
   readonly #listHidden = new AttributeLease<HTMLElement>("hidden", this.identifier);
-  /** Borrows `aria-expanded` on the trigger, to give back when an element stops being the trigger. */
+  /**
+   * Borrows `aria-expanded` on the trigger, to give back when an element stops being the
+   * trigger.
+   */
   readonly #expanded = new AttributeLease<HTMLElement>("aria-expanded", this.identifier);
   /** Borrows `aria-activedescendant` on the trigger, for the same return. */
   readonly #activeDescendant = new AttributeLease<HTMLElement>(
@@ -157,6 +163,9 @@ export class ListboxController extends Controller<HTMLElement> {
   /** Accumulated typeahead query and its idle-reset timer. */
   readonly #typeahead = new Typeahead();
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /**
    * Establishes the ARIA baseline, settles the selection without reporting it,
    * starts closed, and listens for outside clicks.
@@ -164,7 +173,7 @@ export class ListboxController extends Controller<HTMLElement> {
   override connect(): void {
     this.#normalizeSelection();
     this.close();
-    document.addEventListener("click", this.#onOutsideClick, true);
+    this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
     this.#settled = this.#selection();
     this.#reconcile.observe(this.element);
     this.#observeOptions();
@@ -260,9 +269,9 @@ export class ListboxController extends Controller<HTMLElement> {
    * Three things happen, and only these three — which option is chosen is the
    * author's, and is never changed:
    *
-   * 1. Every option gets an explicit value. An absent `aria-selected` means "not
-   *    selectable" in ARIA, so a forgotten attribute hides a selectable option
-   *    from assistive technology.
+   * 1. Every option gets an explicit value. APG has every selectable but unselected
+   *    option carry `aria-selected="false"`; the controller writes it rather than
+   *    relying on the role's implicit default.
    * 2. At most one stays `true`. The first in DOM order wins, since that is the
    *    only deterministic reading of "which one did the author mean"; an option
    *    the page inserts ahead of the selection, already selected, takes it over.
@@ -349,10 +358,10 @@ export class ListboxController extends Controller<HTMLElement> {
    * pass, and clears the typeahead timer.
    */
   override disconnect(): void {
+    this.#connectionGeneration += 1;
     this.#reconcile.disconnect();
-    this.#observer?.disconnect();
-    this.#observer = null;
-    document.removeEventListener("click", this.#onOutsideClick, true);
+    this.#observer.disconnect();
+    this.#listeners.dispose();
     // The typeahead keeps its idle reset in a `SafeTimeout` of its own, so this is
     // the only teardown that reaches it — there is no controller-level registry to
     // fall back on. Every timer this controller can schedule lives in there.
@@ -377,6 +386,7 @@ export class ListboxController extends Controller<HTMLElement> {
   onTriggerKeydown(event: KeyboardEvent): void {
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     if (!this.#isClosed) this.#reconcileActive();
     const options = this.optionTargets;
     const length = options.length;
@@ -500,6 +510,7 @@ export class ListboxController extends Controller<HTMLElement> {
 
   /** Applies selection: `aria-selected`, trigger label, hidden field, `change`. */
   #selectOption(option: HTMLElement, reason: StateReason = "user"): boolean {
+    const generation = this.#connectionGeneration;
     const { value, fieldChanged } = this.#applySelection(option);
     // Settled before anything is reported, so a listener that moves the selection
     // again is measured against this one.
@@ -511,22 +522,22 @@ export class ListboxController extends Controller<HTMLElement> {
     // form-level behaviors — validation re-checks, auto-submit — hear the
     // commit without knowing this widget.
     if (fieldChanged) commitField(this.fieldTarget);
-    if (!this.#moves.isLatest(token)) return false;
+    if (generation !== this.#connectionGeneration || !this.#moves.isLatest(token)) return false;
     this.dispatch("change", { detail: { value, option, reason } });
     return this.#moves.isLatest(token);
   }
 
   /**
    * Writes `option` — or, when it is `undefined`, no selection — into
-   * `aria-selected`, the trigger label and the hidden field. Emits nothing: the
-   * user's commit and a page-driven pass each report it their own way, and
-   * `connect()` only describes the state it finds.
+   * `aria-selected`, the trigger label and the hidden field. Emits nothing: a
+   * commit — a user's choice or a `select()` call — and a page-driven pass each
+   * report it their own way, and `connect()` only describes the state it finds.
    */
   #applySelection(option: HTMLElement | undefined): { value: string; fieldChanged: boolean } {
     for (const candidate of this.optionTargets) {
-      setAttributeIfChanged(candidate, "aria-selected", candidate === option ? "true" : "false");
+      this.#writeSelection(candidate, candidate === option ? "true" : "false");
     }
-    this.#dropOwnRecords();
+    this.#flushMutations();
     const value = option ? this.#optionValue(option) : "";
     this.#renderLabel(option);
     const fieldChanged = this.hasFieldTarget && writeField(this.fieldTarget, value);
@@ -539,44 +550,36 @@ export class ListboxController extends Controller<HTMLElement> {
    * before this controller first wrote into it.
    *
    * The value is this controller's only while it holds the text last written into
-   * it and nothing else — the `owns-label` marker carries that text — and the text
-   * it held before is kept in the `original-label` marker. A value the page
-   * rewrote or added an element to after that — the marker is still there but no
-   * longer matches — is the page's: with nothing selected it is left exactly as it
-   * is, `placeholder` or not, and the next selection remembers its text before
-   * replacing it. A value with no marker at all — the author's, or one a morph put
-   * back without the markers — is taken over the same way by `placeholder` or by a
-   * selection. A value that only ever showed a selection has no text of its own to
-   * return to, so it is emptied rather than left naming an option that is not
-   * selected.
+   * it and nothing else — `owns-label` carries `["text", original, written]`,
+   * including the text it held before. A value the page rewrote or added an element
+   * to after that — the record is still there but its written text does not match —
+   * is the page's: with nothing selected it is left exactly as it is, `placeholder`
+   * or not, and the next selection remembers its text before replacing it. A value
+   * with no record at all — the author's, or one a morph put back without the
+   * record — is taken over the same way by `placeholder` or by a selection. A value
+   * that only ever showed a selection has no text of its own to return to, so it is
+   * emptied rather than left naming an option that is not selected.
    *
    * @stimeoRenderRoot
    */
   #renderLabel(option: HTMLElement | undefined): void {
     if (!this.hasValueTarget) return;
     const label = this.valueTarget;
-    const ownsLabel = `data-${this.identifier}-owns-label`;
-    const originalLabel = `data-${this.identifier}-original-label`;
-    const owned =
-      label.getAttribute(ownsLabel) === label.textContent && label.childElementCount === 0;
-    if (option === undefined && !owned && label.hasAttribute(ownsLabel)) return;
+    const owned = this.#labelText.owns(label);
+    if (option === undefined && !owned && this.#labelText.hasRecord(label)) return;
     const text = option ? this.#optionLabel(option) : this.placeholderValue || null;
     if (text === null) {
-      if (!owned) return;
-      label.textContent = label.getAttribute(originalLabel) ?? "";
-      label.removeAttribute(ownsLabel);
-      label.removeAttribute(originalLabel);
+      this.#labelText.restore(label);
       return;
     }
-    if (!owned) {
-      const current = (label.textContent ?? "").trim();
-      // Text that already shows this selection is not an empty-state label.
-      if (option === undefined || current !== text) {
-        setAttributeIfChanged(label, originalLabel, current);
-      }
-    }
-    if (label.textContent !== text) label.textContent = text;
-    setAttributeIfChanged(label, ownsLabel, text);
+    const current = (label.textContent ?? "").trim();
+    // Text that already shows this selection is not an empty-state label.
+    const original = owned
+      ? undefined
+      : option === undefined || current !== text
+        ? current
+        : (this.#labelText.read(label)?.original ?? "");
+    this.#labelText.write(label, text, original);
   }
 
   /** An option's visible label: its own text, trimmed. */
@@ -589,22 +592,12 @@ export class ListboxController extends Controller<HTMLElement> {
     return option.dataset.value ?? this.#optionLabel(option);
   }
 
-  /**
-   * Watches the options' `aria-selected` and `data-value`. The listbox's own writes
-   * to them are dropped from the queue as they happen, so each record the callback
-   * receives is the page's, and only a record on one of the listbox's own options
-   * schedules a pass.
-   */
+  /** Watches authored state on this component's targets without discarding page records. */
   #observeOptions(): void {
-    const observer = new MutationObserver((records) => {
-      if (this.#concernsOptions(records)) this.#reconcile.schedule();
-    });
-    observer.observe(this.element, {
+    this.#observer.observe(this.element, {
       subtree: true,
-      attributes: true,
-      attributeFilter: OBSERVED_ATTRIBUTES,
+      attributes: OBSERVED_ATTRIBUTES,
     });
-    this.#observer = observer;
   }
 
   /**
@@ -617,15 +610,9 @@ export class ListboxController extends Controller<HTMLElement> {
     return records.some((record) => options.has(record.target));
   }
 
-  /**
-   * Drops the records the listbox's own writes just queued, so the observer never
-   * takes them for the page's. A page write queued just before goes with them and
-   * owes nothing: every such write leaves every option's `aria-selected` at the
-   * value the selection gives it, and the selection is then read back from the DOM,
-   * so it already holds what the page wrote.
-   */
-  #dropOwnRecords(): void {
-    this.#observer?.takeRecords();
+  /** Expires own claims while keeping queued authored options changes observable. */
+  #flushMutations(): void {
+    if (this.#concernsOptions(this.#observer.take())) this.#reconcile.schedule();
   }
 
   /**
@@ -738,5 +725,15 @@ export class ListboxController extends Controller<HTMLElement> {
   /** Whether the list is currently hidden. */
   get #isClosed(): boolean {
     return !this.hasListTarget || this.listTarget.hidden !== false;
+  }
+
+  /**
+   * Records one changed selection attribute before this controller's mutation watcher
+   * receives it.
+   */
+  #writeSelection(target: HTMLElement, value: string | null): void {
+    setAttributeIfChanged(target, "aria-selected", value, () => {
+      this.#observer.claim(target, "aria-selected", value);
+    });
   }
 }

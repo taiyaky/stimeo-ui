@@ -1,6 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { isRtl } from "../utils/logical_scroll";
 import type { StateReason } from "../utils/state_reason";
 import { targetSelector } from "../utils/target_selector";
@@ -31,13 +31,15 @@ import { targetSelector } from "../utils/target_selector";
  * (`0` for the active tab, `-1` for the rest), and the panel `hidden` attribute;
  * the consumer owns all styling. The required `list` target marks the tablist
  * container as part of the semantic contract — that container carries
- * `role="tablist"` and an accessible name; the controller performs no runtime
- * work on it.
+ * `role="tablist"` and an accessible name. The controller writes nothing to it;
+ * it reads the container's writing direction for the arrow keys, falling back to
+ * the controller element when the target is absent.
  *
  * Behavior provided:
  * - Click a tab to select it.
- * - `ArrowRight`/`ArrowLeft` move to and select the next/previous tab (wrapping);
- *   `Home`/`End` select the first/last tab.
+ * - The forward horizontal arrow (`ArrowRight`, or `ArrowLeft` when the tablist is
+ *   right-to-left) moves to and selects the next tab, and the backward one the
+ *   previous (wrapping); `Home`/`End` select the first/last tab.
  * - Every selection move is reported: `stimeo--tabs:change` dispatches
  *   `{ index: number, total: number, previous: number, reason: StateReason }`, after
  *   `aria-selected`, the roving `tabindex` and the panels' `hidden` are written
@@ -51,6 +53,7 @@ export class TabsController extends Controller<HTMLElement> {
   static events = ["change"] as const;
 
   declare readonly listTarget: HTMLElement;
+  declare readonly hasListTarget: boolean;
   declare readonly tabTargets: HTMLButtonElement[];
   declare readonly panelTargets: HTMLElement[];
 
@@ -98,18 +101,19 @@ export class TabsController extends Controller<HTMLElement> {
     // nested menu) must not ALSO act on it — composition depends on this yield.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     const tabs = this.tabTargets;
     const currentIndex = tabs.indexOf(event.currentTarget as HTMLButtonElement);
     if (currentIndex === -1) return;
 
     let nextIndex: number | null = null;
-    // Logical, not physical. APG defines these as "next / previous control", and
-    // says a vertical arrangement swaps in Down/Up for the same meaning — so the
-    // pair is one axis's spelling of an order, and the order reverses with the
-    // writing direction. Read from the controller element: the container is what
-    // lays the items out, and a child may carry its own `dir` (an LTR input
-    // inside an RTL form is ordinary authoring).
-    const step = isRtl(this.element) ? -1 : 1;
+    /**
+     * Horizontal navigation follows the current tablist's computed direction.
+     * A missing list uses the controller element, while a tab's own direction
+     * never changes the sequence.
+     */
+    const directionElement = this.hasListTarget ? this.listTarget : this.element;
+    const step = isRtl(directionElement) ? -1 : 1;
     switch (event.key) {
       case "ArrowRight":
         nextIndex = (currentIndex + step + tabs.length) % tabs.length;

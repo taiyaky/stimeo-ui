@@ -3,6 +3,7 @@ import { AttributeLease } from "../utils/attribute_lease";
 import { BlurDeferral } from "../utils/blur_deferral";
 import { validSelector } from "../utils/declared_value";
 import { FrameCoalescer } from "../utils/frame_coalescer";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
@@ -103,10 +104,11 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
   #visible: boolean | null = null;
   /**
    * The scroll source the listener is on: a container element when `root`
-   * resolves, else the window. Teardown and a move to another source detach from
-   * this same node.
+   * resolves, else the window.
    */
   #scrollSource: ScrollSource = window;
+  /** The scroll listener on the current source; a move to another source releases it first. */
+  readonly #scrollListeners = new ListenerSet();
   /**
    * Gates the declaration callbacks to the connected window.
    *
@@ -158,7 +160,7 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
   override disconnect(): void {
     this.#morphRender.disconnect();
     this.#connected = false;
-    this.#scrollSource.removeEventListener("scroll", this.#onScroll);
+    this.#scrollListeners.dispose();
     this.#frames.cancel();
     this.#pendingHide.releaseAll();
     this.#tabindex.returnAll();
@@ -242,7 +244,7 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
   #followSource(): void {
     const source = resolveScrollSource(this.#rootSelector);
     if (source === this.#scrollSource) return;
-    this.#scrollSource.removeEventListener("scroll", this.#onScroll);
+    this.#scrollListeners.dispose();
     this.#listenTo(source);
   }
 
@@ -253,7 +255,7 @@ export class ScrollVisibilityController extends Controller<HTMLElement> {
   #listenTo(source: ScrollSource): void {
     this.#scrollSource = source;
     this.#lastScrollY = scrollOffset(source);
-    source.addEventListener("scroll", this.#onScroll, { passive: true });
+    this.#scrollListeners.add(source, "scroll", this.#onScroll, { passive: true });
   }
 
   /**

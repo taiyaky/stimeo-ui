@@ -6,6 +6,7 @@ import {
   isTabStop,
   tabStopsWithin,
 } from "../utils/focus_candidate";
+import { ListenerSet } from "../utils/listener_set";
 
 /**
  * Headless "dismissible" behavior for banners, notices, and inline alerts.
@@ -63,6 +64,8 @@ export class DismissibleController extends Controller<HTMLElement> {
   readonly #openDefault = new AttributeLease<HTMLElement>("data-state", this.identifier);
   /** Whether `connect()` has run for this connection; target callbacks arrive outside it too. */
   #connected = false;
+  /** The Escape listener, held while connected with `closeOnEscape` on. */
+  readonly #escapeListeners = new ListenerSet();
 
   override connect(): void {
     this.#establishOpen(this.#root);
@@ -72,7 +75,7 @@ export class DismissibleController extends Controller<HTMLElement> {
 
   override disconnect(): void {
     this.#connected = false;
-    this.element.removeEventListener("keydown", this.#onKeydown);
+    this.#escapeListeners.dispose();
   }
 
   /**
@@ -117,11 +120,11 @@ export class DismissibleController extends Controller<HTMLElement> {
     this.#performDismiss();
   };
 
-  /** Adds or removes the one stable listener reference without duplicating it. */
+  /** Releases the Escape listener, and holds it again while `closeOnEscape` is on. */
   #syncEscapeListener(): void {
-    this.element.removeEventListener("keydown", this.#onKeydown);
+    this.#escapeListeners.dispose();
     if (this.closeOnEscapeValue) {
-      this.element.addEventListener("keydown", this.#onKeydown);
+      this.#escapeListeners.add(this.element, "keydown", this.#onKeydown);
     }
   }
 

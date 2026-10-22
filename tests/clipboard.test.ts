@@ -7,6 +7,7 @@ import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay, tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /**
  * Behavioral tests for {@link ClipboardController}: copy execution against a
@@ -77,6 +78,172 @@ describe("ClipboardController", () => {
     await start();
     expect(controllerEl().getAttribute("data-state")).toBe("idle");
   });
+
+  it.each([false, true])(
+    "follows a result label only while its plain text is owned (child=%s)",
+    async (child) => {
+      await start('data-stimeo--clipboard-feedback-duration-value="0"');
+      await instance().copy();
+      const slot = feedback();
+      const authored = document.createElement("span");
+      if (child) {
+        authored.textContent = slot.textContent;
+        slot.replaceChildren(authored);
+      }
+      controllerEl().setAttribute("data-stimeo--clipboard-copied-label-value", "Done");
+      await tick();
+      expect(slot.textContent).toBe(child ? "Copied" : "Done");
+      if (child) expect(slot.firstElementChild).toBe(authored);
+    },
+  );
+
+  it.each([false, true])(
+    "leaves a replacement feedback that happens to show the previous label (recorded=%s)",
+    async (recorded) => {
+      await start('data-stimeo--clipboard-feedback-duration-value="0"');
+      await instance().copy();
+      const replacement = recorded
+        ? (feedback().cloneNode(true) as HTMLElement)
+        : document.createElement("span");
+      if (!recorded) {
+        replacement.setAttribute("data-stimeo--clipboard-target", "feedback");
+        replacement.textContent = "Copied";
+      }
+      feedback().replaceWith(replacement);
+      await tick();
+      controllerEl().setAttribute("data-stimeo--clipboard-copied-label-value", "Done");
+      await tick();
+      expect(replacement.textContent).toBe("Copied");
+    },
+  );
+
+  it("leaves a recorded replacement a morph finds when the result ends", async () => {
+    await start('data-stimeo--clipboard-feedback-duration-value="20"');
+    vi.useFakeTimers();
+    try {
+      await instance().copy();
+      const replacement = feedback().cloneNode(true) as HTMLElement;
+      feedback().replaceWith(replacement);
+      await vi.advanceTimersByTimeAsync(0);
+      controllerEl().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(20);
+      expect(controllerEl().getAttribute("data-state")).toBe("idle");
+      expect(replacement.textContent).toBe("Copied");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("empties every recorded feedback when a restored copy connects", async () => {
+    await start('data-stimeo--clipboard-feedback-duration-value="0"');
+    await instance().copy();
+    const later = feedback();
+    const first = document.createElement("span");
+    first.setAttribute("data-stimeo--clipboard-target", "feedback");
+    later.before(first);
+    await tick();
+    await instance().copy();
+    expect([first.textContent, later.textContent]).toEqual(["Copied", "Copied"]);
+    const restored = controllerEl().cloneNode(true) as HTMLElement;
+    disconnectAndStopApplication(application);
+    await mount(restored.outerHTML);
+    const slots = [...document.querySelectorAll("[data-stimeo--clipboard-target='feedback']")].map(
+      (slot) => slot.textContent,
+    );
+    expect(controllerEl().getAttribute("data-state")).toBe("idle");
+    expect(slots).toEqual(["", ""]);
+  });
+
+  it("acquires a same-text child on a new explicit copy", async () => {
+    await start('data-stimeo--clipboard-feedback-duration-value="0"');
+    await instance().copy();
+    feedback().innerHTML = "<span>Copied</span>";
+    await instance().copy();
+    expect(feedback().textContent).toBe("Copied");
+    expect(feedback().firstElementChild).toBeNull();
+  });
+
+  it("forgets a DOM-supplied result after its followed slot leaves the targets", async () => {
+    await start('data-stimeo--clipboard-feedback-duration-value="0"');
+    const slot = feedback();
+    slot.textContent = "Copied";
+    slot.setAttribute("data-stimeo--clipboard-feedback-text", '["text","","Copied"]');
+    controllerEl().setAttribute("data-state", "copied");
+    controllerEl().setAttribute("data-stimeo--clipboard-copied-label-value", "Updated");
+    await tick();
+    expect(slot.textContent).toBe("Updated");
+    expect(JSON.parse(slot.getAttribute("data-stimeo--clipboard-feedback-text") ?? "null")).toEqual(
+      ["text", "", "Updated"],
+    );
+    slot.removeAttribute("data-stimeo--clipboard-target");
+    instance().disconnect();
+    instance().connect();
+    expect(controllerEl().getAttribute("data-state")).toBe("idle");
+    expect(slot.textContent).toBe("Updated");
+    expect(slot.hasAttribute("data-stimeo--clipboard-feedback-text")).toBe(false);
+  });
+
+  it.each(["owned", "authored", "child", "departed"] as const)(
+    "forgets a finished result's %s record while respecting its text",
+    async (scenario) => {
+      await start('data-stimeo--clipboard-feedback-duration-value="20"');
+      vi.useFakeTimers();
+      try {
+        await instance().copy();
+        const slot = feedback();
+        if (scenario === "authored") slot.textContent = "Author revised";
+        if (scenario === "child") slot.innerHTML = "<span>Copied</span>";
+        if (scenario === "departed") slot.removeAttribute("data-stimeo--clipboard-target");
+        await vi.advanceTimersByTimeAsync(20);
+        expect(slot.hasAttribute("data-stimeo--clipboard-feedback-text")).toBe(false);
+        expect(slot.textContent).toBe(
+          scenario === "owned" ? "" : scenario === "authored" ? "Author revised" : "Copied",
+        );
+        if (scenario === "child") expect(slot.firstElementChild?.tagName).toBe("SPAN");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["missing", "current", "invalid"] as const)(
+    "releases a live result using its %s DOM record",
+    async (record) => {
+      await start('data-stimeo--clipboard-feedback-duration-value="20"');
+      vi.useFakeTimers();
+      try {
+        await instance().copy();
+        const slot = feedback();
+        if (record === "missing") slot.removeAttribute("data-stimeo--clipboard-feedback-text");
+        if (record === "current") {
+          slot.textContent = "Reconciled";
+          slot.setAttribute("data-stimeo--clipboard-feedback-text", '["text","","Reconciled"]');
+        }
+        if (record === "invalid")
+          slot.setAttribute("data-stimeo--clipboard-feedback-text", "invalid");
+        await vi.advanceTimersByTimeAsync(20);
+        expect(slot.textContent).toBe(record === "invalid" ? "Copied" : "");
+        expect(slot.hasAttribute("data-stimeo--clipboard-feedback-text")).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "repairs its original slot only when a morph omits the record (omitted=%s)",
+    async (omitted) => {
+      await mount(
+        '<div data-controller="stimeo--clipboard" data-stimeo--clipboard-feedback-duration-value="0"><span data-stimeo--clipboard-target="feedback">Ready</span></div>',
+      );
+      await instance().copy();
+      feedback().textContent = "Ready";
+      if (omitted) feedback().removeAttribute("data-stimeo--clipboard-feedback-text");
+      controllerEl().dispatchEvent(new Event("turbo:morph-element", { bubbles: true }));
+      await tick();
+      expect(feedback().textContent).toBe(omitted ? "Copied" : "Ready");
+    },
+  );
 
   it("copies the source value and reports success", async () => {
     await start();
@@ -245,7 +412,7 @@ describe("ClipboardController", () => {
       <div data-controller="stimeo--clipboard" data-state="copied">
         <button data-stimeo--clipboard-target="button"
                 data-action="stimeo--clipboard#copy">Copy</button>
-        <span data-stimeo--clipboard-target="feedback">Copied</span>
+        <span data-stimeo--clipboard-target="feedback" data-stimeo--clipboard-feedback-text='["text","","Copied"]'>Copied</span>
       </div>`);
     expect(controllerEl().getAttribute("data-state")).toBe("idle");
     expect(feedback().textContent).toBe("");
@@ -256,11 +423,34 @@ describe("ClipboardController", () => {
       <div data-controller="stimeo--clipboard" data-state="error">
         <button data-stimeo--clipboard-target="button"
                 data-action="stimeo--clipboard#copy">Copy</button>
-        <span data-stimeo--clipboard-target="feedback">Copy failed</span>
+        <span data-stimeo--clipboard-target="feedback" data-stimeo--clipboard-feedback-text='["text","","Copy failed"]'>Copy failed</span>
       </div>`);
     expect(controllerEl().getAttribute("data-state")).toBe("idle");
     expect(feedback().textContent).toBe("");
   });
+
+  it.each(["owned", "authored", "child", "missing", "invalid"] as const)(
+    "normalises a real result clone without erasing %s feedback",
+    async (scenario) => {
+      await start('data-stimeo--clipboard-feedback-duration-value="0"');
+      await instance().copy();
+      const clone = controllerEl().cloneNode(true) as HTMLElement;
+      const slot = clone.querySelector<HTMLElement>("[data-stimeo--clipboard-target='feedback']");
+      if (!slot) throw new Error("missing feedback");
+      if (scenario === "authored") slot.textContent = "Author revised";
+      if (scenario === "child") slot.innerHTML = "<span>Copied</span>";
+      if (scenario === "missing") slot.removeAttribute("data-stimeo--clipboard-feedback-text");
+      if (scenario === "invalid")
+        slot.setAttribute("data-stimeo--clipboard-feedback-text", "broken");
+      disconnectAndStopApplication(application);
+      await mount(clone.outerHTML);
+      expect(controllerEl().getAttribute("data-state")).toBe("idle");
+      expect(feedback().textContent).toBe(
+        scenario === "owned" ? "" : scenario === "authored" ? "Author revised" : "Copied",
+      );
+      if (scenario === "child") expect(feedback().firstElementChild?.tagName).toBe("SPAN");
+    },
+  );
 
   it("preserves an authored data-state the controller does not own", async () => {
     await mount(`
@@ -375,17 +565,15 @@ describe("ClipboardController", () => {
     }
   });
 
-  // Detaching the element drives Stimulus `disconnect()`, where SafeTimeout's
-  // clearAll cancels the pending reset (`application.stop()` alone would not
-  // disconnect the controller).
+  // disconnect() cancels the pending return to idle through SafeTimeout's clearAll.
   it("clears the auto-reset timer on disconnect (no mutation after teardown)", async () => {
     await start('data-stimeo--clipboard-feedback-duration-value="20"');
     await instance().copy();
     const fb = feedback();
 
-    // Drive disconnect() directly rather than via element removal: relying on the
-    // async MutationObserver that fires disconnect on remove() races the 20ms timer
-    // under parallel load. disconnect() must cancel the pending auto-reset timer.
+    // The case calls disconnect() directly, so it checks the controller's own teardown
+    // rather than the removal Stimulus observes: disconnect() must cancel the pending
+    // auto-reset timer.
     instance().disconnect();
     fb.textContent = "sentinel";
     await delay(40);
@@ -536,6 +724,43 @@ describe("ClipboardController", () => {
         expect(feedback().textContent).toBe("Swapped");
       });
 
+      it("leaves its held slot unchanged when a label callback arrives after disconnect", async () => {
+        await start(
+          'data-stimeo--clipboard-feedback-duration-value="0" ' +
+            'data-stimeo--clipboard-announce-copied-text-value="Copied to clipboard" ' +
+            'data-stimeo--clipboard-announce-error-text-value="Copy failed"',
+        );
+        await copyOnce(fails);
+        const controller = instance();
+        const slot = feedback();
+        const record = slot.getAttribute("data-stimeo--clipboard-feedback-text");
+        const spoken = [...announcements];
+        const copies = countCopies();
+        controller.disconnect();
+        controllerEl().setAttribute(attribute, "Swapped");
+        // A delivered Value callback retains the same slot and matching owned label.
+        if (fails) controller.errorLabelValueChanged("Swapped", label);
+        else controller.copiedLabelValueChanged("Swapped", label);
+        expect(slot.textContent).toBe(label);
+        expect(slot.getAttribute("data-stimeo--clipboard-feedback-text")).toBe(record);
+        expect(controllerEl().getAttribute("data-state")).toBe(state);
+        expect(announcements).toEqual(spoken);
+        expect(copies.count).toBe(0);
+
+        controller.connect();
+        expect(controllerEl().getAttribute("data-state")).toBe("idle");
+        expect(slot.textContent).toBe("");
+        expect(slot.hasAttribute("data-stimeo--clipboard-feedback-text")).toBe(false);
+        await copyOnce(fails);
+        expect(slot.textContent).toBe("Swapped");
+        controllerEl().setAttribute(attribute, "Live");
+        if (fails) controller.errorLabelValueChanged("Live", "Swapped");
+        else controller.copiedLabelValueChanged("Live", "Swapped");
+        expect(slot.textContent).toBe("Live");
+        expect(copies.count).toBe(1);
+        expect(announcements).toEqual([...spoken, ...spoken]);
+      });
+
       it("writes nothing from the label callback Stimulus runs before connect", async () => {
         let beforeConnect: string | null = null;
         class ProbedClipboard extends ClipboardController {
@@ -548,7 +773,7 @@ describe("ClipboardController", () => {
         <div data-controller="stimeo--clipboard" data-state="${state}" ${attribute}="Swapped">
           <button type="button" data-stimeo--clipboard-target="button"
                   data-action="stimeo--clipboard#copy">Copy</button>
-          <span data-stimeo--clipboard-target="feedback">${label}</span>
+          <span data-stimeo--clipboard-target="feedback" data-stimeo--clipboard-feedback-text='["text","","${label}"]'>${label}</span>
         </div>${ANNOUNCER}`;
         application = Application.start();
         application.register("stimeo--clipboard", ProbedClipboard);
@@ -599,16 +824,15 @@ describe("ClipboardController", () => {
   });
 
   /**
-   * Rewrites `feedbackDuration` and delivers its Value callback directly when the
-   * controller defines one, since happy-dom does not reliably run it for an attribute
-   * write.
+   * Rewrites the `feedbackDuration` declaration and waits for Stimulus to deliver it, so
+   * the assertions that follow see whatever the controller does with the change.
    */
-  const declareFeedbackDuration = (value: number) => {
-    controllerEl().setAttribute("data-stimeo--clipboard-feedback-duration-value", String(value));
-    const owner = instance();
-    const callback: unknown = Reflect.get(owner, "feedbackDurationValueChanged");
-    if (typeof callback === "function") callback.call(owner);
-  };
+  const declareFeedbackDuration = (value: number) =>
+    writeValueAttribute(
+      controllerEl(),
+      "data-stimeo--clipboard-feedback-duration-value",
+      String(value),
+    );
 
   it.each([
     { direction: "shrinks", next: 20 },
@@ -622,7 +846,7 @@ describe("ClipboardController", () => {
         await instance().copy();
         vi.advanceTimersByTime(50);
 
-        declareFeedbackDuration(next);
+        await declareFeedbackDuration(next);
         vi.advanceTimersByTime(149);
         expect(controllerEl().getAttribute("data-state")).toBe("copied");
         vi.advanceTimersByTime(1);
@@ -654,7 +878,7 @@ describe("ClipboardController", () => {
       expect(copies).toHaveLength(1);
 
       // The result on screen was promised no return to idle, and a later duration keeps it.
-      declareFeedbackDuration(20);
+      await declareFeedbackDuration(20);
       vi.advanceTimersByTime(1000);
       expect(controllerEl().getAttribute("data-state")).toBe("copied");
       expect(feedback().textContent).toBe("Copied");
@@ -825,6 +1049,46 @@ describe("ClipboardController", () => {
       expect(controllerEl().getAttribute("data-state")).toBe("idle");
       expect(feedback().textContent).toBe("Saved by the page");
     });
+
+    it.each(["timer", "reconnect"] as const)(
+      "keeps a completed slot's later DOM evidence out of the next reset (end=%s)",
+      async (end) => {
+        await start(SHORT);
+        vi.useFakeTimers();
+        try {
+          await instance().copy();
+          const earlier = feedback();
+          const recordName = "data-stimeo--clipboard-feedback-text";
+          const recorded = earlier.getAttribute(recordName);
+          expect(recorded).not.toBeNull();
+          if (end === "timer") await vi.advanceTimersByTimeAsync(20);
+          else {
+            instance().disconnect();
+            instance().connect();
+          }
+          expect(earlier.textContent).toBe("");
+          expect(earlier.hasAttribute(recordName)).toBe(false);
+
+          const ahead = document.createElement("span");
+          ahead.setAttribute(TARGET, "feedback");
+          earlier.before(ahead);
+          // The page restores recorded markup to a slot whose result has already ended.
+          earlier.textContent = "Copied";
+          earlier.setAttribute(recordName, recorded ?? "");
+          await vi.advanceTimersByTimeAsync(0);
+          await instance().copy();
+          expect(ahead.textContent).toBe("Copied");
+          await vi.advanceTimersByTimeAsync(20);
+          expect(controllerEl().getAttribute("data-state")).toBe("idle");
+          expect(ahead.textContent).toBe("");
+          expect(ahead.hasAttribute(recordName)).toBe(false);
+          expect(earlier.textContent).toBe("Copied");
+          expect(earlier.getAttribute(recordName)).toBe(recorded);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
 
     it("forgets the slot a result was written into once that result ends", async () => {
       await start(SHORT);

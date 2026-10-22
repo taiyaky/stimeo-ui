@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { LocalTimeController } from "../src/controllers/local_time_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { withRuntimeTimeZone } from "./helpers/runtime_time_zone";
+import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -34,32 +36,19 @@ const refFor = (
 const ref = (locale: string | undefined, options: Intl.DateTimeFormatOptions): string =>
   refFor(ISO, locale, options);
 
-/**
- * Runs `body` with the runtime's own timezone moved off UTC, then puts it back.
- *
- * The suite runs in UTC, where "read as UTC" and "read in the runtime's local
- * zone" resolve to the *same* instant — so any assertion about that distinction
- * is unfalsifiable until the runtime zone actually differs.
- *
- * Restoring assigns the previous value back rather than deleting the variable:
- * assignment is what makes the runtime re-read its zone, while after a `delete`
- * the zone stays frozen at the moved value and every later assignment is ignored
- * — which would silently leave the following cases in the wrong zone. What goes
- * back is the raw `TZ` when there was one, since the resolved zone can carry a
- * different name than the value that produced it, and otherwise the zone the
- * runtime resolved on entry.
- */
-const withRuntimeTimeZone = async (timeZone: string, body: () => Promise<void>): Promise<void> => {
-  const previous = process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
-  process.env.TZ = timeZone;
-  try {
-    await body();
-  } finally {
-    process.env.TZ = previous;
-  }
-};
-
 describe("withRuntimeTimeZone", () => {
+  it("restores the runtime zone when the body rejects", async () => {
+    const before = process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const failure = new Error("body failed");
+    await expect(
+      withRuntimeTimeZone("America/New_York", async () => {
+        expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe("America/New_York");
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(process.env.TZ).toBe(before);
+  });
+
   it("moves the runtime zone and puts it back", async () => {
     const before = Intl.DateTimeFormat().resolvedOptions().timeZone;
     let inside = "";
@@ -149,7 +138,7 @@ describe("LocalTimeController", () => {
           'data-stimeo--local-time-date-style-value="medium" ' +
           'data-stimeo--local-time-time-style-value="short"',
         "2026-06-08 12:30",
-        "2026-06-08T12:30:00", // no Z / offset → must be read as UTC per the contract
+        "2026-06-08T12:30:00", // no Z / offset → read as UTC
       );
       // Same instant as the Z-suffixed form, so it formats identically to the UTC ref.
       expect(el().textContent).toBe(
@@ -313,6 +302,30 @@ describe("LocalTimeController", () => {
     expect(formatted).toEqual([
       ref("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }),
     ]);
+  });
+
+  it.each([
+    "2026-02-30T12:30:00Z",
+    "2026",
+    "2026-06",
+    "Mon, 08 Jun 2026 12:30:00 GMT",
+    "2026-06-08 12:30:00 UTC",
+    "2026-06-08  12:30:00Z",
+    "2026-06-08t12:30:00z",
+    "2026-06-08T24:00:00.0001Z",
+  ])("leaves text, title and notifications untouched for %j", async (raw) => {
+    const seen: string[] = [];
+    const onFormat = (event: Event) => seen.push(event.type);
+    document.addEventListener("stimeo--local-time:format", onFormat);
+    try {
+      await start('title="server title"', "server fallback", raw);
+      expect(el().textContent).toBe("server fallback");
+      expect(el().getAttribute("title")).toBe("server title");
+      expect(el().getAttribute("datetime")).toBe(raw);
+      expect(seen).toEqual([]);
+    } finally {
+      document.removeEventListener("stimeo--local-time:format", onFormat);
+    }
   });
 
   it("leaves the authored text when datetime is invalid, without reporting an error", async () => {
@@ -532,6 +545,25 @@ describe("LocalTimeController accessibility", () => {
   afterEach(() => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
+  });
+
+  it("exposes the complete localized time to cursor navigation", async () => {
+    document.body.innerHTML = `<time data-controller="stimeo--local-time" datetime="2026-06-08 12:30"
+      data-stimeo--local-time-locale-value="en-US"
+      data-stimeo--local-time-time-zone-value="UTC">Authored</time>`;
+    application = Application.start();
+    application.register("stimeo--local-time", LocalTimeController);
+    await tick();
+    const node = query("time");
+    const expected = new Intl.DateTimeFormat("en-US", {
+      timeZone: "UTC",
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(Date.UTC(2026, 5, 8, 12, 30));
+    expect(await captureSpeech({ container: node, steps: 1 })).toEqual(["time", expected]);
+    expect(
+      document.querySelector("[aria-live], [role='alert'], [role='status'], [role='log']"),
+    ).toBeNull();
   });
 
   it("has no machine-detectable a11y violations", async () => {

@@ -6,6 +6,7 @@ import {
   Typeahead,
   typeaheadLabel,
 } from "../../src/utils/typeahead";
+import { keyEvent } from "../helpers/keyboard";
 
 /**
  * Unit tests for the shared type-ahead primitive: query accumulation with an idle
@@ -124,7 +125,7 @@ describe("Typeahead", () => {
 });
 
 describe("isTypeaheadKey", () => {
-  const key = (init: KeyboardEventInit) => new KeyboardEvent("keydown", init);
+  const key = (init: KeyboardEventInit) => keyEvent(init.key ?? "", init);
 
   it("accepts a bare printable character", () => {
     expect(isTypeaheadKey(key({ key: "a" }))).toBe(true);

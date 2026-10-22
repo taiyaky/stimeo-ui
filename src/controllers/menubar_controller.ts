@@ -1,8 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { isAriaDisabled } from "../utils/aria_disabled";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
+import { ClickVerdicts } from "../utils/click_verdicts";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
-import { ownerOf } from "../utils/event_owner";
+import { ownerOf, ownersOf } from "../utils/event_owner";
+import { ListenerSet } from "../utils/listener_set";
 import { isRtl } from "../utils/logical_scroll";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { RovingTabindex } from "../utils/roving_tabindex";
@@ -78,11 +81,32 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  *   whole menubar out of the Tab order) and the arrow keys never stall on it.
  * - **`aria-disabled="true"`** — still reached by the arrow keys ("disabled menu
  *   items are focusable but cannot be activated"), so a screen-reader user can
- *   discover it; only *activation* is suppressed. Clicks on it — including the one
- *   a browser synthesizes for Enter/Space — are swallowed before consumer handlers
- *   run, and an `aria-disabled` top never opens its menu, since opening the popup
- *   is activation. Moving onto it still closes whatever menu was open, which the
- *   APG makes unconditional for a horizontal move.
+ *   discover it; only *activation* is suppressed. ARIA extends the state to every
+ *   focusable descendant, so an entry inside an element carrying it (its menu, the
+ *   menubar, anything around it) counts as `aria-disabled` too. Clicks on such an
+ *   entry — including the one a browser synthesizes for Enter/Space — are
+ *   swallowed before the handlers inside the menubar element run, and such a
+ *   top never opens its menu, since opening the popup is activation. Moving onto it
+ *   still closes whatever menu was open, which the APG makes unconditional for a
+ *   horizontal move.
+ *
+ * Under all three, {@link MenubarController.toggle} and
+ * {@link MenubarController.activate} refuse the entry whatever they are called
+ * with — a DOM event of any type or an explicit element — and a refusal changes
+ * nothing and reports nothing. Entries can nest, so the judgement covers every
+ * entry that holds what the call lands on — the event's target, or the element
+ * passed — and the call is refused when any of them refuses: what lands inside an
+ * inner entry counts as landing on it, whichever entry the action is bound to. A
+ * click is judged once, as it starts: a capture listener on the menubar element
+ * takes the verdict before the handlers inside that element run, and the action
+ * that click reaches keeps it, so a consumer command that marks its own entry
+ * `disabled` or `aria-disabled` during the click still gets the close or open it
+ * started; a top whose menu that click opened and that the command leaves natively
+ * `disabled` is then closed again, without a report, by the reconciliation that
+ * follows. The action keeps the verdict only for an entry that held the click's
+ * target when it was taken: an entry it was not taken for — a handler that ran
+ * first, such as a capture listener on `document`, moved the target — is judged
+ * when the action runs, as is any other event and an explicit element.
  *
  * Arrow directions are logical: `ArrowRight` moves to the next top item under LTR
  * and to the previous one under RTL, on the bar and from inside an open menu. A top
@@ -150,6 +174,9 @@ export class MenubarController extends Controller<HTMLElement> {
   /** The element inside the menubar that last took DOM focus, if any. */
   #focused: HTMLElement | null = null;
 
+  /** The activation verdict the capture pass took for a click, with the entries it judged. */
+  readonly #clickVerdicts = new ClickVerdicts();
+
   /**
    * Records where DOM focus sits inside the menubar. `focusin` bubbles, so one
    * listener covers the top items and everything nested in their menus. The
@@ -174,6 +201,9 @@ export class MenubarController extends Controller<HTMLElement> {
 
   readonly #morph = new MorphRenderWatcher(() => this.#reconcile());
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /**
    * Establishes the closed baseline and the single tab stop: keep an existing tab
    * stop when it is still navigable (so a Turbo cache restore preserves the user's
@@ -188,10 +218,10 @@ export class MenubarController extends Controller<HTMLElement> {
     this.#morph.observe(this.element);
     this.#closeAllMenus("api");
     this.#reconcile();
-    this.element.addEventListener("click", this.#onDisabledClickCapture, true);
-    this.element.addEventListener("focusin", this.#onFocusIn);
-    this.element.addEventListener("focusout", this.#onFocusOut);
-    document.addEventListener("click", this.#onOutsideClick, true);
+    this.#listeners.add(this.element, "click", this.#onClickCapture, { capture: true });
+    this.#listeners.add(this.element, "focusin", this.#onFocusIn);
+    this.#listeners.add(this.element, "focusout", this.#onFocusOut);
+    this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
     if (typeof MutationObserver !== "undefined") {
       this.#observer = new MutationObserver(() => this.#morph.schedule());
       this.#observer.observe(this.element, {
@@ -212,10 +242,7 @@ export class MenubarController extends Controller<HTMLElement> {
     this.#reporting = false;
     this.#escapeLayer.deactivate();
     this.#layerActive = false;
-    this.element.removeEventListener("click", this.#onDisabledClickCapture, true);
-    this.element.removeEventListener("focusin", this.#onFocusIn);
-    this.element.removeEventListener("focusout", this.#onFocusOut);
-    document.removeEventListener("click", this.#onOutsideClick, true);
+    this.#listeners.dispose();
     this.#focused = null;
     this.#observer?.disconnect();
     this.#observer = null;
@@ -275,18 +302,30 @@ export class MenubarController extends Controller<HTMLElement> {
     this.#reconcile();
   }
 
-  /** Toggles an owned top item's menu from an action or explicit element. */
+  /**
+   * Toggles an owned top item's menu from an action or explicit element.
+   *
+   * A top that is `hidden`, natively `disabled` or `aria-disabled` (itself or
+   * through an ancestor) is refused on every route: nothing opens or closes — not
+   * even another open menu — and focus, the Tab stop and the state events stay as
+   * they were, as they do for a click on such a top. So is a top whose target lies
+   * inside a nested entry that refuses. A click keeps the verdict taken as it started,
+   * before the handlers inside the menubar element ran, when the top held its
+   * target then; a top that verdict was not taken for, and anything else, is judged
+   * now.
+   */
   toggle(source: Event | HTMLElement): void {
     const { event, host, origin, reason } = actionSource(source);
     const top = host?.closest<HTMLButtonElement>(targetSelector(this.identifier, "top"));
     if (!top || !this.topTargets.includes(top)) return;
     if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
       return;
+    if (this.#refuses(top, event, origin)) return;
     const moveFocus = event !== null || this.element.contains(document.activeElement);
     if (this.#isExpanded(top)) {
       this.#closeMenu(top, reason);
     } else {
-      this.#openMenu(top, "first", reason, moveFocus);
+      this.#openMenu(top, "first", reason, moveFocus, true);
     }
   }
 
@@ -297,6 +336,7 @@ export class MenubarController extends Controller<HTMLElement> {
     // this yield.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     const tops = this.#navigableTops;
     const index = tops.indexOf(event.currentTarget as HTMLButtonElement);
     if (index === -1) return;
@@ -305,7 +345,7 @@ export class MenubarController extends Controller<HTMLElement> {
     // the adjacent menu or merely move the roving focus between top items.
     const anyOpen = this.#isAnyOpen;
 
-    // Logical, not physical. APG defines these as "next / previous control", and
+    // Logical, not physical. APG defines these as "next / previous item", and
     // says a vertical arrangement swaps in Down/Up for the same meaning — so the
     // pair is one axis's spelling of an order, and the order reverses with the
     // writing direction. Read from the controller element: the container is what
@@ -357,6 +397,7 @@ export class MenubarController extends Controller<HTMLElement> {
     // See onTopKeydown: a key a descendant already consumed is not ours.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     const item = event.currentTarget as HTMLButtonElement;
     const menu = item.closest<HTMLElement>("[role='menu']");
     if (!menu) return;
@@ -405,13 +446,24 @@ export class MenubarController extends Controller<HTMLElement> {
     // Enter/Space activate the item via its native button click → activate().
   }
 
-  /** Closes an activated item's menu, returning focus only from inside on API calls. */
+  /**
+   * Closes an activated item's menu, returning focus only from inside on API calls.
+   *
+   * An item that is `hidden`, natively `disabled` or `aria-disabled` (itself or
+   * through an ancestor) is refused on every route: its menu stays open, focus and
+   * the Tab stop stay where they are, and no `close` is reported. So is an item
+   * whose target lies inside a nested entry that refuses. A click keeps the verdict
+   * taken as it started, before the handlers inside the menubar element ran,
+   * when the item held its target then; an item that verdict was not taken for, and
+   * anything else, is judged now.
+   */
   activate(source: Event | HTMLElement): void {
     const { event, host, origin } = actionSource(source);
     const item = host?.closest<HTMLButtonElement>(targetSelector(this.identifier, "item"));
     if (!item || !this.itemTargets.includes(item)) return;
     if (origin && origin.closest(`[data-controller~="${this.identifier}"]`) !== this.element)
       return;
+    if (this.#refuses(item, event, origin)) return;
     const moveFocus = event !== null || this.element.contains(document.activeElement);
     const menu = item.closest<HTMLElement>("[role='menu']");
     const top = this.#topFor(menu);
@@ -437,19 +489,25 @@ export class MenubarController extends Controller<HTMLElement> {
   /**
    * Opens `opener`'s menu (closing others) and focuses its first/last item.
    *
-   * Three kinds of top item never open a menu:
-   * - **`aria-disabled`** — focusable but never activated, and opening a popup is
-   *   activation.
-   * - **plain command** (no `aria-controls` at all) — a legitimate top item that
-   *   simply has no popup.
-   * - **dangling `aria-controls`** (names a menu that is not a target) — broken
-   *   markup.
+   * Three kinds of top item do not open a menu:
+   * - **`aria-disabled`** (itself or through an ancestor), unless `judged` —
+   *   focusable but never activated, and opening a popup is activation.
+   * - **plain command** (no `aria-controls` at all), `judged` or not — a legitimate
+   *   top item that simply has no popup.
+   * - **dangling `aria-controls`** (names a menu that is not a target), `judged` or
+   *   not — broken markup.
    *
-   * The first two still take the roving focus, and any open menu closes: the APG
-   * makes closing unconditional for the horizontal move ("closes the submenu,
-   * moves focus to the next menubar item, and *optionally* opens that item's
-   * submenu"), so only the opening half is skipped. Leaving the old menu open
-   * would strand a popup that no longer contains focus.
+   * The first two still take the roving focus, and any open menu closes. On a
+   * horizontal move the APG closes the open menu, moves focus to the adjacent
+   * menubar item, and opens that item's submenu only when it has one. A plain
+   * command has none, and an `aria-disabled` item is "focusable but cannot be
+   * activated" while opening a popup is activation, so for both only the opening
+   * half is skipped. Leaving the old menu open would strand a popup that focus has
+   * left.
+   *
+   * `judged` is set by {@link MenubarController.toggle}, which has already decided
+   * that `opener` is activated — for a click, as the click started — so its
+   * `aria-disabled` is not read again here.
    *
    * The dangling case instead leaves the open/closed state and focus untouched
    * rather than closing everything and dropping focus to the body — but only on
@@ -461,12 +519,13 @@ export class MenubarController extends Controller<HTMLElement> {
     focus: OpenFocus,
     reason: StateReason,
     moveFocus = true,
+    judged = false,
   ): void {
     if (!opener) return;
     // Resolve the menu *before* touching any state, so the dangling case below
     // can bail out without having changed anything.
     const menu = this.#menuFor(opener);
-    if (!menu || this.#isActivationBlocked(opener)) {
+    if (!menu || (!judged && isAriaDisabled(opener))) {
       // Broken markup (an `aria-controls` that resolves to nothing) is the one
       // case that must not act on a guess.
       if (menu || !opener.hasAttribute("aria-controls")) {
@@ -599,18 +658,26 @@ export class MenubarController extends Controller<HTMLElement> {
   };
 
   /**
-   * Captures clicks so `aria-disabled` top items and commands cannot reach
-   * consumer handlers (nor `toggle`/`activate`). Native Enter/Space activation
-   * also synthesizes a click and is blocked here; natively `disabled` buttons
-   * dispatch no click at all.
+   * Judges a click on a top item or command before the handlers inside the
+   * menubar element run, and records the verdict for the `toggle` or `activate` the
+   * click goes on to reach: refused when any entry holding the target refuses
+   * activation, recorded with all of those entries. A click inside an
+   * `aria-disabled` entry (itself or through an ancestor) never reaches those
+   * handlers either: the ones on the entry and inside it can run before `toggle` and
+   * `activate` refuse it, and a refusal does not stop the click.
+   * Every entry that holds the target counts, so an `aria-disabled` entry nested in
+   * an enabled one stops the click too. Native Enter/Space activation also
+   * synthesizes a click and is blocked here; natively `disabled` buttons dispatch no
+   * click at all.
    */
-  readonly #onDisabledClickCapture = (event: MouseEvent): void => {
-    const target = event.target;
-    if (!(target instanceof Node)) return;
-    const blocked = [...this.topTargets, ...this.itemTargets].some(
-      (element) => this.#isActivationBlocked(element) && element.contains(target),
+  readonly #onClickCapture = (event: MouseEvent): void => {
+    const entries = ownersOf(this.#entries, event.target);
+    this.#clickVerdicts.record(
+      event,
+      entries,
+      entries.some((entry) => this.#isActivationDisabled(entry)),
     );
-    if (!blocked) return;
+    if (!entries.some((entry) => isAriaDisabled(entry))) return;
     event.preventDefault();
     event.stopImmediatePropagation();
   };
@@ -623,9 +690,10 @@ export class MenubarController extends Controller<HTMLElement> {
    * being hidden itself, a menu can stay visible after its owning top was removed,
    * an open pair can appear from a morph with no layer registered for it, and the
    * Tab stop can end up on a now-inert top, on a runtime-added one, or on none at
-   * all. The only state carried between calls is the tracked focus record and which side
-   * of the Escape stack this layer is on (which the stack itself does not expose), so the outcome is the
-   * same whichever mutation arrived and calling it more often than needed is free.
+   * all. The only state carried between calls is the tracked focus record and which
+   * side of the Escape stack this layer is on (which the stack itself does not expose),
+   * so the outcome is the same whichever mutation arrived and calling it more often
+   * than needed is free.
    */
   #reconcile(): void {
     for (const top of this.topTargets) {
@@ -762,6 +830,11 @@ export class MenubarController extends Controller<HTMLElement> {
     return this.itemTargets.filter((item) => menu.contains(item) && this.#isNavigable(item));
   }
 
+  /** Every top item and command: the entries a click or an action can land on. */
+  get #entries(): HTMLButtonElement[] {
+    return [...this.topTargets, ...this.itemTargets];
+  }
+
   /** Top items eligible for the roving tab stop and the arrow keys. */
   get #navigableTops(): HTMLButtonElement[] {
     return this.topTargets.filter((top) => this.#isNavigable(top));
@@ -771,7 +844,7 @@ export class MenubarController extends Controller<HTMLElement> {
    * Whether `element` can take roving focus: `hidden` and natively `disabled`
    * controls are out of reach and are skipped. `aria-disabled` is deliberately
    * **not** checked — the APG keeps such items focusable so they stay
-   * discoverable, and {@link MenubarController.#isActivationBlocked} is what
+   * discoverable, and {@link MenubarController.#isActivationDisabled} is what
    * suppresses acting on them. CSS-only visibility is not detectable headlessly
    * and stays the consumer's responsibility.
    */
@@ -780,9 +853,31 @@ export class MenubarController extends Controller<HTMLElement> {
     return !element.disabled;
   }
 
-  /** Whether `element` is `aria-disabled`: reachable, but never activated. */
-  #isActivationBlocked(element: Element): boolean {
-    return element.getAttribute("aria-disabled") === "true";
+  /**
+   * Whether `element` refuses activation: it is out of reach (its own `hidden` or
+   * native `disabled`) or `aria-disabled`, itself or through an ancestor, which
+   * keeps it reachable but never activated.
+   */
+  #isActivationDisabled(element: HTMLButtonElement): boolean {
+    return !this.#isNavigable(element) || isAriaDisabled(element);
+  }
+
+  /**
+   * Whether `toggle` or `activate` refuses `entry` for `event`, or for the explicit
+   * element `origin` when there is no event. A click keeps the verdict its capture
+   * pass took, before the handlers inside the menubar element could change it,
+   * when `entry` was among the entries holding its target. Otherwise — any other
+   * event, an explicit element, or a click recorded without `entry` — `entry` itself
+   * and the entries holding the event's target, or the element, are judged now, and
+   * any one that refuses activation refuses `entry`. `entry` is judged on its own
+   * because a handler can move the target out of it before the action runs.
+   */
+  #refuses(entry: HTMLButtonElement, event: Event | null, origin: Element | null): boolean {
+    const recorded = this.#clickVerdicts.for(event, entry);
+    if (recorded !== undefined) return recorded;
+    if (this.#isActivationDisabled(entry)) return true;
+    const target = event ? event.target : origin;
+    return ownersOf(this.#entries, target).some((owner) => this.#isActivationDisabled(owner));
   }
 
   /** Moves DOM focus to the item at `index` (no-op if out of range). */

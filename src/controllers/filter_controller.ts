@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 
 /** A control whose "on" state contributes its token to the active filter set. */
@@ -88,18 +89,21 @@ export class FilterController extends Controller<HTMLElement> {
 
   readonly #morphRender = new MorphRenderWatcher(() => this.#evaluate());
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   override connect(): void {
     this.#morphRender.observe(this.element);
     this.#reported = null;
     this.#evaluate();
-    this.element.addEventListener("change", this.#onChange);
+    this.#listeners.add(this.element, "change", this.#onChange);
     this.#connected = true;
   }
 
   override disconnect(): void {
     this.#morphRender.disconnect();
     this.#connected = false;
-    this.element.removeEventListener("change", this.#onChange);
+    this.#listeners.dispose();
   }
 
   /**

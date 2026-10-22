@@ -1547,6 +1547,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       const what = describeCounted(rule.target, rule.attr, rule.values);
       const where = rule.within === "" ? "controller scope" : `"${rule.within}" target`;
       for (const container of containers) {
+        if (rule.excludeTemplateContents && crossesTemplateContent(container, node)) continue;
         // Counted by their *literal* markup. A rule that pins specific values
         // skips any ERB-touched one: neutralization blanks the tag in place, so
         // reading what is left would take `<%= prefix %>true` for a literal
@@ -1562,6 +1563,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
         const matched: Array<{ el: ElementNode; at: Anchor }> = [];
         for (const el of counted) {
           if (!isSelfOrDescendantOf(el, container)) continue;
+          if (rule.excludeTemplateContents && crossesTemplateContent(el, node)) continue;
           if (rule.attr === undefined) {
             matched.push({ el, at: el });
             continue;
@@ -1581,7 +1583,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
             report(
               el,
               "cardinality-violation",
-              "error",
+              rule.severity ?? "error",
               `"${identifier}" allows at most ${rule.max} ${what} per ${where}, but found ${matched.length}.`,
               at,
               rule.suggestion,
@@ -1598,7 +1600,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           report(
             container,
             "cardinality-violation",
-            complete ? "error" : "warning",
+            complete ? (rule.severity ?? "error") : "warning",
             `"${identifier}" requires at least ${rule.min} ${what} per ${where}, but found ${matched.length}.`,
             container,
             complete ? rule.suggestion : UNRESOLVED_TARGET_HINT,
@@ -2037,6 +2039,16 @@ const IDREF_ATTRS = new Set([
  * never collide with a controller's own attribute namespace.
  */
 const IGNORE_ATTR = "data-stimeo-ignore";
+
+/** Whether a target belongs to template contents outside its controller's DOM tree. */
+function crossesTemplateContent(node: ElementNode, scope: ElementNode): boolean {
+  if (node === scope) return false;
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (parent.tag === "template") return true;
+    if (parent === scope) return false;
+  }
+  return false;
+}
 
 /** Climbs the ancestor chain (including `node`) for the nearest owning scope. */
 function findOwner(node: ElementNode, identifier: string): ElementNode | null {

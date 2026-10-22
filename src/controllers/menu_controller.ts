@@ -1,8 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
-import { isReservedArrowChord } from "../utils/arrow_step";
+import { isAriaDisabled } from "../utils/aria_disabled";
+import { hasModifierChord, isReservedArrowChord } from "../utils/arrow_step";
 import { AttributeLease } from "../utils/attribute_lease";
+import { ClickVerdicts } from "../utils/click_verdicts";
 import { claimsWhileFocusWithin, EscapeLayer } from "../utils/escape_layer";
-import { ownerOf } from "../utils/event_owner";
+import { ownerOf, ownersOf } from "../utils/event_owner";
+import { ListenerSet } from "../utils/listener_set";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { type StateReason, stateReasonFor } from "../utils/state_reason";
 
@@ -33,7 +36,7 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  * `keydown->stimeo--menu#onItemKeydown`) is supported alongside it. A
  * focus-moving key runs once (the action claims it and the delegate stands
  * down), and `activate`, reachable on both paths, claims the click so one
- * gesture activates once. See the delegated click listener below.
+ * gesture activates once.
  *
  * Implements the WAI-ARIA APG **Menu Button** pattern (a button that opens a menu
  * of commands). Unlike `stimeo--dropdown` (a disclosure for arbitrary content),
@@ -71,9 +74,18 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *   {@link connect}, a trigger or a menu that takes over, and {@link disconnect}
  *   are all silent.
  *
- * Roving focus skips `hidden` and natively `disabled` items. An
- * `aria-disabled="true"` item remains discoverable by arrow-key focus, while its
- * activation is suppressed in the capture phase.
+ * Roving focus skips `hidden` and natively `disabled` items. An item that carries
+ * `aria-disabled="true"`, or sits inside an element that does, remains discoverable by
+ * arrow-key focus; ARIA applies the state to every focusable descendant. None of these
+ * is activated on any path: {@link activate} does nothing for an event whose target
+ * one of them holds — items can nest, and any item holding the target that refuses
+ * refuses the event — and a capture listener on the controller element also stops a
+ * click an `aria-disabled` one holds before the handlers inside that element
+ * run. A click is judged once, in that capture pass, so a consumer handler that
+ * disables the item while the click runs does not take back the activation. The
+ * verdict holds only for an item that held the click's target when it was taken: an
+ * item it was not taken for — a handler moved the target into another one — is
+ * judged when the action runs, as is any other event.
  */
 export class MenuController extends Controller<HTMLElement> {
   static override targets = ["trigger", "menu", "item"];
@@ -107,11 +119,14 @@ export class MenuController extends Controller<HTMLElement> {
   #menu: HTMLElement | null = null;
 
   /**
-   * The item a click started on, recorded in the capture pass. Read once by the
-   * delegated bubble listener, which must not re-derive it: consumer handlers run
+   * The outermost item a click started in, recorded in the capture pass. Read once by
+   * the delegated bubble listener, which must not re-derive it: consumer handlers run
    * in between and may detach the item.
    */
   #clickOwner: HTMLButtonElement | null = null;
+
+  /** The activation verdict the capture pass took for a click, with the items it judged. */
+  readonly #clickVerdicts = new ClickVerdicts();
 
   /** Clicks already turned into an activation, so the two paths run it once. */
   readonly #activated = new WeakSet<Event>();
@@ -122,13 +137,16 @@ export class MenuController extends Controller<HTMLElement> {
   /** Whether state moves are reported: set once `connect()` settled the baseline. */
   #reporting = false;
 
+  /** The listeners of one connection, released together on `disconnect()`. */
+  readonly #listeners = new ListenerSet();
+
   /** Starts closed and registers activation / outside-click listeners. */
   override connect(): void {
     this.#close("api");
-    this.element.addEventListener("click", this.#onItemClickCapture, true);
-    this.element.addEventListener("click", this.#onDelegatedItemClick);
-    this.element.addEventListener("keydown", this.#onDelegatedItemKeydown);
-    document.addEventListener("click", this.#onOutsideClick, true);
+    this.#listeners.add(this.element, "click", this.#onItemClickCapture, { capture: true });
+    this.#listeners.add(this.element, "click", this.#onDelegatedItemClick);
+    this.#listeners.add(this.element, "keydown", this.#onDelegatedItemKeydown);
+    this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
     this.#connected = true;
     this.#reporting = true;
   }
@@ -139,10 +157,7 @@ export class MenuController extends Controller<HTMLElement> {
     this.#reporting = false;
     this.#timers.clearAll();
     this.#escapeLayer.deactivate();
-    this.element.removeEventListener("click", this.#onItemClickCapture, true);
-    this.element.removeEventListener("click", this.#onDelegatedItemClick);
-    this.element.removeEventListener("keydown", this.#onDelegatedItemKeydown);
-    document.removeEventListener("click", this.#onOutsideClick, true);
+    this.#listeners.dispose();
   }
 
   /** Brings a trigger that arrives after connect to the open state. */
@@ -291,6 +306,7 @@ export class MenuController extends Controller<HTMLElement> {
     // whichever runs first calls `preventDefault()`, and the other one bows out.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
     const items = this.#navigableItems;
     const currentIndex = items.indexOf(from as HTMLButtonElement);
 
@@ -331,20 +347,53 @@ export class MenuController extends Controller<HTMLElement> {
    * Closes the menu after an item is activated. Bound via `data-action`, and
    * also reached from the delegated listener.
    *
+   * An event whose target lies in an item that is `hidden`, natively `disabled`, or
+   * `aria-disabled="true"` itself or through an ancestor does nothing: the menu stays
+   * open, nothing is dispatched, focus stays where it is, and the event is left
+   * unclaimed. Every item holding the target counts, so an item nested in another one
+   * refuses for both. A click is judged as its capture pass found the items, before
+   * the handlers inside the controller element ran, when the item this
+   * resolves was among them; an item that was not, and any other event, is judged
+   * when this runs. An event that resolves to no item closes the menu, and a
+   * programmatic call with no event always runs.
+   *
    * Markup that carries the per-element action *and* gets the delegate would run
    * this twice for one gesture. The state hooks (`hidden`, `aria-expanded`) are
    * written only when they change, so a second pass writes nothing on its own, but
    * a page handler between the two paths — on an ancestor of the item — that opens
    * the menu again would see the second pass close it. The event is therefore
    * claimed: the path that gets there first does the work, the other one finds it
-   * claimed and returns. A programmatic call with no event always runs.
+   * claimed and returns.
    */
   activate(event?: Event): void {
-    if (event !== undefined) {
-      if (this.#activated.has(event)) return;
-      this.#activated.add(event);
-    }
+    if (event === undefined) this.#closeAndRestore("select");
+    else this.#activateItem(this.#itemFrom(event.target), event);
+  }
+
+  /**
+   * Runs one gesture's activation for `item`, the item the event resolved to or
+   * `null`. An item that refuses activation is turned away before the claim, so a
+   * later path of the same event that finds the item enabled still runs it; every
+   * path of one click reads the same verdict.
+   */
+  #activateItem(item: HTMLButtonElement | null, event: Event): void {
+    if (item !== null && this.#refuses(item, event)) return;
+    if (this.#activated.has(event)) return;
+    this.#activated.add(event);
     this.#closeAndRestore("select");
+  }
+
+  /**
+   * Whether the activation `event` asks of `item` is refused: the verdict the capture
+   * pass took for the click when `item` was among the items holding its target,
+   * otherwise whether any item holding the event's target refuses activation now.
+   */
+  #refuses(item: HTMLButtonElement, event: Event): boolean {
+    const recorded = this.#clickVerdicts.for(event, item);
+    if (recorded !== undefined) return recorded;
+    return ownersOf(this.itemTargets, event.target).some((owner) =>
+      this.#isActivationDisabled(owner),
+    );
   }
 
   /** Closes and returns focus to the trigger (Escape / item-activation path). */
@@ -365,8 +414,8 @@ export class MenuController extends Controller<HTMLElement> {
    * into this menu at runtime — carries whatever `data-action` its author wrote,
    * and that is exactly the binding a consumer forgets, because the markup that
    * declares the item lives nowhere near the menu. Listening on the container
-   * makes membership in the `item` target enough to be operable. The per-element
-   * action stays supported and is not double-handled: see
+   * makes membership in the `item` target enough to be operable. A per-element
+   * action is also accepted and is not double-handled: see
    * {@link #handleItemKeydown}.
    */
   readonly #onDelegatedItemKeydown = (event: KeyboardEvent): void => {
@@ -382,14 +431,16 @@ export class MenuController extends Controller<HTMLElement> {
    * by the time a click bubbles up here, a consumer handler may already have
    * detached the row it lives in, and `itemTargets` is a live query that would
    * then resolve nothing — the activation would be lost and the menu left open
-   * over an item that no longer exists. `aria-disabled` items never reach this
-   * listener at all: the capture pass stops the click outright.
+   * over an item that no longer exists. The recorded item is refused on the
+   * verdict the capture pass took for the items holding the target, as in
+   * {@link activate}; a click an `aria-disabled` item holds never gets this far,
+   * because the capture pass stops it outright.
    */
   readonly #onDelegatedItemClick = (event: MouseEvent): void => {
     const item = this.#clickOwner;
     this.#clickOwner = null;
     if (item === null) return;
-    this.activate(event);
+    this.#activateItem(item, event);
   };
 
   /** The item target that is, or contains, `node`; `null` when it is neither. */
@@ -398,21 +449,24 @@ export class MenuController extends Controller<HTMLElement> {
   }
 
   /**
-   * First look at every click inside the controller, and the only point at which
-   * the DOM is still the one the user clicked. Two jobs: record which item owns
-   * the click for the delegate above, and stop an `aria-disabled` command before
-   * it reaches consumer handlers (native Enter/Space activation synthesizes a
+   * Sees every click inside the controller before the handlers inside the
+   * controller element run, so none of them has changed the DOM the click landed in
+   * yet. Three jobs: record the outermost item holding the click for the delegate
+   * above, record whether any item holding it refuses activation so every path of the
+   * click that resolves one of those items acts on this one verdict, and stop a
+   * command any `aria-disabled` item holds — the item's own state or an ancestor's —
+   * before it reaches those handlers (native Enter/Space activation synthesizes a
    * click and is blocked here too).
    */
   readonly #onItemClickCapture = (event: MouseEvent): void => {
-    const target = event.target;
-    if (!(target instanceof Node)) {
-      this.#clickOwner = null;
-      return;
-    }
-    const item = this.#itemFrom(target);
-    this.#clickOwner = item;
-    if (item === null || item.getAttribute("aria-disabled") !== "true") return;
+    const items = ownersOf(this.itemTargets, event.target);
+    this.#clickOwner = items[0] ?? null;
+    this.#clickVerdicts.record(
+      event,
+      items,
+      items.some((item) => this.#isActivationDisabled(item)),
+    );
+    if (!items.some((item) => isAriaDisabled(item))) return;
     this.#clickOwner = null;
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -441,12 +495,21 @@ export class MenuController extends Controller<HTMLElement> {
 
   /**
    * An item can take roving focus unless it is `hidden` or a natively `disabled`
-   * form control. `aria-disabled` remains focusable for discoverability; capture
-   * suppresses activation. CSS-only visibility is the consumer's responsibility.
+   * form control. `aria-disabled`, on the item or an ancestor, remains focusable for
+   * discoverability while its activation is refused. CSS-only visibility is the
+   * consumer's responsibility.
    */
   #isNavigable(item: HTMLButtonElement): boolean {
     if (item.hasAttribute("hidden")) return false;
     return !item.disabled;
+  }
+
+  /**
+   * Whether an item refuses activation: one roving focus skips (`hidden`, natively
+   * `disabled`), or one that `aria-disabled="true"` reaches.
+   */
+  #isActivationDisabled(item: HTMLButtonElement): boolean {
+    return !this.#isNavigable(item) || isAriaDisabled(item);
   }
 
   /** Whether the menu is currently visible. */

@@ -12,8 +12,10 @@ module Stimeo
     # Sets up an importmap-rails app to use Stimeo UI without npm:
     #   1. vendors the gem's prebuilt JS into vendor/javascript/stimeo/
     #   2. pins "stimeo-ui" in config/importmap.rb
-    #   3. registers every stimeo--* controller with the app's Stimulus
-    #      application (app/javascript/controllers/stimeo.js)
+    #   3. registers the "stimeo-ui" entry point's controllers (registerStimeo) with the
+    #      app's Stimulus application (app/javascript/controllers/stimeo.js); the
+    #      positioning and cable subpaths stay opt-in: their pins and registrations
+    #      are written commented out in config/importmap.rb and controllers/stimeo.js
     #
     # Re-running is safe: the vendor copy is refreshed in place, while pins
     # and imports are only appended when missing — so after a gem update you
@@ -60,6 +62,9 @@ module Stimeo
             pin "stimeo-ui", to: "stimeo/index.js"
             # Opt-in positioning module — also pin @floating-ui/dom if you enable it:
             # pin "stimeo-ui/positioning", to: "stimeo/positioning/index.js"
+            # Opt-in cable module — also pin @rails/actioncable if you enable it:
+            # pin "stimeo-ui/cable", to: "stimeo/cable/index.js"
+            # pin "@rails/actioncable", to: "actioncable.esm.js"
           RUBY
         end
       end

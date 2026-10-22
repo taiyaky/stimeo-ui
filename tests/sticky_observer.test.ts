@@ -339,8 +339,8 @@ describe("StickyObserverController", () => {
       const fresh = document.createElement("header");
       fresh.setAttribute("data-stimeo--sticky-observer-target", "element");
       element().replaceWith(fresh);
-      // Driven directly: happy-dom's MutationObserver delivers target
-      // callbacks unreliably, and the callback's contract is what matters.
+      // The helper stays synchronous, so it calls the target callback directly
+      // instead of waiting for the MutationObserver delivery.
       controller().elementTargetConnected(fresh);
       return fresh;
     };
@@ -655,7 +655,7 @@ describe("StickyObserverController", () => {
     await expectNoA11yViolations(root());
   });
 
-  it("keeps the decorative sentinel silent and the heading announceable when stuck", async () => {
+  it("keeps the decorative sentinel silent and the sticky header announceable when stuck", async () => {
     await start();
     const before = await captureSpeech({ container: root(), steps: 3 });
     expect(before).toEqual(["banner", "Site heading", "end of banner", "main"]);

@@ -12,6 +12,8 @@ export interface MorphFixture {
   html: string;
   selector: string;
   output: string;
+  /** Bookkeeping the server's markup omits alongside the derived output. */
+  omittedAttributes?: readonly string[];
 }
 
 /** Retained roots repair derived output without restarting their connected lifetime. */
@@ -66,6 +68,8 @@ export function defineMorphRecovery(fixtures: readonly MorphFixture[]): void {
           const connect = vi.spyOn(controller, "connect");
           if (fixture.output === "text") output.textContent = "server fallback";
           else output.removeAttribute(fixture.output);
+          for (const attribute of fixture.omittedAttributes ?? [])
+            output.removeAttribute(attribute);
           expect(read()).not.toBe(expected);
           if (origin === "descendant" && !root.contains(descendant)) root.append(descendant);
           (origin === "own" ? root : descendant).dispatchEvent(

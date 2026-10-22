@@ -2,9 +2,12 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastController } from "../src/controllers/toast_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
+import { press as pressKey } from "./helpers/keyboard";
+import { recordListeners } from "./helpers/listeners";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
+import { writeValueAttribute } from "./helpers/value_delivery";
 
 /**
  * Behavioral tests for {@link ToastController}: list/live-region semantics,
@@ -83,15 +86,11 @@ describe("ToastController", () => {
   };
 
   /**
-   * Rewrites `duration` and delivers its Value callback directly when the controller
-   * defines one, since happy-dom does not reliably run it for an attribute write.
+   * Rewrites the `duration` declaration and waits for Stimulus to deliver it, so the
+   * assertions that follow see whatever the controller does with the change.
    */
-  const declareDuration = (value: number) => {
-    root().setAttribute("data-stimeo--toast-duration-value", String(value));
-    const owner = controller();
-    const callback: unknown = Reflect.get(owner, "durationValueChanged");
-    if (typeof callback === "function") callback.call(owner);
-  };
+  const declareDuration = (value: number) =>
+    writeValueAttribute(root(), "data-stimeo--toast-duration-value", String(value));
 
   /** Mounts the fixture again with other Values, for a case the default ones do not cover. */
   const remount = async (options: { duration?: number; max?: number }) => {
@@ -103,9 +102,9 @@ describe("ToastController", () => {
   };
 
   /**
-   * Shows a toast and hands it to `itemTargetConnected` directly, the callback a
-   * DOM-only environment does not reliably deliver, so the arrival is taken on
-   * exactly as the browser would take it on.
+   * Shows a toast and makes the `itemTargetConnected` call Stimulus makes for it
+   * directly, so a synchronous test takes the arrival on without waiting for the
+   * MutationObserver delivery.
    */
   const showArmed = (text: string): HTMLElement => {
     triggerShow(text);
@@ -264,8 +263,13 @@ describe("ToastController", () => {
     toast.style.transitionProperty = "opacity";
     toast.style.transitionDuration = "0.1s";
     dismissButton(toast)?.click();
-    declareDuration(0);
-    expect(toast.getAttribute("data-paused")).toBe("true");
+    // The pass the dismissal queues runs before Stimulus delivers the write below, so
+    // the hook that pass leaves is the one the change must keep.
+    await flushMicrotasks();
+    const hook = toast.getAttribute("data-paused");
+    expect(hook).toBeNull();
+    await declareDuration(0);
+    expect(toast.getAttribute("data-paused")).toBe(hook);
   });
 
   it("keeps a hover hold while the pointer moves within one toast", async () => {
@@ -324,10 +328,10 @@ describe("ToastController", () => {
     await remount({ duration: 0, max: 0 });
     const external = document.createElement("li");
     external.setAttribute("data-stimeo--toast-target", "item");
+    external.tabIndex = -1;
     document.body.append(external);
     external.addEventListener("keydown", (event) => controller().onKeydown(event));
-    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    external.dispatchEvent(event);
+    const event = pressKey(external, "Escape");
     expect(event.defaultPrevented).toBe(false);
     expect(external.isConnected).toBe(true);
   });
@@ -841,7 +845,7 @@ describe("ToastController", () => {
     expect(shownNames()).toEqual(["A"]);
   });
 
-  it("keeps a held toast's hold and banked time across a duration switched off and on", () => {
+  it("keeps a held toast's hold and banked time across a duration switched off and on", async () => {
     vi.useFakeTimers();
     const dismissed = recordDismissals();
     const a = showArmed("A");
@@ -849,9 +853,9 @@ describe("ToastController", () => {
     focusIn(a); // banks the 150 ms left of the 200 ms the toast was given
     expect(a.getAttribute("data-paused")).toBe("true");
 
-    declareDuration(0);
+    await declareDuration(0);
     expect(a.getAttribute("data-paused")).toBe("true");
-    declareDuration(500);
+    await declareDuration(500);
     expect(a.getAttribute("data-paused")).toBe("true");
     vi.advanceTimersByTime(5_000);
     expect(a.isConnected).toBe(true);
@@ -945,8 +949,8 @@ describe("ToastController", () => {
   /**
    * Replays what Stimulus reports for a move within the list: the item's target
    * disconnects and connects again in one batch, once the node already sits where it
-   * went. Called directly, because a DOM-only environment does not reliably deliver
-   * target callbacks; the node stays where it is, as a `moveBefore` in place leaves it.
+   * went. The test makes both calls itself, synchronously, and leaves the node where it
+   * is, as a `moveBefore` in place leaves it.
    */
   const reportMove = (toast: HTMLElement) => {
     controller().itemTargetDisconnected(toast);
@@ -1125,6 +1129,27 @@ describe("ToastController", () => {
 
     expect(a.hasAttribute("data-paused")).toBe(false);
     expect(b.hasAttribute("data-paused")).toBe(false);
+  });
+
+  // The hover reader deliberately reenters teardown while a batch is being processed.
+  it("does not read the remaining moved toasts after synchronous teardown", () => {
+    vi.useFakeTimers();
+    const a = showArmed("A");
+    const b = showArmed("B");
+    pointerOver(a);
+    pointerOver(b);
+    stubHover(a, () => true);
+    stubHover(b, () => true);
+    reportMove(a);
+    reportMove(b);
+    stubHover(a, () => {
+      controller().disconnect();
+      return false;
+    });
+    const reads = vi.spyOn(b, "matches");
+    reads.mockClear();
+    movePointer();
+    expect(reads).not.toHaveBeenCalledWith(":hover");
   });
 
   it("reads a moved toast's hover on the first pointer movement only", () => {
@@ -1687,9 +1712,9 @@ describe("ToastController", () => {
   });
 
   it("arms a toast the list already holds when the controller connects", () => {
-    // The target callback that normally arms a toast is delivered through a
-    // MutationObserver, which a DOM-only environment does not reliably fire, so
-    // `connect()` re-scans the list for toasts nothing is counting down yet.
+    // The toast is appended without the target callback that arms it, so the
+    // `connect()` below is what arms it: `connect()` scans the list for toasts
+    // nothing is counting down yet.
     vi.useFakeTimers();
     triggerShow("Restored notification");
     const toast = item();
@@ -1701,8 +1726,8 @@ describe("ToastController", () => {
   });
 
   it("keeps a running deadline when the controller connects again", () => {
-    // Stimulus may run `connect()` for an element it is already driving; the
-    // toasts it is already counting down must not restart from the full duration.
+    // `connect()` stays idempotent: a second call while toasts are counting down
+    // must not restart them from the full duration.
     vi.useFakeTimers();
     triggerShow("Reconnect notification");
     const toast = item();
@@ -1784,13 +1809,13 @@ describe("ToastController", () => {
   // `duration` is read as each toast is taken on: a toast already shown keeps the
   // deadline it was given, and a change applies from the next toast.
 
-  it("keeps a shown toast's deadline when duration changes to zero, and lets the next one stay", () => {
+  it("keeps a shown toast's deadline when duration changes to zero, and lets the next one stay", async () => {
     vi.useFakeTimers();
     const dismissed = recordDismissals();
     const a = showArmed("A");
     vi.advanceTimersByTime(100);
 
-    declareDuration(0);
+    await declareDuration(0);
     vi.advanceTimersByTime(99);
     expect(dismissed).toEqual([]);
     vi.advanceTimersByTime(1);
@@ -1803,13 +1828,13 @@ describe("ToastController", () => {
     expect(b.hasAttribute("data-paused")).toBe(false);
   });
 
-  it("neither stretches nor restarts a shown toast's deadline, and times the next one anew", () => {
+  it("neither stretches nor restarts a shown toast's deadline, and times the next one anew", async () => {
     vi.useFakeTimers();
     const dismissed = recordDismissals();
     showArmed("A");
     vi.advanceTimersByTime(100);
 
-    declareDuration(500);
+    await declareDuration(500);
     vi.advanceTimersByTime(99);
     expect(dismissed).toEqual([]);
     vi.advanceTimersByTime(1);
@@ -1822,7 +1847,7 @@ describe("ToastController", () => {
     expect(dismissed).toEqual(["timeout A", "timeout B"]);
   });
 
-  it("keeps a held toast's banked time when duration changes", () => {
+  it("keeps a held toast's banked time when duration changes", async () => {
     vi.useFakeTimers();
     triggerShow("Paused duration notification");
     const toast = item();
@@ -1830,7 +1855,7 @@ describe("ToastController", () => {
     vi.advanceTimersByTime(50);
     toast.dispatchEvent(new FocusEvent("focusin", { bubbles: true, relatedTarget: document.body }));
 
-    declareDuration(500);
+    await declareDuration(500);
     vi.advanceTimersByTime(1_000);
     expect(list().children.length).toBe(1);
     expect(toast.getAttribute("data-paused")).toBe("true");
@@ -1852,7 +1877,7 @@ describe("ToastController", () => {
     root().addEventListener("stimeo--toast:show", () => shown.push("show"));
     const toast = showArmed("Standing");
 
-    declareDuration(100);
+    await declareDuration(100);
     await settle();
     vi.advanceTimersByTime(1_000);
     expect(toast.isConnected).toBe(true);
@@ -1916,17 +1941,11 @@ describe("ToastController", () => {
   it("ignores non-Escape keys and prevents the delegated Escape action", () => {
     triggerShow("Keyboard notification");
     const toast = item();
-    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
-    toast.dispatchEvent(enter);
+    const enter = pressKey(toast, "Enter");
     expect(enter.defaultPrevented).toBe(false);
     expect(list().children.length).toBe(1);
 
-    const escapeEvent = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
-    toast.dispatchEvent(escapeEvent);
+    const escapeEvent = pressKey(toast, "Escape");
     expect(escapeEvent.defaultPrevented).toBe(true);
     expect(list().children.length).toBe(0);
   });
@@ -1937,13 +1956,7 @@ describe("ToastController", () => {
     // Widget-local half of the shared layered-Escape contract: a composing press
     // (e.g. in a text field inside the toast) steers the IME conversion,
     // never the toast.
-    const composing = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-      isComposing: true,
-    });
-    toast.dispatchEvent(composing);
+    const composing = pressKey(toast, "Escape", { isComposing: true });
     expect(composing.defaultPrevented).toBe(false);
     expect(list().children.length).toBe(1);
   });
@@ -2124,8 +2137,8 @@ describe("ToastController", () => {
         .join("");
 
     /**
-     * Inserts a list holding server-rendered toasts after the current one and delivers the
-     * callbacks Stimulus would, since a DOM-only environment does not reliably fire them.
+     * Inserts a list holding server-rendered toasts after the current one and makes the
+     * target callbacks Stimulus makes for them directly, so the test stays synchronous.
      */
     const insertSuccessor = (...names: string[]): [HTMLOListElement, HTMLOListElement] => {
       const original = list();
@@ -2306,10 +2319,70 @@ describe("ToastController", () => {
     controller().disconnect();
 
     button?.click();
-    toast.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    pressKey(toast, "Escape");
 
     expect(list().children.length).toBe(1);
   });
+
+  it.each([false, true])(
+    "releases and rearms delegation after repeated disconnects with replacement=%s",
+    (replace) => {
+      vi.useFakeTimers();
+      disableAutoDismiss();
+      const instance = controller();
+      const previous = list();
+      const region = previous.parentElement;
+      if (!region) throw new Error("Toast region not found");
+      const delegated = ["click", "focusin", "focusout", "keydown", "mouseover", "mouseout"];
+      instance.disconnect();
+      const ledger = recordListeners();
+      const dismissed = recordDismissals();
+      try {
+        instance.connect();
+        const retained = showArmed("Retained");
+        expect(ledger.live(previous).map(({ type }) => type)).toEqual(delegated);
+
+        instance.disconnect();
+        instance.disconnect();
+        dismissButtonOf(retained).click();
+        expect(ledger.live(previous)).toEqual([]);
+        expect(retained.isConnected).toBe(true);
+        expect(dismissed).toEqual([]);
+
+        let current = previous;
+        if (replace) {
+          previous.remove();
+          instance.listTargetDisconnected(previous);
+          instance.connect();
+          instance.disconnect();
+          instance.disconnect();
+          current = previous.cloneNode(false) as HTMLOListElement;
+          region.append(current);
+          instance.listTargetConnected();
+        } else {
+          instance.itemTargetConnected(retained);
+        }
+        instance.connect();
+        instance.connect();
+        expect(ledger.live(current).map(({ type }) => type)).toEqual(delegated);
+        if (replace) {
+          expect(ledger.live(previous)).toEqual([]);
+          dismissButtonOf(retained).click();
+          expect(retained.parentElement).toBe(previous);
+          expect(dismissed).toEqual([]);
+        }
+
+        const active = replace ? showArmed("Replacement") : retained;
+        dismissButtonOf(active).click();
+        expect(active.isConnected).toBe(false);
+        expect(dismissed).toEqual([`user ${replace ? "Replacement" : "Retained"}`]);
+        instance.disconnect();
+        expect(ledger.live(current)).toEqual([]);
+      } finally {
+        ledger.restore();
+      }
+    },
+  );
 
   it("clears auto-dismiss and pending animation callbacks on disconnect", () => {
     vi.useFakeTimers();
@@ -2388,21 +2461,23 @@ describe("ToastController", () => {
 
   it("moves delegation off the previous list when a replacement list connects before it leaves", () => {
     const previous = list();
-    const released = vi.spyOn(previous, "removeEventListener");
-    const replacement = document.createElement("ol");
-    replacement.setAttribute("data-stimeo--toast-target", "list");
-    previous.before(replacement);
+    const delegated = ["click", "focusin", "focusout", "keydown", "mouseover", "mouseout"];
+    controller().disconnect();
+    const ledger = recordListeners();
+    try {
+      controller().connect();
+      expect(ledger.live(previous).map(({ type }) => type)).toEqual(delegated);
+      const replacement = document.createElement("ol");
+      replacement.setAttribute("data-stimeo--toast-target", "list");
+      previous.before(replacement);
 
-    controller().listTargetConnected();
+      controller().listTargetConnected();
 
-    expect(released.mock.calls.map(([type]) => type)).toEqual([
-      "click",
-      "focusin",
-      "focusout",
-      "keydown",
-      "mouseover",
-      "mouseout",
-    ]);
+      expect(ledger.live(previous)).toEqual([]);
+      expect(ledger.live(replacement).map(({ type }) => type)).toEqual(delegated);
+    } finally {
+      ledger.restore();
+    }
   });
 
   it("clears a real transition-finalize timer on disconnect", () => {
@@ -2543,12 +2618,7 @@ describe("ToastController", () => {
       foreign.dispatchEvent(ignored);
       expect(ignored.defaultPrevented).toBe(false);
       expect(foreign.isConnected).toBe(true);
-      const accepted = new KeyboardEvent("keydown", {
-        key: "Escape",
-        bubbles: true,
-        cancelable: true,
-      });
-      owned.dispatchEvent(accepted);
+      const accepted = pressKey(owned, "Escape");
       expect(accepted.defaultPrevented).toBe(true);
       expect(owned.isConnected).toBe(false);
     });

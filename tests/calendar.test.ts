@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CalendarController } from "../src/controllers/calendar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
-import { press } from "./helpers/keyboard";
+import { keyEvent, press, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { delay, tick } from "./helpers/timing";
@@ -66,6 +66,132 @@ describe("CalendarController", () => {
     disconnectAndStopApplication(application);
     document.body.innerHTML = "";
     await delay(50);
+  });
+
+  it.each(
+    (["Home", "End"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Shift", { shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Home/End chord (%s, %s)", async (key, _modifier, init) => {
+    const element = document.getElementById("calendar");
+    const current = document.querySelector<HTMLElement>("[data-date='2026-05-27']");
+    if (!element || !current) throw new Error("Expected calendar and middle-week day");
+    const field = document.createElement("input");
+    field.type = "hidden";
+    field.setAttribute("data-stimeo--calendar-target", "field");
+    const monthField = document.createElement("input");
+    monthField.type = "hidden";
+    monthField.setAttribute("data-stimeo--calendar-target", "monthField");
+    element.append(field, monthField);
+    await tick();
+    current.click();
+    current.focus();
+    await tick();
+    const events: Event[] = [];
+    for (const name of [
+      "stimeo--calendar:select",
+      "stimeo--calendar:monthchange",
+      "stimeo--calendar:reconcile",
+      "input",
+      "change",
+    ]) {
+      element.addEventListener(name, (event) => events.push(event));
+    }
+    const before = element.outerHTML;
+    const rejected = press(current, key, init);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(events).toEqual([]);
+    expect(field.value).toBe("2026-05-27");
+    expect(monthField.value).toBe("2026-05");
+    expect(current.getAttribute("aria-selected")).toBe("true");
+    expect(current.tabIndex).toBe(0);
+    expect(press(current, key).defaultPrevented).toBe(true);
+    expect(document.activeElement?.getAttribute("data-date")).toBe(
+      key === "Home" ? "2026-05-24" : "2026-05-30",
+    );
+    expect(field.value).toBe("2026-05-27");
+    expect(monthField.value).toBe("2026-05");
+  });
+
+  it.each(
+    (["PageUp", "PageDown"] as const).flatMap((key) =>
+      (
+        [
+          ["Alt", { altKey: true }],
+          ["Ctrl", { ctrlKey: true }],
+          ["Meta", { metaKey: true }],
+          ["Alt+Shift", { altKey: true, shiftKey: true }],
+          ["Ctrl+Shift", { ctrlKey: true, shiftKey: true }],
+          ["Meta+Shift", { metaKey: true, shiftKey: true }],
+        ] as const
+      ).map(([modifier, init]) => [key, modifier, init] as const),
+    ),
+  )("yields an unassigned Page chord (%s, %s)", async (key, _modifier, init) => {
+    const element = document.getElementById("calendar");
+    const current = document.querySelector<HTMLElement>("[data-date='2026-05-27']");
+    if (!element || !current) throw new Error("Expected calendar and day cell");
+    const field = document.createElement("input");
+    field.type = "hidden";
+    field.setAttribute("data-stimeo--calendar-target", "field");
+    const monthField = document.createElement("input");
+    monthField.type = "hidden";
+    monthField.setAttribute("data-stimeo--calendar-target", "monthField");
+    element.append(field, monthField);
+    await tick();
+    current.click();
+    current.focus();
+    await tick();
+    const events: string[] = [];
+    for (const name of [
+      "stimeo--calendar:select",
+      "stimeo--calendar:monthchange",
+      "stimeo--calendar:reconcile",
+      "input",
+      "change",
+    ]) {
+      element.addEventListener(name, () => events.push(name));
+    }
+    const before = element.outerHTML;
+    const rejected = press(current, key, init);
+    await tick();
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(current);
+    expect(element.outerHTML).toBe(before);
+    expect(field.value).toBe("2026-05-27");
+    expect(monthField.value).toBe("2026-05");
+    expect(events).toEqual([]);
+
+    expect(press(current, key).defaultPrevented).toBe(true);
+    await tick();
+    const month = key === "PageUp" ? "04" : "06";
+    const monthDate = `2026-${month}-27`;
+    const moved = document.querySelector<HTMLElement>(`[data-date='${monthDate}']`);
+    if (!moved) throw new Error("Expected day after month jump");
+    expect(document.activeElement).toBe(moved);
+    expect(moved.tabIndex).toBe(0);
+    expect(monthField.value).toBe(`2026-${month}`);
+    expect(field.value).toBe("2026-05-27");
+    expect(events).toEqual(["change", "stimeo--calendar:monthchange"]);
+    events.length = 0;
+
+    expect(press(moved, key, { shiftKey: true }).defaultPrevented).toBe(true);
+    await tick();
+    const year = key === "PageUp" ? 2025 : 2027;
+    expect(document.activeElement?.getAttribute("data-date")).toBe(`${year}-${month}-27`);
+    expect(document.activeElement?.getAttribute("tabindex")).toBe("0");
+    expect(monthField.value).toBe(`${year}-${month}`);
+    expect(field.value).toBe("2026-05-27");
+    expect(events).toEqual(["change", "stimeo--calendar:monthchange"]);
   });
 
   it("rejects nested-origin action events while accepting owned descendants", async () => {
@@ -216,7 +342,7 @@ describe("CalendarController", () => {
     ) as CalendarController;
     const lastDay = root.querySelector<HTMLElement>("[data-date='2026-05-31']") as HTMLElement;
     lastDay.focus();
-    lastDay.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    press(lastDay, "ArrowRight", { bubbles: true });
     controller.prev();
     expect(root.querySelector("[data-date='2026-05-01']")?.getAttribute("tabindex")).toBe("0");
     expect(root.querySelector("[data-date='2026-06-01']")?.getAttribute("tabindex")).toBe("-1");
@@ -373,8 +499,8 @@ describe("CalendarController", () => {
     startCell.focus();
 
     // ArrowRight from May 31 should transition to June 1st and trigger month change automatically
-    const rightEvent = new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true });
-    startCell.dispatchEvent(rightEvent);
+    const rightEvent = keyEvent("ArrowRight", { bubbles: true });
+    press(startCell, rightEvent);
     await tick();
 
     const label = document.getElementById("label");
@@ -386,12 +512,8 @@ describe("CalendarController", () => {
     expect(activeCell?.getAttribute("tabindex")).toBe("0");
 
     // Shift+PageDown (Next year) from June 1st should go to June 1st, 2027
-    const shiftPageDown = new KeyboardEvent("keydown", {
-      key: "PageDown",
-      shiftKey: true,
-      bubbles: true,
-    });
-    activeCell?.dispatchEvent(shiftPageDown);
+    const shiftPageDown = keyEvent("PageDown", { shiftKey: true, bubbles: true });
+    press(activeCell as HTMLElement, shiftPageDown);
     await tick();
 
     expect(label?.textContent).toContain("June 2027");
@@ -406,17 +528,17 @@ describe("CalendarController", () => {
     controller.selectedValue = "2026-03-31";
     controller.monthValue = "2026-03";
     controller.focusedDate = new Date(2026, 2, 31);
-    // The month Value's callback repaints; it is called directly rather than
-    // waiting on the value observer.
+    // The explicit repaint and its pending focus restoration settle before the next gesture.
     controller.monthValueChanged();
+    await tick();
 
     expect(label?.textContent).toContain("March 2026");
     const currentActive = document.querySelector("[tabindex='0']") as HTMLElement;
     expect(currentActive.getAttribute("data-date")).toBe("2026-03-31");
 
     // Press PageDown (Next month) from March 31st. Should clamp to April 30th.
-    const pageDown = new KeyboardEvent("keydown", { key: "PageDown", bubbles: true });
-    currentActive.dispatchEvent(pageDown);
+    const pageDown = keyEvent("PageDown", { bubbles: true });
+    press(currentActive, pageDown);
     await tick();
 
     expect(label?.textContent).toContain("April 2026");
@@ -430,8 +552,8 @@ describe("CalendarController", () => {
     activeCell.focus();
 
     // Trigger 't' key down
-    const tEvent = new KeyboardEvent("keydown", { key: "t", bubbles: true });
-    activeCell.dispatchEvent(tEvent);
+    const tEvent = keyEvent("t", { bubbles: true });
+    press(activeCell as HTMLElement, tEvent);
     await tick();
 
     // Expected today YYYY-MM-DD string resolved from local timezone
@@ -465,7 +587,7 @@ describe("CalendarController", () => {
     // ArrowRight crosses into June: assigning monthValue drives the single
     // re-render via monthValueChanged — the controller must not also render
     // synchronously, or the month would paint twice.
-    startCell.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    press(startCell, "ArrowRight", { bubbles: true });
     await tick();
     labelRecords.push(...labelObserver.takeRecords());
     labelObserver.disconnect();
@@ -523,7 +645,7 @@ describe("CalendarController", () => {
       // ArrowRight from May 31 crosses into June: the key writes the month
       // Value, and the paint of June — the step that moves focus — arrives
       // later through the Value callback.
-      startCell.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      press(startCell, "ArrowRight", { bubbles: true });
       const callsBeforeDisconnect = focusSpy.mock.calls.length;
 
       // Disconnecting the controller directly leaves Stimulus's Value observer
@@ -566,6 +688,103 @@ describe("CalendarController", () => {
 
     sendKey("ArrowUp"); // -7 days regardless of direction
     expect(roving()?.getAttribute("data-date")).toBe("2026-05-24");
+  });
+
+  /** Inline direction isolates container resolution from the browser's dir mapping. */
+  describe("layout direction", () => {
+    const calendar = () => {
+      const element = document.getElementById("calendar");
+      if (!element) throw new Error("Expected calendar");
+      return element;
+    };
+    const grid = () => {
+      const element = document.querySelector<HTMLElement>("[data-stimeo--calendar-target='grid']");
+      if (!element) throw new Error("Expected calendar grid");
+      return element;
+    };
+    const day = (date: string) => {
+      const element = document.querySelector<HTMLElement>(`[data-date='${date}']`);
+      if (!element) throw new Error(`Expected day ${date}`);
+      return element;
+    };
+    /** The table orders the grid's columns, so its direction is the one that counts. */
+    const table = () => {
+      const element = grid().closest("table");
+      if (!element) throw new Error("Expected calendar table");
+      return element;
+    };
+
+    it.each(["ltr", "rtl"] as const)(
+      "reads the %s table direction when the root, grid and focused day disagree",
+      (direction) => {
+        const opposite = direction === "rtl" ? "ltr" : "rtl";
+        calendar().style.direction = opposite;
+        table().style.direction = direction;
+        grid().style.direction = opposite;
+        day("2026-05-15").style.direction = opposite;
+
+        const event = press(day("2026-05-15"), "ArrowRight");
+        const next = direction === "rtl" ? "2026-05-14" : "2026-05-16";
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(document.activeElement).toBe(day(next));
+        expect(roving()).toBe(day(next));
+      },
+    );
+
+    it("keeps the table's column order when only the grid row group declares a direction", () => {
+      calendar().style.direction = "ltr";
+      grid().style.direction = "rtl";
+
+      const event = press(day("2026-05-15"), "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(day("2026-05-16"));
+    });
+
+    it("reads a live change to the table direction on the next key", () => {
+      calendar().style.direction = "ltr";
+      table().style.direction = "rtl";
+      press(day("2026-05-15"), "ArrowRight");
+      expect(document.activeElement).toBe(day("2026-05-14"));
+
+      table().style.direction = "ltr";
+      press(day("2026-05-14"), "ArrowRight");
+      expect(document.activeElement).toBe(day("2026-05-15"));
+      press(day("2026-05-15"), "ArrowUp");
+      expect(document.activeElement).toBe(day("2026-05-08"));
+    });
+
+    it("reads the table of the current grid after its target is replaced", async () => {
+      calendar().style.direction = "ltr";
+      const original = grid();
+      const originalTable = table();
+      originalTable.style.direction = "ltr";
+      const replacementTable = originalTable.cloneNode() as HTMLElement;
+      replacementTable.style.direction = "rtl";
+      const replacement = original.cloneNode() as HTMLElement;
+      replacement.append(...original.children);
+      replacementTable.append(replacement);
+      originalTable.replaceWith(replacementTable);
+      await tick();
+
+      const event = press(day("2026-05-15"), "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(day("2026-05-14"));
+      expect(roving()).toBe(day("2026-05-14"));
+    });
+
+    it("falls back to the root when no grid target remains", async () => {
+      calendar().style.direction = "rtl";
+      const container = grid();
+      container.style.direction = "ltr";
+      container.removeAttribute("data-stimeo--calendar-target");
+      await tick();
+
+      const event = press(day("2026-05-15"), "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(day("2026-05-14"));
+      expect(roving()).toBe(day("2026-05-14"));
+    });
   });
 
   it("PageDown moves the roving focus into the next month, PageUp into the previous", async () => {
@@ -679,15 +898,13 @@ describe("CalendarController", () => {
   });
 
   it("ignores a keydown an outer handler already consumed", async () => {
-    // Yield a key a descendant already consumed.
+    // An outer capture listener has already claimed the key, so the grid yields it.
     const before = roving()?.getAttribute("data-date");
     const claim = (event: Event) => event.preventDefault();
     document.addEventListener("keydown", claim, true);
     try {
       roving()?.focus();
-      roving()?.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }),
-      );
+      press(roving() as HTMLElement, "ArrowRight", { bubbles: true, cancelable: true });
       await delay(20);
     } finally {
       document.removeEventListener("keydown", claim, true);
@@ -703,13 +920,8 @@ describe("CalendarController", () => {
       const before = roving()?.getAttribute("data-date");
       const cell = roving() as HTMLElement;
       cell.focus();
-      const event = new KeyboardEvent("keydown", {
-        key: "t",
-        [modifier]: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      cell.dispatchEvent(event);
+      const event = keyEvent("t", { [modifier]: true, bubbles: true, cancelable: true });
+      press(cell, event);
       await delay(20);
 
       expect(event.defaultPrevented).toBe(false);
@@ -761,14 +973,16 @@ describe("CalendarController", () => {
   it("Shift+PageUp moves back one year", async () => {
     const cell = roving() as HTMLElement;
     cell.focus();
-    cell.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "PageUp", shiftKey: true, bubbles: true }),
-    );
+    press(cell, "PageUp", { shiftKey: true, bubbles: true });
     await delay(50);
     expect(roving()?.getAttribute("data-date")).toBe("2025-05-31");
   });
 
   it("Space selects the focused day, like Enter", async () => {
+    sendKey("ArrowLeft"); // 2026-05-31 → 2026-05-30
+    await delay(20);
+    expect(roving()?.getAttribute("data-date")).toBe("2026-05-30");
+
     const details: Array<{ date: string }> = [];
     document.getElementById("calendar")?.addEventListener("stimeo--calendar:select", (event) => {
       details.push((event as CustomEvent<{ date: string }>).detail);
@@ -777,8 +991,8 @@ describe("CalendarController", () => {
     sendKey(" ");
     await delay(20);
 
-    expect(details).toEqual([]);
     expect(roving()?.getAttribute("aria-selected")).toBe("true");
+    expect(details.map((d) => d.date)).toEqual(["2026-05-30"]);
   });
 
   it("T jumps to today, transitioning the month when needed", async () => {
@@ -844,7 +1058,7 @@ describe("CalendarController", () => {
       "#cal3 [data-stimeo--calendar-target='day'][tabindex='0']",
     );
     focused?.focus();
-    focused?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    press(focused as HTMLElement, "Home", { bubbles: true });
     await delay(20);
     expect(
       document
@@ -1348,7 +1562,8 @@ describe("CalendarController off-contract input", () => {
     const before = days().map((cell) => cell.getAttribute("tabindex"));
 
     grid().dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    grid().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    // A dayless container probes rejection without receiving focus.
+    typeKey(grid(), "ArrowRight");
     await delay(50);
 
     expect(errors).toEqual([]);
@@ -1501,7 +1716,7 @@ describe("CalendarController off-contract input", () => {
     try {
       const cell = days().find((el) => el.dataset.date === "2026-05-14") as HTMLElement;
       cell.focus();
-      cell.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      press(cell, "ArrowRight", { bubbles: true });
     } finally {
       Object.defineProperty(Intl, "DateTimeFormat", {
         configurable: true,
@@ -1584,7 +1799,7 @@ describe("CalendarController off-contract cell counts", () => {
     const before = days().findIndex((cell) => cell.getAttribute("tabindex") === "0");
     const label = document.getElementById("cal-label")?.textContent;
     spare.focus();
-    spare.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    press(spare, "ArrowRight", { bubbles: true });
     await delay(50);
 
     expect(errors).toEqual([]);
@@ -1885,8 +2100,10 @@ describe("CalendarController month announcements", () => {
   });
 
   it("stays silent when the month is re-applied unchanged", async () => {
-    // Turbo restores a cached page by replaying the value callbacks against the
-    // month already on screen; re-announcing it would refetch on every restore.
+    // A Value callback can run again for the month already on screen — when `selected` and
+    // then `month` are written before Stimulus delivers either, the `selected` callback
+    // paints and reports the new month, and the `month` callback that follows finds it
+    // painted — and re-announcing it would make a listener refetch a month it already has.
     await mount('data-stimeo--calendar-month-value="2026-05"');
     const controller = application.getControllerForElementAndIdentifier(
       document.getElementById("cal") as HTMLElement,
@@ -2718,8 +2935,8 @@ describe("CalendarController selection held to the bounds", () => {
     inserted.value = "stale";
     inserted.setAttribute("data-stimeo--calendar-target", "field");
     root().append(inserted);
-    // Target callbacks are delivered unreliably under happy-dom, so the one
-    // Stimulus makes for the inserted field is made here directly.
+    // The check stays synchronous, so the test calls `fieldTargetConnected` for the
+    // inserted field directly instead of waiting for the MutationObserver delivery.
     controller().fieldTargetConnected(inserted);
 
     expect(inserted.value).toBe("");

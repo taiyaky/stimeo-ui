@@ -7,7 +7,7 @@
     disconnect and pagehide); a lost notice is caught by the timeout expiry. The id/name
     pair is randomized per render, which is fine for a demo; a real app renders
     current_user.id / current_user.name. The count templates (data-zero/-one/
-    -other) keep the text localizable; %{count} is substituted by the
+    -other) keep the text localizable; {count} is substituted by the
     controller. Heartbeat/timeout are shortened so leaving is quick to observe. %>
 <% token = SecureRandom.hex(4) %>
 <% guest = t("components.presence.demo.guest_name", token: token.first(4)) %>

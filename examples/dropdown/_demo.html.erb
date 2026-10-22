@@ -13,17 +13,21 @@
   </button>
 
   <%# The toggled menu. Starts hidden (closed).
-      Each link uses click->stimeo--dropdown#close to close the menu on selection.
+      Each placeholder link closes the menu and prevents navigation so the event
+      readout stays visible. Real destination links can omit :prevent.
       (The links are inside the controller element, so an outside click won't close
       it — wire it explicitly.) %>
   <ul class="dropdown__menu" data-stimeo--dropdown-target="menu" hidden>
-    <li><a class="demo-menuitem" href="#profile" data-action="click->stimeo--dropdown#close"><%= t(
+    <li><a class="demo-menuitem" href="#profile"
+      data-action="click->stimeo--dropdown#close:prevent"><%= t(
       "components.dropdown.demo.profile"
     ) %></a></li>
-    <li><a class="demo-menuitem" href="#settings" data-action="click->stimeo--dropdown#close"><%= t(
+    <li><a class="demo-menuitem" href="#settings"
+      data-action="click->stimeo--dropdown#close:prevent"><%= t(
       "components.dropdown.demo.settings"
     ) %></a></li>
-    <li><a class="demo-menuitem" href="#sign-out" data-action="click->stimeo--dropdown#close"><%= t(
+    <li><a class="demo-menuitem" href="#sign-out"
+      data-action="click->stimeo--dropdown#close:prevent"><%= t(
       "components.dropdown.demo.sign_out"
     ) %></a></li>
   </ul>

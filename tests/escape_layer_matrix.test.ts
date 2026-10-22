@@ -10,6 +10,7 @@ import { NavigationMenuController } from "../src/controllers/navigation_menu_con
 import { PopoverController } from "../src/controllers/popover_controller";
 import { TooltipController } from "../src/controllers/tooltip_controller";
 import { byId } from "./helpers/dom";
+import { keyEvent, press as pressKey, typeKey } from "./helpers/keyboard";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -171,7 +172,7 @@ const KINDS: LayerKind[] = [
     markup: (p, slot) => `
       <div data-controller="stimeo--context-menu">
         <div id="${p}-trigger" data-stimeo--context-menu-target="region" tabindex="0"
-             aria-haspopup="menu" aria-controls="${p}-overlay"
+             role="group" aria-controls="${p}-overlay"
              data-action="contextmenu->stimeo--context-menu#open
                           keydown->stimeo--context-menu#onRegionKeydown">Area</div>
         <ul id="${p}-overlay" role="menu" data-stimeo--context-menu-target="menu" hidden>
@@ -242,8 +243,11 @@ describe("Escape layer pair matrix (inner closes first, outer second)", () => {
   });
 
   const pressEscape = (): KeyboardEvent => {
-    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    (document.activeElement ?? document).dispatchEvent(event);
+    const event = keyEvent("Escape", { bubbles: true, cancelable: true });
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body) return pressKey(active, event);
+    // Body focus models a document fallback without granting an element focus.
+    typeKey(document, event);
     return event;
   };
 

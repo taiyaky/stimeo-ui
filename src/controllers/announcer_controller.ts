@@ -1,9 +1,11 @@
 import { Controller } from "@hotwired/stimulus";
 import { DetachGate } from "../utils/detach_gate";
 import { KeyedTimers } from "../utils/keyed_timers";
+import { ListenerSet } from "../utils/listener_set";
 import { MicrotaskCoalescer } from "../utils/microtask_coalescer";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
+import { OwnedText } from "../utils/owned_text";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /** The two politeness levels this controller keeps a region for. */
@@ -69,10 +71,12 @@ const ANNOUNCED = "announced";
  * region beside the new stand-in or an authored target.
  *
  * **A restored page does not read out an earlier message.** A region holding a
- * message this controller wrote carries `data-<identifier>-announced` until the message
+ * message this controller wrote carries `["text", original, written]` in
+ * `data-<identifier>-announced` until the message
  * is cleared after `clearAfter`. The teardown drops the clearing timers, so a connection
- * that is not the other half of a move empties every marked authored region it finds;
- * an authored region's own initial text carries no mark and stays. Nothing is dropped or emptied on `turbo:before-cache`, which Turbo
+ * that is not the other half of a move empties only a region still holding that
+ * recorded text alone. Authored replacements, element children, and invalid records
+ * stay. Nothing is dropped or emptied on `turbo:before-cache`, which Turbo
  * also dispatches on pages that stay (a promoted frame navigation, a state-less
  * `popstate`, a refresh of a cached URL): the messages queued there are still read.
  *
@@ -119,6 +123,9 @@ export class AnnouncerController extends Controller<HTMLElement> {
   /** Tells an in-page move or a permanent carry from a real detach. */
   readonly #gate = new DetachGate();
 
+  /** The announce listeners, released by the teardown a real detach runs. */
+  readonly #listeners = new ListenerSet();
+
   /** The auto-clear each region may have outstanding; a newer message releases it. */
   readonly #regionTimers = new KeyedTimers<HTMLElement>();
 
@@ -131,9 +138,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
   }
 
   /** The written-message marker, in the namespace this controller is registered under. */
-  get #announced(): string {
-    return `data-${this.identifier}-${ANNOUNCED}`;
-  }
+  readonly #messageText = new OwnedText(`data-${this.identifier}-${ANNOUNCED}`);
 
   /** Messages waiting to be written, oldest first, one queue per politeness. */
   readonly #queues = new Map<Level, string[]>();
@@ -186,8 +191,8 @@ export class AnnouncerController extends Controller<HTMLElement> {
     // before the first message rather than appearing with it.
     this.#reconcileRegions();
     this.#hostWatch.observe(this.element, { childList: true });
-    this.element.addEventListener("stimeo--announcer:announce", this.#onAnnounceEvent);
-    window.addEventListener("stimeo--announcer:announce", this.#onAnnounceEvent);
+    this.#listeners.add(this.element, "stimeo--announcer:announce", this.#onAnnounceEvent);
+    this.#listeners.add(window, "stimeo--announcer:announce", this.#onAnnounceEvent);
   }
 
   /** Tears everything down once the element is really detached. */
@@ -199,8 +204,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
   #teardown(): void {
     this.#reconcile.cancel();
     this.#hostWatch.disconnect();
-    this.element.removeEventListener("stimeo--announcer:announce", this.#onAnnounceEvent);
-    window.removeEventListener("stimeo--announcer:announce", this.#onAnnounceEvent);
+    this.#listeners.dispose();
     this.#timers.clearAll();
     this.#regionTimers.clearAll();
     this.#queues.clear();
@@ -233,7 +237,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
    * whether anything had to be created.
    *
    * A region created here is not written to in the same task: assistive tech
-   * reports changes to regions it already knows about, so {@link drain} waits a
+   * reports changes to regions it already knows about, so {@link #drain} waits a
    * task whenever this says a region is new.
    */
   #reconcileRegions(): boolean {
@@ -282,9 +286,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
    */
   #emptyInheritedMessages(): void {
     for (const region of [...this.politeTargets, ...this.assertiveTargets]) {
-      if (!region.hasAttribute(this.#announced)) continue;
-      region.replaceChildren();
-      region.removeAttribute(this.#announced);
+      this.#messageText.clear(region);
     }
   }
 
@@ -370,6 +372,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
 
     if (this.dedupeReannounceValue && region.textContent === message) {
       region.textContent = "";
+      this.#messageText.forget(region);
       this.#scheduleDrain(level);
       return;
     }
@@ -378,25 +381,23 @@ export class AnnouncerController extends Controller<HTMLElement> {
     // A non-positive `clearAfter` arms nothing below, so the region's pending
     // timer is released here rather than by the arming that replaces it.
     this.#regionTimers.clear(region);
-    region.textContent = message;
-    region.setAttribute(this.#announced, "");
-    this.#scheduleClear(region, message);
+    this.#messageText.write(region, message, undefined, true);
+    this.#scheduleClear(region);
     if (queue.length > 0) this.#scheduleDrain(level);
   }
 
   /**
-   * Clears the region after `clearAfter` ms, unless a newer message replaced it.
+   * Clears the region after `clearAfter` ms if it still shows only the message this
+   * controller recorded there. A newer message re-arms the region's one timer.
    *
    * @stimeoRuntimeOnly `clearAfter` is the delay of the one clearing timer this call arms.
    */
-  #scheduleClear(region: HTMLElement, message: string): void {
+  #scheduleClear(region: HTMLElement): void {
     if (this.#safeClearAfter <= 0) return;
     this.#regionTimers.set(
       region,
       () => {
-        if (region.textContent !== message) return;
-        region.textContent = "";
-        region.removeAttribute(this.#announced);
+        this.#messageText.clear(region);
       },
       this.#safeClearAfter,
     );

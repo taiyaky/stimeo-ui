@@ -1,5 +1,6 @@
 import { Controller } from "@hotwired/stimulus";
-import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { hasModifierChord, isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
+import { setAttributeIfChanged } from "../utils/attribute_write";
 import { commitField, writeField } from "../utils/field_mirror";
 import { isRtl } from "../utils/logical_scroll";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
@@ -18,7 +19,7 @@ const DEFAULT_MAX = 100;
 
 /**
  * Headless, accessible **two-thumb range slider** behavior (APG Slider —
- * Multi-Thumb). A derivative of {@link SliderController}: it manages two thumbs
+ * Multi-Thumb). A derivative of `stimeo--slider`: it manages two thumbs
  * (`start` ≤ `end`) that constrain each other.
  *
  * Markup contract (identifier: `stimeo--range-slider`):
@@ -103,8 +104,9 @@ const DEFAULT_MAX = 100;
  *
  * The fractions are value ratios, not positions, so only the consumer knows
  * whether their track mirrors under RTL. Set `logicalTrack` to declare that it
- * does: the pointer mapping and the horizontal arrow pair then follow the
- * writing direction. Left unset, nothing here reads `direction`.
+ * does: the pointer mapping and the horizontal arrow pair then follow the `track`
+ * target's writing direction (the root's while no `track` target is present). Left
+ * unset, nothing here reads `direction`.
  */
 export class RangeSliderController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
@@ -163,9 +165,9 @@ export class RangeSliderController extends Controller<HTMLElement> {
    */
   #settled: RangePair = { start: DEFAULT_MIN, end: DEFAULT_MAX };
 
-  /** Whether the consumer declared a mirroring track and the direction mirrors it. */
-  get #mirrored(): boolean {
-    return this.logicalTrackValue && isRtl(this.element);
+  /** The current track owns direction; incomplete markup falls back to the root. */
+  get #directionElement(): HTMLElement {
+    return this.hasTrackTarget ? this.trackTarget : this.element;
   }
 
   /**
@@ -291,6 +293,14 @@ export class RangeSliderController extends Controller<HTMLElement> {
    */
   onKeydown(event: KeyboardEvent): void {
     if (isReservedArrowChord(event)) return;
+    if (
+      (event.key === "Home" ||
+        event.key === "End" ||
+        event.key === "PageUp" ||
+        event.key === "PageDown") &&
+      hasModifierChord(event)
+    )
+      return;
     const thumb = event.currentTarget as HTMLElement;
     const isStart = this.startThumbTargets.includes(thumb);
     const isEnd = this.endThumbTargets.includes(thumb);
@@ -323,7 +333,9 @@ export class RangeSliderController extends Controller<HTMLElement> {
     let next: number | null = null;
     // On a mirrored track the greater value sits at the visual left, so the
     // horizontal pair trades places; `Home`/`End` name bounds, not a direction.
-    switch (this.#mirrored ? logicalArrowKey(event.key, this.element) : event.key) {
+    switch (
+      this.logicalTrackValue ? logicalArrowKey(event.key, this.#directionElement) : event.key
+    ) {
       case "ArrowRight":
       case "ArrowUp":
         next = stepSteppedValue(current, 1, range);
@@ -366,7 +378,7 @@ export class RangeSliderController extends Controller<HTMLElement> {
     // Resolve the direction once for the whole gesture: reading it per move
     // would query computed style on every frame, and a drag that flipped
     // mid-gesture would be incoherent anyway.
-    const mirrored = this.#mirrored;
+    const mirrored = this.logicalTrackValue && isRtl(track);
     const value = this.#valueFromClientX(event.clientX, mirrored, track);
     if (value === null) return;
     event.preventDefault();
@@ -549,8 +561,7 @@ export class RangeSliderController extends Controller<HTMLElement> {
 
   /** Writes one numeric ARIA attribute only when its serialized value changed. */
   #setAria(thumb: HTMLElement, name: string, value: number): void {
-    const next = String(value);
-    if (thumb.getAttribute(name) !== next) thumb.setAttribute(name, next);
+    setAttributeIfChanged(thumb, name, String(value));
   }
 
   /** Writes the two behavior-only fraction hooks only when they changed. */

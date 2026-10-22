@@ -4,7 +4,7 @@ import { CommandPaletteController } from "../src/controllers/command_palette_con
 import { ConfirmController } from "../src/controllers/confirm_controller";
 import { DialogController } from "../src/controllers/dialog_controller";
 import { byId } from "./helpers/dom";
-import { typeKey } from "./helpers/keyboard";
+import { press as pressKey, typeKey } from "./helpers/keyboard";
 import { TARGET_SWAPS } from "./helpers/modal_stack";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
@@ -84,11 +84,6 @@ describe("modal stack", () => {
   });
 
   const inert = (id: string): boolean => byId(id).closest("[inert]") !== null;
-  const press = (key: string, init: KeyboardEventInit = {}): KeyboardEvent => {
-    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
-    (document.activeElement ?? document.body).dispatchEvent(event);
-    return event;
-  };
   const openDialog = (): void => {
     byId("edit-trigger").focus();
     byId("edit-trigger").click();
@@ -100,8 +95,9 @@ describe("modal stack", () => {
       "stimeo--dialog",
     ) as DialogController;
   const openPalette = (): void => {
-    press("k", { ctrlKey: true });
-    if (byId("palette").hidden) press("k", { metaKey: true });
+    pressKey(document.activeElement as HTMLElement, "k", { ctrlKey: true });
+    if (byId("palette").hidden)
+      pressKey(document.activeElement as HTMLElement, "k", { metaKey: true });
     expect(document.activeElement).toBe(byId("palette-input"));
   };
   const turboConfirm = (message: string): Promise<boolean> => {
@@ -118,17 +114,17 @@ describe("modal stack", () => {
     expect(byId("confirm-dialog").hidden).toBe(false);
     expect(inert("confirm-dialog")).toBe(false);
     expect(document.activeElement).toBe(byId("confirm-cancel"));
-    expect(press("Tab").defaultPrevented).toBe(true);
+    expect(pressKey(document.activeElement as HTMLElement, "Tab").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(byId("confirm-ok"));
     expect(inert("edit-dialog")).toBe(true);
 
-    press("Escape");
+    pressKey(document.activeElement as HTMLElement, "Escape");
     await expect(answer).resolves.toBe(false);
     expect(document.activeElement).toBe(byId("edit-delete"));
     expect(inert("edit-dialog")).toBe(false);
     expect(inert("edit-trigger")).toBe(true);
     expect(inert("confirm-dialog")).toBe(true);
-    press("Tab");
+    pressKey(document.activeElement as HTMLElement, "Tab");
     expect(document.activeElement).toBe(byId("edit-close"));
   });
 
@@ -147,11 +143,11 @@ describe("modal stack", () => {
 
       expect(inert("confirm-dialog")).toBe(false);
       expect(document.activeElement).toBe(byId("confirm-cancel"));
-      expect(press("Tab").defaultPrevented).toBe(true);
+      expect(pressKey(document.activeElement as HTMLElement, "Tab").defaultPrevented).toBe(true);
       expect(document.activeElement).toBe(byId("confirm-ok"));
       expect(inert("next-edit-dialog")).toBe(true);
 
-      press("Escape");
+      pressKey(document.activeElement as HTMLElement, "Escape");
       await expect(answer).resolves.toBe(false);
       expect(document.activeElement).toBe(byId("next-edit-name"));
       expect(successor.hidden).toBe(false);
@@ -165,17 +161,18 @@ describe("modal stack", () => {
 
   it("keeps the command palette opened over a dialog operable, and the dialog after it", () => {
     openDialog();
-    press("k", { ctrlKey: true });
-    if (byId("palette").hidden) press("k", { metaKey: true });
+    pressKey(document.activeElement as HTMLElement, "k", { ctrlKey: true });
+    if (byId("palette").hidden)
+      pressKey(document.activeElement as HTMLElement, "k", { metaKey: true });
 
     expect(byId("palette").hidden).toBe(false);
     expect(inert("palette")).toBe(false);
     expect(document.activeElement).toBe(byId("palette-input"));
-    press("Tab");
+    pressKey(document.activeElement as HTMLElement, "Tab");
     expect(document.activeElement).toBe(byId("palette-help"));
     expect(inert("edit-dialog")).toBe(true);
 
-    press("Escape");
+    pressKey(document.activeElement as HTMLElement, "Escape");
     expect(byId("palette").hidden).toBe(true);
     expect(document.activeElement).toBe(byId("edit-name"));
     expect(inert("edit-dialog")).toBe(false);
@@ -184,8 +181,9 @@ describe("modal stack", () => {
 
   it("keeps the upper modal isolated when the dialog below closes first", () => {
     openDialog();
-    press("k", { ctrlKey: true });
-    if (byId("palette").hidden) press("k", { metaKey: true });
+    pressKey(document.activeElement as HTMLElement, "k", { ctrlKey: true });
+    if (byId("palette").hidden)
+      pressKey(document.activeElement as HTMLElement, "k", { metaKey: true });
     expect(document.activeElement).toBe(byId("palette-input"));
 
     const dialog = application.getControllerForElementAndIdentifier(
@@ -199,10 +197,10 @@ describe("modal stack", () => {
     expect(inert("edit-trigger")).toBe(true);
     expect(inert("confirm-dialog")).toBe(true);
     byId("palette-input").focus();
-    press("Tab");
+    pressKey(document.activeElement as HTMLElement, "Tab");
     expect(document.activeElement).toBe(byId("palette-help"));
 
-    press("Escape");
+    pressKey(document.activeElement as HTMLElement, "Escape");
     expect(document.querySelectorAll("[inert]").length).toBe(0);
   });
 
@@ -213,7 +211,7 @@ describe("modal stack", () => {
     dialogController().close();
     expect(document.activeElement).toBe(byId("palette-input"));
 
-    press("Escape");
+    pressKey(document.activeElement as HTMLElement, "Escape");
     expect(byId("palette").hidden).toBe(true);
     expect(document.activeElement).toBe(byId("edit-trigger"));
   });
@@ -225,7 +223,7 @@ describe("modal stack", () => {
     byId("search").focus();
     openPalette();
 
-    press("Enter");
+    pressKey(document.activeElement as HTMLElement, "Enter");
     expect(byId("palette").hidden).toBe(true);
     expect(byId("edit-dialog").hidden).toBe(false);
     expect(document.activeElement).toBe(byId("edit-name"));

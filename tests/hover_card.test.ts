@@ -4,6 +4,7 @@ import { HoverCardController } from "../src/controllers/hover_card_controller";
 import { EscapeLayer } from "../src/utils/escape_layer";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { press as keyboardPress, keyEvent, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
@@ -204,12 +205,8 @@ describe("HoverCardController", () => {
     fire(trigger(), "mouseenter");
     vi.advanceTimersByTime(300);
     trigger().focus();
-    const event = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
-    trigger().dispatchEvent(event);
+    const event = keyEvent("Escape");
+    keyboardPress(trigger(), event);
     expect(event.defaultPrevented).toBe(true);
     expect(card().hidden).toBe(true);
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
@@ -219,7 +216,8 @@ describe("HoverCardController", () => {
     fire(trigger(), "mouseenter");
     vi.advanceTimersByTime(300);
     outside().focus();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    // The document shortcut dismisses the card while focus stays on the outside control.
+    typeKey(document, "Escape");
     expect(card().hidden).toBe(true);
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
   });
@@ -234,15 +232,15 @@ describe("HoverCardController", () => {
     let aboveDismissed = 0;
     const above = new EscapeLayer();
     above.activate(document, { onDismiss: () => aboveDismissed++ });
-    const first = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    trigger().dispatchEvent(first);
+    const first = keyEvent("Escape");
+    keyboardPress(trigger(), first);
     expect(first.defaultPrevented).toBe(true);
     expect(aboveDismissed).toBe(1);
     expect(card().hidden).toBe(false);
 
     above.deactivate();
-    const second = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-    trigger().dispatchEvent(second);
+    const second = keyEvent("Escape");
+    keyboardPress(trigger(), second);
     expect(second.defaultPrevented).toBe(true);
     expect(card().hidden).toBe(true);
   });
@@ -260,8 +258,8 @@ describe("HoverCardController", () => {
       fire(trigger(), "mouseleave");
       fire(card(), "mouseenter");
       vi.advanceTimersByTime(1000);
-      const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-      document.dispatchEvent(press);
+      const press = keyEvent("Escape");
+      keyboardPress(document.activeElement as HTMLElement, press);
       expect(press.defaultPrevented).toBe(true);
       expect(aboveDismissed).toBe(1);
       expect(card().hidden).toBe(false);
@@ -273,16 +271,16 @@ describe("HoverCardController", () => {
   it("ignores an Escape already handled by an inner layer", () => {
     fire(trigger(), "mouseenter");
     vi.advanceTimersByTime(300);
-    const handled = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    const handled = keyEvent("Escape");
     handled.preventDefault();
-    document.dispatchEvent(handled);
+    keyboardPress(document.activeElement as HTMLElement, handled);
     // A consumed press closes at most one layer.
     expect(card().hidden).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
 
-    const handledOnTrigger = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    const handledOnTrigger = keyEvent("Escape");
     handledOnTrigger.preventDefault();
-    trigger().dispatchEvent(handledOnTrigger);
+    keyboardPress(trigger(), handledOnTrigger);
     expect(card().hidden).toBe(false);
   });
 
@@ -345,12 +343,8 @@ describe("HoverCardController", () => {
     fire(trigger(), "mouseenter");
     vi.advanceTimersByTime(300);
     controller().disconnect();
-    const event = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
-    document.dispatchEvent(event);
+    const event = keyEvent("Escape");
+    keyboardPress(document.activeElement as HTMLElement, event);
     expect(event.defaultPrevented).toBe(false);
     expect(card().hidden).toBe(false);
   });
@@ -388,8 +382,8 @@ describe("HoverCardController", () => {
     // The node never left the element, so it is still the card this hover card shows.
     expect(moved.hidden).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
-    const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-    document.dispatchEvent(press);
+    const press = keyEvent("Escape");
+    keyboardPress(document.activeElement as HTMLElement, press);
     expect(press.defaultPrevented).toBe(true);
     expect(moved.hidden).toBe(true);
   });
@@ -410,8 +404,8 @@ describe("HoverCardController", () => {
     // Only the card this hover card shows holds what the open state lent.
     expect(card().hidden).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
-    const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-    document.dispatchEvent(press);
+    const press = keyEvent("Escape");
+    keyboardPress(document.activeElement as HTMLElement, press);
     expect(press.defaultPrevented).toBe(true);
   });
 
@@ -425,11 +419,8 @@ describe("HoverCardController", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     // The removal itself released the layer, so the press reaches whatever is below.
-    const firstEscape = new KeyboardEvent("keydown", {
-      key: "Escape",
-      cancelable: true,
-    });
-    document.dispatchEvent(firstEscape);
+    const firstEscape = keyEvent("Escape");
+    keyboardPress(document.activeElement as HTMLElement, firstEscape);
     expect(firstEscape.defaultPrevented).toBe(false);
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
 
@@ -437,11 +428,8 @@ describe("HoverCardController", () => {
     detachedCard.hidden = false;
     window.dispatchEvent(new Event("scroll"));
     expect(detachedCard.hidden).toBe(false);
-    const secondEscape = new KeyboardEvent("keydown", {
-      key: "Escape",
-      cancelable: true,
-    });
-    document.dispatchEvent(secondEscape);
+    const secondEscape = keyEvent("Escape");
+    keyboardPress(document.activeElement as HTMLElement, secondEscape);
     expect(secondEscape.defaultPrevented).toBe(false);
   });
 
@@ -454,8 +442,8 @@ describe("HoverCardController", () => {
       expect(() => vi.advanceTimersByTime(300)).not.toThrow();
       expect(trigger().getAttribute("aria-expanded")).toBe("false");
       expect(capture.seen).toEqual([]);
-      const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-      document.dispatchEvent(press);
+      const press = keyEvent("Escape");
+      keyboardPress(document.activeElement as HTMLElement, press);
       expect(press.defaultPrevented).toBe(false);
 
       // The same request opens the card once the target is back.
@@ -629,7 +617,8 @@ describe("HoverCardController", () => {
       const only = trigger();
       only.remove();
 
-      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      // Call the callback directly inside `expect`, so a throw from it fails this case
+      // rather than surfacing outside the test from the MutationObserver delivery.
       expect(() => controller().triggerTargetDisconnected(only)).not.toThrow();
     });
 
@@ -725,10 +714,13 @@ describe("HoverCardController", () => {
       capture.stop();
     });
 
-    /** Presses Escape at the document and reports whether a layer consumed it. */
+    /**
+     * Presses Escape on the focused element, from where it bubbles to the document, and
+     * reports whether a layer consumed it.
+     */
     const pressEscape = (): boolean => {
-      const press = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-      document.dispatchEvent(press);
+      const press = keyEvent("Escape");
+      keyboardPress(document.activeElement as HTMLElement, press);
       return press.defaultPrevented;
     };
 
@@ -1255,7 +1247,7 @@ describe("HoverCardController", () => {
       await vi.advanceTimersByTimeAsync(300);
       capture.clear();
 
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      keyboardPress(document.activeElement as HTMLElement, "Escape");
 
       expect(capture.names()).toEqual(["close"]);
       expect(capture.reasons()).toEqual(["escape"]);

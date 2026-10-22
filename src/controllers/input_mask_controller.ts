@@ -1,9 +1,27 @@
 import { Controller } from "@hotwired/stimulus";
 import { CompositionTracker } from "../utils/composition_tracker";
 import { compileRegExp, parseJsonObject } from "../utils/declared_value";
+import { DetachGate } from "../utils/detach_gate";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
+import { FormDataProjection, prepareFormDataProjection } from "../utils/form_data_projection";
 import { halfWidthChar } from "../utils/half_width";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
+import { SafeTimeout } from "../utils/safe_timeout";
+import { sharedRegistry } from "../utils/shared_registry";
+
+/**
+ * Synchronously prepares a new detached form for managed raw-field submission.
+ * Registration is idempotent and lasts for this form element in its document;
+ * later fields and repeated FormData constructions need no further calls.
+ * Connected forms, and forms where `stimeo--input-mask` has synchronized a managed field,
+ * are automatic. Call this before constructing FormData for any other detached
+ * form, including an existing form that received a managed field only by a DOM
+ * move. This observes submission only, without committing edits or releasing
+ * raw-field ownership. Discard the form to discard its registration.
+ */
+export function prepareInputMaskForm(form: HTMLFormElement): void {
+  prepareFormDataProjection(form);
+}
 
 /** Default placeholder tokens → single-char regex sources (user tokens merge over these). */
 const DEFAULT_TOKENS: Readonly<Record<string, string>> = {
@@ -17,6 +35,16 @@ const DEFAULT_TOKENS: Readonly<Record<string, string>> = {
  * paired input's `id`.
  */
 const UNMASK_ATTR = "unmask";
+
+/**
+ * The mask that last wrote each sink's raw value: one map per page for every copy of the
+ * library, so masks registered by another Stimulus application, or loaded through both the
+ * barrel and the per-controller entry, read the same writer.
+ */
+const rawWriters = sharedRegistry(
+  "stimeo-ui.input-mask-raw-writer.registry.v1",
+  () => new WeakMap<HTMLInputElement, object>(),
+);
 
 /** Which neighbour a deleting keystroke aimed at, when the platform names one. */
 type Deletion = "backward" | "forward";
@@ -175,15 +203,22 @@ function tokenCharOffset(tokenFlags: readonly boolean[], n: number): number {
  * `change` and `reconcile` dispatch `{ masked, unmasked, complete }`.
  *
  * @remarks
- * Behavior only and **idempotent** — the formatted value lives only in the input and
- * the hidden field (no module-scope state), so `connect()` re-formats the existing
- * value and is stable across Turbo restore/morph. The controller sits on the
- * `<input>` itself (a void element), so the raw-value sink is not a Stimulus target;
- * it is the `[data-stimeo--input-mask-unmask]` field resolved nearest-first among
- * the associated form's own controls (an explicit pairing by the sink attribute's
+ * Behavior only and **idempotent** — a snapshot of the committed derived output
+ * repairs the hooks and the maintained sink while the IME owns the field's text.
+ * Page-wide registries coordinate the last writer and each sink's form transport
+ * identity. `connect()` re-formats the existing value and is stable across Turbo
+ * restore/morph. The controller sits on the `<input>` itself (a void element), so
+ * the raw-value sink is not a Stimulus target; it is the
+ * `[data-stimeo--input-mask-unmask]` field resolved nearest-first among the
+ * associated form's own controls (an explicit pairing by the sink attribute's
  * value naming the input's `id` wins; otherwise the closest ancestor's value-less
  * sink) — when one form holds several masked inputs, wrap each input+sink pair in a
  * container or pair them by `id`.
+ *
+ * A maintained named sink carries a reserved internal DOM name. Native FormData and
+ * submission expose its original name and entry position. A removed source contributes
+ * an empty raw entry without committing a draft or changing the maintained DOM value.
+ * Consumers find the sink by id or pairing attribute rather than its DOM name.
  *
  * Formatting never steals keys: it rejects disallowed characters silently and keeps
  * the caret on insert, Backspace, and range replacement (WCAG 2.2 3.3.2 / 1.3.5;
@@ -204,11 +239,10 @@ function tokenCharOffset(tokenFlags: readonly boolean[], n: number): number {
  * after `pattern` / `tokens` / `unmaskToHidden` changed. A malformed `tokens`
  * declaration falls back to the default tokens, and a single broken source falls
  * back to that key's default: it is parsed once in `tokensValueChanged`, and the
- * hot path only ever sees the validated map. A field
- * the user cannot edit (`readonly`, `disabled`, or inside a disabled `<fieldset>`)
- * keeps the value the page authored — the sink and the state hooks still follow it,
- * but the field itself is never rewritten. The composition listener is released on
- * `disconnect()`.
+ * hot path only ever sees the validated map. A field the user cannot edit
+ * (`readonly`, `disabled`, or inside a disabled `<fieldset>`) keeps the value the
+ * page authored — the sink and the state hooks still follow it, but the field
+ * itself is never rewritten. The composition listener is released on `disconnect()`.
  */
 export class InputMaskController extends Controller<HTMLInputElement> {
   /** The attribute above, in the namespace this controller is registered under. */
@@ -232,17 +266,40 @@ export class InputMaskController extends Controller<HTMLInputElement> {
   #lastValue: string | null = null;
   #started = false;
 
+  /** The sink this instance last wrote a raw value to and still answers for. */
+  #rawSink: HTMLInputElement | null = null;
+  /**
+   * The raw value written to `#rawSink`, so a different value written there since is left
+   * alone.
+   */
+  #rawValue = "";
+  #rawSourceForm: HTMLFormElement | null = null;
+  readonly #submission = new FormDataProjection();
+
   /** Validated token map; the hot path never parses the `tokens` declaration. */
   #tokens = compileTokens("");
 
   /** The field's text when the running composition began. */
   #textBeforeComposition = "";
+  /**
+   * The declarations the last format applied; `null` while no format stands — none
+   * ran yet, or the running composition withdrew the sink it wrote. A composition owes
+   * a format at its end exactly while this differs from what the page declares, so a
+   * change taken back owes nothing and a pass that changed nothing cannot discard one.
+   */
+  #formatted: string | null = null;
+
+  /** The derived output last published, kept apart from the IME's unfinished text. */
+  #shown: { result: MaskResult | null; empty: boolean } = { result: null, empty: true };
 
   /**
    * Holds mid-composition input so the IME's uncommitted text is never rewritten,
    * and formats the confirmed text once when the composition ends. A composition
    * that ends on the text it began with committed nothing, so a re-format then is
-   * the page's: the mask changed while it ran.
+   * the page's: the mask changed while it ran. One that ends without
+   * `compositionend` committed nothing either: a re-format the page asked for
+   * meanwhile is the page's and runs then; with none held, the field's text waits
+   * for whatever formats it next.
    */
   readonly #composition = new CompositionTracker({
     onStart: () => {
@@ -251,6 +308,9 @@ export class InputMaskController extends Controller<HTMLInputElement> {
     onEnd: () => {
       const committedNothing = this.element.value === this.#textBeforeComposition;
       this.#reformat(committedNothing ? "reconcile" : "edit");
+    },
+    onAbandon: () => {
+      if (this.#formatted !== this.#declared) this.#reformat("reconcile");
     },
   });
 
@@ -264,32 +324,61 @@ export class InputMaskController extends Controller<HTMLInputElement> {
     if (this.#started) this.#reformat("reconcile");
   }
 
-  /** Clears a sink it stops maintaining so a submit cannot carry a stale raw value. */
+  /** Takes back the raw value it stops maintaining so a submit cannot carry it stale. */
   unmaskToHiddenValueChanged(): void {
     if (!this.#started) return;
-    if (!this.unmaskToHiddenValue) {
-      const sink = this.#resolveSink();
-      if (sink) sink.value = "";
-    }
+    if (!this.unmaskToHiddenValue) this.#withdraw();
     this.#reformat("reconcile");
+  }
+
+  /**
+   * Takes back the raw value of a synchronization that stopped. A sink withdrawn
+   * mid-composition is written again only by a format, so the composition's end owes
+   * one even when synchronization comes back before it.
+   */
+  #withdraw(): void {
+    if (this.#retractRaw() && this.#composition.isComposing()) this.#formatted = null;
   }
 
   readonly #morph = new MorphRenderWatcher(() => this.#reformat("reconcile"));
 
+  /** Tells an in-page move or a Turbo carry from the field leaving the page. */
+  readonly #gate = new DetachGate();
+
+  /** The second look for a sink that arrives after the field connected. */
+  readonly #adoption = new SafeTimeout();
+
   override connect(): void {
+    this.#gate.cancel();
     this.#morph.observe(this.element);
     this.#started = true;
     this.#composition.observe(this.element);
+    if (!this.unmaskToHiddenValue) this.#withdraw();
+    // A field that moved here with its conversion keeps the value it committed; the
+    // conversion's end formats it, and a format the move asks for waits for that end.
+    if (this.#composition.isComposing()) {
+      this.#reformat("reconcile");
+      return;
+    }
     // Seed the baseline from the DOM so a value that is already masked stays
     // silent, then re-format any server-rendered/restored value.
     this.#lastValue = this.element.value;
     this.#reformat("reconcile");
+    // A sink Turbo carries to the next page is put back later in the task that connected
+    // the field; look for it once more on the next task.
+    if (this.unmaskToHiddenValue && this.#rawSink === null) {
+      this.#adoption.set(() => this.#adoptSink(), 0);
+    }
   }
 
   override disconnect(): void {
     this.#morph.disconnect();
     this.#started = false;
     this.#composition.disconnect();
+    this.#adoption.clearAll();
+    // A move, a morph or a Turbo carry connects the field again; a field that does not
+    // come back has left the page, including the page a Turbo visit leaves.
+    this.#gate.disconnected(this, () => this.#retractRaw());
   }
 
   /** Formats the field on input, preserving the caret. Bound via `data-action`. */
@@ -305,16 +394,25 @@ export class InputMaskController extends Controller<HTMLInputElement> {
    * @stimeoRenderRoot
    */
   #reformat(cause: Cause, deletion: Deletion | null = null): void {
-    // The IME owns the text until it commits; the composition's end re-formats it.
-    if (this.#composition.isComposing()) return;
+    // The IME owns the text until it commits; the composition's end re-formats it. A
+    // format asked for meanwhile waits for that end, and the outputs show the last
+    // format again.
+    if (this.#composition.isComposing()) {
+      this.#showAgain();
+      return;
+    }
+    this.#formatted = this.#declared;
     const input = this.element;
     const raw = input.value;
 
     // No pattern → act as a pass-through. Without this branch `applyMask` would
     // produce an empty string and blank a misconfigured field's value; the hooks
     // still describe the field so a pattern removed at runtime cannot leave a
-    // stale `data-mask-complete` behind.
+    // stale `data-mask-complete` behind, and a raw value written under the pattern
+    // is taken back, as nothing maintains it any more.
     if (this.patternValue === "") {
+      this.#retractRaw();
+      this.#shown = { result: null, empty: raw.length === 0 };
       this.#flag("data-mask-complete", false);
       this.#flag("data-mask-empty", raw.length === 0);
       this.#lastValue = raw;
@@ -362,14 +460,91 @@ export class InputMaskController extends Controller<HTMLInputElement> {
     else this.dispatch("reconcile", { detail });
   }
 
+  /** The declarations a format applies. */
+  get #declared(): string {
+    return JSON.stringify([this.patternValue, this.tokensValue, this.unmaskToHiddenValue]);
+  }
+
   /** Syncs the raw-value sink and the state hooks for the `shown` field text. */
   #publish(result: MaskResult, shown: string): void {
+    this.#shown = { result, empty: shown.length === 0 };
     if (this.unmaskToHiddenValue) {
       const sink = this.#resolveSink();
-      if (sink) sink.value = result.unmasked;
+      if (sink !== this.#rawSink) this.#retractRaw();
+      if (sink) {
+        sink.value = result.unmasked;
+        rawWriters.set(sink, this);
+        this.#rawSink = sink;
+        this.#rawValue = result.unmasked;
+        this.#rawSourceForm = this.element.form;
+        this.#submission.hold(sink, (value) => this.#submittedValue(sink, value));
+      }
     }
     this.#flag("data-mask-complete", result.complete);
     this.#flag("data-mask-empty", shown.length === 0);
+  }
+
+  /**
+   * Restores the committed hooks and the same sink this instance still writes,
+   * without reading the composing field or changing which sink it maintains.
+   *
+   * @stimeoRenderRoot
+   */
+  #showAgain(): void {
+    const shown = this.#shown;
+    const sink = this.#rawSink;
+    if (
+      shown.result !== null &&
+      this.unmaskToHiddenValue &&
+      sink !== null &&
+      rawWriters.get(sink) === this &&
+      this.#resolveSink() === sink
+    ) {
+      sink.value = shown.result.unmasked;
+    }
+    this.#flag("data-mask-complete", shown.result?.complete ?? false);
+    this.#flag("data-mask-empty", shown.empty);
+  }
+
+  /**
+   * Takes back the raw value this instance last wrote: empties that sink, wherever the
+   * resolution now points, and stops answering for it. The sink keeps a value another
+   * mask has written there since, and a different value the page has written there; an
+   * instance that has written none leaves every sink as it is. Answers whether it gave
+   * up a sink it still answered for.
+   */
+  #retractRaw(): boolean {
+    const sink = this.#rawSink;
+    this.#rawSink = null;
+    this.#submission.release();
+    if (sink === null || rawWriters.get(sink) !== this) return false;
+    rawWriters.delete(sink);
+    if (sink.value === this.#rawValue) sink.value = "";
+    return true;
+  }
+
+  /** Projects only its own unchanged raw entry; a page or another writer keeps its value. */
+  #submittedValue(sink: HTMLInputElement, value: FormDataEntryValue): FormDataEntryValue {
+    if (rawWriters.get(sink) !== this || sink.value !== this.#rawValue || value !== this.#rawValue)
+      return value;
+    const source = this.element;
+    const listed = (source.getAttribute("data-controller") ?? "")
+      .split(/\s+/)
+      .includes(this.identifier);
+    const associated =
+      source.form === null ? this.#rawSourceForm === null : source.form === sink.form;
+    const eligible =
+      source.isConnected &&
+      this.application.element.contains(source) &&
+      listed &&
+      this.unmaskToHiddenValue &&
+      associated;
+    return eligible ? value : "";
+  }
+
+  /** Writes a sink that arrived after the field connected without one. */
+  #adoptSink(): void {
+    if (this.#resolveSink() !== null) this.#reformat("reconcile");
   }
 
   /**

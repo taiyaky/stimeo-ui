@@ -469,7 +469,7 @@ describe("SmartStickyHeaderController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Speech-order regression ------------------------------------------------
+  // --- Speech-order check -----------------------------------------------------
 
   it("keeps the banner announcement identical while hidden (data hook only)", async () => {
     await mount();

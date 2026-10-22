@@ -6,7 +6,7 @@
  * on each keystroke and each arrow repeat: *which one option is the active
  * candidate, and what does the rest of the set look like now?* Answering it by
  * writing `aria-selected` to **every** option is the obvious implementation, and
- * the one this helper exists to replace.
+ * the one this helper avoids.
  *
  * **The write count is the point.** At most two options change per move (the old
  * active and the new one), while the option count is authored — a consumer can
@@ -40,6 +40,8 @@
  * ```
  */
 
+import { setAttributeIfChanged } from "./attribute_write";
+
 /**
  * Writes `aria-selected` across `options` so that exactly `active` reads `"true"`.
  *
@@ -62,9 +64,7 @@ export function syncActiveOption(
   let written = 0;
   for (const option of options) {
     const next = option === active ? "true" : "false";
-    if (option.getAttribute("aria-selected") === next) continue;
-    option.setAttribute("aria-selected", next);
-    written += 1;
+    if (setAttributeIfChanged(option, "aria-selected", next)) written += 1;
   }
   return written;
 }

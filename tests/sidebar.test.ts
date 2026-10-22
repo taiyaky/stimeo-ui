@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DialogController } from "../src/controllers/dialog_controller";
 import { SidebarController } from "../src/controllers/sidebar_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
-import { typeKey } from "./helpers/keyboard";
+import { press as keyboardPress, keyEvent } from "./helpers/keyboard";
 import { expectUpperModalOnTop, openUpperModal, TARGET_SWAPS } from "./helpers/modal_stack";
 import { captureSpeech } from "./helpers/speech";
 import { captureStateEvents } from "./helpers/state_events";
@@ -13,7 +13,7 @@ import { tick } from "./helpers/timing";
 /**
  * Behavioral tests for {@link SidebarController}: the inline rail (toggle +
  * `localStorage` persistence), the responsive switch to an overlay off-canvas
- * panel (shared {@link import("../src/utils/focus_trap").FocusTrap}: focus move,
+ * panel (shared `FocusTrap`: focus move,
  * trap, `Escape`, scroll lock, background `inert`, restore), and teardown.
  *
  * `matchMedia` is mocked so the test drives the responsive mode: `matches` is the
@@ -51,8 +51,15 @@ const installMatchMedia = () => {
       get matches() {
         return mediaQuery.matches;
       },
-      addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => {
+      addEventListener: (
+        _type: string,
+        listener: (event: MediaQueryListEvent) => void,
+        options?: AddEventListenerOptions,
+      ) => {
+        if (options?.signal?.aborted) return;
         listeners.add(listener);
+        // As a browser's list does, a listener added with a signal leaves when it aborts.
+        options?.signal?.addEventListener("abort", () => listeners.delete(listener));
       },
       removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => {
         listeners.delete(listener);
@@ -698,7 +705,7 @@ describe("SidebarController", () => {
     await start();
     trigger().focus();
     trigger().click();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
     expect(panel().getAttribute("data-state")).toBe("closed");
     expect(panel().hidden).toBe(true);
     expect(document.body.style.overflow).toBe("");
@@ -713,7 +720,7 @@ describe("SidebarController", () => {
     openAction().click();
     expect(document.activeElement).toBe(document.getElementById("first"));
 
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
 
     expect(panel().hidden).toBe(true);
     expect(document.activeElement).toBe(trigger());
@@ -753,7 +760,7 @@ describe("SidebarController", () => {
     await start();
     trigger().click();
     document.getElementById("last")?.focus();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    keyboardPress(document.activeElement as HTMLElement, "Tab");
     expect(document.activeElement).toBe(document.getElementById("first"));
   });
 
@@ -763,8 +770,8 @@ describe("SidebarController", () => {
     trigger().click();
     const first = document.getElementById("first") as HTMLElement;
     first.focus();
-    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-    first.dispatchEvent(tab);
+    const tab = keyEvent("Tab");
+    keyboardPress(first, tab);
     expect(tab.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(document.getElementById("close-action"));
   });
@@ -794,7 +801,7 @@ describe("SidebarController", () => {
     expect(document.body.style.overflow).toBe("hidden");
     expect(background.inert).toBe(true);
     expect(document.activeElement).toBe(document.getElementById("first"));
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
     expect(panel().getAttribute("data-state")).toBe("closed");
     expect(document.body.style.overflow).toBe("");
     expect(background.inert).toBe(false);
@@ -829,12 +836,12 @@ describe("SidebarController", () => {
     expect(panel().hidden).toBe(false);
     expect(dialog.hidden).toBe(false);
     expect(panel().inert).toBe(false);
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
     expect(dialog.hidden).toBe(true);
     expect(panel().hidden).toBe(false);
     expect(panel().inert).toBe(false);
     expect(background.inert).toBe(true);
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
     expect(panel().getAttribute("data-state")).toBe("closed");
     expect(document.querySelectorAll("[inert]")).toHaveLength(0);
     expect(document.body.style.overflow).toBe("");
@@ -900,7 +907,7 @@ describe("SidebarController", () => {
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
     expect(document.body.style.overflow).toBe("hidden");
     expect((document.getElementById("background") as HTMLElement).inert).toBe(true);
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
     expect(panel().getAttribute("data-state")).toBe("closed");
     expect(document.body.style.overflow).toBe("");
   });
@@ -1058,7 +1065,7 @@ describe("SidebarController", () => {
       expectUpperModalOnTop(upper, successor);
       expect(successor.getAttribute("data-state")).toBe("open");
       expect(backdrop().hidden).toBe(false);
-      typeKey(document, "Escape");
+      keyboardPress(document.activeElement as HTMLElement, "Escape");
       expect(successor.hidden).toBe(true);
       expect(document.activeElement).toBe(trigger());
     },
@@ -1441,10 +1448,10 @@ describe("SidebarController", () => {
      */
     const modalEffects = () => {
       trigger().focus();
-      const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-      document.dispatchEvent(tab);
-      const esc = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
-      document.dispatchEvent(esc);
+      const tab = keyEvent("Tab");
+      keyboardPress(document.activeElement as HTMLElement, tab);
+      const esc = keyEvent("Escape");
+      keyboardPress(document.activeElement as HTMLElement, esc);
       return {
         scrollLocked: document.body.style.overflow === "hidden",
         backgroundInert: (document.getElementById("background") as HTMLElement).inert,
@@ -1561,6 +1568,18 @@ describe("SidebarController", () => {
     });
   });
 
+  it("stops following the breakpoint after connecting twice without a disconnect", async () => {
+    await start();
+    expect(panel().getAttribute("data-mode")).toBe("inline");
+    controller().connect();
+    controller().disconnect();
+
+    changeViewport(false);
+
+    expect(panel().getAttribute("data-mode")).toBe("inline");
+    expect(mediaQueries.every((mediaQuery) => mediaQuery.listeners.size === 0)).toBe(true);
+  });
+
   it("removes actions and responsive listeners when the application unloads the controller", async () => {
     viewportWidth = 600;
     await start();
@@ -1572,7 +1591,7 @@ describe("SidebarController", () => {
     const mode = panel().getAttribute("data-mode");
     trigger().click();
     changeViewport(true);
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    keyboardPress(document.activeElement as HTMLElement, "Escape");
 
     expect(panel().getAttribute("data-state")).toBe(state);
     expect(panel().getAttribute("data-mode")).toBe(mode);
@@ -1595,7 +1614,7 @@ describe("SidebarController", () => {
     await expectNoA11yViolations(document.body);
   });
 
-  // Speech-order regression: the trigger announces its expanded state, and
+  // Speech-order check: the trigger announces its expanded state, and
   // toggling it flips the announcement to collapsed.
   it("announces the trigger's expanded/collapsed state", async () => {
     await start();
@@ -1690,7 +1709,7 @@ describe("SidebarController", () => {
       trigger().click();
       capture.clear();
 
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      keyboardPress(document.activeElement as HTMLElement, "Escape");
 
       expect(capture.names()).toEqual(["close"]);
       expect(capture.seen[0]?.detail).toEqual({ reason: "escape", mode: "overlay" });
@@ -1849,9 +1868,7 @@ describe("SidebarController", () => {
       root().addEventListener("stimeo--sidebar:open", () => instance.disconnect(), { once: true });
       instance.open();
       vi.spyOn(window, "getComputedStyle").mockReturnValue(transitionStyle());
-      document.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
-      );
+      keyboardPress(document.activeElement as HTMLElement, "Escape");
       // The open went on after its handler disconnected the controller, so the modal is held
       // through the exit transition.
       expect(document.body.style.overflow).toBe("hidden");
@@ -1878,7 +1895,7 @@ describe("SidebarController", () => {
     });
   });
 
-  // --- A trigger or backdrop that replaces the current one ------------------------
+  // --- A panel that moves or stops resolving --------------------------------------
 
   describe("a panel that moves or stops resolving", () => {
     const targetAttribute = "data-stimeo--sidebar-target";
@@ -2070,6 +2087,8 @@ describe("SidebarController", () => {
       expect(document.body.style.overflow).toBe("");
     });
   });
+
+  // --- A trigger or backdrop that replaces the current one ------------------------
 
   describe("a trigger that replaces the current one", () => {
     const targetAttribute = "data-stimeo--sidebar-target";

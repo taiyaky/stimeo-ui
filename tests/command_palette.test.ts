@@ -2,7 +2,8 @@ import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPaletteController } from "../src/controllers/command_palette_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
-import { typeKey } from "./helpers/keyboard";
+import { composeDraft } from "./helpers/ime";
+import { keyEvent, press as pressKey, typeKey } from "./helpers/keyboard";
 import { expectUpperModalOnTop, openUpperModal, TARGET_SWAPS } from "./helpers/modal_stack";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
@@ -80,31 +81,17 @@ describe("CommandPaletteController", () => {
     input().dispatchEvent(new Event("input", { bubbles: true }));
   };
 
-  const press = (key: string, options: KeyboardEventInit = {}) =>
-    input().dispatchEvent(new KeyboardEvent("keydown", { ...options, key, bubbles: true }));
-
-  const pressGlobal = (key: string, ctrl = false, meta = false, shift = false, alt = false) => {
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key,
-        ctrlKey: ctrl,
-        metaKey: meta,
-        shiftKey: shift,
-        altKey: alt,
-        bubbles: true,
-      }),
-    );
-  };
-
   const listenForSelection = (listener: EventListener): void => {
     document.addEventListener("stimeo--command-palette:select", listener, {
       signal: listenerAbort.signal,
     });
   };
 
-  const pressHotkey = () => {
-    pressGlobal("k", !isMac, isMac);
-  };
+  /**
+   * The modifier these tests press with the default `mod+k` hotkey: Meta when the user
+   * agent names an Apple platform, Ctrl elsewhere.
+   */
+  const hotkeyModifiers = { ctrlKey: !isMac, metaKey: isMac };
 
   /** Runs `act`, lets Stimulus deliver the callbacks, and returns the writes to `attributes`. */
   const attributeWrites = async (element: Element, attributes: string[], act: () => void) => {
@@ -120,15 +107,6 @@ describe("CommandPaletteController", () => {
     records.push(...observer.takeRecords());
     observer.disconnect();
     return records;
-  };
-
-  // Dispatches a keydown from whatever element currently holds focus, so the
-  // document-level Tab/Escape handlers see the right `document.activeElement`.
-  const pressFrom = (key: string, options: { shift?: boolean } = {}) => {
-    const el = (document.activeElement as HTMLElement | null) ?? document.body;
-    el.dispatchEvent(
-      new KeyboardEvent("keydown", { key, shiftKey: options.shift ?? false, bubbles: true }),
-    );
   };
 
   it.each(["filter", "open"] as const)(
@@ -174,7 +152,7 @@ describe("CommandPaletteController", () => {
       await tick();
       expect(empty().hidden).toBe(true);
       expect(input().hasAttribute("aria-activedescendant")).toBe(false);
-      press("ArrowDown");
+      pressKey(input(), "ArrowDown");
       expect(input().getAttribute("aria-activedescendant")).toBe(added.id);
       expect(added.getAttribute("aria-selected")).toBe("true");
     },
@@ -202,7 +180,7 @@ describe("CommandPaletteController", () => {
     instance.connect();
     instance.open();
     input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    type("Publish");
+    composeDraft(input(), "Publish");
     expect(option("cmd-new").hidden).toBe(false);
     input().dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
     expect(option("cmd-new").hidden).toBe(true);
@@ -235,7 +213,7 @@ describe("CommandPaletteController", () => {
   };
 
   it("reflects the disabled marker of an option added while the active one stays", async () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     const late = appendOption("cmd-late", { "data-disabled": "true" });
     await flushMicrotasks();
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
@@ -245,7 +223,7 @@ describe("CommandPaletteController", () => {
   it.each(["aria-selected", "data-active"])(
     "does not let an authored %s make an added option active",
     async (marker) => {
-      pressHotkey();
+      typeKey(document, "k", hotkeyModifiers);
       type("zzz");
       expect(input().hasAttribute("aria-activedescendant")).toBe(false);
       const late = appendOption("cmd-late", { [marker]: "true" });
@@ -257,7 +235,7 @@ describe("CommandPaletteController", () => {
   );
 
   it("hides a re-rendered empty state when target churn keeps the active command", async () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     const rerendered = document.createElement("p");
     rerendered.id = "empty";
     rerendered.setAttribute("data-stimeo--command-palette-target", "empty");
@@ -293,7 +271,7 @@ describe("CommandPaletteController", () => {
 
   it("restores virtual focus when the input target is replaced", async () => {
     controller().open();
-    press("ArrowDown");
+    pressKey(input(), "ArrowDown");
     const replacement = input().cloneNode(true) as HTMLInputElement;
     replacement.removeAttribute("aria-activedescendant");
     controller().inputTargetDisconnected(input());
@@ -323,7 +301,7 @@ describe("CommandPaletteController", () => {
 
   it("points an input that arrives after the only one left at the active option", async () => {
     controller().open();
-    press("ArrowDown"); // Publish active
+    pressKey(input(), "ArrowDown"); // Publish active
     const original = input();
     original.remove();
     await tick();
@@ -340,7 +318,7 @@ describe("CommandPaletteController", () => {
     /** Opens the palette with Publish active and inserts a stale copy of the input after it. */
     const insertSuccessor = async (): Promise<[HTMLInputElement, HTMLInputElement]> => {
       controller().open();
-      press("ArrowDown"); // Publish active
+      pressKey(input(), "ArrowDown"); // Publish active
       const original = input();
       const successor = original.cloneNode(true) as HTMLInputElement;
       successor.setAttribute("aria-expanded", "false");
@@ -428,11 +406,12 @@ describe("CommandPaletteController", () => {
 
     it("tolerates the removal of the only input", async () => {
       controller().open();
-      press("ArrowDown");
+      pressKey(input(), "ArrowDown");
       const only = input();
       only.remove();
 
-      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      // Call the callback directly, so a throw from it fails this case instead of
+      // surfacing outside the test.
       expect(() => controller().inputTargetDisconnected(only)).not.toThrow();
       await tick();
       expect(dialog().hidden).toBe(false);
@@ -454,7 +433,7 @@ describe("CommandPaletteController", () => {
 
     it("gives the authored ARIA back to an input that stops being the input", async () => {
       controller().open();
-      press("ArrowDown");
+      pressKey(input(), "ArrowDown");
       const former = input();
       expect(former.getAttribute("aria-activedescendant")).toBe("cmd-publish");
 
@@ -468,7 +447,7 @@ describe("CommandPaletteController", () => {
 
     it("gives the input back its own ARIA when the palette loses its controller", async () => {
       controller().open();
-      press("ArrowDown");
+      pressKey(input(), "ArrowDown");
       const departed = input();
 
       controller().element.removeAttribute("data-controller");
@@ -480,7 +459,7 @@ describe("CommandPaletteController", () => {
 
     it("keeps what it wrote on an input that moves within the dialog", async () => {
       controller().open();
-      press("ArrowDown");
+      pressKey(input(), "ArrowDown");
       const moving = input();
 
       const writes = await attributeWrites(moving, ["aria-expanded", "aria-activedescendant"], () =>
@@ -529,7 +508,7 @@ describe("CommandPaletteController", () => {
     });
     try {
       for (const key of ["ArrowDown", "ArrowUp"]) {
-        press(key);
+        pressKey(input(), key);
         const records = observer.takeRecords();
         expect(records).toHaveLength(1);
         expect(records[0]?.target).toBe(option("cmd-heading"));
@@ -547,7 +526,7 @@ describe("CommandPaletteController", () => {
     controller().open();
     expect(first).toHaveBeenCalledWith({ block: "nearest" });
     expect(next).not.toHaveBeenCalled();
-    press("ArrowDown");
+    pressKey(input(), "ArrowDown");
     expect(next).toHaveBeenCalledWith({ block: "nearest" });
   });
 
@@ -572,7 +551,7 @@ describe("CommandPaletteController", () => {
 
   it("uses the removed input-selected option's successor instead of cached focus", async () => {
     controller().open();
-    press("End");
+    pressKey(input(), "End");
     input().setAttribute("aria-activedescendant", "cmd-publish");
     const removed = option("cmd-publish");
     removed.remove();
@@ -583,12 +562,10 @@ describe("CommandPaletteController", () => {
 
   it("retains and reconciles virtual focus without an input target", async () => {
     controller().open();
-    press("ArrowDown");
+    pressKey(input(), "ArrowDown");
     input().remove();
     await tick();
-    expect(() =>
-      controller().onKeydown(new KeyboardEvent("keydown", { key: "ArrowDown" })),
-    ).not.toThrow();
+    expect(() => controller().onKeydown(keyEvent("ArrowDown"))).not.toThrow();
     expect(option("cmd-delete").getAttribute("aria-selected")).toBe("true");
     const removed = option("cmd-delete");
     removed.remove();
@@ -749,18 +726,13 @@ describe("CommandPaletteController", () => {
     // phase, which is what runs before a bubble-phase handler on the target. A
     // claiming node placed *beside* the input never reaches `onKeydown` at all
     // and would exercise nothing.
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     dialog().addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
     const before = input().getAttribute("aria-activedescendant");
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      bubbles: true,
-      cancelable: true,
-    });
-    const notCanceled = input().dispatchEvent(event);
+    const event = pressKey(input(), "ArrowDown");
 
-    expect(notCanceled).toBe(false); // the claim really took (a non-cancelable event would not)
+    expect(event.defaultPrevented).toBe(true); // the claim really took (a non-cancelable event would not)
     expect(input().getAttribute("aria-activedescendant")).toBe(before);
   });
 
@@ -771,13 +743,13 @@ describe("CommandPaletteController", () => {
 
   it("toggles open and closed via global mod+k hotkey", async () => {
     trigger().focus();
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     expect(dialog().hidden).toBe(false);
     expect(input().getAttribute("aria-expanded")).toBe("true");
 
     // Toggles closed
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     expect(dialog().hidden).toBe(true);
     expect(input().getAttribute("aria-expanded")).toBe("false");
   });
@@ -786,25 +758,25 @@ describe("CommandPaletteController", () => {
     trigger().focus();
     expect(document.activeElement).toBe(trigger());
 
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     expect(document.activeElement).toBe(input());
 
-    press("Escape");
+    pressKey(input(), "Escape");
     expect(dialog().hidden).toBe(true);
     expect(document.activeElement).toBe(trigger());
   });
 
   it("navigates active options using ArrowDown/ArrowUp and sets activedescendant", () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
     expect(option("cmd-new").getAttribute("aria-selected")).toBe("true");
 
-    press("ArrowDown");
+    pressKey(input(), "ArrowDown");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
     expect(option("cmd-publish").getAttribute("aria-selected")).toBe("true");
 
-    press("ArrowUp");
+    pressKey(input(), "ArrowUp");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
   });
 
@@ -812,7 +784,7 @@ describe("CommandPaletteController", () => {
     // Option counts are authored and unbounded, and this runs on every arrow
     // repeat, so an unconditional pass costs one attribute mutation per option
     // per keypress. At most two change: the old active and the new one.
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     const all = Array.from(
       document.querySelectorAll<HTMLElement>('[data-stimeo--command-palette-target="option"]'),
     );
@@ -824,7 +796,7 @@ describe("CommandPaletteController", () => {
       observer.observe(el, { attributes: true, attributeFilter: ["aria-selected"] });
     }
 
-    press("ArrowDown");
+    pressKey(input(), "ArrowDown");
     await Promise.resolve();
     seen += observer.takeRecords().length;
     observer.disconnect();
@@ -835,16 +807,10 @@ describe("CommandPaletteController", () => {
   it("leaves a modified arrow to the browser", () => {
     // A bare arrow belongs to the palette; a chorded one does not. The active
     // option stays where it is and the press reaches the browser uncanceled.
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
 
-    const event = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    input().dispatchEvent(event);
+    const event = pressKey(input(), "ArrowDown", { altKey: true });
 
     expect(event.defaultPrevented).toBe(false);
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
@@ -854,34 +820,109 @@ describe("CommandPaletteController", () => {
   it.each(["ArrowDown", "ArrowUp", "Home", "End", "Enter"])(
     "consumes %s while open instead of leaving it to the browser",
     (key) => {
-      pressHotkey();
-      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-      input().dispatchEvent(event);
+      typeKey(document, "k", hotkeyModifiers);
+      const event = pressKey(input(), key);
       expect(event.defaultPrevented).toBe(true);
     },
   );
 
   it("wraps ArrowUp from the first option and ArrowDown from the last", () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
 
-    press("ArrowUp");
+    pressKey(input(), "ArrowUp");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
 
-    press("ArrowDown");
+    pressKey(input(), "ArrowDown");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
   });
 
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+        key,
+        modifier,
+      })),
+    ),
+  )(
+    "yields modified boundary key $modifier+$key without changing popup or input state",
+    async ({ key, modifier }) => {
+      controller().open();
+      input().focus();
+      pressKey(input(), "ArrowDown");
+      expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+      input().value = "sample text";
+      input().setSelectionRange(3, 7);
+      const seen: string[] = [];
+      for (const name of ["stimeo--command-palette:select", "input", "change"]) {
+        controller().element.addEventListener(name, () => seen.push(name));
+      }
+      const before = controller().element.innerHTML;
+      const value = input().value;
+      const event = pressKey(input(), key, { [modifier]: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(input());
+      expect(controller().element.innerHTML).toBe(before);
+      expect(input().value).toBe(value);
+      expect(input().value).toBe("sample text");
+      expect(input().selectionStart).toBe(3);
+      expect(input().selectionEnd).toBe(7);
+      expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+      expect(seen).toEqual([]);
+    },
+  );
+
+  it.each(
+    ["Home", "End"].flatMap((key) =>
+      (["altKey", "ctrlKey", "metaKey", "shiftKey"] as const).map((modifier) => ({
+        key,
+        modifier,
+      })),
+    ),
+  )(
+    "yields modified boundary key $modifier+$key before reconciling a replaced active option",
+    async ({ key, modifier }) => {
+      controller().open();
+      input().focus();
+      pressKey(input(), "ArrowDown");
+      expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+      input().value = "sample text";
+      input().setSelectionRange(3, 7);
+      const active = option("cmd-publish");
+      if (!active) throw new Error("Missing active option");
+      const replacement = active.cloneNode(true) as HTMLElement;
+      replacement.removeAttribute("data-active");
+      replacement.setAttribute("aria-selected", "false");
+      active.replaceWith(replacement);
+      const seen: string[] = [];
+      for (const name of ["stimeo--command-palette:select", "input", "change"]) {
+        controller().element.addEventListener(name, () => seen.push(name));
+      }
+      const before = controller().element.innerHTML;
+      const value = input().value;
+      const event = pressKey(input(), key, { [modifier]: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(input());
+      expect(controller().element.innerHTML).toBe(before);
+      expect(input().value).toBe(value);
+      expect(input().value).toBe("sample text");
+      expect(input().selectionStart).toBe(3);
+      expect(input().selectionEnd).toBe(7);
+      expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
+      expect(seen).toEqual([]);
+    },
+  );
+
   it("jumps to first/last options on Home/End keypress", () => {
-    pressHotkey();
-    press("End");
+    typeKey(document, "k", hotkeyModifiers);
+    pressKey(input(), "End");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
 
-    press("Home");
+    pressKey(input(), "Home");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
   });
 
   it("filters options and handles empty states correctly", () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     type("pu");
 
     expect(option("cmd-new").hasAttribute("hidden")).toBe(true);
@@ -910,7 +951,7 @@ describe("CommandPaletteController", () => {
   });
 
   it("shows options again when the query widens", () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     type("pu");
     expect(option("cmd-new").hidden).toBe(true);
 
@@ -921,7 +962,7 @@ describe("CommandPaletteController", () => {
   });
 
   it("skips hidden options during keyboard navigation after filtering", () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     type("e"); // Matches "New" and "Delete" but not "Publish"
 
     expect(option("cmd-new").hasAttribute("hidden")).toBe(false);
@@ -930,13 +971,13 @@ describe("CommandPaletteController", () => {
 
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-new");
 
-    press("ArrowDown"); // Should skip "Publish" and go straight to "Delete"
+    pressKey(input(), "ArrowDown"); // Should skip "Publish" and go straight to "Delete"
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
   });
 
   it("uses data-search-value instead of visible text when filtering", () => {
     option("cmd-publish").dataset.searchValue = "ship production";
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
 
     type("production");
     expect(option("cmd-publish").hidden).toBe(false);
@@ -950,7 +991,7 @@ describe("CommandPaletteController", () => {
   it("removes activedescendant instead of authoring an empty reference when an id is missing", () => {
     option("cmd-new").removeAttribute("id");
 
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
 
     expect(input().hasAttribute("aria-activedescendant")).toBe(false);
     expect(
@@ -966,9 +1007,9 @@ describe("CommandPaletteController", () => {
       firedEvent = e as CustomEvent;
     });
 
-    pressHotkey();
-    press("ArrowDown"); // Actives "cmd-publish"
-    press("Enter");
+    typeKey(document, "k", hotkeyModifiers);
+    pressKey(input(), "ArrowDown"); // Actives "cmd-publish"
+    pressKey(input(), "Enter");
 
     expect(firedEvent).not.toBeNull();
     expect((firedEvent as unknown as CustomEvent).detail.value).toBe("publish");
@@ -982,7 +1023,7 @@ describe("CommandPaletteController", () => {
       firedEvent = e as CustomEvent;
     });
 
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     option("cmd-delete").click();
 
     expect(firedEvent).not.toBeNull();
@@ -998,18 +1039,18 @@ describe("CommandPaletteController", () => {
     });
     option("cmd-new").removeAttribute("data-value");
 
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     option("cmd-new").click();
 
     expect(selectedValue).toBe("New…");
   });
 
   it("excludes disabled options from navigation, selection and the empty count", () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     expect(option("cmd-heading").getAttribute("aria-disabled")).toBe("true");
 
     // Disabled heading is shown but never navigable.
-    press("End");
+    pressKey(input(), "End");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
 
     // Clicking a disabled option does not select or close.
@@ -1033,7 +1074,7 @@ describe("CommandPaletteController", () => {
     // deny that the command exists. `data-disabled` keeps the opposite meaning
     // (the case just above still shows the empty state).
     option("cmd-delete").setAttribute("aria-disabled", "true");
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
 
     type("Delete");
 
@@ -1049,9 +1090,9 @@ describe("CommandPaletteController", () => {
     // unavailable — while activation is suppressed. `data-disabled` is the marker
     // for "skip this entirely", which is what leaves both meanings expressible.
     option("cmd-delete").setAttribute("aria-disabled", "true");
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
 
-    press("End");
+    pressKey(input(), "End");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
 
     option("cmd-delete").click();
@@ -1068,11 +1109,11 @@ describe("CommandPaletteController", () => {
       selected.push((event as CustomEvent<{ value: string }>).detail.value);
     });
     option("cmd-delete").setAttribute("aria-disabled", "true");
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
 
-    press("End");
+    pressKey(input(), "End");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-delete");
-    press("Enter");
+    pressKey(input(), "Enter");
 
     expect(selected).toEqual([]);
     expect(dialog().hidden).toBe(false);
@@ -1086,9 +1127,9 @@ describe("CommandPaletteController", () => {
       selected.push((event as CustomEvent<{ value: string }>).detail.value);
     });
     option("cmd-new").setAttribute("aria-disabled", "true");
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
 
-    press("Enter");
+    pressKey(input(), "Enter");
 
     expect(selected).toEqual([]);
     expect(dialog().hidden).toBe(false);
@@ -1098,9 +1139,9 @@ describe("CommandPaletteController", () => {
     // The other half of the split: this attribute is the controller's own, so it
     // keeps meaning "not a destination at all".
     option("cmd-delete").setAttribute("data-disabled", "true");
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
 
-    press("End");
+    pressKey(input(), "End");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
   });
 
@@ -1122,7 +1163,7 @@ describe("CommandPaletteController", () => {
   });
 
   it("removes the aria-disabled it wrote when the data-disabled marker is lifted", () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     expect(option("cmd-heading").getAttribute("aria-disabled")).toBe("true");
 
     option("cmd-heading").removeAttribute("data-disabled");
@@ -1132,7 +1173,7 @@ describe("CommandPaletteController", () => {
   });
 
   it("keeps an aria-disabled authored after the data-disabled marker was lifted", () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     option("cmd-heading").removeAttribute("data-disabled");
     type("");
 
@@ -1147,7 +1188,7 @@ describe("CommandPaletteController", () => {
     listenForSelection((event) => {
       values.push((event as CustomEvent<{ value: string }>).detail.value);
     });
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     expect(option("cmd-heading").getAttribute("aria-disabled")).toBe("true");
 
     option("cmd-heading").removeAttribute("data-disabled");
@@ -1162,7 +1203,7 @@ describe("CommandPaletteController", () => {
       option(id).setAttribute("data-disabled", "true");
     }
 
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
 
     expect(input().hasAttribute("aria-activedescendant")).toBe(false);
     expect(empty().hidden).toBe(false);
@@ -1178,15 +1219,14 @@ describe("CommandPaletteController", () => {
     listenForSelection((event) => {
       selectedValues.push((event as CustomEvent).detail.value);
     });
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
 
     input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    input().value = "publish";
-    input().dispatchEvent(new InputEvent("input", { bubbles: true }));
+    composeDraft(input(), "publish");
 
     // The active browser event can omit isComposing. Controller-owned lifecycle state
     // still protects the Enter and keeps pre-conversion filtering idle.
-    press("Enter");
+    pressKey(input(), "Enter");
     expect(selectedValues).toEqual([]);
     expect(dialog().hidden).toBe(false);
     expect(option("cmd-new").hidden).toBe(false);
@@ -1197,7 +1237,7 @@ describe("CommandPaletteController", () => {
     expect(option("cmd-publish").hidden).toBe(false);
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
 
-    press("Enter");
+    pressKey(input(), "Enter");
     expect(selectedValues).toEqual(["publish"]);
     expect(dialog().hidden).toBe(true);
   });
@@ -1205,13 +1245,13 @@ describe("CommandPaletteController", () => {
   it("also honors the standard per-event IME signal without lifecycle events", () => {
     let selections = 0;
     listenForSelection(() => selections++);
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
 
-    press("Enter", { isComposing: true });
+    pressKey(input(), "Enter", { isComposing: true });
     expect(selections).toBe(0);
     expect(dialog().hidden).toBe(false);
 
-    press("Enter");
+    pressKey(input(), "Enter");
     expect(selections).toBe(1);
     expect(dialog().hidden).toBe(true);
   });
@@ -1219,13 +1259,18 @@ describe("CommandPaletteController", () => {
   it("clears composition state across disconnect and reconnect", () => {
     let selections = 0;
     listenForSelection(() => selections++);
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     input().dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
 
+    // Moving the controller element without moveBefore takes focus from the field; in
+    // Chromium the move ends the conversion with no compositionend. The controller disconnects
+    // and connects again.
+    const part = controller().element;
+    part.parentElement?.append(part);
     controller().disconnect();
     controller().connect();
     controller().open();
-    press("Enter");
+    pressKey(input(), "Enter");
 
     expect(selections).toBe(1);
     expect(dialog().hidden).toBe(true);
@@ -1270,26 +1315,20 @@ describe("CommandPaletteController", () => {
     // macOS, not only Cmd+K).
     trigger().focus();
 
-    pressGlobal("k", true, false); // Ctrl+K
+    typeKey(document, "k", { ctrlKey: true, metaKey: false }); // Ctrl+K
     await tick();
     expect(dialog().hidden).toBe(false);
 
-    pressGlobal("k", true, false); // Ctrl+K toggles closed
+    typeKey(document, "k", { ctrlKey: true, metaKey: false }); // Ctrl+K toggles closed
     expect(dialog().hidden).toBe(true);
 
-    pressGlobal("k", false, true); // Cmd+K
+    typeKey(document, "k", { ctrlKey: false, metaKey: true }); // Cmd+K
     await tick();
     expect(dialog().hidden).toBe(false);
   });
 
   it("consumes the hotkey so the browser's own shortcut does not also run", () => {
-    const event = new KeyboardEvent("keydown", {
-      key: "k",
-      ctrlKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    document.dispatchEvent(event);
+    const event = typeKey(document, "k", { ctrlKey: true });
 
     expect(dialog().hidden).toBe(false);
     expect(event.defaultPrevented).toBe(true);
@@ -1298,30 +1337,30 @@ describe("CommandPaletteController", () => {
   it("supports custom and bare hotkeys while rejecting extra modifiers", () => {
     controller().hotkeyValue = "mod+p";
 
-    pressGlobal("p", true);
+    typeKey(document, "p", { ctrlKey: true });
     expect(dialog().hidden).toBe(false);
-    pressGlobal("p", true);
+    typeKey(document, "p", { ctrlKey: true });
     expect(dialog().hidden).toBe(true);
 
-    pressGlobal("p", true, false, true);
-    pressGlobal("p", true, false, false, true);
-    pressGlobal("p", true, true);
+    typeKey(document, "p", { ctrlKey: true, metaKey: false, shiftKey: true });
+    typeKey(document, "p", { ctrlKey: true, metaKey: false, shiftKey: false, altKey: true });
+    typeKey(document, "p", { ctrlKey: true, metaKey: true });
     expect(dialog().hidden).toBe(true);
 
     controller().hotkeyValue = "x";
-    pressGlobal("x", true);
-    pressGlobal("x", false, false, true);
+    typeKey(document, "x", { ctrlKey: true });
+    typeKey(document, "x", { ctrlKey: false, metaKey: false, shiftKey: true });
     expect(dialog().hidden).toBe(true);
-    pressGlobal("x");
+    typeKey(document, "x");
     expect(dialog().hidden).toBe(false);
 
     controller().close();
     controller().hotkeyValue = "mod";
-    pressGlobal("mod");
+    typeKey(document, "mod");
     expect(dialog().hidden).toBe(true);
 
     controller().hotkeyValue = "mod+shift+k";
-    pressGlobal("k", true, false, true);
+    typeKey(document, "k", { ctrlKey: true, metaKey: false, shiftKey: true });
     expect(dialog().hidden).toBe(true);
   });
 
@@ -1349,12 +1388,12 @@ describe("CommandPaletteController", () => {
       "stimeo--command-palette",
     ) as CommandPaletteController;
 
-    pressGlobal("p", true);
+    typeKey(document, "p", { ctrlKey: true });
     expect(dialog().hidden).toBe(true);
     expect((document.getElementById("dialog-2") as HTMLElement).hidden).toBe(false);
 
     second.close();
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     expect(dialog().hidden).toBe(false);
     expect((document.getElementById("dialog-2") as HTMLElement).hidden).toBe(true);
   });
@@ -1370,9 +1409,9 @@ describe("CommandPaletteController", () => {
     document.getElementById("cmdk-list")?.appendChild(dynamic);
     await tick();
 
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     expect(dynamic.getAttribute("aria-selected")).toBe("false");
-    press("End");
+    pressKey(input(), "End");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-dynamic");
 
     let selectedValue = "";
@@ -1396,8 +1435,8 @@ describe("CommandPaletteController", () => {
         (candidate) => candidate.id,
       );
     const activatePublish = () => {
-      pressHotkey();
-      press("ArrowDown");
+      typeKey(document, "k", hotkeyModifiers);
+      pressKey(input(), "ArrowDown");
       expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
     };
 
@@ -1415,7 +1454,7 @@ describe("CommandPaletteController", () => {
       expect(activeOptionIds()).toEqual(["cmd-publish"]);
       expect(activeMarkerIds()).toEqual(["cmd-publish"]);
 
-      press("Enter");
+      pressKey(input(), "Enter");
       expect(selections).toEqual(["publish"]);
     });
 
@@ -1437,7 +1476,7 @@ describe("CommandPaletteController", () => {
       expect(removedActive.hasAttribute("data-active")).toBe(false);
       expect(option("cmd-heading").getAttribute("aria-selected")).toBe("false");
 
-      press("Enter");
+      pressKey(input(), "Enter");
       expect(selections).toEqual(["delete"]);
     });
 
@@ -1458,8 +1497,8 @@ describe("CommandPaletteController", () => {
     });
 
     it("falls back to the previous command when no later selectable survivor remains", async () => {
-      pressHotkey();
-      press("End"); // Delete; the following heading is disabled.
+      typeKey(document, "k", hotkeyModifiers);
+      pressKey(input(), "End"); // Delete; the following heading is disabled.
       const removedActive = option("cmd-delete");
       const selections: string[] = [];
       listenForSelection((event) => {
@@ -1476,7 +1515,7 @@ describe("CommandPaletteController", () => {
       expect(removedActive.hasAttribute("data-active")).toBe(false);
       expect(option("cmd-heading").getAttribute("aria-selected")).toBe("false");
 
-      press("Enter");
+      pressKey(input(), "Enter");
       expect(selections).toEqual(["publish"]);
     });
 
@@ -1498,7 +1537,7 @@ describe("CommandPaletteController", () => {
       expect(option("cmd-delete").getAttribute("aria-selected")).toBe("false");
       expect(option("cmd-heading").getAttribute("aria-selected")).toBe("false");
 
-      press("Enter");
+      pressKey(input(), "Enter");
       expect(selections).toEqual(["new"]);
     });
 
@@ -1528,7 +1567,7 @@ describe("CommandPaletteController", () => {
       expect(original.getAttribute("aria-selected")).toBe("false");
       expect(original.hasAttribute("data-active")).toBe(false);
 
-      press("Enter");
+      pressKey(input(), "Enter");
       expect(selections).toEqual([{ value: "publish-v2", option: replacement, reason: "user" }]);
     });
 
@@ -1550,13 +1589,13 @@ describe("CommandPaletteController", () => {
       });
 
       original.replaceWith(replacement);
-      press("Enter");
+      pressKey(input(), "Enter");
 
       expect(selections).toEqual(["delete"]);
     });
 
     it("clears all active state and exposes empty state after the last selectable command is removed", async () => {
-      pressHotkey();
+      typeKey(document, "k", hotkeyModifiers);
       type("delete");
       const lastSelectable = option("cmd-delete");
       const selections: unknown[] = [];
@@ -1573,7 +1612,7 @@ describe("CommandPaletteController", () => {
       expect(lastSelectable.hasAttribute("data-active")).toBe(false);
       expect(empty().hidden).toBe(false);
 
-      press("Enter");
+      pressKey(input(), "Enter");
       expect(selections).toEqual([]);
       expect(dialog().hidden).toBe(false);
     });
@@ -1586,7 +1625,7 @@ describe("CommandPaletteController", () => {
       });
 
       option("cmd-new").remove();
-      press("Enter");
+      pressKey(input(), "Enter");
 
       expect(selections).toEqual(["publish"]);
     });
@@ -1599,18 +1638,18 @@ describe("CommandPaletteController", () => {
     close.textContent = "Close";
     dialog().appendChild(close);
 
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     expect(document.activeElement).toBe(input());
 
     // Shift+Tab from the first focusable (input) wraps to the last (close button).
-    pressFrom("Tab", { shift: true });
+    pressKey(document.activeElement as HTMLElement, "Tab", { shiftKey: true });
     expect(document.activeElement).toBe(close);
 
     // Tab from the last focusable wraps back to the first (input) — the close
     // button has no per-element handler, so this only works because the trap lives
     // at the document level.
-    pressFrom("Tab");
+    pressKey(document.activeElement as HTMLElement, "Tab");
     expect(document.activeElement).toBe(input());
 
     // If focus has escaped the dialog, Tab pulls it back to the first focusable. The
@@ -1618,7 +1657,7 @@ describe("CommandPaletteController", () => {
     // let it take focus at all.
     trigger().inert = false;
     trigger().focus();
-    pressFrom("Tab");
+    pressKey(document.activeElement as HTMLElement, "Tab");
     expect(document.activeElement).toBe(input());
   });
 
@@ -1627,12 +1666,11 @@ describe("CommandPaletteController", () => {
       "beforeend",
       '<button id="help">Help</button><button id="close">Close</button>',
     );
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     expect(document.activeElement).toBe(input());
 
-    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-    input().dispatchEvent(tab);
+    const tab = pressKey(input(), "Tab");
     expect(tab.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(document.getElementById("help"));
   });
@@ -1644,18 +1682,18 @@ describe("CommandPaletteController", () => {
     dialog().appendChild(close);
 
     trigger().focus();
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     expect(dialog().hidden).toBe(false);
 
     close.focus();
-    pressFrom("Escape");
+    pressKey(document.activeElement as HTMLElement, "Escape");
     expect(dialog().hidden).toBe(true);
     expect(document.activeElement).toBe(trigger());
   });
 
   it("closes on backdrop click but not on clicks inside the panel", async () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     expect(dialog().hidden).toBe(false);
 
@@ -1671,11 +1709,11 @@ describe("CommandPaletteController", () => {
   it("locks background scroll while open and restores it on close", async () => {
     expect(document.body.style.overflow).toBe("");
 
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     expect(document.body.style.overflow).toBe("hidden");
 
-    pressHotkey(); // toggle closed
+    typeKey(document, "k", hotkeyModifiers); // toggle closed
     expect(document.body.style.overflow).toBe("");
   });
 
@@ -1686,16 +1724,16 @@ describe("CommandPaletteController", () => {
   });
 
   it("has no machine-detectable a11y violations while open", async () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     expect(dialog().hidden).toBe(false);
     await expectNoA11yViolations(document.body);
   });
 
-  // --- Speech-order regression -----------------------------------------------
+  // --- Speech-order check ----------------------------------------------------
 
   it("announces the listbox options and reflects the active option in order", async () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     const list = document.getElementById("cmdk-list") as HTMLElement;
 
@@ -1710,7 +1748,7 @@ describe("CommandPaletteController", () => {
     ]);
 
     // Moving the virtual focus flips which option announces as selected.
-    press("ArrowDown");
+    pressKey(input(), "ArrowDown");
     expect(await captureSpeech({ container: list, steps: 5 })).toEqual([
       "listbox, orientated vertically",
       "option, New…, not selected, position 1, set size 4",
@@ -1721,13 +1759,13 @@ describe("CommandPaletteController", () => {
     ]);
   });
 
-  // --- Disconnect teardown regression ----------------------------------------
+  // --- Disconnect teardown check ---------------------------------------------
 
   it("removes the global hotkey listener after the controller is torn down", async () => {
     controller().disconnect();
 
     // With the controller torn down, the global hotkey must no longer open it.
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     expect(dialog().hidden).toBe(true);
   });
@@ -1754,7 +1792,7 @@ describe("CommandPaletteController", () => {
   });
 
   it("reverts the background scroll lock if torn down while open", async () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     expect(dialog().hidden).toBe(false);
     expect(document.body.style.overflow).toBe("hidden");
@@ -1766,7 +1804,7 @@ describe("CommandPaletteController", () => {
   });
 
   it("keeps an open palette open, query included, when its element moves within the page", async () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     type("pub");
     expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
@@ -1794,7 +1832,7 @@ describe("CommandPaletteController", () => {
     instance.disconnect();
     instance.connect();
 
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
     expect(dialog().hidden).toBe(false);
     dialog().dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1802,7 +1840,7 @@ describe("CommandPaletteController", () => {
   });
 
   it("keeps an open palette and its modal side effects through turbo:before-cache", async () => {
-    pressHotkey();
+    typeKey(document, "k", hotkeyModifiers);
     await tick();
 
     document.dispatchEvent(new Event("turbo:before-cache"));
@@ -1830,10 +1868,10 @@ describe("CommandPaletteController", () => {
     };
 
     it("keeps an open palette open with its query, its matches and its active option", async () => {
-      pressHotkey();
+      typeKey(document, "k", hotkeyModifiers);
       await tick();
       type("e");
-      press("ArrowDown");
+      pressKey(input(), "ArrowDown");
       expect(option("cmd-delete").getAttribute("aria-selected")).toBe("true");
       expect(option("cmd-publish").hidden).toBe(true);
 
@@ -1900,7 +1938,7 @@ describe("CommandPaletteController", () => {
     };
 
     it("shows a palette that was open closed, with the page operable", async () => {
-      pressHotkey();
+      typeKey(document, "k", hotkeyModifiers);
       await tick();
       type("pub");
 
@@ -1918,7 +1956,7 @@ describe("CommandPaletteController", () => {
       expect(document.querySelectorAll("[inert]")).toHaveLength(0);
       expect(document.body.style.overflow).toBe("");
 
-      pressHotkey();
+      typeKey(document, "k", hotkeyModifiers);
       await tick();
       expect(dialog().hidden).toBe(false);
       expect(input().value).toBe("");
@@ -1926,7 +1964,7 @@ describe("CommandPaletteController", () => {
     });
 
     it("keeps a closed palette closed", async () => {
-      pressHotkey();
+      typeKey(document, "k", hotkeyModifiers);
       await tick();
       controller().close();
 
@@ -1943,8 +1981,8 @@ describe("CommandPaletteController", () => {
       // Leaving it (and `data-active`) behind after close would make a closed
       // palette claim an active option for the rest of the session, and would
       // ride into Turbo's cache.
-      pressHotkey();
-      press("ArrowDown");
+      typeKey(document, "k", hotkeyModifiers);
+      pressKey(input(), "ArrowDown");
       const activeIds = () =>
         Array.from(document.querySelectorAll("[data-active]")).map((el) => el.id);
       const selectedIds = () =>
@@ -1954,7 +1992,7 @@ describe("CommandPaletteController", () => {
       expect(activeIds().length).toBe(1);
       expect(selectedIds()).toEqual(activeIds());
 
-      press("Escape");
+      pressKey(input(), "Escape");
 
       expect(activeIds()).toEqual([]);
       expect(selectedIds()).toEqual([]);
@@ -1962,8 +2000,8 @@ describe("CommandPaletteController", () => {
     });
 
     it("clears it on teardown too", async () => {
-      pressHotkey();
-      press("ArrowDown");
+      typeKey(document, "k", hotkeyModifiers);
+      pressKey(input(), "ArrowDown");
       expect(document.querySelectorAll("[data-active]").length).toBe(1);
 
       disconnectAndStopApplication(application);
@@ -1976,8 +2014,8 @@ describe("CommandPaletteController", () => {
       // An authored value cannot mean anything for an attribute that tracks the
       // active option. The close path is not involved here, so the baseline pass
       // is the only thing that can stop two options claiming to be active.
-      pressHotkey();
-      press("ArrowDown");
+      typeKey(document, "k", hotkeyModifiers);
+      pressKey(input(), "ArrowDown");
       const late = document.createElement("li");
       late.id = "cmd-late";
       late.setAttribute("role", "option");
@@ -1995,8 +2033,8 @@ describe("CommandPaletteController", () => {
 
   describe("an option added before the active one", () => {
     it("keeps the active identity, so Enter runs what AT announced", async () => {
-      pressHotkey();
-      press("ArrowDown");
+      typeKey(document, "k", hotkeyModifiers);
+      pressKey(input(), "ArrowDown");
       const active = input().getAttribute("aria-activedescendant");
       expect(active).toBeTruthy();
 
@@ -2019,7 +2057,7 @@ describe("CommandPaletteController", () => {
       listenForSelection((event) => {
         runs.push((event as CustomEvent<{ value: string }>).detail.value);
       });
-      press("Enter");
+      pressKey(input(), "Enter");
 
       expect(runs).toEqual([expected.dataset.value]);
     });
@@ -2124,7 +2162,7 @@ describe("CommandPaletteController", () => {
 
     it("closes the palette when the only dialog loses its target token", async () => {
       controller().open();
-      press("ArrowDown");
+      pressKey(input(), "ArrowDown");
       const only = dialog();
       only.removeAttribute("data-stimeo--command-palette-target");
       await tick();
@@ -2203,7 +2241,8 @@ describe("CommandPaletteController", () => {
       controller().open();
       const current = dialog();
       current.parentElement?.append(current);
-      // Drive the callback directly: happy-dom delivers target callbacks unreliably.
+      // The test stays synchronous, so it calls the Stimulus target callback directly
+      // instead of waiting for the MutationObserver delivery.
       controller().dialogTargetDisconnected(current);
 
       expect(current.hidden).toBe(false);
@@ -2456,9 +2495,7 @@ describe("CommandPaletteController initial open state", () => {
     expect(document.body.style.overflow).toBe("");
 
     // A palette the user opened stays open over a declaration that says closed.
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }),
-    );
+    typeKey(document, "k", { ctrlKey: true });
     expect(dialog().hidden).toBe(false);
     host.setAttribute("data-stimeo--command-palette-open-value", "false");
     await tick();
@@ -2498,9 +2535,7 @@ describe("CommandPaletteController initial open state", () => {
       expect(document.querySelectorAll("[inert]")).toHaveLength(0);
       expect(document.body.style.overflow).toBe("");
 
-      document.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }),
-      );
+      typeKey(document, "k", { ctrlKey: true });
       expect(dialog().hidden).toBe(false);
       expect(document.body.style.overflow).toBe("hidden");
     });

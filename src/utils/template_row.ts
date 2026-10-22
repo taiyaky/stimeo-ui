@@ -46,8 +46,8 @@ export interface TemplateRowParts<R extends string, O extends string> {
 /**
  * Builds one row from an authored `<template>`, naming an unusable one once per connection.
  *
- * **The row is the template's only element, and it carries {@link
- * TemplateRowOptions.root} itself.** Cloning it alone ({@link cloneTemplateRoot})
+ * **The row is the template's only element, and it carries
+ * {@link TemplateRowOptions.root} itself.** Cloning it alone ({@link cloneTemplateRoot})
  * makes what the caller appends exactly what a later `remove()` takes back; a row
  * wrapped in another element, or standing beside a second one, would leave that
  * other element behind on every removal — or never be rendered at all — so such a

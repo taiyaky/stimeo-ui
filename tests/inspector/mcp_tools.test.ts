@@ -283,8 +283,8 @@ describe("callTool", () => {
   it("keeps the component-name list on stimeo_catalog, the discovery entry point", () => {
     // The other half of the description contract: the enumeration lives on the tool a
     // component-name query should land on, instead of being repeated across all
-    // four (clients truncate descriptions — 2KB each in the tightest known one —
-    // so padding them costs reach elsewhere). This pins the list's presence here
+    // four (clients truncate descriptions — some at 2,048 characters each — so
+    // padding them costs reach elsewhere). This pins the list's presence here
     // and deliberately does not assert its absence elsewhere — that would fail
     // the moment another description legitimately names a component.
     const catalog = TOOL_DESCRIPTORS.find((descriptor) => descriptor.name === "stimeo_catalog");

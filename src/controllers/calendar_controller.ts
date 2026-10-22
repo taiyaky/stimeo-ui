@@ -1,10 +1,19 @@
 import { Controller } from "@hotwired/stimulus";
 import { actionSource } from "../utils/action_source";
-import { isReservedArrowChord, logicalArrowKey } from "../utils/arrow_step";
 import {
+  gridDirectionElement,
+  hasModifierChord,
+  isReservedArrowChord,
+  logicalArrowKey,
+} from "../utils/arrow_step";
+import {
+  dateInMonthClamped,
+  monthGridDays,
   monthLabelFormatter,
   parseISODateString,
   parseISOMonthString,
+  shiftMonthClamped,
+  shiftYearClamped,
   toISODateString,
   toISOMonthString,
 } from "../utils/dates";
@@ -87,29 +96,32 @@ const OWNED_DISABLED = "owns-disabled";
  * nor mirrored into `field`, and it comes back once the bounds allow it again;
  * the Value itself is never rewritten.
  *
- * `monthchange` dispatches `{ month: string }`; `select` dispatches `{ date: string }`.
+ * `monthchange` dispatches `{ month: string }`. `select` dispatches
+ * `{ date: string, reason: StateReason }` whenever the controller moves the
+ * selection itself — `reason` tells a user's choice from an `api` call.
  * `reconcile` dispatches `{ date: string }` — the selection now published, empty
  * when there is none — once per paint in which a change the page made after
  * connect moved the published selection: `selected` written by application
  * code or a morph, or `min` / `max` withholding the requested day or giving it
- * back. A selection the user picks is reported as `select` alone. Connecting,
- * or connecting again, reports neither `monthchange` nor `reconcile`, whichever
- * month the grid opens on.
+ * back. A pick — a user's choice or a `select()` call — is reported as
+ * `select` alone. Connecting, or connecting again, reports neither
+ * `monthchange` nor `reconcile`, whichever month the grid opens on.
  *
  * A pick is measured from the selection last published. Selecting it again
  * reports nothing; a page request still awaiting its paint is included in the
- * user's pick. Listen to cell clicks separately to observe repeated activation.
+ * pick. Listen to cell clicks separately to observe repeated activation.
  *
  * Two optional fields carry the grid's state into a form, so a server can serve
  * the days it is showing: `field` mirrors the published selection (`YYYY-MM-DD`,
  * empty when nothing is selected) and `monthField` the month being painted
- * (`YYYY-MM`). A move the user made — the previous/next controls, a month
- * crossing by keyboard, picking a day — emits a native bubbling `change` from
- * the field that moved, the way a form control does, so `stimeo--auto-submit`
- * and form-level validation hear it. A repaint driven by the Values, by a
- * replacement field, or by the initial paint refreshes both mirrors silently,
- * and so does a move of the selection a change the page made, which `reconcile`
- * reports even in a paint the user's own move asked for.
+ * (`YYYY-MM`). A move the controller makes itself — the previous/next controls
+ * or `prev()` / `next()`, a month crossing by keyboard, picking a day — emits a
+ * native bubbling `change` from the field that moved, the way a form control
+ * does, so `stimeo--auto-submit` and form-level validation hear it. A repaint
+ * driven by the Values, by a replacement field, or by the initial paint
+ * refreshes both mirrors silently, and so does a move of the selection a change
+ * the page made, which `reconcile` reports even in a paint the controller's own
+ * move asked for.
  *
  * A day `min` / `max` exclude cannot be picked, even before a paint has marked
  * its cell. A pick is painted — `aria-selected` and both fields — before
@@ -214,12 +226,13 @@ export class CalendarController extends Controller<HTMLElement> {
   #opened = false;
 
   /**
-   * Whether the paint about to run was asked for by this grid's own controls.
-   * The `month` and `selected` Values are shared with the page — application
-   * code and a Turbo morph write them too — so the field mirrors take their
-   * "did the user commit this" answer from the route, not from the Value.
+   * Whether the paint about to run was asked for by a move the controller made
+   * itself — a control, a key, or a `prev()` / `next()` / `select()` call. The
+   * `month` and `selected` Values are shared with the page — application code
+   * and a Turbo morph write them too — so the field mirrors take their "did the
+   * controller commit this" answer from the route, not from the Value.
    */
-  #movedByUser = false;
+  #ownMove = false;
 
   /**
    * Repaints the month on screen after `min`, `max` or `weekStart` changed.
@@ -359,6 +372,12 @@ export class CalendarController extends Controller<HTMLElement> {
     // composite) must not ALSO move the roving focus or select a day.
     if (event.defaultPrevented) return;
     if (isReservedArrowChord(event)) return;
+    if ((event.key === "Home" || event.key === "End") && hasModifierChord(event)) return;
+    if (
+      (event.key === "PageUp" || event.key === "PageDown") &&
+      (event.ctrlKey || event.altKey || event.metaKey)
+    )
+      return;
     const dayElement = (event.target as HTMLElement | null)?.closest<HTMLElement>(
       targetSelector(this.identifier, "day"),
     );
@@ -371,11 +390,13 @@ export class CalendarController extends Controller<HTMLElement> {
 
     let handled = true;
     let nextDate = new Date(date);
+    const directionElement = this.hasGridTarget
+      ? gridDirectionElement(this.gridTarget, this.element)
+      : this.element;
 
-    // Logical, not physical. The key is normalised rather than the
-    // delta negated: these two branches are not mirror images — their guards
-    // differ — so swapping the key keeps each guard with its own direction.
-    switch (logicalArrowKey(event.key, this.element)) {
+    // Logical, not physical: under a right-to-left grid `logicalArrowKey` trades ArrowLeft and
+    // ArrowRight, so `ArrowLeft` below is always the previous day.
+    switch (logicalArrowKey(event.key, directionElement)) {
       case "ArrowLeft":
         nextDate.setDate(nextDate.getDate() - 1);
         break;
@@ -390,16 +411,16 @@ export class CalendarController extends Controller<HTMLElement> {
         break;
       case "PageUp":
         if (event.shiftKey) {
-          nextDate = this.#calculateShiftedYearDate(date, -1);
+          nextDate = shiftYearClamped(date, -1);
         } else {
-          nextDate = this.#calculateShiftedMonthDate(date, -1);
+          nextDate = shiftMonthClamped(date, -1);
         }
         break;
       case "PageDown":
         if (event.shiftKey) {
-          nextDate = this.#calculateShiftedYearDate(date, 1);
+          nextDate = shiftYearClamped(date, 1);
         } else {
-          nextDate = this.#calculateShiftedMonthDate(date, 1);
+          nextDate = shiftMonthClamped(date, 1);
         }
         break;
       case "Home":
@@ -464,9 +485,9 @@ export class CalendarController extends Controller<HTMLElement> {
 
   /**
    * Renders the grid days and updates the month/year label, mirrors both
-   * fields, then reports each field the user's move moved and — once connected
-   * — a painted month that differs from the last one painted, and a published
-   * selection that a change the page made moved.
+   * fields, then reports each field that a move the controller made itself
+   * moved and — once connected — a painted month that differs from the last one
+   * painted, and a published selection that a change the page made moved.
    *
    * The report belongs to the paint, not to the `month` Value: the Value is only
    * one of the things that decide the month on screen. While a malformed `month`
@@ -489,7 +510,7 @@ export class CalendarController extends Controller<HTMLElement> {
       this.labelTarget.textContent = monthLabelFormatter(locale).format(monthStart);
     }
 
-    const days = this.#calculateGridDays(year, month);
+    const days = monthGridDays(year, month, this.#safeWeekStart);
     const dayElements = this.dayTargets;
 
     // A consumer's `aria-disabled` belongs to the date its cell shows, so every
@@ -699,16 +720,16 @@ export class CalendarController extends Controller<HTMLElement> {
    *
    * @param reconciled - Whether a change the page made moved the selection in
    *   this paint, which `reconcile` reports rather than the field.
-   * @returns Each field this grid's own controls moved, with the value written
-   *   to it, for the paint to report.
+   * @returns Each field a move the controller made itself moved, with the value
+   *   written to it, for the paint to report.
    */
   #mirrorFields(
     painted: string,
     selection: string,
     reconciled: boolean,
   ): [HTMLInputElement, string, number][] {
-    const byUser = this.#movedByUser;
-    this.#movedByUser = false;
+    const ownMove = this.#ownMove;
+    this.#ownMove = false;
     const moved: [HTMLInputElement, string, number][] = [];
     if (this.hasFieldTarget && this.#writeField(this.fieldTarget, selection) && !reconciled) {
       moved.push([this.fieldTarget, selection, this.#fieldWrites.get(this.fieldTarget) ?? 0]);
@@ -720,7 +741,7 @@ export class CalendarController extends Controller<HTMLElement> {
         this.#fieldWrites.get(this.monthFieldTarget) ?? 0,
       ]);
     }
-    return byUser ? moved : [];
+    return ownMove ? moved : [];
   }
 
   /** Commits one selectable day after recording its publication baseline. */
@@ -740,12 +761,13 @@ export class CalendarController extends Controller<HTMLElement> {
     // external (consumer-driven) value changes.
     const selected = parseISODateString(dateStr);
     if (selected) this.focusedDate = selected;
-    this.#movedByUser = true;
+    this.#ownMove = true;
     const changed = dateStr !== this.#published;
     if (changed) this.#selectionMoves += 1;
     const move = this.#selectionMoves;
-    // The pick is the user's move: recorded as published before the paint, so
-    // the paint reports it through the field and `select`, never as `reconcile`.
+    // The pick is the controller's own move: recorded as published before the
+    // paint, so the paint reports it through the field and `select`, never as
+    // `reconcile`.
     this.#published = dateStr;
     this.#repaintKeepingFocus();
     // A listener of the paint's reports that picked another day, or made a
@@ -758,13 +780,11 @@ export class CalendarController extends Controller<HTMLElement> {
     this.focusedDate = date;
     const targetMonthStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 
-    this.#movedByUser = true;
+    this.#ownMove = true;
     if (targetMonthStr !== this.#monthRequest) {
-      /**
-       * A new month paints from the Value callback. A return to the painted
-       * month can cancel a pending declaration before that callback observes it,
-       * so the current paint and focus move complete synchronously below.
-       */
+      // A new month paints from the Value callback. A return to the painted
+      // month can cancel a pending declaration before that callback observes it,
+      // so the current paint and focus move complete synchronously below.
       this.monthValue = targetMonthStr;
       if (targetMonthStr !== this.#paintedMonth) return;
     }
@@ -799,37 +819,13 @@ export class CalendarController extends Controller<HTMLElement> {
     const monthInfo = parseISOMonthString(this.#monthRequest);
     if (!monthInfo) return;
 
-    this.#movedByUser = true;
+    this.#ownMove = true;
     const nextMonthDate = new Date(monthInfo.year, monthInfo.month - 1 + delta, 1);
     this.monthValue = `${nextMonthDate.getFullYear()}-${String(nextMonthDate.getMonth() + 1).padStart(2, "0")}`;
     if (this.monthValue === this.#paintedMonth) {
       this.#syncFocusedDateWithMonth();
       this.#repaintKeepingFocus();
     }
-  }
-
-  #calculateShiftedMonthDate(baseDate: Date, delta: number): Date {
-    const targetDate = new Date(baseDate.getFullYear(), baseDate.getMonth() + delta, 1);
-    const lastDayInTarget = new Date(
-      targetDate.getFullYear(),
-      targetDate.getMonth() + 1,
-      0,
-    ).getDate();
-    const clampedDay = Math.min(baseDate.getDate(), lastDayInTarget);
-    targetDate.setDate(clampedDay);
-    return targetDate;
-  }
-
-  #calculateShiftedYearDate(baseDate: Date, delta: number): Date {
-    const targetDate = new Date(baseDate.getFullYear() + delta, baseDate.getMonth(), 1);
-    const lastDayInTarget = new Date(
-      targetDate.getFullYear(),
-      targetDate.getMonth() + 1,
-      0,
-    ).getDate();
-    const clampedDay = Math.min(baseDate.getDate(), lastDayInTarget);
-    targetDate.setDate(clampedDay);
-    return targetDate;
   }
 
   #getStartOfWeekDate(date: Date): Date {
@@ -883,34 +879,11 @@ export class CalendarController extends Controller<HTMLElement> {
       if (today.getFullYear() === monthInfo.year && today.getMonth() === monthInfo.month - 1) {
         this.focusedDate = today;
       } else {
-        // Keep same day if possible, otherwise clamp to end of target month
-        const targetDate = new Date(monthInfo.year, monthInfo.month - 1, 1);
-        const lastDayInTarget = new Date(monthInfo.year, monthInfo.month, 0).getDate();
-        const clampedDay = Math.min(this.focusedDate.getDate(), lastDayInTarget);
-        targetDate.setDate(clampedDay);
-        this.focusedDate = targetDate;
+        this.focusedDate = dateInMonthClamped(this.focusedDate, monthInfo.year, monthInfo.month);
       }
     }
   }
 
-  #calculateGridDays(year: number, month: number): Date[] {
-    const firstDay = new Date(year, month - 1, 1);
-    const dayOfWeek = firstDay.getDay();
-
-    // calculate offset days based on weekStartValue
-    const offset = (dayOfWeek - this.#safeWeekStart + 7) % 7;
-
-    const days: Date[] = [];
-    const current = new Date(firstDay);
-    current.setDate(firstDay.getDate() - offset);
-
-    for (let i = 0; i < 42; i++) {
-      days.push(new Date(current));
-      current.setDate(current.getDate() + 1);
-    }
-
-    return days;
-  }
   /** Current `weekStart` declaration resolved against its numeric contract. */
   get #safeWeekStart(): number {
     return this.#numbers.read(

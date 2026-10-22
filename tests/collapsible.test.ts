@@ -13,9 +13,10 @@ import { tick } from "./helpers/timing";
  * for a single inline region — `aria-expanded` on the trigger plus `hidden` /
  * `data-state` on the content, asserted in happy-dom.
  *
- * happy-dom reports a zero `transition-duration`, so the default close path
- * applies `hidden` synchronously. Transition-specific cases stub the complete
- * computed property/duration/delay tuple.
+ * happy-dom reports empty computed transition fields, which the shared transition
+ * waiter reads as already settled, so the default close path applies `hidden`
+ * synchronously. Transition-specific cases stub the complete computed
+ * property/duration/delay tuple.
  */
 
 describe("CollapsibleController", () => {
@@ -272,7 +273,7 @@ describe("CollapsibleController", () => {
     await expectNoA11yViolations(document.body, noRegion);
   });
 
-  // Speech-order regression: the trigger's expanded state must flip in the
+  // Speech-order check: the trigger's expanded state must flip in the
   // announced phrase across a toggle.
   it("announces the trigger's expanded state and flips it on toggle", async () => {
     const before = await captureSpeech({ container: trigger(), steps: 0 });

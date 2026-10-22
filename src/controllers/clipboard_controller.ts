@@ -4,6 +4,7 @@ import { setDefaultAttribute } from "../utils/default_attribute";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
+import { OwnedText } from "../utils/owned_text";
 import { SafeTimeout } from "../utils/safe_timeout";
 
 /**
@@ -121,12 +122,14 @@ export class ClipboardController extends Controller<HTMLElement> {
    */
   #connected = false;
   #result: boolean | null = null;
-  #feedback: { element: HTMLElement; original: string; text: string } | null = null;
+  /** The first slot's authored baseline, retained until a copy acquires another slot. */
+  #feedback: { element: HTMLElement; original: string } | null = null;
+  readonly #feedbackText = new OwnedText(`data-${this.identifier}-feedback-text`);
   /**
-   * Every feedback this controller wrote a result's wording into, with that wording. It
+   * Every feedback this controller wrote a result's wording into. It
    * outlives a connection, so an in-page move still knows what it wrote.
    */
-  readonly #written = new Map<HTMLElement, string>();
+  readonly #written = new Set<HTMLElement>();
   readonly #morphRender = new MorphRenderWatcher(() => this.#renderResult());
 
   override connect(): void {
@@ -134,11 +137,7 @@ export class ClipboardController extends Controller<HTMLElement> {
     this.#adopt();
     this.#result = null;
     this.#feedback = this.hasFeedbackTarget
-      ? {
-          element: this.feedbackTarget,
-          original: this.feedbackTarget.textContent ?? "",
-          text: this.feedbackTarget.textContent ?? "",
-        }
+      ? { element: this.feedbackTarget, original: this.feedbackTarget.textContent ?? "" }
       : null;
     this.#morphRender.observe(this.element);
   }
@@ -214,17 +213,16 @@ export class ClipboardController extends Controller<HTMLElement> {
    * Reads the current state back from the DOM.
    *
    * A `copied` or `error` found at connect time is this controller's own output
-   * from a connection that is gone, and so is the timer that would have cleared it
-   * — nothing else would ever return the element to `idle`. Any other authored
-   * value belongs to the consumer and only a missing attribute takes the default.
+   * from a connection that is gone, and so is the timer that would have cleared it;
+   * any other authored `data-state` value belongs to the consumer, and only a missing
+   * attribute takes the default. Only a feedback still showing the text recorded as
+   * written in `data-<identifier>-feedback-text` (`["text", original, written]`) is
+   * emptied.
    */
   #adopt(): void {
     if (this.#inTransientState()) {
-      const restored = this.#written.size === 0;
       this.#reset();
-      // A fresh instance on restored markup has no write on record: the first feedback
-      // holds the restored result's wording, which goes with the result.
-      if (restored && this.hasFeedbackTarget) this.feedbackTarget.textContent = "";
+      for (const element of this.feedbackTargets) this.#feedbackText.clear(element);
       return;
     }
     setDefaultAttribute(this.element, "data-state", "idle");
@@ -258,23 +256,22 @@ export class ClipboardController extends Controller<HTMLElement> {
     this.element.setAttribute("data-state", this.#result ? "copied" : "error");
     if (!this.hasFeedbackTarget) return;
     const element = this.feedbackTarget;
-    const held = this.#feedback;
-    if (
-      !force &&
-      (!held ||
-        element !== held.element ||
-        element.firstElementChild !== null ||
-        (element.textContent !== held.text && element.textContent !== held.original))
-    )
-      return;
+    if (!force && (element !== this.#feedback?.element || !this.#ownsFeedback(element))) return;
     const text = this.#result ? this.copiedLabelValue : this.errorLabelValue;
-    this.#feedback = {
-      element,
-      original: held?.element === element ? held.original : (element.textContent ?? ""),
-      text,
-    };
-    element.textContent = text;
-    this.#written.set(element, text);
+    const original =
+      element === this.#feedback?.element ? this.#feedback.original : (element.textContent ?? "");
+    this.#feedback = { element, original };
+    this.#feedbackText.write(element, text, original, force);
+    this.#written.add(element);
+  }
+
+  /** A morph may omit the record while returning this same slot to its original text. */
+  #ownsFeedback(element: HTMLElement): boolean {
+    return (
+      this.#feedbackText.owns(element) ||
+      (!this.#feedbackText.hasRecord(element) &&
+        this.#feedbackText.owns(element, { source: "live", allowOriginal: true }))
+    );
   }
 
   /**
@@ -309,10 +306,15 @@ export class ClipboardController extends Controller<HTMLElement> {
   #followLabel(state: "copied" | "error", label: string, previous: string | undefined): void {
     if (!this.#connected) return;
     if (this.element.getAttribute("data-state") !== state || !this.hasFeedbackTarget) return;
-    if (this.feedbackTarget.textContent !== previous) return;
-    this.feedbackTarget.textContent = label;
-    this.#written.set(this.feedbackTarget, label);
-    if (this.#feedback?.element === this.feedbackTarget) this.#feedback.text = label;
+    const element = this.feedbackTarget;
+    if (
+      element !== this.#feedback?.element ||
+      element.textContent !== previous ||
+      !this.#ownsFeedback(element)
+    )
+      return;
+    this.#feedbackText.write(element, label);
+    this.#written.add(element);
   }
 
   /**
@@ -323,11 +325,13 @@ export class ClipboardController extends Controller<HTMLElement> {
   #reset(): void {
     this.#result = null;
     this.element.setAttribute("data-state", "idle");
-    for (const [element, text] of this.#written) {
-      if (!this.feedbackTargets.includes(element)) continue;
-      if (element.firstElementChild === null && element.textContent === text) {
-        element.textContent = "";
-      }
+    for (const element of this.#written) {
+      if (this.feedbackTargets.includes(element))
+        this.#feedbackText.clear(
+          element,
+          this.#feedbackText.hasRecord(element) ? {} : { source: "live" },
+        );
+      this.#feedbackText.forget(element);
     }
     this.#written.clear();
   }

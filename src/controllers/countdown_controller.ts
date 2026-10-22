@@ -3,20 +3,16 @@ import { announce, fillTemplate } from "../utils/announce";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
+import { OwnedText } from "../utils/owned_text";
 import { SafeInterval } from "../utils/safe_timeout";
 
 /** Display granularity: the slots render whole seconds, so amounts snap to these. */
 const SECOND_MS = 1000;
 
 /**
- * Suffix of the marker on the text this controller wrote into the `status` slot;
- * the marker holds that text as its value. The slot is this controller's only while
- * it shows that text and nothing else: the two still agree, and the slot holds no
- * element. While the marker holds text, a slot the consumer rewrites or empties
- * afterwards is theirs; a marker with an empty value owns the empty slot, including
- * one the consumer empties again after writing into it. An element the consumer
- * puts in the slot makes it theirs either way, for as long as it is there. A
- * restored page carries the claim along with the text.
+ * Suffix of the status record: `["text", original, written]`. Ownership requires
+ * the written string alone; an empty written string owns an empty, element-free
+ * slot. A restored page carries this evidence along with the text.
  */
 const OWNED_STATUS = "owns-status";
 
@@ -45,7 +41,7 @@ const OWNED_STATUS = "owns-status";
  * same thing twice.
  *
  * The slot is shared with the consumer. Completion writes the label in force and
- * marks it with `data-<identifier>-owns-status`, whose value is that text; while
+ * records `["text", original, written]` in `data-<identifier>-owns-status`; while
  * the slot still shows that text and nothing else, the controller keeps it on the
  * current `completeLabel` and takes it back once the timer leaves the complete
  * state — `reset`, `start()` counting on from it, or a completion the new reading
@@ -54,7 +50,7 @@ const OWNED_STATUS = "owns-status";
  * again.
  * An empty label puts no text there, so it never displaces what the slot already
  * holds; completing with one claims an empty slot — no text and no element — with
- * an empty marker, which owns the slot whenever it is empty. Text the consumer put
+ * a record of the empty string, which owns the slot whenever it is empty. Text the consumer put
  * there stays theirs while it is there, and so does a slot they put an element in,
  * whatever its text: the label is neither followed into it nor taken back out of
  * it, and its marker stays, until the element is gone. Only a completion with a
@@ -148,7 +144,7 @@ export class CountdownController extends Controller<HTMLElement> {
   #renderedAmount = 0;
   #phase = "paused";
   #valuesDirty = false;
-  readonly #statusWrites = new WeakMap<HTMLElement, { original: string; text: string }>();
+  readonly #statusText = new OwnedText(this.#ownedStatus);
 
   override connect(): void {
     this.#connected = true;
@@ -245,8 +241,7 @@ export class CountdownController extends Controller<HTMLElement> {
    */
   statusTargetDisconnected(status: HTMLElement): void {
     if (!this.statusTargets.includes(status) && this.#ownsStatus(status)) {
-      status.removeAttribute(this.#ownedStatus);
-      this.#statusWrites.delete(status);
+      this.#statusText.forget(status);
     }
     this.#resync.schedule();
   }
@@ -481,23 +476,16 @@ export class CountdownController extends Controller<HTMLElement> {
 
   /**
    * Whether the status slot shows the text this controller wrote there and nothing
-   * else: the text matches the marker, and the slot holds no element. Writing the
+   * else: the text matches the record's written string, and the slot holds no element. Writing the
    * slot's text replaces every child node, so an element the consumer puts in the
-   * slot makes it theirs even while the text still matches. An empty marker
+   * slot makes it theirs even while the text still matches. An empty written string
    * matches the slot whenever it is empty.
    */
   #ownsStatus(status: HTMLElement): boolean {
-    const held = this.#statusWrites.get(status);
-    if (
-      !status.hasAttribute(this.#ownedStatus) &&
-      held &&
-      status.firstElementChild === null &&
-      (status.textContent === held.text || status.textContent === held.original)
-    )
-      return true;
     return (
-      status.getAttribute(this.#ownedStatus) === status.textContent &&
-      status.firstElementChild === null
+      this.#statusText.owns(status) ||
+      (!this.#statusText.hasRecord(status) &&
+        this.#statusText.owns(status, { source: "live", allowOriginal: true }))
     );
   }
 
@@ -508,18 +496,15 @@ export class CountdownController extends Controller<HTMLElement> {
 
   /** Puts `text` into the status slot and records it as this controller's. */
   #writeStatus(status: HTMLElement, text: string): void {
-    const original = this.#statusWrites.get(status)?.original ?? status.textContent ?? "";
-    this.#statusWrites.set(status, { original, text });
-    if (status.textContent !== text) status.textContent = text;
-    if (status.getAttribute(this.#ownedStatus) !== text)
-      status.setAttribute(this.#ownedStatus, text);
+    this.#statusText.write(status, text);
   }
 
   /** Takes this controller's text out of the status slot, marker and all. */
   #releaseStatus(status: HTMLElement): void {
-    status.textContent = "";
-    status.removeAttribute(this.#ownedStatus);
-    this.#statusWrites.delete(status);
+    this.#statusText.clear(
+      status,
+      this.#statusText.hasRecord(status) ? {} : { source: "live", allowOriginal: true },
+    );
   }
 
   /**
