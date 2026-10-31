@@ -5,6 +5,7 @@ import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { dispatchFormData } from "./helpers/form_data";
 import { composeDraft } from "./helpers/ime";
+import { captureSpeech } from "./helpers/speech";
 import {
   disconnectAndStopApplication,
   reconnectKeepingFocus,
@@ -2159,5 +2160,16 @@ describe("InputMaskController", () => {
     type("1234567");
     expect(input().value).toBe("123-4567");
     expect(changes).toEqual([]);
+  });
+
+  it("reads the controller-formatted value with its authored field name", async () => {
+    await start(`<label for="i">Postal code</label><input id="i" type="text"
+      data-controller="stimeo--input-mask" data-stimeo--input-mask-pattern-value="999-9999"
+      data-action="input->stimeo--input-mask#format">`);
+    type("1234567");
+    expect(input().value).toBe("123-4567");
+    expect(await captureSpeech({ container: input(), steps: 0 })).toEqual([
+      "textbox, Postal code, 123-4567",
+    ]);
   });
 });

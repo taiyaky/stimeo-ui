@@ -146,6 +146,8 @@ export class PointerDragController extends Controller<HTMLElement> {
 
   #pointer: PointerSession | null = null;
   #keyboard: KeyboardSession | null = null;
+  /** Whether this controller currently owns its connection resources. */
+  #connected = false;
   /** The session whose focus departure is waiting for synchronous focus restoration. */
   #keyboardFocusSession: KeyboardSession | null = null;
   /** Delegated input listeners share one connected lifetime. */
@@ -172,6 +174,7 @@ export class PointerDragController extends Controller<HTMLElement> {
   });
 
   override connect(): void {
+    this.#connected = true;
     this.#morphRender.observe(this.element);
     if (!this.#pointer && !this.#keyboard) this.#followOutput = null;
     // A reconnect disarms the probe a mid-session disconnect() armed — the
@@ -197,6 +200,7 @@ export class PointerDragController extends Controller<HTMLElement> {
   }
 
   override disconnect(): void {
+    this.#connected = false;
     this.#morphRender.disconnect();
     this.#listeners.dispose();
     this.#shadowFocus.dispose();
@@ -257,6 +261,7 @@ export class PointerDragController extends Controller<HTMLElement> {
     this.#prepareHandle(handle);
   }
 
+  /** Releases a departed declaration while preserving current handles across connection moves. */
   handleTargetDisconnected(handle: HTMLElement): void {
     // The loan is due back the moment an element stops being a handle, and this
     // callback is the only place that sees every such element: once the
@@ -264,19 +269,13 @@ export class PointerDragController extends Controller<HTMLElement> {
     // Across an in-page move `handleTargetConnected` lends it again in the same
     // mutation batch.
     this.#restoreHandle(handle);
-    // Target callbacks ALSO fire when the CONTROLLER goes away (Stimulus stops
-    // the target observer after `disconnect()` has run) and across the in-page
-    // move a live session must survive. In both the handle is still inside the
-    // element: the session belongs to `disconnect()`, and handing the contract
-    // to the container here would bake a nameless tab stop onto it on every
-    // morph. Only a handle that actually LEFT is this callback's business.
-    if (this.element.contains(handle)) return;
+    if (!this.#connected) return;
+    if (
+      this.element.contains(handle) &&
+      (this.handleTargets.includes(handle) || DetachGate.isDetached(this))
+    )
+      return;
 
-    // It can never deliver its keydown again (the delegated listener sits on the
-    // container it left), so a live session would leak and the one-session guard
-    // would reject every future pointerdown. The tree and the consumers are both
-    // alive here, so it ends the way every other keep-the-element teardown does:
-    // in `cancel`, or a composer like sortable strands its session bookkeeping.
     const interrupted =
       this.#pointer?.handle === handle && this.#pointer.started
         ? this.#pointer.pointerType

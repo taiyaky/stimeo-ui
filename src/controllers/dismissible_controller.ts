@@ -169,6 +169,8 @@ export class DismissibleController extends Controller<HTMLElement> {
       if (document.activeElement === candidate) return;
     }
     document.body.focus();
+    const remaining = document.activeElement;
+    if (remaining instanceof HTMLElement && root.contains(remaining)) remaining.blur();
   }
 
   /** Yields available focus fallbacks in precedence order, stopping after focus succeeds. */

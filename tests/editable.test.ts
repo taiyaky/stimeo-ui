@@ -87,6 +87,18 @@ describe("EditableController", () => {
     expect(root().dataset.mode).toBe("editing");
   });
 
+  it("yields a display F2 already consumed by another handler", async () => {
+    await mount();
+    root().addEventListener("keydown", (event) => event.preventDefault(), { capture: true });
+
+    const event = pressKey(display(), "F2");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(root().dataset.mode).toBe("display");
+    expect(input().hidden).toBe(true);
+    expect(document.activeElement).toBe(display());
+  });
+
   it("saves on Enter, updating display and dispatching change with previous", async () => {
     await mount();
     const changes: Array<{ value: string; previous: string }> = [];

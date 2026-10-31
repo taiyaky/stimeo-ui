@@ -28,7 +28,7 @@ import { valueRelationRules } from "./value_relation_rules";
  * running one of its checks on a newer manifest. An optional field an older
  * engine skips, losing only the new check, keeps the version.
  */
-export const SCHEMA_VERSION = 16;
+export const SCHEMA_VERSION = 17;
 
 /**
  * Minimal structural view of a Stimulus controller class, exposing only the
@@ -86,6 +86,9 @@ export function buildManifest(packageVersion: string): Manifest {
   const allActionParamRules = {
     ...actionParamRules,
   };
+  const allHostRules = {
+    ...hostRules,
+  };
   for (const [identifier, ctor] of Object.entries(allControllers)) {
     const reflect = ctor as unknown as ReflectableController;
     const rule = allStructureRules[identifier];
@@ -115,7 +118,7 @@ export function buildManifest(packageVersion: string): Manifest {
       actionCompletion: [...(rule?.actionCompletion ?? [])],
       a11y: [...(allA11yRules[identifier] ?? [])],
       keyboard: [...(keyboardRules[identifier] ?? [])],
-      hosts: [...(hostRules[identifier] ?? [])],
+      hosts: [...(allHostRules[identifier] ?? [])],
       managedAria: [...(allManagedAriaRules[identifier] ?? [])],
       compositions: [...(compositionRules[identifier] ?? [])],
       companions: [...(companionRules[identifier] ?? [])],

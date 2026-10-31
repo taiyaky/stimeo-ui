@@ -889,9 +889,7 @@ describe("checkSource", () => {
       expect(codeList).toContain("missing-required-target");
     });
 
-    // A feature that is opt-in but incomplete without its whole set.
-    // Every other check passes and the page loads — the feature just silently does
-    // nothing — so a static rule is the only layer that can say anything.
+    /** Reports incomplete opt-in target sets before the page runs. */
     describe("conditional targets", () => {
       const trail = (extra: string) => `
         <nav data-controller="stimeo--breadcrumb">
@@ -1550,6 +1548,64 @@ describe("checkSource", () => {
       ).toBe(
         'The "radio" target of "stimeo--radio-group" uses an unsupported interactive <input> host.',
       );
+    });
+
+    it("admits the input types a host rule lists and still rejects every other input", () => {
+      const group = manifest.controllers["stimeo--radio-group"];
+      if (!group) throw new Error("Missing radio-group manifest");
+      const admitting: Manifest = {
+        ...manifest,
+        controllers: {
+          ...manifest.controllers,
+          "stimeo--radio-group": {
+            ...group,
+            hosts: [
+              {
+                target: "radio",
+                mode: "non-interactive-or-button",
+                buttonTypes: ["button"],
+                inputTypes: ["radio"],
+                suggestion: "Use a radio input or a span.",
+              },
+            ],
+          },
+        },
+      };
+      const host = (input: string) =>
+        checkSource(
+          `<div role="radiogroup" aria-label="Plan" data-controller="stimeo--radio-group">
+            ${input}
+          </div>`,
+          admitting,
+        ).filter((diagnostic) => diagnostic.code === "invalid-host");
+
+      expect(host('<input type="radio" data-stimeo--radio-group-target="radio">')).toEqual([]);
+      expect(host('<input type="RADIO" data-stimeo--radio-group-target="radio">')).toEqual([]);
+      expect(
+        host('<input type="checkbox" data-stimeo--radio-group-target="radio">')[0]?.message,
+      ).toBe(
+        'The "radio" target of "stimeo--radio-group" uses an unsupported interactive <input> host.',
+      );
+      // An input without a type is a text field.
+      expect(host('<input data-stimeo--radio-group-target="radio">')).toHaveLength(1);
+      // So is one whose type is not a keyword: HTML does not trim the value.
+      expect(host('<input type=" radio " data-stimeo--radio-group-target="radio">')).toHaveLength(
+        1,
+      );
+      expect(host('<input type="" data-stimeo--radio-group-target="radio">')).toHaveLength(1);
+      // A generated type leaves the answer to the runtime.
+      expect(host('<input type="<%= kind %>" data-stimeo--radio-group-target="radio">')).toEqual(
+        [],
+      );
+      // Without the list the input is rejected as before.
+      expect(
+        checkSource(
+          `<div role="radiogroup" aria-label="Plan" data-controller="stimeo--radio-group">
+            <input type="radio" data-stimeo--radio-group-target="radio">
+          </div>`,
+          manifest,
+        ).filter((diagnostic) => diagnostic.code === "invalid-host"),
+      ).toHaveLength(1);
     });
 
     it("rejects every button as a non-interactive host, whatever type it renders", () => {
@@ -3699,10 +3755,11 @@ describe("checkSource", () => {
     });
 
     it("does not read a partly interpolated target name as its literal remnant", () => {
-      // Neutralization blanks the tag in place, so `<%= prefix %>tab` is left
-      // reading as "tab". Taking that would register a target the runtime never
-      // resolves — and silence the required-target check that a fully generated
-      // name (below) still trips. Undecidable, so the two must agree.
+      /**
+       * Neutralization leaves "tab", but the rendered name depends on `prefix`.
+       * Counting the remnant as a known target could suppress the required-target
+       * check. Partly and fully generated names are equally undecidable here.
+       */
       const tabs = (name: string) => `
         <div data-controller="stimeo--tabs">
           <div role="tablist" aria-label="Sections" data-stimeo--tabs-target="list">
@@ -3715,8 +3772,7 @@ describe("checkSource", () => {
     });
 
     it("does not count a partly interpolated target name toward a cardinality bound", () => {
-      // The same remnant reaching the count would report an over-count among
-      // elements the runtime does not even own.
+      /** Counting a remnant could over-count targets whose rendered names are unknown. */
       const source = `
         <ul data-controller="stimeo--tree-view" role="tree" aria-label="Files">
           <li role="treeitem" aria-selected="true" tabindex="0"
@@ -4392,9 +4448,10 @@ describe("checkSource", () => {
     });
 
     it("leaves a value the author only half wrote undecided", () => {
-      // Neutralization blanks the ERB tag in place, so a partly generated value reads
-      // as its literal remnant. Judging that remnant would report a value the page
-      // never renders.
+      /**
+       * Neutralization leaves a literal remnant, but the rendered value depends
+       * on the ERB expression. The remnant alone cannot decide its validity.
+       */
       const partly = 'data-stimeo--overflow-indicator-direction-param="sta<%= rt %>"';
 
       expect(codes(scroller(partly))).not.toContain("invalid-action-param");

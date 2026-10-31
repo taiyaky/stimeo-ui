@@ -485,6 +485,11 @@ const CONTROLLER_CONTRACT_SCHEMA: ToolOutputSchema = {
             ...STRING_ARRAY,
             description: "Literal button types admitted by non-interactive-or-button.",
           },
+          inputTypes: {
+            ...STRING_ARRAY,
+            description:
+              "Literal input types admitted in either mode (a native control the controller composes with).",
+          },
           suggestion: { type: "string" },
         },
         required: ["target", "mode", "suggestion"],

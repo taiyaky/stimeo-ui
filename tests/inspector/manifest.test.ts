@@ -390,7 +390,7 @@ describe("buildManifest", () => {
         });
       }
     }
-    expect(manifest.schemaVersion).toBe(16);
+    expect(manifest.schemaVersion).toBe(17);
     expect(manifest.controllers["stimeo--slider"]?.valueConstraints).toEqual(
       expect.arrayContaining([expect.objectContaining({ value: "step", exclusiveMin: 0 })]),
     );

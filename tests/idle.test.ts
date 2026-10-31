@@ -4,6 +4,7 @@ import { IdleController } from "../src/controllers/idle_controller";
 import { MAX_TIMER_DELAY_MS, SafeTimeout } from "../src/utils/safe_timeout";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 
@@ -1140,5 +1141,28 @@ describe("IdleController", () => {
     application.register("stimeo--idle", IdleController);
     await tick();
     await expectNoA11yViolations(root());
+  });
+
+  it("reads only the dedicated warning and timeout output for each phase", async () => {
+    await mount(
+      'data-stimeo--idle-timeout-value="1000" data-stimeo--idle-prompt-before-value="300"',
+      HIDDEN_REGIONS,
+    );
+    await vi.advanceTimersByTimeAsync(700);
+    expect(promptRegion().hidden).toBe(false);
+    expect(idleRegion().hidden).toBe(true);
+    expect(await captureSpeech({ container: promptRegion(), steps: 2 })).toEqual([
+      "paragraph",
+      "Your session expires in a minute.",
+      "end of paragraph",
+    ]);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(promptRegion().hidden).toBe(true);
+    expect(idleRegion().hidden).toBe(false);
+    expect(await captureSpeech({ container: idleRegion(), steps: 2 })).toEqual([
+      "paragraph",
+      "You have been signed out.",
+      "end of paragraph",
+    ]);
   });
 });

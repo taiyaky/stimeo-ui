@@ -664,6 +664,7 @@ export class CommandPaletteController extends Controller<HTMLElement> {
   }
 
   readonly #onGlobalKeydown = (event: KeyboardEvent): void => {
+    if (event.defaultPrevented) return;
     if (this.#composition.isComposing(event) || !this.#matchesHotkey(event)) return;
 
     event.preventDefault();

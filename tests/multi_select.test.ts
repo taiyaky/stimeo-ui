@@ -4,17 +4,10 @@ import { MultiSelectController } from "../src/controllers/multi_select_controlle
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
 import { composeDraft } from "./helpers/ime";
-import { keyEvent, press as pressKey } from "./helpers/keyboard";
+import { keyEvent, press as pressKey, typeKey } from "./helpers/keyboard";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
-
-/**
- * Behavioral tests for {@link MultiSelectController}: substring filtering with
- * activedescendant roving, multi toggle (`aria-selected` + chips), the `max`
- * cap, chip removal/Backspace, focus management, dismissal, and the
- * `change`/`filter` events.
- */
 
 const option = (value: string, label: string) => `
   <li id="ms-${value}" role="option" aria-selected="false" data-value="${value}"
@@ -74,6 +67,12 @@ const markupWithFields = (attrs = "", preselected = "") => `
     </template>
   </div>`;
 
+/**
+ * Behavioral tests for {@link MultiSelectController}: substring filtering with
+ * activedescendant roving, multi toggle (`aria-selected` + chips), the `max`
+ * cap, chip removal/Backspace, focus management, dismissal, and the
+ * `change`/`filter` events.
+ */
 describe("MultiSelectController", () => {
   let application: Application;
   let announcements: Array<{ message: string; assertive: boolean }>;
@@ -2092,6 +2091,117 @@ describe("MultiSelectController", () => {
     pressKey(input(), "ArrowDown");
     expect(list().hidden).toBe(false);
     pressKey(input(), "Tab");
+    expect(list().hidden).toBe(true);
+  });
+
+  it.each([false, true])(
+    "closes the list on a chip's Tab with shift=%s without consuming it",
+    async (shiftKey) => {
+      await mountFields("", "apple");
+      input().focus();
+      expect(list().hidden).toBe(false);
+      const chip = buttons()[0];
+      if (!chip) throw new Error("Missing chip");
+
+      const event = pressKey(chip, "Tab", { shiftKey });
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(list().hidden).toBe(true);
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+      expect(input().hasAttribute("aria-activedescendant")).toBe(false);
+      expect(fields().map((field) => field.value)).toEqual(["apple"]);
+      expect(document.activeElement).toBe(chip);
+    },
+  );
+
+  it("leaves a chip's claimed or composing Tab to its owner", async () => {
+    await mountFields("", "apple");
+    input().focus();
+    const chip = buttons()[0];
+    if (!chip) throw new Error("Missing chip");
+    const claimed = keyEvent("Tab");
+    claimed.preventDefault();
+
+    pressKey(chip, claimed);
+    expect(list().hidden).toBe(false);
+    const composing = pressKey(chip, "Tab", { isComposing: true });
+    expect(composing.defaultPrevented).toBe(false);
+    expect(list().hidden).toBe(false);
+    pressKey(chip, "Tab");
+    expect(list().hidden).toBe(true);
+  });
+
+  it("keeps the input closed only for the focus caused by a chip's Tab", async () => {
+    await mountFields("", "apple");
+    input().focus();
+    const chip = buttons()[0];
+    if (!chip) throw new Error("Missing chip");
+    pressKey(chip, "Tab");
+    input().focus();
+    expect(list().hidden).toBe(true);
+
+    chip.focus();
+    pressKey(chip, "ArrowRight");
+    expect(document.activeElement).toBe(input());
+    expect(list().hidden).toBe(false);
+
+    pressKey(chip, "Tab");
+    controller().open();
+    expect(list().hidden).toBe(false);
+  });
+
+  it("keeps chip Tab dismissal idempotent across repeated connect", async () => {
+    await mountFields("", "apple");
+    controller().connect();
+    input().focus();
+    const chip = buttons()[0];
+    if (!chip) throw new Error("Missing chip");
+    pressKey(chip, "Tab");
+    input().focus();
+    expect(list().hidden).toBe(true);
+  });
+
+  it.each(["keydown", "keyup", "pointerdown"] as const)(
+    "releases a pending chip Tab on %s",
+    async (type) => {
+      await mountFields("", "apple");
+      input().focus();
+      const chip = buttons()[0];
+      if (!chip) throw new Error("Missing chip");
+      pressKey(chip, "Tab");
+      if (type === "pointerdown") document.dispatchEvent(new PointerEvent(type, { bubbles: true }));
+      else typeKey(document, keyEvent("Tab", {}, type));
+      input().focus();
+      expect(list().hidden).toBe(false);
+    },
+  );
+
+  it("lets a later cancellation release a chip Tab's focus association", async () => {
+    await mountFields("", "apple");
+    input().focus();
+    const chip = buttons()[0];
+    if (!chip) throw new Error("Missing chip");
+    document.addEventListener("keydown", (event) => event.preventDefault(), { once: true });
+    const event = pressKey(chip, "Tab");
+    expect(event.defaultPrevented).toBe(true);
+    input().focus();
+    expect(list().hidden).toBe(false);
+  });
+
+  it("releases chip Tab dismissal on disconnect and restores it on reconnect", async () => {
+    await mountFields("", "apple");
+    input().focus();
+    const chip = buttons()[0];
+    if (!chip) throw new Error("Missing chip");
+    controller().disconnect();
+    pressKey(chip, "Tab");
+    expect(list().hidden).toBe(false);
+
+    controller().connect();
+    input().focus();
+    const restored = buttons()[0];
+    if (!restored) throw new Error("Missing restored chip");
+    pressKey(restored, "Tab");
     expect(list().hidden).toBe(true);
   });
 

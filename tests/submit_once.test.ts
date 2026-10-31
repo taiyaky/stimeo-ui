@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SubmitOnceController } from "../src/controllers/submit_once_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 import { writeValueAttribute } from "./helpers/value_delivery";
@@ -1450,5 +1451,26 @@ describe("SubmitOnceController", () => {
     turboStart(control("#send"));
 
     await expectNoA11yViolations(form());
+  });
+
+  it("reads the owned busy label and returns the original button name", async () => {
+    await mountAround(
+      'data-stimeo--submit-once-busy-label-value="Saving"',
+      '<button id="speech-send" type="submit">Save</button>',
+    );
+    const original = await captureSpeech({ container: control(), steps: 0 });
+    turboStart(control());
+    expect(control().disabled).toBe(true);
+    expect(form().getAttribute("aria-busy")).toBe("true");
+    const busy = await captureSpeech({ container: control(), steps: 0 });
+    turboEnd();
+    expect(control().disabled).toBe(false);
+    expect(form().hasAttribute("aria-busy")).toBe(false);
+    const restored = await captureSpeech({ container: control(), steps: 0 });
+    expect([original, busy, restored]).toEqual([
+      ["button, Save"],
+      ["button, Saving, busy, disabled"],
+      ["button, Save"],
+    ]);
   });
 });

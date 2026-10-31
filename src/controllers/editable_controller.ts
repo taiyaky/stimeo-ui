@@ -210,6 +210,7 @@ export class EditableController extends Controller<HTMLElement> {
 
   /** Adds `F2` as an editing entry point alongside the button's native activation. */
   onDisplayKeydown(event: KeyboardEvent): void {
+    if (event.defaultPrevented) return;
     if (event.key === "F2") {
       event.preventDefault();
       this.edit();

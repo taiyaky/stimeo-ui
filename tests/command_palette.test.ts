@@ -1327,6 +1327,42 @@ describe("CommandPaletteController", () => {
     expect(dialog().hidden).toBe(false);
   });
 
+  it.each([
+    ["Control", { ctrlKey: true }],
+    ["Meta", { metaKey: true }],
+  ] as const)(
+    "yields global %s+k to an inner keydown claim while closed and open",
+    (_, modifiers) => {
+      const selection = vi.fn();
+      listenForSelection(selection);
+      pressKey(trigger(), "k", modifiers);
+      expect(dialog().hidden).toBe(false);
+      expect(document.activeElement).toBe(input());
+      pressKey(input(), "k", modifiers);
+      expect(dialog().hidden).toBe(true);
+      expect(document.activeElement).toBe(trigger());
+
+      trigger().addEventListener("keydown", (event) => event.preventDefault(), { once: true });
+      const closedClaim = pressKey(trigger(), "k", modifiers);
+      expect(closedClaim.defaultPrevented).toBe(true);
+      expect(dialog().hidden).toBe(true);
+      expect(document.activeElement).toBe(trigger());
+      expect(input().getAttribute("aria-expanded")).toBe("false");
+      expect(selection).not.toHaveBeenCalled();
+
+      controller().open();
+      const active = input().getAttribute("aria-activedescendant");
+      input().addEventListener("keydown", (event) => event.preventDefault(), { once: true });
+      const openClaim = pressKey(input(), "k", modifiers);
+      expect(openClaim.defaultPrevented).toBe(true);
+      expect(dialog().hidden).toBe(false);
+      expect(document.activeElement).toBe(input());
+      expect(input().getAttribute("aria-expanded")).toBe("true");
+      expect(input().getAttribute("aria-activedescendant")).toBe(active);
+      expect(selection).not.toHaveBeenCalled();
+    },
+  );
+
   it("consumes the hotkey so the browser's own shortcut does not also run", () => {
     const event = typeKey(document, "k", { ctrlKey: true });
 

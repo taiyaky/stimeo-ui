@@ -3,8 +3,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PreviewGuardController } from "../src/controllers/preview_guard_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
+
+const startPreview = () => document.documentElement.setAttribute("data-turbo-preview", "");
+const endPreview = () => document.documentElement.removeAttribute("data-turbo-preview");
+const PLACEHOLDER = 'data-stimeo--preview-guard-placeholder-value="—"';
 
 /**
  * Behavioral tests for {@link PreviewGuardController}: hide/show driven by the
@@ -17,11 +22,6 @@ import { tick } from "./helpers/timing";
  * is the bookkeeping the controller owns either way — which element the guard recorded,
  * and whether it hands it back.
  */
-
-const startPreview = () => document.documentElement.setAttribute("data-turbo-preview", "");
-const endPreview = () => document.documentElement.removeAttribute("data-turbo-preview");
-const PLACEHOLDER = 'data-stimeo--preview-guard-placeholder-value="—"';
-
 describe("PreviewGuardController", () => {
   let application: Application;
 
@@ -443,5 +443,21 @@ describe("PreviewGuardController", () => {
   it("has no a11y violations", async () => {
     await mount();
     await expectNoA11yViolations(el());
+  });
+
+  it("reads the owned preview placeholder and restores the consumer text", async () => {
+    await mount('data-stimeo--preview-guard-placeholder-value="Balance unavailable"', "Balance 42");
+    const original = await captureSpeech({ container: el(), steps: 0 });
+    startPreview();
+    await tick();
+    const placeholder = await captureSpeech({ container: el(), steps: 0 });
+    endPreview();
+    await tick();
+    const restored = await captureSpeech({ container: el(), steps: 0 });
+    expect([original, placeholder, restored]).toEqual([
+      ["Balance 42"],
+      ["Balance unavailable"],
+      ["Balance 42"],
+    ]);
   });
 });

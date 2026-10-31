@@ -256,6 +256,41 @@ describe("DismissibleController", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
+  it.each(["hide", "remove"])(
+    "retreats before %s when a body-focus handler returns focus inside",
+    async (mode) => {
+      await start(
+        `<div data-controller="stimeo--dismissible" data-stimeo--dismissible-mode-value="${mode}"><div data-stimeo--dismissible-target="root"><button id="close" data-action="stimeo--dismissible#dismiss">Close</button></div></div>`,
+      );
+      const close = byId("close");
+      let focusRequests = 0;
+      let focusDuringDismiss: Element | null = null;
+      let connectedDuringDismiss = false;
+      let hiddenDuringDismiss: HTMLElement["hidden"] = true;
+      const returnFocusInside = () => {
+        focusRequests += 1;
+        close.focus();
+      };
+      document.body.addEventListener("focus", returnFocusInside, { once: true });
+      host().addEventListener("stimeo--dismissible:dismiss", () => {
+        focusDuringDismiss = document.activeElement;
+        connectedDuringDismiss = root().isConnected;
+        hiddenDuringDismiss = root().hidden;
+      });
+      try {
+        close.focus();
+        close.click();
+        expect(focusRequests).toBe(1);
+        expect(focusDuringDismiss).toBe(document.body);
+        expect(connectedDuringDismiss).toBe(true);
+        expect(hiddenDuringDismiss).toBe(false);
+        expect(document.activeElement).toBe(document.body);
+      } finally {
+        document.body.removeEventListener("focus", returnFocusInside);
+      }
+    },
+  );
+
   it("does not move focus when focus was outside the element", async () => {
     await start(remove_markup);
     const before = byId("before");

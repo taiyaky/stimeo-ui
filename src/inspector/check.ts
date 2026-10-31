@@ -211,6 +211,14 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       return (rule.buttonTypes ?? []).includes(effectiveType);
     }
 
+    if (element.tag === "input" && rule.inputTypes) {
+      const type = element.attrs.find((attr) => attr.name === "type");
+      if (type && isDynamicValue(type)) return null;
+      // HTML matches the type keyword case-insensitively but untrimmed, so a padded
+      // or unknown type is a text field like a missing one; an unlisted one is refused.
+      return rule.inputTypes.includes(type?.value.toLowerCase() || "text");
+    }
+
     if (ALWAYS_INTERACTIVE_HOSTS.has(element.tag)) return false;
     if ((element.tag === "a" || element.tag === "area") && hasAttr(element, "href")) return false;
     if ((element.tag === "audio" || element.tag === "video") && hasAttr(element, "controls")) {
@@ -554,12 +562,12 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
           );
           continue;
         }
-        // Neutralization blanks the ERB tag in place, so a partly generated
-        // name reads as its literal remnant (`<%= p %>item` → "item"). Taking
-        // that reading would both silence the spelling check and register a
-        // target the runtime never resolves — the same fabrication the
-        // cardinality count avoids. Undecidable, exactly like a fully generated
-        // name, whose blanked value already falls through the guards below.
+        /**
+         * Neutralization leaves a literal remnant (`<%= p %>item` → "item"),
+         * but the rendered target name is unknown. Treating the remnant as a
+         * declaration could suppress a spelling error or count an unrelated
+         * target. Partly and fully generated names are both undecidable here.
+         */
         const declared = isDynamicValue(attr) ? [] : attributeTokens(attr.value);
         for (const token of declared) {
           if (controller.targets.includes(token.name)) continue;
@@ -1281,10 +1289,12 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   }
 
   // --- Stage 3: supported host elements per scope --------------------------
-  // A native interactive host contributes its own activation model. Unless a
-  // rule explicitly admits a non-submitting button, composing that model with
-  // controller-owned key handling creates duplicate activation or an unrelated
-  // side effect such as form submission.
+  /**
+   * A native interactive host contributes its own activation model. A rule can
+   * admit button types or input types whose activation the controller supports.
+   * Other interactive hosts can duplicate controller-owned key handling or cause
+   * an unrelated side effect such as form submission.
+   */
   for (const { node, identifier } of scopes) {
     const controller = known[identifier];
     if (!controller) continue;

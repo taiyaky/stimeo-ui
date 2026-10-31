@@ -1,8 +1,10 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AnnouncerController } from "../src/controllers/announcer_controller";
 import { AutoSubmitController } from "../src/controllers/auto_submit_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 import { writeValueAttribute } from "./helpers/value_delivery";
@@ -701,5 +703,25 @@ describe("AutoSubmitController", () => {
     application.register("stimeo--auto-submit", AutoSubmitController);
     await tick();
     await expectNoA11yViolations(document.body);
+  });
+
+  it("reads the configured completion output separately from the busy state", async () => {
+    await start(`<div data-controller="stimeo--auto-submit" data-stimeo--auto-submit-debounce-value="10"
+      data-stimeo--auto-submit-announce-value="true" data-stimeo--auto-submit-message-value="Search updated"
+      data-action="input->stimeo--auto-submit#submit"><form data-stimeo--auto-submit-target="form">
+      <label>Search <input type="search" name="q"></label></form></div><div data-controller="stimeo--announcer" data-stimeo--announcer-clear-after-value="0"><div id="speech-output" data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div></div>`);
+    application.register("stimeo--announcer", AnnouncerController);
+    await vi.advanceTimersByTimeAsync(0);
+    const submit = stubSubmit();
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(form().getAttribute("aria-busy")).toBe("true");
+    form().dispatchEvent(new Event("turbo:submit-end", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(form().hasAttribute("aria-busy")).toBe(false);
+    expect(await captureSpeech({ container: query("#speech-output"), steps: 0 })).toEqual([
+      "Search updated",
+    ]);
   });
 });

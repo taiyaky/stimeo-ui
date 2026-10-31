@@ -248,6 +248,103 @@ describe("PopoverController", () => {
     expect(panel().hidden).toBe(false);
   });
 
+  it("closes at an external focus destination after focus fell to the body", () => {
+    trigger().click();
+    const capture = captureStateEvents("stimeo--popover");
+    const outside = query<HTMLButtonElement>("#outside");
+    outside.addEventListener("focusin", (event) => event.stopPropagation());
+    query<HTMLInputElement>("#field").blur();
+    expect(document.activeElement).toBe(document.body);
+    expect(panel().hidden).toBe(false);
+    expect(capture.seen).toEqual([]);
+
+    outside.focus();
+
+    expect(document.activeElement).toBe(outside);
+    expect(panel().hidden).toBe(true);
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(capture.names()).toEqual(["close"]);
+    expect(capture.reasons()).toEqual(["focus"]);
+    outside.blur();
+    const escaped = keyEvent("Escape");
+    // Body focus exposes any Escape ownership retained after the external landing.
+    typeKey(document.body, escaped);
+    expect(escaped.defaultPrevented).toBe(false);
+    expect(capture.reasons()).toEqual(["focus"]);
+    capture.stop();
+  });
+
+  it("ignores a body focusin after an indeterminate blur", () => {
+    trigger().click();
+    const capture = captureStateEvents("stimeo--popover");
+    query<HTMLInputElement>("#field").blur();
+    expect(document.activeElement).toBe(document.body);
+
+    document.body.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+
+    expect(panel().hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(capture.seen).toEqual([]);
+    capture.stop();
+  });
+
+  it("preserves authored hidden-until-found while closed when external focus lands", () => {
+    panel().setAttribute("hidden", "until-found");
+    expect(panel().hidden).toBeTruthy();
+    const capture = captureStateEvents("stimeo--popover");
+
+    query<HTMLButtonElement>("#outside").focus();
+
+    expect(document.activeElement).toBe(query("#outside"));
+    expect(panel().getAttribute("hidden")).toBe("until-found");
+    expect(trigger().getAttribute("aria-expanded")).toBe("false");
+    expect(capture.seen).toEqual([]);
+    capture.stop();
+  });
+
+  it("keeps related open and close controls inside the authored root", async () => {
+    const close = document.createElement("button");
+    close.textContent = "Close directly";
+    close.setAttribute("data-action", "click->stimeo--popover#close");
+    query("[data-controller='stimeo--popover']").append(close);
+    await tick();
+    trigger().click();
+    const capture = captureStateEvents("stimeo--popover");
+    query<HTMLInputElement>("#field").blur();
+    query<HTMLButtonElement>("#open").focus();
+    expect(panel().hidden).toBe(false);
+    query<HTMLButtonElement>("#open").click();
+    expect(document.activeElement).toBe(query("#open"));
+    expect(panel().hidden).toBe(false);
+    expect(capture.seen).toEqual([]);
+
+    close.focus();
+    expect(panel().hidden).toBe(false);
+    close.click();
+
+    expect(document.activeElement).toBe(close);
+    expect(panel().hidden).toBe(true);
+    expect(capture.names()).toEqual(["close"]);
+    expect(capture.reasons()).toEqual(["user"]);
+    capture.stop();
+  });
+
+  it("removes the document focusin listener when disconnected after a null blur", () => {
+    trigger().click();
+    query<HTMLInputElement>("#field").blur();
+    expect(document.activeElement).toBe(document.body);
+    controller().disconnect();
+    const capture = captureStateEvents("stimeo--popover");
+
+    query<HTMLButtonElement>("#outside").focus();
+
+    expect(document.activeElement).toBe(query("#outside"));
+    expect(panel().hidden).toBe(false);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(capture.seen).toEqual([]);
+    capture.stop();
+  });
+
   it("closes when focus leaves the panel (Tab out) without restoring focus", () => {
     trigger().click();
     // focus moves to an element outside the controller → modeless close, no restore.
@@ -295,7 +392,7 @@ describe("PopoverController", () => {
     query<HTMLInputElement>("#field").dispatchEvent(
       new FocusEvent("focusout", { relatedTarget: query("#outside"), bubbles: true }),
     );
-    // If the listener leaked it would have closed the (already detached) panel.
+    /** A leaked listener would close the panel after the controller disconnects. */
     expect(panel().hidden).toBe(false);
   });
 
@@ -779,6 +876,10 @@ describe("PopoverController", () => {
         query("#field").dispatchEvent(
           new FocusEvent("focusout", { bubbles: true, relatedTarget: query("#outside") }),
         ),
+      "focus returning from the body to the outside": () => {
+        query<HTMLInputElement>("#field").blur();
+        query<HTMLButtonElement>("#outside").focus();
+      },
     } as const;
 
     for (const [how, leave] of Object.entries(leaveBy)) {

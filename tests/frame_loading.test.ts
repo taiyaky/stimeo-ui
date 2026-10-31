@@ -1,8 +1,10 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AnnouncerController } from "../src/controllers/announcer_controller";
 import { FrameLoadingController } from "../src/controllers/frame_loading_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
 import { writeValueAttribute } from "./helpers/value_delivery";
@@ -1179,5 +1181,30 @@ describe("FrameLoadingController", () => {
     application.register("stimeo--frame-loading", FrameLoadingController);
     await tick();
     await expectNoA11yViolations(frame());
+  });
+
+  it("reads configured loading and ready output independently of busy and inert hooks", async () => {
+    await mount(
+      'data-stimeo--frame-loading-min-duration-value="0" data-stimeo--frame-loading-announce-text-value="Loading invoices" data-stimeo--frame-loading-announce-ready-text-value="Invoices ready"',
+    );
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<div data-controller="stimeo--announcer" data-stimeo--announcer-clear-after-value="0"><div id="speech-output" data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div></div>',
+    );
+    application.register("stimeo--announcer", AnnouncerController);
+    await vi.advanceTimersByTimeAsync(0);
+    fire("turbo:before-fetch-request");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(frame().getAttribute("aria-busy")).toBe("true");
+    expect(content().hasAttribute("inert")).toBe(true);
+    expect(skeleton().hidden).toBe(false);
+    const loading = await captureSpeech({ container: query("#speech-output"), steps: 0 });
+    fire("turbo:frame-load");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(frame().hasAttribute("aria-busy")).toBe(false);
+    expect(content().hasAttribute("inert")).toBe(false);
+    expect(skeleton().hidden).toBe(true);
+    const ready = await captureSpeech({ container: query("#speech-output"), steps: 0 });
+    expect([loading, ready]).toEqual([["Loading invoices"], ["Invoices ready"]]);
   });
 });

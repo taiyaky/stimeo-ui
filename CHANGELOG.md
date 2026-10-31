@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
-## [Unreleased]
+## [0.18.1] - 2026-10-31
+
+Patch release focused on keyboard ownership, focus handoff, masked selections,
+and Inspector compatibility.
+
+### Changed
+
+- Inspector host contracts can admit the `<input>` types a controller composes
+  with instead of replacing (`inputTypes`); any other `<input>` on such a host is
+  still reported as `invalid-host`. The manifest carries this as `schemaVersion`
+  17. Update Inspector engines and the VS Code extension together with their
+  manifest; an older engine reading it may report an admitted input as
+  `invalid-host`.
+- Refresh pinned build and test tooling: Biome 2.6.3, happy-dom 21.0.4,
+  tsup 9.0.0, and Rollup 4.66.0.
+
+### Fixed
+
+- command-palette and editable: respect keyboard events already handled by another
+  listener, including global shortcuts and F2.
+- multi-select: close on Tab from a chip and keep the list closed when that Tab
+  reaches the input.
+- popover: close when focus reaches an unrelated control after first falling to
+  the document body, while preserving the destination focus.
+- dismissible: release focus from hidden content when no fallback can receive
+  focus.
+- input-mask: preserve selected text when a single invalid typed character would
+  replace it.
+- pointer-drag: cancel active sessions when a handle loses its target declaration
+  and restore the fallback handle when no declared handles remain.
 
 ## [0.18.0] - 2026-10-22
 
@@ -1411,7 +1440,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
-[Unreleased]: https://github.com/taiyaky/stimeo-ui/compare/v0.18.0...HEAD
+[0.18.1]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.18.1
 [0.18.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.18.0
 [0.17.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.17.0
 [0.16.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.16.0

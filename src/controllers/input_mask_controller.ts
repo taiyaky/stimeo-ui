@@ -5,6 +5,7 @@ import { DetachGate } from "../utils/detach_gate";
 import { inheritsFieldsetDisabled } from "../utils/focus_candidate";
 import { FormDataProjection, prepareFormDataProjection } from "../utils/form_data_projection";
 import { halfWidthChar } from "../utils/half_width";
+import { ListenerSet } from "../utils/listener_set";
 import { MorphRenderWatcher } from "../utils/morph_render_watcher";
 import { SafeTimeout } from "../utils/safe_timeout";
 import { sharedRegistry } from "../utils/shared_registry";
@@ -134,8 +135,8 @@ export function applyMask(
  * The token map a `tokens` declaration selects: the defaults with the declared
  * single-char regex sources compiled over them.
  *
- * A declaration that is not a JSON object of string sources declares no tokens,
- * leaving the defaults. A source that is not a valid regex is answered per key:
+ * A declaration that is not a JSON object leaves the defaults. Within an object,
+ * non-string entries are ignored individually. An invalid regex is answered per key:
  * a key that has a default keeps that default, and a key that has none is left
  * out so the character stays a literal. Either way the rest of the mask, and the
  * field, keep working instead of going down with the broken source.
@@ -292,6 +293,51 @@ export class InputMaskController extends Controller<HTMLInputElement> {
   /** The derived output last published, kept apart from the IME's unfinished text. */
   #shown: { result: MaskResult | null; empty: boolean } = { result: null, empty: true };
 
+  readonly #edits = new ListenerSet();
+
+  /** Rejects a single invalid typed replacement before native editing deletes its selection. */
+  readonly #onBeforeInput = (event: InputEvent): void => {
+    const data = event.data;
+    if (
+      event.defaultPrevented ||
+      !event.cancelable ||
+      event.inputType !== "insertText" ||
+      data === null ||
+      Array.from(data).length !== 1 ||
+      !this.#started ||
+      this.#composition.isComposing(event)
+    )
+      return;
+    const input = this.element;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    if (
+      start === null ||
+      end === null ||
+      start === end ||
+      input.readOnly ||
+      input.disabled ||
+      inheritsFieldsetDisabled(input) ||
+      !input.isConnected ||
+      !this.application.element.contains(input) ||
+      !(input.getAttribute("data-controller") ?? "").split(/\s+/).includes(this.identifier) ||
+      this.patternValue === "" ||
+      this.#formatted !== this.#declared ||
+      input.value !== this.#lastValue
+    )
+      return;
+    const prefix = applyMask(input.value.slice(0, start), this.patternValue, this.#tokens);
+    for (const character of Array.from(this.patternValue).slice(prefix.tokenFlags.length)) {
+      const token = this.#tokens.get(character);
+      if (token) {
+        if (acceptedForm(token, data) === null) event.preventDefault();
+        return;
+      }
+      if (halfWidthChar(data) === halfWidthChar(character)) return;
+    }
+    event.preventDefault();
+  };
+
   /**
    * Holds mid-composition input so the IME's uncommitted text is never rewritten,
    * and formats the confirmed text once when the composition ends. A composition
@@ -353,6 +399,7 @@ export class InputMaskController extends Controller<HTMLInputElement> {
     this.#morph.observe(this.element);
     this.#started = true;
     this.#composition.observe(this.element);
+    this.#edits.add(this.element, "beforeinput", this.#onBeforeInput);
     if (!this.unmaskToHiddenValue) this.#withdraw();
     // A field that moved here with its conversion keeps the value it committed; the
     // conversion's end formats it, and a format the move asks for waits for that end.
@@ -374,6 +421,7 @@ export class InputMaskController extends Controller<HTMLInputElement> {
   override disconnect(): void {
     this.#morph.disconnect();
     this.#started = false;
+    this.#edits.dispose();
     this.#composition.disconnect();
     this.#adoption.clearAll();
     // A move, a morph or a Turbo carry connects the field again; a field that does not

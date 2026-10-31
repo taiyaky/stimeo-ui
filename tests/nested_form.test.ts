@@ -1,8 +1,10 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AnnouncerController } from "../src/controllers/announcer_controller";
 import { NestedFormController } from "../src/controllers/nested_form_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
+import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { withinTimeLimit } from "./helpers/time_limit";
 import { tick } from "./helpers/timing";
@@ -1040,5 +1042,23 @@ describe("NestedFormController", () => {
     expect(rows()).toHaveLength(0);
     expect(removed).toEqual([row]);
     expect(repairs).toEqual([]);
+  });
+
+  it("reads the configured count output after adding and removing a row", async () => {
+    await start(
+      MARKUP('data-stimeo--nested-form-count-message-value="Items: {count}"') +
+        '<div data-controller="stimeo--announcer" data-stimeo--announcer-clear-after-value="0"><div id="speech-output" data-stimeo--announcer-target="polite" aria-live="polite" aria-atomic="true"></div></div>',
+    );
+    application.register("stimeo--announcer", AnnouncerController);
+    await tick();
+    addButton().click();
+    await tick();
+    expect(root().getAttribute("data-nested-count")).toBe("1");
+    const added = await captureSpeech({ container: query("#speech-output"), steps: 0 });
+    query<HTMLButtonElement>('[data-stimeo--nested-form-target="remove"]', list()).click();
+    await tick();
+    expect(root().getAttribute("data-nested-count")).toBe("0");
+    const removed = await captureSpeech({ container: query("#speech-output"), steps: 0 });
+    expect([added, removed]).toEqual([["Items: 1"], ["Items: 0"]]);
   });
 });

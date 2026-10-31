@@ -18,6 +18,9 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *          role="dialog" aria-label="Edit profile" hidden>…</div>
  *   </div>
  *
+ * The controller root groups the panel and its related controls, including additional
+ * `open` and `close` invokers. Unrelated page controls belong outside this root.
+ *
  * Implements the WAI-ARIA APG **Dialog** pattern run *non-modally* (no
  * `aria-modal`, no focus trap, no `inert`/scroll lock). The background stays
  * fully interactive; this is the modeless counterpart to `stimeo--dialog`. For
@@ -43,10 +46,11 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  *   focus. Focus stays at the clicked element, or falls back to the document body
  *   for a non-focusable destination.
  * - Because it is modeless, focus is *not* trapped: when `Tab` moves focus out of
- *   the controller it closes (detected via bubbling `focusout`) without yanking
+ *   the controller it closes (detected via `focusout` and document `focusin`) without yanking
  *   focus back, so forward and reverse traversal preserve their natural destination.
  *   A `focusout` with no destination is ignored because it also occurs for clicks
- *   on non-focusable content and when the browser window loses focus.
+ *   on non-focusable content and when the browser window loses focus. A later known
+ *   external focus destination closes it even when focus first fell to the body.
  * - Opt-in **dismiss on scroll** (`closeOnScroll`): while open, scrolling a tracked
  *   scroll-parent ancestor (or the window) closes the panel, the usual convention for
  *   anchored popups. Closes without restoring focus (like the modeless `focusout` path)
@@ -110,6 +114,7 @@ export class PopoverController extends Controller<HTMLElement> {
     this.#close("api");
     this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
     this.#listeners.add(this.element, "focusout", this.#onFocusOut);
+    this.#listeners.add(document, "focusin", this.#onDocumentFocusIn, { capture: true });
     this.#connected = true;
     this.#reporting = true;
   }
@@ -284,12 +289,22 @@ export class PopoverController extends Controller<HTMLElement> {
    * not restored — the natural destination is kept, which is the modeless
    * contract. A null/non-Node destination is indeterminate: browsers use it for
    * clicks on non-focusable content and window deactivation, so the later outside
-   * click handler decides pointer dismissal instead.
+   * click or known external focus destination decides dismissal instead.
    */
   readonly #onFocusOut = (event: FocusEvent): void => {
     if (!this.#closable) return;
     const next = event.relatedTarget;
     if (!(next instanceof Node) || this.element.contains(next)) return;
+    this.#close("focus");
+  };
+
+  /** Closes at a known external landing, including after an indeterminate blur to the body. */
+  readonly #onDocumentFocusIn = (event: FocusEvent): void => {
+    if (!this.#closable) return;
+    const target = event.target;
+    if (!(target instanceof Node) || target === document.body || this.element.contains(target)) {
+      return;
+    }
     this.#close("focus");
   };
 

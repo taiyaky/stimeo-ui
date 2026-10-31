@@ -213,8 +213,12 @@ export class MultiSelectController extends Controller<HTMLElement> {
   /** The listeners of one connection, released together on `disconnect()`. */
   readonly #listeners = new ListenerSet();
 
+  /** Associates chip Tab with its next focus action. */
+  #tab: Event | null = null;
+
   /** Starts closed, syncs chips for any pre-selected options, and listens out. */
   override connect(): void {
+    this.#tab = null;
     this.#tabindex.reclaim(this.element);
     this.#rows.connect();
     // A fresh connection has no prior selection to preserve: deterministic DOM
@@ -230,6 +234,9 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // the initial selection without an interaction.
     this.#syncFields();
     this.#listeners.add(document, "click", this.#onOutsideClick, { capture: true });
+    this.#listeners.add(this.element, "keydown", this.#onTab);
+    for (const type of ["focus", "keydown", "keyup", "pointerdown"] as const)
+      this.#listeners.add(document, type, this.#trackTab, { capture: true });
     this.#connected = true;
     this.#reconcile.observe(this.element);
   }
@@ -259,6 +266,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     this.#composition.disconnect();
     this.#chipRow.disconnect();
     this.#listeners.dispose();
+    this.#tab = null;
     this.#releaseTabindex();
   }
 
@@ -355,11 +363,11 @@ export class MultiSelectController extends Controller<HTMLElement> {
    *
    * The baseline pass fills in any missing `aria-selected`, and the chips and
    * hidden fields are re-derived from it, because the options are the truth source
-   * for the selection. The chips are rebuilt **only when the selected value set
-   * actually moved**: the rebuild removes and recreates every chip, so running it
-   * for an unrelated option would drop focus from a chip's remove button to
-   * `<body>`, losing the keyboard user's place for something that did not concern
-   * them.
+   * for the selection. The chips are rebuilt only when their current value set
+   * differs from the selected option values. Rebuilding removes and recreates
+   * every chip, so doing it for an unrelated option would drop focus from a chip's
+   * remove button to `<body>`, losing the keyboard user's place for something that
+   * did not concern them.
    *
    * @stimeoRenderRoot
    */
@@ -536,8 +544,13 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * list shown without one is a popup no assistive technology is told about. So
    * opening is skipped entirely, where {@link MultiSelectController.close | close}
    * still closes.
+   * A focus action delivered by chip Tab keeps the list closed.
    */
-  open(): void {
+  open(event?: Event): void {
+    if (event instanceof FocusEvent && event === this.#tab) {
+      this.#tab = null;
+      return;
+    }
     if (!this.hasListTarget || !this.hasInputTarget) {
       this.#reflectEmpty();
       return;
@@ -655,6 +668,32 @@ export class MultiSelectController extends Controller<HTMLElement> {
     }
   }
 
+  /** Closes on chip Tab without moving focus. */
+  readonly #onTab = (event: KeyboardEvent): void => {
+    if (
+      event.key !== "Tab" ||
+      event.defaultPrevented ||
+      event.isComposing ||
+      !this.hasTagsTarget ||
+      !this.tagsTarget.contains(event.target as Node)
+    )
+      return;
+    this.#tab = event;
+    this.close();
+  };
+
+  /** Associates the next input focus with chip Tab; other gestures release it. */
+  readonly #trackTab = (event: Event): void => {
+    const key = this.#tab;
+    this.#tab =
+      event.type === "focus" &&
+      key instanceof KeyboardEvent &&
+      !key.defaultPrevented &&
+      event.target === this.inputTargets[0]
+        ? event
+        : null;
+  };
+
   /**
    * Toggles an owned option or descendant. For action events, focus is
    * re-homed to the input afterwards: options are non-focusable, so the click blurs
@@ -679,14 +718,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     return this.hasTagsTarget ? this.tagsTarget : this.element;
   }
 
-  /**
-   * Re-homes focus to the input, or leaves it where it is when there is none.
-   *
-   * All three callers run *after* an option or a chip already took focus, and all
-   * three are reachable without an input — options and chips carry their own
-   * `data-action`. Throwing here would leave the chip removed but focus stranded
-   * on a detached button.
-   */
+  /** Re-homes focus to the input, or leaves it where it is when there is none. */
   #focusInput(): void {
     if (this.hasInputTarget) this.inputTarget.focus();
   }
@@ -771,8 +803,8 @@ export class MultiSelectController extends Controller<HTMLElement> {
    * The value order alone does not say the chips are still correct: a server can
    * re-render the same candidate with a new label ("Apple" → "Green Apple"), and
    * the chip text and its `Remove {label}` name are both derived from the option.
-   * Updating them here keeps the rebuild — which would drop focus — for the case
-   * that actually needs it, a changed selection.
+   * Updating them here avoids a focus-losing rebuild when the chip values already
+   * match the selected option values.
    */
   #refreshTagLabels(selected: readonly HTMLElement[]): void {
     // Paired by value rather than by position: the chips are in selection order

@@ -393,11 +393,13 @@ export interface KeyboardRequirement {
  * of its targets must use semantics the controller can own without competing
  * with another native interaction.
  *
- * `"non-interactive"` admits only generic, non-interactive elements.
+ * `"non-interactive"` admits generic, non-interactive elements by default.
  * `"non-interactive-or-button"` additionally admits a `<button>` whose
  * literal `type` is listed in {@link buttonTypes}. The explicit type matters:
  * a missing or invalid button type defaults to `submit`, so treating it as an
  * ordinary action button would silently submit an enclosing form.
+ * In either mode, {@link inputTypes} can admit `<input>` types whose native
+ * activation the controller supports.
  */
 export interface HostRequirement {
   /** Target name; the empty string `""` means the controller scope element. */
@@ -406,6 +408,13 @@ export interface HostRequirement {
   readonly mode: "non-interactive" | "non-interactive-or-button";
   /** Literal button types admitted by `"non-interactive-or-button"`. */
   readonly buttonTypes?: readonly string[];
+  /**
+   * Literal `<input>` types admitted in either mode, for a controller that composes
+   * with that input's own activation instead of replacing it. A missing or empty
+   * type reads as `text`; any type not listed, an invalid one included, is not
+   * admitted.
+   */
+  readonly inputTypes?: readonly string[];
   /** Human-readable fix suggestion shown by the CLI (stage 4). */
   readonly suggestion: string;
 }
