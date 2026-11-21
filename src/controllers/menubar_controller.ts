@@ -63,11 +63,9 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  * show is native `Tab`/`Shift+Tab`: the browser walks the DOM, so `Shift+Tab` out of
  * a menu lands on the owning top item only while the menu follows it — write the
  * conventional owner-then-menu order to get the destinations described here. Menu
- * placement and viewport-edge collision are out of scope — static placement is the
- * consumer's CSS, and dynamic placement is delegated to the opt-in
- * `stimeo-ui/positioning` module (never imported here, keeping the core
- * zero-dependency). Roving mechanics across the top items are delegated to
- * `RovingTabindex`.
+ * placement is the consumer's CSS. For dynamic placement and viewport-edge collision
+ * avoidance, use the opt-in `stimeo-ui/positioning` module. Roving mechanics
+ * across the top items are delegated to `RovingTabindex`.
  *
  * Focus-restoration contract: closing via `Escape` or an item activation returns
  * focus to the owning top item; `Tab` and an outside click deliberately do **not**

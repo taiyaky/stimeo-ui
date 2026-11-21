@@ -84,7 +84,7 @@ describe("TabindexLoan", () => {
       expect(element.hasAttribute("tabindex")).toBe(false);
     });
 
-    it("retains a focused restored loan for a later returnAll without lending it again", () => {
+    it("protects a focused restored loan from reclamation until its later returnAll", () => {
       const protectedLoan = new TabindexLoan("0", "stimeo--protected", { preserveFocus: true });
       protectedLoan.lend(element);
       const copy = element.cloneNode(true) as HTMLElement;
@@ -94,6 +94,9 @@ describe("TabindexLoan", () => {
       expect(restored.return(copy)).toBe(false);
       expect(copy.getAttribute("tabindex")).toBe("0");
       copy.blur();
+      new TabindexLoan("0", "stimeo--protected").reclaim(copy);
+      expect(copy.getAttribute("tabindex")).toBe("0");
+      expect(copy.getAttribute("data-stimeo--protected-tabindex-loan")).toBe("0");
       restored.returnAll();
       expect(copy.hasAttribute("tabindex")).toBe(false);
       expect(copy.hasAttribute("data-stimeo--protected-tabindex-loan")).toBe(false);
@@ -277,14 +280,16 @@ describe("TabindexLoan records", () => {
     document.body.innerHTML = "";
   });
 
-  it("adopts its owner's loan on a restored clone, and gives it back", () => {
+  it("protects an adopted restored loan from reclamation until it gives it back", () => {
     const element = document.createElement("div");
     new TabindexLoan("-1", OWNER).lend(element);
     const restored = element.cloneNode() as HTMLElement;
     const loan = new TabindexLoan("-1", OWNER);
 
     loan.lend(restored);
+    new TabindexLoan("-1", OWNER).reclaim(restored);
     expect(restored.getAttribute("tabindex")).toBe("-1");
+    expect(restored.getAttribute(RECORD)).toBe("-1");
     loan.returnAll();
 
     expect(restored.hasAttribute("tabindex")).toBe(false);
@@ -475,6 +480,28 @@ describe("TabindexLoan records", () => {
       focusable.returnAll();
 
       expect(element.hasAttribute("tabindex")).toBe(false);
+    });
+
+    it("does not rewrite a returned tabindex that the lower loan also holds", () => {
+      for (const [coverValue, mutations] of [
+        ["-1", 0],
+        ["0", 1],
+      ] as const) {
+        const element = document.createElement("div");
+        const lower = new TabindexLoan("-1", OWNER);
+        const upper = new TabindexLoan(coverValue, OTHER);
+        lower.lend(element);
+        upper.lend(element);
+        const observer = new MutationObserver(() => {});
+        observer.observe(element, { attributes: true, attributeFilter: ["tabindex"] });
+
+        upper.return(element);
+
+        expect(element.getAttribute("tabindex")).toBe("-1");
+        expect(observer.takeRecords()).toHaveLength(mutations);
+        observer.disconnect();
+        lower.returnAll();
+      }
     });
 
     it("keeps the tabindex on a restored copy until the last owner's recorded loan is reclaimed", () => {

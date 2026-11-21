@@ -105,7 +105,10 @@ export class OwnedText<T extends HTMLElement = HTMLElement> {
     );
   }
 
-  /** Empties an owned slot and releases its evidence. */
+  /**
+   * Empties an owned slot and releases its evidence.
+   * An already empty string receives no property assignment.
+   */
   clear(element: T, evidence: TextEvidence = {}): boolean {
     if (!this.owns(element, evidence)) return false;
     if (this.#current(element) !== "") this.#put(element, "");
@@ -113,7 +116,10 @@ export class OwnedText<T extends HTMLElement = HTMLElement> {
     return true;
   }
 
-  /** Restores an owned slot's original string and releases its evidence. */
+  /**
+   * Restores an owned slot's original string and releases its evidence.
+   * A string already matching the original receives no property assignment.
+   */
   restore(element: T, evidence: TextEvidence = {}): boolean {
     const record = this.#ownedRecord(element, evidence);
     if (record === null) return false;

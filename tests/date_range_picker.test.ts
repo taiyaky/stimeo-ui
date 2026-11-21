@@ -1057,15 +1057,18 @@ describe("DateRangePickerController", () => {
     expect(cell("2026-06-18").getAttribute("tabindex")).toBe("0");
   });
 
-  it("re-rolls the roving tab stop when focus lands on a non-stop cell", async () => {
+  it("moves the roving tab stop without replacing the focused day label", async () => {
     await mount();
-    expect(cell("2026-06-10").getAttribute("tabindex")).toBe("0"); // initial stop
+    expect(cell("2026-06-10").getAttribute("tabindex")).toBe("0");
+    const day = cell("2026-06-12");
+    const label = day.firstChild;
+    expect(label?.textContent).toBe("12");
 
-    // External focus (Tab / click / programmatic) onto a different, non-stop cell
-    // must move the roving tab stop to it, not leave it stale until the next paint.
-    cell("2026-06-15").dispatchEvent(new FocusEvent("focus"));
-    expect(cell("2026-06-15").getAttribute("tabindex")).toBe("0");
+    day.focus();
+
+    expect(day.getAttribute("tabindex")).toBe("0");
     expect(cell("2026-06-10").getAttribute("tabindex")).toBe("-1");
+    expect(day.firstChild).toBe(label);
   });
 
   it("leaves the roving stop untouched when focus lands on the current stop", async () => {
@@ -1370,9 +1373,12 @@ describe("DateRangePickerController", () => {
   it("renders a localized month label and navigates with prev/next", async () => {
     await mount();
     expect(monthLabel().textContent).toBe("June 2026");
+    const reusedCell = cell("2026-06-19");
+    expect(reusedCell.textContent).toBe("19");
     navButton("prev").dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(monthLabel().textContent).toBe("May 2026");
-    expect(cell("2026-05-15")).not.toBeNull();
+    expect(cell("2026-05-15")).toBe(reusedCell);
+    expect(reusedCell.textContent).toBe("15");
     navButton("next").dispatchEvent(new MouseEvent("click", { bubbles: true }));
     navButton("next").dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(monthLabel().textContent).toBe("July 2026");
@@ -2627,8 +2633,8 @@ describe("DateRangePickerController", () => {
     });
 
     it("keeps working when its only month label, field or grid leaves", async () => {
+      // Any error Stimulus catches here fails the test (tests/setup/fatal-stimulus-errors.ts).
       await mount();
-      const handleError = vi.spyOn(application, "handleError").mockImplementation(() => {});
 
       monthLabel().remove();
       field("start").remove();
@@ -2637,8 +2643,6 @@ describe("DateRangePickerController", () => {
       next();
       grid().remove();
       await tick();
-
-      expect(handleError).not.toHaveBeenCalled();
     });
 
     it("writes nothing into targets that stay once disconnected", async () => {

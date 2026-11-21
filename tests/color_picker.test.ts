@@ -120,14 +120,6 @@ describe("ColorPickerController", () => {
     document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, ...init }));
   const pointerUp = (init: PointerEventInit = {}) =>
     document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, ...init }));
-  /** Collects errors Stimulus catches, so a throwing handler is not silently green. */
-  const captureErrors = () => {
-    const errors: unknown[] = [];
-    application.handleError = (error) => {
-      errors.push(error);
-    };
-    return errors;
-  };
 
   /** A hue-only picker whose range attributes are supplied verbatim by the case. */
   const startWithHueRange = async (range: string) => {
@@ -388,6 +380,18 @@ describe("ColorPickerController", () => {
 
     expect(slider("lightness").getAttribute("aria-valuenow")).toBe("40");
     expect(event.defaultPrevented).toBe(true);
+  });
+
+  it.each([
+    ["#ffff00", "61", "#fbff00"],
+    ["#0000ff", "241", "#0400ff"],
+    ["#ff00ff", "301", "#ff00fb"],
+  ])("reflects a hue step from %s", async (initial, hue, expected) => {
+    await start(`data-stimeo--color-picker-value-value="${initial}"`);
+    press(slider("hue"), "ArrowRight");
+    expect(slider("hue").getAttribute("aria-valuenow")).toBe(hue);
+    expect(hex().value).toBe(expected);
+    expect(field().value).toBe(expected);
   });
 
   it("leaves a modified arrow to the browser", async () => {
@@ -941,7 +945,6 @@ describe("ColorPickerController", () => {
 
   it("ignores a slider whose data-channel is not a channel", async () => {
     await start('data-stimeo--color-picker-value-value="#ff0000"');
-    const errors = captureErrors();
     const stray = track("saturation");
     stray.setAttribute("data-channel", "chroma");
 
@@ -950,14 +953,12 @@ describe("ColorPickerController", () => {
     press(slider("hue"), "ArrowRight"); // a repaint that must skip the stray slider
 
     expect(stray.getAttribute("aria-valuenow")).toBe("100");
-    expect(errors).toEqual([]);
   });
 
   it("ignores a slider whose data-channel names an inherited object key", async () => {
     // `toString` lives on Object.prototype: a prototype-aware lookup would index
     // the model with a function and announce its source.
     await start('data-stimeo--color-picker-value-value="#ff0000"');
-    const errors = captureErrors();
     const stray = track("saturation");
     stray.setAttribute("data-channel", "toString");
 
@@ -967,7 +968,6 @@ describe("ColorPickerController", () => {
 
     expect(stray.getAttribute("aria-valuenow")).toBe("100");
     expect(stray.getAttribute("aria-valuetext")).toBe("Saturation 100 percent");
-    expect(errors).toEqual([]);
   });
 
   it("survives a hex confirmation when the markup has no hex input", async () => {
@@ -982,13 +982,11 @@ describe("ColorPickerController", () => {
     application = Application.start();
     application.register("stimeo--color-picker", ColorPickerController);
     await tick();
-    const errors = captureErrors();
 
     const input = document.querySelector("input") as HTMLInputElement;
     input.value = "#00ff00";
     input.dispatchEvent(new Event("change", { bubbles: true }));
 
-    expect(errors).toEqual([]);
     expect(slider("hue").getAttribute("aria-valuenow")).toBe("0");
   });
 
@@ -1553,12 +1551,10 @@ describe("ColorPickerController", () => {
 
     it("keeps working when its only hex input leaves", async () => {
       await start('data-stimeo--color-picker-value-value="#ff0000"');
-      const errors = captureErrors();
       hex().remove();
       await tick();
       press(slider("hue"), "ArrowRight");
 
-      expect(errors).toEqual([]);
       expect(field().value).toBe("#ff0400");
     });
 

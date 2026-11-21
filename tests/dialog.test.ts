@@ -75,7 +75,7 @@ describe("DialogController", () => {
     expect(dialog().hidden).toBe(true);
   });
 
-  it("writes nothing after a morph once disconnected", async () => {
+  it("leaves the mock morph's hidden change in place after unload", async () => {
     application.unload("stimeo--dialog");
     await morph(dialog(), { hidden: null });
     expect(dialog().hidden).toBe(false);
@@ -335,7 +335,7 @@ describe("DialogController", () => {
       expect(document.getElementById("background")?.hasAttribute("inert")).toBe(false);
     });
 
-    it("keeps the live trap when the close handler reopens it", () => {
+    it("keeps the dialog open and body scroll locked when a close handler reopens it", () => {
       controller().open();
       root().addEventListener("stimeo--dialog:close", () => controller().open());
 
@@ -393,10 +393,6 @@ describe("DialogController", () => {
           <button id="trigger" data-stimeo--dialog-target="trigger">Open</button>
         </div>`;
       application = Application.start();
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       application.register("stimeo--dialog", DialogController);
       await tick();
       const root = document.querySelector("[data-controller='stimeo--dialog']") as HTMLElement;
@@ -405,7 +401,6 @@ describe("DialogController", () => {
 
       controller.open();
 
-      expect(errors).toEqual([]);
       expect(document.body.style.overflow).toBe("");
       expect(document.getElementById("background")?.inert).toBe(false);
     });
@@ -421,11 +416,22 @@ describe("DialogController", () => {
       if (!(instance instanceof DialogController)) throw new Error("dialog controller not found");
       return instance;
     };
-    /** A server-rendered copy of the dialog, closed as the markup contract authors it. */
+    /** A closed dialog copy with unique IDs and a matching label reference. */
     const dialogCopy = (): HTMLElement => {
       const copy = dialog().cloneNode(true) as HTMLElement;
       for (const element of [copy, ...Array.from(copy.querySelectorAll<HTMLElement>("[id]"))]) {
         if (element.id) element.id = `copy-${element.id}`;
+      }
+      const labelledBy = copy.getAttribute("aria-labelledby");
+      if (labelledBy) {
+        copy.setAttribute(
+          "aria-labelledby",
+          labelledBy
+            .trim()
+            .split(/\s+/)
+            .map((id) => `copy-${id}`)
+            .join(" "),
+        );
       }
       copy.hidden = true;
       return copy;
@@ -570,10 +576,12 @@ describe("DialogController", () => {
       dialog().replaceWith(dialogCopy());
       await tick();
       const original = dialog();
-      original.after(dialogCopy());
+      const successor = dialogCopy();
+      original.after(successor);
       await tick();
       original.remove();
       await tick();
+      expect(successor.getAttribute("aria-labelledby")).toBe(successor.querySelector("h2")?.id);
       dialog().remove();
       await tick();
 

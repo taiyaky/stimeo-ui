@@ -84,6 +84,8 @@ export interface TransitionWaitOptions {
 
 /**
  * Owns one cancellable wait for an element's CSS transitions to settle.
+ * Cancelled and completed waits release the element and completion callback, so
+ * an idle instance retains neither.
  *
  * When available, active CSS transitions provide their expanded property names.
  * Tracking those names lets shorthand declarations settle from their longhand
@@ -94,11 +96,10 @@ export interface TransitionWaitOptions {
  * re-read before completing and adopted when it is not yet empty. Without Web
  * Animations data, explicit transition properties retain the declared-property
  * behavior and the ambiguous `transition-property: all` form waits until the
- * computed maximum wall-clock time. A `max + 50ms` timeout is always armed
- * because browsers emit no terminal event when a property never transitions, an
- * ancestor disappears, or rendering is otherwise interrupted; a consumer with
- * better knowledge can replace that fallback via
- * {@link TransitionWaitOptions.timeoutMs}.
+ * computed maximum wall-clock time. Pending waits use a `max + 50ms` timeout
+ * because rendering can stop without a terminal event. A positive
+ * {@link TransitionWaitOptions.timeoutMs} replaces the fallback. A zero-time
+ * transition without an override completes synchronously.
  */
 export class TransitionCompletion {
   readonly #timers = new SafeTimeout();
@@ -142,7 +143,7 @@ export class TransitionCompletion {
     this.#timers.set(() => this.#finish(), override > 0 ? override : maximum + 50);
   }
 
-  /** Cancels the pending wait without invoking its completion callback. */
+  /** Cancels the pending wait and releases its element and callback without invoking it. */
   cancel(): void {
     this.#complete = null;
     this.#teardown();

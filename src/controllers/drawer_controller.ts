@@ -216,7 +216,10 @@ export class DrawerController extends Controller<HTMLElement> {
     this.#morphRender.schedule();
   }
 
-  /** Keeps `data-placement` in sync if the value changes at runtime. */
+  /**
+   * Reflects runtime placement changes. On a connected drawer this also keeps the
+   * panel and overlay in the current open or closing state without restarting the trap.
+   */
   placementValueChanged(): void {
     if (this.#connected) this.#repair();
     else this.#reflectPlacement();

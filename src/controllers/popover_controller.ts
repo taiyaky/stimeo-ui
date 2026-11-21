@@ -30,8 +30,8 @@ import { type StateReason, stateReasonFor } from "../utils/state_reason";
  * @remarks
  * Behavior only — static placement is the consumer's CSS, and dynamic
  * edge-collision avoidance is delegated to the opt-in `stimeo-ui/positioning`
- * module (this controller never imports it, preserving the zero-dep core). State
- * is exposed via the trigger's `aria-expanded` and the panel's `hidden`.
+ * module. State is exposed via the trigger's `aria-expanded` and the panel's
+ * `hidden`.
  *
  * Behavior provided:
  * - Click the trigger to toggle (`aria-expanded` + `hidden` reflect state).

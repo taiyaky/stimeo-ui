@@ -119,7 +119,8 @@ export function applyMask(
       tokenFlags.push(false);
       // The literal is already in the output, so the typed character only has to
       // be the one that renders it — in either width.
-      if (halfWidthChar(value[valueIndex] ?? "") === halfWidthChar(patternChar)) valueIndex += 1;
+      const literal = value.slice(valueIndex, valueIndex + patternChar.length);
+      if (halfWidthChar(literal) === halfWidthChar(patternChar)) valueIndex += patternChar.length;
     }
   }
 
@@ -177,15 +178,21 @@ function deletionOf(event: Event | undefined): Deletion | null {
   return inputType.endsWith("Forward") ? "forward" : "backward";
 }
 
-/** The offset of the `n`-th token char in a masked string, or `-1` when there is none. */
-function tokenCharOffset(tokenFlags: readonly boolean[], n: number): number {
-  let seen = 0;
-  for (let i = 0; i < tokenFlags.length; i += 1) {
-    if (!tokenFlags[i]) continue;
-    seen += 1;
-    if (seen === n) return i;
+/** The string code-unit offset before the next token after `tokensBefore` slots, or the end. */
+function tokenBoundary(
+  pattern: string,
+  tokenFlags: readonly boolean[],
+  tokensBefore: number,
+): number {
+  const characters = pattern[Symbol.iterator]();
+  let offset = 0;
+  for (const token of tokenFlags) {
+    if (token && tokensBefore === 0) break;
+    const character = characters.next().value ?? "";
+    if (token) tokensBefore -= 1;
+    offset += token ? 1 : character.length;
   }
-  return -1;
+  return offset;
 }
 
 /**
@@ -225,9 +232,9 @@ function tokenCharOffset(tokenFlags: readonly boolean[], n: number): number {
  * the caret on insert, Backspace, and range replacement (WCAG 2.2 3.3.2 / 1.3.5;
  * the expected format is the consumer's `aria-describedby`). The caret anchors on
  * the token slots the text before it fills, so a rejected character leaves it
- * exactly where it was. Backspace and Delete always progress: when the keystroke
- * only removed literals the mask re-inserts, the significant character it aimed at
- * goes instead. Events fired mid-IME-composition are ignored; the confirmed text is
+ * exactly where it was. If a deletion removes only literals that the mask restores,
+ * it removes the adjacent token character in the deletion direction when one exists.
+ * Events fired mid-IME-composition are ignored; the confirmed text is
  * formatted once on `compositionend`. A `pattern` / `tokens` / `unmaskToHidden`
  * change that arrives mid-composition leaves the uncommitted text alone and applies
  * with that same format: as the user's `change` when the composition committed
@@ -471,13 +478,12 @@ export class InputMaskController extends Controller<HTMLInputElement> {
     let anchor = this.#significantBefore(raw.slice(0, caret));
     let result = applyMask(raw, this.patternValue, this.#tokens);
 
-    // A deletion that only took literals the mask re-inserts would land back on
-    // the value it started from, so that keystroke could never delete anything:
-    // drop the significant character it aimed at instead.
+    // If masking restores the deleted literals, remove the adjacent token
+    // character in the deletion direction when one exists.
     if (deletion !== null && result.masked === this.#lastValue) {
       const target = deletion === "backward" ? anchor : anchor + 1;
-      const offset = tokenCharOffset(result.tokenFlags, target);
-      if (offset >= 0) {
+      const offset = tokenBoundary(this.patternValue, result.tokenFlags, target - 1);
+      if (offset < result.masked.length) {
         anchor = target - 1;
         result = applyMask(
           result.masked.slice(0, offset) + result.masked.slice(offset + 1),
@@ -497,7 +503,7 @@ export class InputMaskController extends Controller<HTMLInputElement> {
 
     if (input.value !== result.masked) {
       input.value = result.masked;
-      this.#restoreCaret(result.tokenFlags, anchor);
+      this.#restoreCaret(tokenBoundary(this.patternValue, result.tokenFlags, anchor));
     }
     this.#publish(result, result.masked);
 
@@ -604,24 +610,8 @@ export class InputMaskController extends Controller<HTMLInputElement> {
     return applyMask(prefix, this.patternValue, this.#tokens).unmasked.length;
   }
 
-  /** Places the caret after the `n`-th token char (skipping following literals). */
-  #restoreCaret(tokenFlags: readonly boolean[], n: number): void {
-    let position: number;
-    if (n <= 0) {
-      // Sit after any leading literals, before the first token slot.
-      let i = 0;
-      while (i < tokenFlags.length && !tokenFlags[i]) i += 1;
-      position = i;
-    } else {
-      const offset = tokenCharOffset(tokenFlags, n);
-      if (offset < 0) {
-        position = tokenFlags.length;
-      } else {
-        let j = offset + 1;
-        while (j < tokenFlags.length && !tokenFlags[j]) j += 1;
-        position = j;
-      }
-    }
+  /** Restores a collapsed caret at a code-unit offset in the masked string. */
+  #restoreCaret(position: number): void {
     try {
       this.element.setSelectionRange(position, position);
     } catch {

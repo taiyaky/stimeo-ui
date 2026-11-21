@@ -23,7 +23,7 @@ const RATIO_EPSILON = 0.01;
  * scroll-driven behavior — loading more on approach, "animate when visible"
  * (compose it with `stimeo--count-up`), progress and sticky-header work — so a
  * consumer does not write its own observer. No APG widget — a pure
- * state-detection utility. Core (zero dependencies).
+ * state-detection utility.
  *
  * Markup contract (identifier: `stimeo--intersection`):
  *   <div data-controller="stimeo--intersection"

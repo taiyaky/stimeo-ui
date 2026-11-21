@@ -2164,15 +2164,10 @@ describe("SidebarController", () => {
 
     it("keeps working when the only trigger leaves", async () => {
       await start();
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       trigger().remove();
       await tick();
       controller().toggle();
 
-      expect(errors).toEqual([]);
       expect(panel().getAttribute("data-state")).toBe("collapsed");
     });
 
@@ -2348,16 +2343,11 @@ describe("SidebarController", () => {
     it("keeps working when the only backdrop leaves", async () => {
       viewportWidth = 600;
       await start();
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       controller().open();
       backdrop().remove();
       await tick();
       controller().close();
 
-      expect(errors).toEqual([]);
       expect(panel().getAttribute("data-state")).toBe("closed");
       expect(document.body.style.overflow).toBe("");
     });

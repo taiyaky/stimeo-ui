@@ -59,6 +59,23 @@ describe("FormDataProjection", () => {
       ["same", "after"],
     ]);
   });
+  it("holds a field outside any form and retains its identity on a repeated hold", () => {
+    document.body.innerHTML = '<input name="same" type="hidden" value="raw">';
+    const field = query<HTMLInputElement>("input");
+    const projection = hold();
+    expect(field.form).toBeNull();
+
+    expect(() => projection.hold(field, () => "projected")).not.toThrow();
+    const key = field.name;
+    expect(projectedFieldName(key)).toBe("same");
+
+    expect(() => projection.hold(field, () => "replacement")).not.toThrow();
+    expect(field.name).toBe(key);
+    expect(field.value).toBe("raw");
+
+    projection.release();
+    expect(field.name).toBe("same");
+  });
   it("does not let a prior writer release a newer writer's identity", () => {
     const { form, field } = fixture();
     const older = hold();

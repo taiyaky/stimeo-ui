@@ -437,6 +437,25 @@ describe("FormFieldController dynamic reconciliation", () => {
     expect(root().hasAttribute("data-stimeo--form-field-invalid")).toBe(false);
   });
 
+  it("reconciles an isolated change of the description id", async () => {
+    description().id = "description-b";
+    await tick();
+    expect(control()?.getAttribute("aria-describedby")).toBe("external-hint description-b");
+  });
+
+  it("adopts authored descriptions changed while the same control is detached", async () => {
+    const field = root();
+    const input = control() as HTMLInputElement;
+    field.remove();
+    await tick();
+    expect(input.getAttribute("aria-describedby")).toBe("external-hint external-hint");
+
+    input.setAttribute("aria-describedby", "updated-hint");
+    document.body.append(field);
+    await tick();
+    expect(input.getAttribute("aria-describedby")).toBe("updated-hint description-a");
+  });
+
   it("keeps the invalid request but not the message when the error target is exchanged", async () => {
     // Error targets are displays the page owns: an exchanged one shows its own content,
     // and the explicit request survives only as the invalid state.
@@ -507,6 +526,23 @@ describe("FormFieldController dynamic reconciliation", () => {
     expect(input.getAttribute("aria-invalid")).toBe("spelling");
     expect(input.getAttribute("aria-errormessage")).toBe("legacy-error");
     expect(input.getAttributeNames().filter((name) => name.endsWith("-lease"))).toEqual([]);
+  });
+
+  it("restores an explicit invalid request without a visual error target", async () => {
+    controller().setError("Required.");
+    error().remove();
+    await tick();
+
+    application = await restoreFromCache(application, (restored) =>
+      restored.register("stimeo--form-field", FormFieldController),
+    );
+
+    expect(control()?.getAttribute("aria-invalid")).toBe("true");
+    expect(control()?.hasAttribute("aria-errormessage")).toBe(false);
+    expect(root().hasAttribute("data-stimeo--form-field-invalid")).toBe(true);
+
+    controller().clearError();
+    expect(control()?.getAttribute("aria-invalid")).toBe("false");
   });
 
   it("drops a queued reconciliation when it disconnects", async () => {

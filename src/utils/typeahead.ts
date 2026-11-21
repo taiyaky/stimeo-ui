@@ -23,11 +23,8 @@
  *   narrowing: `s`, `s`, `e` searches `"se"`, not the dead `"sse"` that no label
  *   can match. Growing the query instead leaves the widget frozen on exactly
  *   that sequence, which is why the choice is made here and not per widget.
- * - **`aria-label` wins over text**, so type-ahead matches what a screen reader
- *   announces — but only when it contributes a name. A blank (empty or
- *   whitespace-only) one is skipped, because accname skips it too: honoring it
- *   would leave an element that AT announces by its text unreachable by that
- *   text. This mirrors the accessible-name computation rather than the raw text.
+ * - **A nonblank `aria-label` takes precedence.** Otherwise the search uses
+ *   the label text supplied by the caller or the element's text.
  * - **`Space` and composition input are never type-ahead.** `Space` natively
  *   activates a `<button>`-based item, and characters still being composed are
  *   not a committed query.
@@ -58,8 +55,6 @@ export class Typeahead {
   readonly #resetMs: number;
   /** The accumulated lowercase query, empty when idle. */
   #query = "";
-  /** Id of the pending reset timer, `0` when none is scheduled. */
-  #timerId = 0;
 
   /** @param options - Overrides for the idle window. */
   constructor({ resetMs = TYPEAHEAD_RESET_MS }: TypeaheadOptions = {}) {
@@ -79,16 +74,15 @@ export class Typeahead {
     const char = key.toLowerCase();
     const repeated = this.#query.length > 0 && [...this.#query].every((c) => c === char);
     this.#query = repeated ? char : this.#query + char;
-    this.#timers.clear(this.#timerId);
-    this.#timerId = this.#timers.set(() => this.reset(), this.#resetMs);
+    this.#timers.clearAll();
+    this.#timers.set(() => this.reset(), this.#resetMs);
     return this.#query;
   }
 
   /** Clears the query and cancels the pending idle reset. */
   reset(): void {
     this.#query = "";
-    this.#timers.clear(this.#timerId);
-    this.#timerId = 0;
+    this.#timers.clearAll();
   }
 }
 

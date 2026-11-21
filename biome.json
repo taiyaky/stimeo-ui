@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!**/dist", "!**/node_modules"]
+    "includes": ["**", "!**/dist", "!**/.dist-next", "!**/.stimeo-watch", "!**/node_modules"]
   },
   "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "linter": {

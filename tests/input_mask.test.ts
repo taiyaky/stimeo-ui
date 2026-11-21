@@ -102,6 +102,13 @@ describe("applyMask", () => {
     expect(applyMask("＋８１－１２", "+81-99", NUMERIC).masked).toBe("+81-12");
     expect(applyMask("+81-12", "+81-99", NUMERIC).masked).toBe("+81-12");
   });
+
+  it("consumes an emoji literal before a token that accepts any code unit", () => {
+    const result = applyMask("💡ab", "💡**", tokenMap({ "*": "." }));
+    expect(result.masked).toBe("💡ab");
+    expect(result.unmasked).toBe("ab");
+    expect(result.complete).toBe(true);
+  });
 });
 
 describe("InputMaskController", () => {
@@ -295,6 +302,41 @@ describe("InputMaskController", () => {
     expect(input().hasAttribute("data-mask-empty")).toBe(false);
   });
 
+  it("deletes the next token and keeps the caret after emoji literals", async () => {
+    await start(ZIP.replace("999-9999", "💡💡99-aa"));
+    type("12bc");
+    expect(input().value).toBe("💡💡12-bc");
+    expect(input().selectionStart).toBe("💡💡12-bc".length);
+
+    const events = record();
+    edit("💡💡12bc", "💡💡12".length, "deleteContentForward");
+
+    expect(input().value).toBe("💡💡12-c");
+    expect(input().selectionStart).toBe("💡💡12-".length);
+    expect(input().selectionEnd).toBe("💡💡12-".length);
+    expect(hidden().value).toBe("12c");
+    expect(events).toEqual([
+      { event: "change", detail: { masked: "💡💡12-c", unmasked: "12c", complete: false } },
+    ]);
+  });
+
+  it("keeps the caret after the accepted token when its placeholder is an emoji", async () => {
+    await start(
+      ZIP.replace("999-9999", "💡99").replace(
+        'data-action="input',
+        'data-stimeo--input-mask-tokens-value=\'{"💡":"[A-Z]"}\' data-action="input',
+      ),
+    );
+    type("Q12");
+    expect(input().value).toBe("Q12");
+
+    edit("Qx12", 2, "insertText");
+
+    expect(input().value).toBe("Q12");
+    expect(input().selectionStart).toBe(1);
+    expect(hidden().value).toBe("Q12");
+  });
+
   it("keeps the caret at the end while typing sequentially", async () => {
     await start(ZIP);
     type("1234");
@@ -315,6 +357,16 @@ describe("InputMaskController", () => {
       expect(input().selectionStart).toBe(4);
     }
     expect(log).toEqual([]);
+  });
+
+  it("keeps the caret after the leading literal when the first token rejects a character", async () => {
+    await start(ZIP.replace("999-9999", "+999-9999"));
+    input().focus();
+    type("1234567");
+    edit("+x123-4567", 2, "insertText");
+
+    expect(input().value).toBe("+123-4567");
+    expect(input().selectionStart).toBe(1);
   });
 
   it("keeps the caret after the inserted digit when a literal also matches a token", async () => {
@@ -1231,7 +1283,7 @@ describe("InputMaskController", () => {
     expect(log.map((entry) => entry.event)).toEqual(["change"]);
   });
 
-  it("holds nothing when a move keeping focus changes nothing, with Values left at their defaults", async () => {
+  it("holds nothing when a move keeps focus and leaves the mask configuration unchanged", async () => {
     await start(ZIP);
     type("123");
     const log = record();
@@ -1825,7 +1877,7 @@ describe("InputMaskController", () => {
     expect(hidden().value).toBe("");
   });
 
-  it("keeps its raw value while Turbo carries a permanent field to the next page", async () => {
+  it("keeps its raw value when a permanent field is detached and reinserted", async () => {
     await start(`
       <div id="carried" data-turbo-permanent>${maskField("i")}</div>
       <input id="hidden" type="hidden" data-stimeo--input-mask-unmask="i">`);

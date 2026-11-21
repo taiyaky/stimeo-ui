@@ -4,7 +4,7 @@
  * Every Escape-dismissable overlay layer (modal focus traps, disclosure
  * overlays like dropdown/popover/menu, and hover-triggered transient layers)
  * registers here while it is open. One document-level listener per document
- * resolves each press to exactly one owner and invokes that layer's
+ * offers each eligible press to the active layers and invokes the first claimant's
  * {@link EscapeLayerOptions.onDismiss} — controllers never listen for a
  * dismissing Escape themselves.
  *
@@ -94,6 +94,7 @@ export class EscapeLayer {
    * Re-activating an already-active layer moves it to the top.
    */
   activate(ownerDocument: Document = document, options: EscapeLayerOptions): void {
+    const entry = { onDismiss: options.onDismiss, claims: options.claims ?? null };
     this.deactivate();
     let registry = EscapeLayer.#registries.get(ownerDocument);
     if (!registry) {
@@ -101,7 +102,6 @@ export class EscapeLayer {
       EscapeLayer.#registries.set(ownerDocument, registry);
       ownerDocument.addEventListener("keydown", registry.onKeydown);
     }
-    const entry = { onDismiss: options.onDismiss, claims: options.claims ?? null };
     registry.stack.push(entry);
     this.#active = { document: ownerDocument, entry };
   }

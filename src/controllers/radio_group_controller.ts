@@ -409,11 +409,7 @@ export class RadioGroupController extends Controller<HTMLElement> {
   #releaseRadio(radio: HTMLElement): void {
     this.#managedRadios.delete(radio);
     const original = this.#originalTabindex.get(radio);
-    if (original === null) {
-      this.#writeAttribute(radio, "tabindex", null);
-    } else if (original !== undefined) {
-      this.#writeAttribute(radio, "tabindex", original);
-    }
+    if (original !== undefined) this.#writeAttribute(radio, "tabindex", original);
     this.#originalTabindex.delete(radio);
     if (this.#ownedChecked.delete(radio)) {
       this.#writeAttribute(radio, "aria-checked", null);

@@ -58,11 +58,11 @@ import { TemplateRow } from "../utils/template_row";
  *     </template>
  *   </div>
  *
- * Implements the WAI-ARIA APG **Combobox** pattern in its list-autocomplete,
- * multi-select form. Focus stays on the input; the active option is tracked with
- * `aria-activedescendant` and selection with `aria-selected`. Selected options are
- * mirrored as removable chips. For single selection use `stimeo--listbox` or
- * `stimeo--combobox`; for free-text tags use `stimeo--tags-input`.
+ * Combines an editable combobox with a multiselect listbox and removable chips.
+ * Focus stays on the input while navigating options. `aria-activedescendant`
+ * tracks the active option, and `aria-selected` tracks selection. For single
+ * selection use `stimeo--listbox` or `stimeo--combobox`. For free-text tags use
+ * `stimeo--tags-input`.
  *
  * Behavior provided:
  * - Typing filters options by substring and opens the list; `ArrowDown`/`ArrowUp`
@@ -879,8 +879,10 @@ export class MultiSelectController extends Controller<HTMLElement> {
 
   /** Removes chip `index` and deselects its option, re-homing focus. */
   #removeTagAt(index: number, focus: "neighbor" | "input" = "neighbor"): void {
-    const tag = this.tagTargets[index];
+    const tags = this.tagTargets;
+    const tag = tags[index];
     if (!tag) return;
+    const afterFocus = focus === "neighbor" && tags.length === 1 && this.hasInputTarget;
     const value = tag.dataset.value ?? "";
     // Match by the option's stable value, which falls back to its label when no
     // data-value is present, so a label-keyed chip still finds its option.
@@ -890,7 +892,8 @@ export class MultiSelectController extends Controller<HTMLElement> {
     // Prefer the option's display label for the announcement (e.g. "Apple"),
     // which can differ from its data-value (e.g. "apple").
     this.#refreshRoving();
-    if (!this.#publishSelection(false, option ? this.#optionLabel(option) : value, value)) return;
+    const label = option ? this.#optionLabel(option) : value;
+    if (!this.#publishSelection(false, label, value, "user", afterFocus)) return;
 
     if (focus === "input") {
       this.#focusInput();
@@ -963,6 +966,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     label: string,
     value: string,
     reason: StateReason = "user",
+    afterFocus = false,
   ): boolean {
     const values = this.#values;
     const changed = !this.#sameSelection(this.#selectionValues, values);
@@ -972,7 +976,7 @@ export class MultiSelectController extends Controller<HTMLElement> {
     const token = this.#moves.record();
     if (fieldChanged) commitField(this.fieldsTarget);
     if (!this.#moves.isLatest(token)) return false;
-    this.#announceTransition(selected, label, value, values.length);
+    this.#announceTransition(selected, label, value, values.length, afterFocus);
     if (!this.#moves.isLatest(token)) return false;
     this.dispatch("change", { detail: { values, reason } });
     return this.#moves.isLatest(token);
@@ -988,9 +992,15 @@ export class MultiSelectController extends Controller<HTMLElement> {
    *
    * @stimeoRuntimeOnly The texts word the one announcement of this change.
    */
-  #announceTransition(selected: boolean, label: string, value: string, count: number): void {
+  #announceTransition(
+    selected: boolean,
+    label: string,
+    value: string,
+    count: number,
+    afterFocus = false,
+  ): void {
     const template = selected ? this.announceTextValue : this.announceRemovedTextValue;
-    announce(fillTemplate(template, { label, value, count }));
+    announce(fillTemplate(template, { label, value, count }), { afterFocus });
   }
 
   /** Whether two arrays represent the same selection set, independent of DOM order. */

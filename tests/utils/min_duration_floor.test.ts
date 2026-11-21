@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MinDurationFloor } from "../../src/utils/min_duration_floor";
-import { SafeTimeout } from "../../src/utils/safe_timeout";
+import { TaskTimeout } from "../../src/utils/safe_timeout";
+import { installRecyclingTimers } from "../helpers/timing";
 
 /**
  * Behavioral tests for {@link MinDurationFloor}: the elapsed / not-yet-elapsed
@@ -8,12 +9,12 @@ import { SafeTimeout } from "../../src/utils/safe_timeout";
  * registry contract.
  */
 describe("MinDurationFloor", () => {
-  let timers: SafeTimeout;
+  let timers: TaskTimeout;
   let floor: MinDurationFloor;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    timers = new SafeTimeout();
+    timers = new TaskTimeout();
     floor = new MinDurationFloor(timers);
   });
 
@@ -43,7 +44,7 @@ describe("MinDurationFloor", () => {
     expect(finish).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(finish).toHaveBeenCalledTimes(1);
-    // The id is forgotten once it fires, so a later cancel has nothing to do.
+    /** The task handle expires before the finish callback runs. */
     expect(floor.pending).toBe(false);
   });
 
@@ -54,8 +55,7 @@ describe("MinDurationFloor", () => {
     floor.schedule(500, first);
     vi.advanceTimersByTime(100);
     floor.schedule(500, second);
-    // Only the newest queued id is cancellable, so a stacked timer would outlive
-    // every later cancel and end a state that has since restarted.
+    /** The floor retains one task handle. Scheduling a new finish cancels the pending task. */
     expect(timers.size).toBe(1);
     vi.advanceTimersByTime(500);
     expect(first).not.toHaveBeenCalled();
@@ -94,8 +94,7 @@ describe("MinDurationFloor", () => {
     const finish = vi.fn();
     floor.begin();
     floor.schedule(500, finish);
-    // A controller tearing down clears the whole registry at once; the floor still
-    // has to forget its id so `pending` does not claim a timer that is gone.
+    /** Clearing the registry invalidates the task handle and makes the later cancel safe. */
     timers.clearAll();
     floor.cancel();
     expect(floor.pending).toBe(false);
@@ -121,5 +120,67 @@ describe("MinDurationFloor", () => {
     const finish = vi.fn();
     floor.schedule(0, finish);
     expect(finish).toHaveBeenCalledTimes(1);
+  });
+
+  it("is no longer pending as soon as the borrowed registry clears", () => {
+    floor.begin();
+    floor.schedule(500, vi.fn());
+    timers.clearAll();
+    expect(floor.pending).toBe(false);
+  });
+
+  it("does not cancel another timer reusing its bulk-cleared registration's id", () => {
+    const recycling = installRecyclingTimers();
+    try {
+      floor.begin();
+      floor.schedule(500, vi.fn());
+      timers.clearAll();
+      const other = vi.fn();
+      timers.set(other, 100);
+      expect(recycling.handed).toEqual([recycling.handed[0], recycling.handed[0]]);
+      floor.cancel();
+      vi.advanceTimersByTime(100);
+      expect(other).toHaveBeenCalledOnce();
+    } finally {
+      timers.clearAll();
+      recycling.restore();
+    }
+  });
+
+  it("lets separate floors and an unrelated timer share one registry", () => {
+    const second = new MinDurationFloor(timers);
+    const firstFinished = vi.fn();
+    const secondFinished = vi.fn();
+    const other = vi.fn();
+    floor.begin();
+    second.begin();
+    floor.schedule(200, firstFinished);
+    second.schedule(300, secondFinished);
+    timers.set(other, 100);
+    floor.cancel();
+    expect(floor.pending).toBe(false);
+    expect(second.pending).toBe(true);
+    vi.advanceTimersByTime(300);
+    expect(firstFinished).not.toHaveBeenCalled();
+    expect(secondFinished).toHaveBeenCalledOnce();
+    expect(other).toHaveBeenCalledOnce();
+    expect(second.pending).toBe(false);
+  });
+
+  it("expires the finish before a callback schedules the next floor", () => {
+    const observed: boolean[] = [];
+    const next = vi.fn();
+    floor.begin();
+    floor.schedule(100, () => {
+      observed.push(floor.pending);
+      floor.begin();
+      floor.schedule(200, next);
+    });
+    vi.advanceTimersByTime(100);
+    expect(observed).toEqual([false]);
+    expect(floor.pending).toBe(true);
+    vi.advanceTimersByTime(200);
+    expect(next).toHaveBeenCalledOnce();
+    expect(floor.pending).toBe(false);
   });
 });

@@ -9,16 +9,6 @@ import { captureStateEvents } from "./helpers/state_events";
 import { disconnectAndStopApplication, restoreFromCache } from "./helpers/stimulus";
 import { flushMicrotasks, tick } from "./helpers/timing";
 
-/**
- * Behavioral tests for {@link DrawerController}: the APG modal contract plus the
- * slide-over plumbing — `data-state` sync, `data-placement` reflection, deferred
- * `hidden`, focus trap, overlay-only backdrop close, and teardown reversal.
- *
- * happy-dom reports no transition duration, so ordinary close assertions hide
- * synchronously; dedicated cases stub the full transition tuple to exercise the
- * deferred path, terminal events, fallback, and target replacement.
- */
-
 const markup = (placement = "right") => `
   <p id="background">Background</p>
   <div data-controller="stimeo--drawer" data-stimeo--drawer-placement-value="${placement}">
@@ -63,6 +53,15 @@ const dispatchPanelTransition = (
   panel.dispatchEvent(event);
 };
 
+/**
+ * Behavioral tests for {@link DrawerController}: the APG modal contract,
+ * `data-state` and `data-placement` reflection, deferred hiding, focus trapping,
+ * overlay-only backdrop dismissal, and teardown.
+ *
+ * happy-dom reports no transition duration, so ordinary close assertions hide
+ * synchronously. Dedicated cases stub transition properties to exercise deferred
+ * hiding, terminal events, fallback, and target replacement.
+ */
 describe("DrawerController", () => {
   let application: Application;
 
@@ -109,6 +108,35 @@ describe("DrawerController", () => {
     // getter.
     controller.placementValueChanged();
     expect(panel().getAttribute("data-placement")).toBe("bottom");
+  });
+
+  it("keeps a retained drawer open when a placement update carries stale state", async () => {
+    const root = trigger().parentElement as HTMLElement;
+    const focused = panel().querySelector<HTMLButtonElement>("#close") as HTMLButtonElement;
+    trigger().focus();
+    trigger().click();
+    focused.focus();
+    expect(document.activeElement).toBe(focused);
+    const events = captureStateEvents("stimeo--drawer", ["open", "close"], root);
+
+    panel().setAttribute("data-state", "closed");
+    overlay().setAttribute("data-state", "closed");
+    root.setAttribute("data-stimeo--drawer-placement-value", "bottom");
+    await tick();
+
+    expect(panel().getAttribute("data-placement")).toBe("bottom");
+    expect(panel().getAttribute("data-state")).toBe("open");
+    expect(overlay().getAttribute("data-state")).toBe("open");
+    expect(panel().hidden).toBe(false);
+    expect(overlay().hidden).toBe(false);
+    expect(document.activeElement).toBe(focused);
+    expect(events.names()).toEqual([]);
+
+    keyboardPress(focused, "Escape");
+    expect(panel().hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger());
+    expect(events.names()).toEqual(["close"]);
+    events.stop();
   });
 
   it("reflects data-placement again when it reconnects onto a panel without one", () => {
@@ -205,10 +233,7 @@ describe("DrawerController", () => {
     expect(background.inert).toBe(false);
   });
 
-  it("releases the global keydown listener on disconnect (Escape no longer closes)", () => {
-    // Direct probe that the document-level keydown goes away with the teardown:
-    // a leaked trap listener would still run onEscape -> close() and flip
-    // data-state to "closed" (disconnect leaves the open markup untouched).
+  it("keeps the drawer's open state when Escape is pressed after disconnect", () => {
     const root = document.querySelector("[data-controller='stimeo--drawer']") as HTMLElement;
     trigger().click();
     const controller = application.getControllerForElementAndIdentifier(root, "stimeo--drawer");
@@ -512,8 +537,6 @@ describe("DrawerController", () => {
   );
 
   it("keeps an open drawer and its modal side effects through turbo:before-cache", () => {
-    // Turbo also dispatches the event on a page that stays (a promoted frame
-    // navigation, a popstate without Turbo state, a refresh of a cached URL).
     const background = document.getElementById("background") as HTMLElement;
     trigger().click();
     expect(background.inert).toBe(true);
@@ -1307,16 +1330,11 @@ describe("DrawerController", () => {
     });
 
     it("keeps working when the only overlay leaves", async () => {
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       controller().open();
       overlay().remove();
       await tick();
       controller().close();
 
-      expect(errors).toEqual([]);
       expect(panel().getAttribute("data-state")).toBe("closed");
       expect(document.body.style.overflow).toBe("");
     });

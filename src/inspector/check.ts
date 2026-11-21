@@ -317,8 +317,13 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
     return false;
   };
 
-  /** Controller scope registrations: a node declaring `data-controller`. */
-  const scopes: Array<{ node: ElementNode; identifier: string }> = [];
+  /**
+   * Controller scope registrations: a node declaring `data-controller`, with the
+   * manifest entry of the identifier it declares. Only known identifiers are
+   * registered, so every later stage reads the entry without looking it up again.
+   */
+  const scopes: Array<{ node: ElementNode; identifier: string; controller: ControllerManifest }> =
+    [];
   /** Target names found within each scope, keyed by scope node then identifier. */
   const presence = new Map<ElementNode, Map<string, Set<string>>>();
   /** Target *elements* per scope/identifier/target name, for stage-3 ARIA checks. */
@@ -486,7 +491,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
               diagnostics,
               "unknown-ignore-code",
               "warning",
-              `Unknown diagnostic code "${token}" in ${IGNORE_ATTR}.`,
+              `Unknown diagnostic code "${token.name}" in ${IGNORE_ATTR}.`,
               attr,
               asDidYouMean(best),
               tokenFix(attr, token, best),
@@ -529,8 +534,9 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
       if (attr.name === "data-controller") {
         for (const token of controllerIdentifierTokens(attr.value)) {
           const identifier = token.name;
-          if (identifier in known) {
-            scopes.push({ node, identifier });
+          const controller = known[identifier];
+          if (controller) {
+            scopes.push({ node, identifier, controller });
           } else {
             const best = nearestName(identifier, knownIdentifiers);
             report(
@@ -967,9 +973,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   ): boolean => container.origin === "markup" && !targetsUnreadable(container, scope, identifier);
 
   // --- Stage 2: required targets per scope ---------------------------------
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     const complete = scopeIsComplete(node, node, identifier);
     const present = presence.get(node)?.get(identifier) ?? new Set<string>();
     for (const required of controller.requiredTargets) {
@@ -991,9 +995,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   // *presence* set rather than the element set: the question is only whether the
   // author declared the target anywhere in this scope. A `requireInside` rule is
   // the exception — it asks where the parts sit, so it reads their elements.
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     const complete = scopeIsComplete(node, node, identifier);
     const present = presence.get(node)?.get(identifier) ?? new Set<string>();
     for (const rule of controller.conditionalTargets) {
@@ -1083,9 +1085,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   // takes back. A template holding anything else renders only the part the row
   // covers — or, when the row is not the element that carries the declared
   // target, nothing at all.
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     const complete = scopeIsComplete(node, node, identifier);
     const nodesOf = (target: string): readonly ElementNode[] =>
       targetNodes.get(node)?.get(identifier)?.get(target) ?? [];
@@ -1156,9 +1156,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   // Tab stop while remaining inert because the consumer omitted the one action
   // binding that activates them. The rule checks the exact host and event, not
   // merely the method appearing somewhere else in the controller scope.
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     const wired = wiredActions.get(node)?.get(identifier) ?? [];
     for (const rule of controller.requiredActions) {
       if (conditionHolds(node, identifier, rule.when) !== true) continue;
@@ -1193,9 +1191,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   // An action that opens a state the controller cannot close on its own. The
   // markup is well-formed either way and nothing throws, so the only symptom of
   // a missing exit is a control that never comes back.
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     const wired = wiredActions.get(node)?.get(identifier) ?? [];
     if (wired.length === 0) continue;
     for (const rule of controller.actionCompletion) {
@@ -1223,9 +1219,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   }
 
   // --- Stage 3: accessibility (ARIA) per scope -----------------------------
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     for (const req of controller.a11y) {
       // A conditional requirement only exists in the configuration it names —
       // outside it the attribute is not merely optional but wrong, so an
@@ -1262,9 +1256,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   // --- Stage 3: keyboard prerequisites per scope ---------------------------
   // Declared targets whose contract makes the author responsible for
   // focusability must be natively focusable or carry tabindex/contenteditable.
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     for (const req of controller.keyboard) {
       const reach = req.reach ?? "tab";
       const elements = targetNodes.get(node)?.get(identifier)?.get(req.target) ?? [];
@@ -1295,9 +1287,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
    * Other interactive hosts can duplicate controller-owned key handling or cause
    * an unrelated side effect such as form submission.
    */
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     for (const rule of controller.hosts) {
       const elements =
         rule.target === ""
@@ -1327,9 +1317,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   }
 
   // --- Stage 3: author-futile (controller-managed) attributes --------------
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     for (const rule of controller.managedAria) {
       const elements =
         rule.target === ""
@@ -1360,9 +1348,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   // in one configuration of the element's contents and wrong in the other.
   // Warning severity, because one file at one instant cannot tell a stale
   // declaration from a genuinely in-progress one.
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     for (const rule of controller.forbiddenAria) {
       const elements =
         rule.target === ""
@@ -1402,9 +1388,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   // precisely where the companion's default does not match the host's. An
   // ERB-generated value on either side makes the rule undecidable, so it is
   // skipped rather than guessed at.
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     for (const rule of controller.compositions) {
       const targeted = targetNodes.get(node)?.get(identifier)?.get(rule.target);
       // An absent optional container target falls back to the scope element
@@ -1462,9 +1446,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   // ones. Here the companion carries behavior the host never implements, so its
   // absence is the failure — reported on the element that should have declared
   // it. An ERB-generated `data-controller` is undecidable and skipped.
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     for (const rule of controller.companions) {
       const elements =
         rule.target === ""
@@ -1506,9 +1488,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   // while assistive technology announces it as part of the widget. Ownership
   // goes to the *nearest* enclosing controller of the same identifier, so
   // nested instances judge only their own subtree.
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     if (controller.targetDeclarations.length === 0) continue;
     const targetAttrName = `data-${identifier}-target`;
     for (const rule of controller.targetDeclarations) {
@@ -1546,9 +1526,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
   // first extra element is either ignored forever or normalized away on connect
   // — so the authored source is the only place the mistake is still visible.
   // Counting follows the runtime's own ownership rule: the Stimulus target set.
-  for (const { node, identifier } of scopes) {
-    const controller = known[identifier];
-    if (!controller) continue;
+  for (const { node, identifier, controller } of scopes) {
     for (const rule of controller.cardinality) {
       if (conditionHolds(node, identifier, rule.when) !== true) continue;
       const byName = targetNodes.get(node)?.get(identifier);
@@ -1668,9 +1646,7 @@ export function checkSource(source: string, manifest: Manifest): Diagnostic[] {
 /**
  * The contract on one declared Value, from either field.
  *
- * `valueSyntaxConstraints` is absent from a manifest written before the field
- * existed, so it is read defensively: this engine has to keep checking an older
- * installed manifest, just as an older engine has to keep reading this one.
+ * Reads optional `valueSyntaxConstraints` when the manifest supplies an array.
  */
 function declaredConstraint(
   controller: ControllerManifest | undefined,
@@ -1769,7 +1745,7 @@ const UNRESOLVED_TARGET_HINT =
   "Part of this scope is rendered by a helper or a non-literal data: hash, so the target may exist at runtime.";
 /** See {@link UNRESOLVED_TARGET_HINT}. */
 const UNRESOLVED_HOST_HINT =
-  "An enclosing helper's data: option is not a literal hash, so the host controller may be declared at runtime.";
+  "Generated attributes on the target element or an ancestor may declare the controller at runtime.";
 
 /**
  * Whether the element's *whole* attribute set is readable from the template.

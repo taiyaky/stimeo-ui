@@ -16,6 +16,7 @@ type TemplateState = { source: string; expected: string | null; yielded: boolean
  * a different value yields like an author edit. Releasing returns the original value
  * without forgetting a yield. Attribute values are compared as strings, so an author's
  * identical write cannot be distinguished.
+ * With no intent or lease to return, an empty source leaves the element unchanged.
  */
 export class TemplateAttributeLease<T extends Element = Element> {
   readonly #lease: AttributeLease<T>;

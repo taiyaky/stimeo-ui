@@ -82,7 +82,10 @@ export class ChipRow {
     return this.#entries.at(-1)?.itemIndex ?? -1;
   }
 
-  /** Keeps exactly one button tabbable, preferring the first authored Tab stop. */
+  /**
+   * Keeps exactly one button tabbable, preferring the first authored Tab stop.
+   * A row that already has one zero-tabindex button receives no attribute writes.
+   */
   ensureTabStop(): void {
     const buttons = this.#entries.map(({ button }) => button);
     const active = buttons.findIndex((button) => button.tabIndex === 0);

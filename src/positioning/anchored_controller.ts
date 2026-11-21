@@ -60,8 +60,8 @@ const PLACEMENTS: ReadonlySet<string> = new Set([
  * Behavior only. It does **not** open/close, manage focus, or render an overlay
  * (pair with `stimeo--dialog` / `stimeo--popover` and `stimeo--focus`), and it does
  * **not** move DOM (pair with `stimeo--portal`). It lives in the opt-in
- * `stimeo-ui/positioning` subpath so the core `import "stimeo-ui"` stays
- * zero-dependency; only consumers who register it pull in `@floating-ui/dom`. The
+ * `stimeo-ui/positioning` subpath, which uses the optional peer
+ * `@floating-ui/dom`. The core entry point requires only `@hotwired/stimulus`. The
  * `autoUpdate` cleanup is released on `disconnect()` (Turbo navigation included)
  * so no observer outlives the element, and `#sync` reconciles to a single live
  * observer (keyed on the applied options and elements) so reconnects never stack

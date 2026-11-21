@@ -1,6 +1,7 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AnnouncerController, visuallyHide } from "../src/controllers/announcer_controller";
+import { announce as sendAnnouncement } from "../src/utils/announce";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { captureSpeech } from "./helpers/speech";
@@ -299,6 +300,26 @@ describe("AnnouncerController", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(polite().textContent).toBe("Deleted");
     vi.useRealTimers();
+  });
+
+  it("holds later polite messages in order while focus speech starts", async () => {
+    vi.useFakeTimers();
+    mount();
+    await vi.advanceTimersByTimeAsync(0);
+
+    sendAnnouncement("Removed", { afterFocus: true });
+    announce({ message: "Saved" });
+    sendAnnouncement("Connection lost", { assertive: true, afterFocus: true });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(assertive().textContent).toBe("Connection lost");
+    expect(polite().textContent).toBe("");
+    await vi.advanceTimersByTimeAsync(499);
+    expect(polite().textContent).toBe("");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(polite().textContent).toBe("Removed");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(polite().textContent).toBe("Saved");
   });
 
   it("auto-clears after the default clearAfter", async () => {
@@ -727,13 +748,12 @@ describe("AnnouncerController", () => {
     vi.useRealTimers();
   });
 
-  // The announced text must reach the live region's accessible name.
+  /** The virtual screen reader reads the message from the polite region's contents. */
   it("announces the message text through the live region", async () => {
     await start(`data-stimeo--announcer-clear-after-value="0"`);
     announce({ message: "Profile saved" });
     await tick();
     const spoken = await captureSpeech({ container: polite(), steps: 1 });
-    // The polite region must announce the message text.
     expect(spoken).toContain("Profile saved");
   });
 

@@ -26,8 +26,8 @@ const AUTHORED_VALUE = "value:";
  * keeps it when the server confirms, and **rolls it back** when the submission
  * fails. The pattern: flip the like button instantly; the success response (a
  * Turbo Stream) replaces the fragment with the server truth anyway, so the
- * client only needs the instant flip and the failure rollback. Core (zero
- * dependencies — it rides Turbo's own `turbo:submit-*` events).
+ * client only needs the instant flip and the failure rollback. The controller
+ * listens to Turbo's own `turbo:submit-*` events.
  *
  * Markup contract (identifier: `stimeo--optimistic`):
  *   <form data-controller="stimeo--optimistic" method="post" action="/likes">
@@ -45,16 +45,14 @@ const AUTHORED_VALUE = "value:";
  * explicit tokens. The owner's terminal clears the pending hook and, with
  * `success === true`, dispatches `commit`
  * (the toggled state stays — the server response owns the final DOM), or on
- * failure restores the authored markup and dispatches `rollback`. Ownership is
+ * failure rolls back the attributes it owns and dispatches `rollback`. Ownership is
  * released before either event is dispatched.
  *
- * **Every write records what it displaced.** A target this controller hides or
- * reveals carries the authored `hidden` value in `data-optimistic-toggled`, and
- * the element carries the authored `aria-busy` in `data-optimistic-busy`, so a
- * rollback puts back exactly what the author wrote — not the inverse of whatever
- * the attribute says at that moment. The record lives in the DOM rather than in
- * memory because a Turbo cache snapshot has to carry it: `connect()` is what
- * rewinds a restored page.
+ * Targets changed by the controller carry their authored `hidden` state in
+ * `data-optimistic-toggled`. The root carries its authored `aria-busy` in
+ * `data-optimistic-busy`, with an absent value recorded on a form root where
+ * Turbo owns `aria-busy`. The records travel with a Turbo cache snapshot so
+ * `connect()` can roll back the attributes the controller still owns.
  *
  * @remarks
  * Behavior only — what "optimistic" looks like is the author's markup (the
@@ -63,11 +61,10 @@ const AUTHORED_VALUE = "value:";
  * (optimistic numbers). The listeners are delegated on the element, so a form
  * nested under it (or swapped for a new one) keeps working, and the submission
  * ownership is what keeps a sibling form's terminal from resolving this state.
- * With several submissions in flight the newest start owns the optimistic state,
- * so a submission whose terminal never arrives — its form replaced mid-flight —
- * cannot strand the element. `connect()` is idempotent: a Turbo cache snapshot
- * taken mid-submit is rewound, since no submission can be in flight across a
- * restore, while an in-page move (where the submission *does* survive) keeps it.
+ * Each new start replaces the previous submission's ownership, so only its
+ * matching terminal can commit or roll back the optimistic state.
+ * `connect()` rolls back the pending state in a restored Turbo cache snapshot.
+ * An in-page move keeps a submission in flight and preserves its ownership.
  * On a real detach the listeners go with the element.
  */
 export class OptimisticController extends Controller<HTMLElement> {
@@ -181,7 +178,7 @@ export class OptimisticController extends Controller<HTMLElement> {
   }
 
   /**
-   * Puts back exactly the markup this controller displaced (record-owned only).
+   * Resets the pending state and restores attributes still owned by the controller.
    *
    * A face can be registered on both sides, and the hide pass runs last, so what
    * this controller wrote there is `hidden` — matching it against the reveal's

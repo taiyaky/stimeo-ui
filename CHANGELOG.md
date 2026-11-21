@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the public API (the `stimeo--*` data attributes) may
 change between releases.
 
+## [0.18.2] - 2026-11-21
+
+Patch release focused on numeric stepping, focus, and text editing.
+
+### Fixed
+
+- auto-submit and toolbar: preserve IME composition tracking across unrelated
+  edits inside a contenteditable field.
+- number-input, slider, range-slider and separator: round midpoint values
+  consistently and handle steps near numeric limits. Number-input disables
+  buttons that cannot move the value.
+- Continue Tab navigation from inside an open shadow root with a negative-tabindex
+  host.
+- input-mask: keep the caret and delete the intended character when the mask
+  contains emoji literals.
+- multi-select and tags-input: give input focus time to be announced before the
+  last chip's removal message.
+- Inspector names unknown diagnostic suppressions. Meter and Progress types
+  support declaration generation in consuming projects.
+
 ## [0.18.1] - 2026-10-31
 
 Patch release focused on keyboard ownership, focus handoff, masked selections,
@@ -1440,6 +1460,7 @@ Initial public alpha: 101 behavior-only, accessible Stimulus controllers driven
 by `data-*` attributes, shipping no CSS. Published to npm (with provenance) and
 RubyGems.
 
+[0.18.2]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.18.2
 [0.18.1]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.18.1
 [0.18.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.18.0
 [0.17.0]: https://github.com/taiyaky/stimeo-ui/releases/tag/v0.17.0

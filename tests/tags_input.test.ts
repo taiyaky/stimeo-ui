@@ -1,6 +1,7 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TagsInputController } from "../src/controllers/tags_input_controller";
+import { announcesAfterFocus } from "../src/utils/announce";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
 import { press as keyboardPress, keyEvent } from "./helpers/keyboard";
@@ -350,7 +351,6 @@ describe("TagsInputController", () => {
     application = Application.start();
     application.register("stimeo--tags-input", TagsInputController);
     await tick();
-    const handleError = vi.spyOn(application, "handleError").mockImplementation(() => {});
     const changes: string[][] = [];
     root().addEventListener("stimeo--tags-input:change", (event) => {
       changes.push((event as CustomEvent).detail.tags);
@@ -362,7 +362,6 @@ describe("TagsInputController", () => {
     expect(changes).toEqual([]);
     // The entry survives, so the author can still see what was typed.
     expect(input().value).toBe("React");
-    expect(handleError).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -907,6 +906,38 @@ describe("TagsInputController", () => {
       { message: "Removed React; 0 total", assertive: false },
     ]);
   });
+
+  it.each(["chip", "input", "neighbor"])(
+    "lets input focus settle only when removal moves focus from the last chip (%s)",
+    async (origin) => {
+      await mount(
+        'data-stimeo--tags-input-announce-removed-text-value="Removed {value}; {count} total"',
+      );
+      type("Rails", "Enter");
+      if (origin === "neighbor") type("Vue", "Enter");
+      const [first, neighbor] = buttons();
+      const timing: boolean[] = [];
+      window.addEventListener(
+        "stimeo--announcer:announce",
+        (event) => timing.push(announcesAfterFocus(event)),
+        { once: true },
+      );
+      if (origin === "input") {
+        keyboardPress(input(), "Backspace");
+      } else {
+        expect(first).toBeDefined();
+        first?.focus();
+        expect(document.activeElement).toBe(first);
+        first?.click();
+      }
+
+      expect(document.activeElement).toBe(origin === "neighbor" ? neighbor : input());
+      expect(announcements).toEqual([
+        { message: `Removed Rails; ${origin === "neighbor" ? 1 : 0} total`, assertive: false },
+      ]);
+      expect(timing).toEqual([origin === "chip"]);
+    },
+  );
 
   it("stays silent when announcement templates are not authored", async () => {
     await mount();

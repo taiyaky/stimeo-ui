@@ -67,11 +67,16 @@ export interface IntersectionWatchOptions {
   threshold?: number | number[];
 }
 
+/** Observer ownership and published state for one start attempt. */
+interface IntersectionSession {
+  observer: IntersectionObserver | null;
+  active: boolean;
+  usingPlatformDefaults: boolean;
+}
+
 export class IntersectionWatcher {
   readonly #onEntries: (entries: IntersectionObserverEntry[]) => void;
-  #observer: IntersectionObserver | null = null;
-  #active = false;
-  #usingPlatformDefaults = false;
+  #session: IntersectionSession | null = null;
 
   constructor(onEntries: (entries: IntersectionObserverEntry[]) => void) {
     this.#onEntries = onEntries;
@@ -79,12 +84,12 @@ export class IntersectionWatcher {
 
   /** Whether an observer is live (started, `IntersectionObserver` supported). */
   get active(): boolean {
-    return this.#active;
+    return this.#session?.active ?? false;
   }
 
   /** Whether the live observer discarded configured options after construction failed. */
   get usingPlatformDefaults(): boolean {
-    return this.#usingPlatformDefaults;
+    return this.#session?.usingPlatformDefaults ?? false;
   }
 
   /**
@@ -97,52 +102,78 @@ export class IntersectionWatcher {
    * {@link IntersectionWatchOptions.rootSelector}), so a typo never fails the
    * call.
    *
+   * A later `start()` or `stop()` made synchronously while options, construction,
+   * warnings, or observation run supersedes this attempt. An interrupted attempt
+   * releases its partial observation and returns `false`; it cannot publish state
+   * or roll back the later operation. Defaults remain unpublished until every
+   * target has been observed.
+   *
    * @throws The fallback constructor error if both construction attempts fail,
    *   or whatever the platform throws from `observe()`. The exception is passed
-   *   through unchanged, but the watcher rolls back first: every target observed
-   *   so far is released and `active` stays `false`, so a caller that retries
-   *   starts from a clean slate.
+   *   through unchanged, but the failed attempt rolls back first: every target it
+   *   observed is released. Without a later operation, `active` stays `false` and
+   *   a retry starts from a clean slate; a later operation keeps its own state.
    */
   start(targets: Element | readonly Element[], options: IntersectionWatchOptions = {}): boolean {
-    this.stop();
-    if (typeof IntersectionObserver === "undefined") return false;
-    const list = Array.isArray(targets) ? (targets as readonly Element[]) : [targets as Element];
-    if (list.length === 0) return false;
-
-    const root = "root" in options ? (options.root ?? null) : queryRoot(options.rootSelector);
-
+    const previous = this.#session;
+    const session: IntersectionSession = {
+      observer: null,
+      active: false,
+      usingPlatformDefaults: false,
+    };
+    this.#session = session;
     let observer: IntersectionObserver | null = null;
     try {
+      if (previous) this.#release(previous);
+      if (this.#session !== session) return false;
+      if (typeof IntersectionObserver === "undefined") return false;
+      const list = Array.isArray(targets) ? (targets as readonly Element[]) : [targets as Element];
+      const empty = list.length === 0;
+      if (this.#session !== session) return false;
+      if (empty) return false;
+      const root = "root" in options ? (options.root ?? null) : queryRoot(options.rootSelector);
+      if (this.#session !== session) return false;
       const onEntries = (entries: IntersectionObserverEntry[]): void => {
-        // Identity matters across an immediate restart: the old observer can
-        // flush a queued batch after the new observer has made `active` true.
-        if (this.#active && this.#observer === observer) this.#onEntries(entries);
+        if (this.#session === session && session.active) this.#onEntries(entries);
       };
+      let usingPlatformDefaults = false;
       try {
-        observer = new IntersectionObserver(onEntries, {
+        const configured = {
           root,
           rootMargin: options.rootMargin,
           threshold: options.threshold,
-        });
+        };
+        if (this.#session !== session) return false;
+        observer = new IntersectionObserver(onEntries, configured);
       } catch (error) {
+        if (this.#session !== session) return false;
         console.warn(
           "Stimeo UI: IntersectionObserver could not be constructed with the configured options; retrying with platform defaults.",
           error,
         );
+        if (this.#session !== session) return false;
         observer = new IntersectionObserver(onEntries, { root });
-        this.#usingPlatformDefaults = true;
+        usingPlatformDefaults = true;
       }
-      for (const target of list) observer.observe(target);
-      this.#observer = observer;
-      this.#active = true;
+      if (this.#session !== session) {
+        this.#release(session, observer);
+        return false;
+      }
+      session.observer = observer;
+      for (const target of list) {
+        if (this.#session !== session) return false;
+        observer.observe(target);
+        if (this.#session !== session) {
+          this.#release(session, observer);
+          return false;
+        }
+      }
+      if (this.#session !== session) return false;
+      session.usingPlatformDefaults = usingPlatformDefaults;
+      session.active = true;
       return true;
     } catch (error) {
-      // A constructor or partial observe failure must not leave earlier targets
-      // observed or report an active watcher. Preserve the platform exception.
-      observer?.disconnect();
-      this.#observer = null;
-      this.#active = false;
-      this.#usingPlatformDefaults = false;
+      this.#release(session, observer);
       throw error;
     }
   }
@@ -152,25 +183,41 @@ export class IntersectionWatcher {
    * only reports *changes*, but `observe()` always reports the present state,
    * so unobserve→observe turns "still intersecting" into a fresh callback.
    *
-   * @throws Whatever `unobserve()`/`observe()` throws. The watcher is stopped
+   * A later start or stop interrupts the re-arm without changing that later
+   * operation's state.
+   *
+   * @throws Whatever `unobserve()`/`observe()` throws. Its session is released
    *   first, so it never stays live with a half-rearmed target.
    */
   rearm(target: Element): void {
-    if (!this.#observer) return;
+    const session = this.#session;
+    const observer = session?.observer;
+    if (!session?.active || !observer) return;
     try {
-      this.#observer.unobserve(target);
-      this.#observer.observe(target);
+      observer.unobserve(target);
+      if (this.#session !== session) return;
+      observer.observe(target);
+      if (this.#session !== session) this.#release(session, observer);
     } catch (error) {
-      this.stop();
+      if (this.#session === session) this.#session = null;
+      this.#release(session, observer);
       throw error;
     }
   }
 
   /** Severs the observer; late queued callbacks become no-ops via the guard. */
   stop(): void {
-    this.#active = false;
-    this.#observer?.disconnect();
-    this.#observer = null;
-    this.#usingPlatformDefaults = false;
+    const session = this.#session;
+    this.#session = null;
+    if (session) this.#release(session);
+  }
+
+  /** Releases only this session, including a constructor or observation interrupted by reentry. */
+  #release(
+    session: IntersectionSession,
+    observer: IntersectionObserver | null = session.observer,
+  ): void {
+    session.observer = null;
+    observer?.disconnect();
   }
 }

@@ -1,5 +1,15 @@
 export { fillTemplate } from "./template";
 
+/** Shares the focus timing marker across separately bundled controllers. */
+const afterFocus = Symbol.for("stimeo--announcer:after-focus");
+
+type AnnouncementEvent = Event & { [afterFocus]?: true };
+
+/** Whether the event's live-region write should give focus a head start. */
+export function announcesAfterFocus(event: Event): boolean {
+  return (event as AnnouncementEvent)[afterFocus] === true;
+}
+
 /**
  * Sends one message to the page's shared `stimeo--announcer`.
  *
@@ -21,12 +31,15 @@ export { fillTemplate } from "./template";
  * announce(this.announceTextValue, { assertive: false });
  * ```
  */
-export function announce(message: string, options: { assertive?: boolean } = {}): void {
+export function announce(
+  message: string,
+  options: { assertive?: boolean; afterFocus?: boolean } = {},
+): void {
   const text = message.trim();
   if (text.length === 0) return;
-  window.dispatchEvent(
-    new CustomEvent("stimeo--announcer:announce", {
-      detail: { message: text, assertive: options.assertive === true },
-    }),
-  );
+  const event = new CustomEvent("stimeo--announcer:announce", {
+    detail: { message: text, assertive: options.assertive === true },
+  });
+  if (options.afterFocus) (event as AnnouncementEvent)[afterFocus] = true;
+  window.dispatchEvent(event);
 }

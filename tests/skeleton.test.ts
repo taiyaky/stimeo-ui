@@ -448,17 +448,12 @@ describe("SkeletonController", () => {
       "keeps working when its only %s leaves",
       async (name) => {
         await start();
-        const errors: unknown[] = [];
-        application.handleError = (error) => {
-          errors.push(error);
-        };
         query(`[${TARGET}='${name}']`).remove();
         await settle();
         instance().ready();
         instance().reset();
         await settle();
 
-        expect(errors).toEqual([]);
         expect(root().getAttribute("data-state")).toBe("loading");
       },
     );
@@ -568,7 +563,7 @@ describe("SkeletonController", () => {
       expect(kept.hidden).toBe(false);
     });
 
-    it("writes nothing onto the placeholder or content while Stimulus tears the controller down", async () => {
+    it("preserves the page's replacement visibility on the content when Stimulus unloads", async () => {
       await start();
       instance().ready();
       // A value the page wrote after the last write stays where it was left.

@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus";
+import { announcesAfterFocus } from "../utils/announce";
 import { DetachGate } from "../utils/detach_gate";
 import { KeyedTimers } from "../utils/keyed_timers";
 import { ListenerSet } from "../utils/listener_set";
@@ -13,6 +14,12 @@ const LEVELS = ["polite", "assertive"] as const;
 
 /** One of the politeness levels in {@link LEVELS}. */
 type Level = (typeof LEVELS)[number];
+
+/** One accepted message and whether its write gives focus speech a head start. */
+type Announcement = { text: string; afterFocus: boolean };
+
+/** Time for focus speech to start before the next polite live-region write. */
+const FOCUS_SETTLE_MS = 500;
 
 /** Suffix of the marker on a live region this controller generated; see the class remarks. */
 const STAND_IN = "stand-in";
@@ -86,11 +93,10 @@ const ANNOUNCED = "announced";
  * has its own FIFO — an assertive message never waits behind polite ones — and a
  * message is written only in a task where its region already existed.
  *
- * **The region set is kept whole while connected.** Exactly one region per
- * politeness is present: an authored target retires the stand-in generated for it,
- * losing one materialises a stand-in again, and a generated region removed by a
- * morph (it is absent from the server's HTML, so a morph drops it) is put back
- * without waiting for the next message.
+ * **One region per politeness receives messages.** The controller uses the
+ * first authored target when present and a generated stand-in otherwise. It
+ * retires the stand-in when an authored target is present and replaces a
+ * stand-in removed by a morph without waiting for the next message.
  */
 export class AnnouncerController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
@@ -141,7 +147,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
   readonly #messageText = new OwnedText(`data-${this.identifier}-${ANNOUNCED}`);
 
   /** Messages waiting to be written, oldest first, one queue per politeness. */
-  readonly #queues = new Map<Level, string[]>();
+  readonly #queues = new Map<Level, Announcement[]>();
 
   /** Politeness levels whose next drain is already armed. */
   readonly #draining = new Set<Level>();
@@ -173,7 +179,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
     const detail = (event as CustomEvent<unknown>).detail;
     const message = this.#messageFromDetail(detail);
     if (!message) return;
-    this.#announce(message, this.#assertiveFromDetail(detail));
+    this.#announce(message, this.#assertiveFromDetail(detail), announcesAfterFocus(event));
   };
 
   /**
@@ -233,8 +239,8 @@ export class AnnouncerController extends Controller<HTMLElement> {
   }
 
   /**
-   * Brings the region set back to exactly one region per politeness and reports
-   * whether anything had to be created.
+   * Supplies a stand-in for each missing target and reports whether a region was
+   * created. Retires a stand-in when an authored target is present.
    *
    * A region created here is not written to in the same task: assistive tech
    * reports changes to regions it already knows about, so {@link #drain} waits a
@@ -314,7 +320,7 @@ export class AnnouncerController extends Controller<HTMLElement> {
     const assertive =
       params?.assertive === true ||
       this.#assertiveFromDetail((event as CustomEvent<unknown>).detail);
-    this.#announce(message, assertive);
+    this.#announce(message, assertive, announcesAfterFocus(event));
   }
 
   /**
@@ -324,43 +330,50 @@ export class AnnouncerController extends Controller<HTMLElement> {
    * observes, so several messages written into one region within a single task are
    * one change and only the last is read.
    */
-  #announce(message: string, assertive: boolean): void {
+  #announce(text: string, assertive: boolean, afterFocus: boolean): void {
     const level: Level = assertive ? "assertive" : "polite";
+    const announcement = { text, afterFocus: !assertive && afterFocus };
     const queue = this.#queues.get(level);
     if (queue) {
-      queue.push(message);
+      queue.push(announcement);
     } else {
-      this.#queues.set(level, [message]);
+      this.#queues.set(level, [announcement]);
     }
     this.#scheduleDrain(level);
   }
 
   /** Arms one drain pass for `level`; further messages ride the pass already armed. */
-  #scheduleDrain(level: Level): void {
+  #scheduleDrain(level: Level, delay = 0): void {
     if (this.#draining.has(level)) return;
     this.#draining.add(level);
     this.#timers.set(() => {
       this.#draining.delete(level);
       this.#drain(level);
-    }, 0);
+    }, delay);
   }
 
   /**
    * Writes one queued message, then arms the next pass while the queue holds more.
    *
-   * Two steps take a whole pass without consuming the message: materialising a
-   * region (it has to be in the accessibility tree before the text arrives) and
-   * emptying a region that already holds this exact text (an unchanged node is not
-   * re-read, so `dedupeReannounce` clears first and writes on the following pass).
+   * A pass can wait for focus speech, give a new region time to enter the
+   * accessibility tree, or clear duplicate text for `dedupeReannounce`. In each
+   * case the message stays in the queue for the next pass.
    *
    * @stimeoRuntimeOnly `dedupeReannounce` decides whether one queued message is spoken again; the
    *   region's text is the message itself.
    */
   #drain(level: Level): void {
     const queue = this.#queues.get(level);
-    const message = queue?.[0];
-    if (queue === undefined || message === undefined) return;
+    const announcement = queue?.[0];
+    if (queue === undefined || announcement === undefined) return;
 
+    if (announcement.afterFocus) {
+      announcement.afterFocus = false;
+      this.#scheduleDrain(level, FOCUS_SETTLE_MS);
+      return;
+    }
+
+    const message = announcement.text;
     const created = this.#reconcileRegions();
     const region = this.#regionFor(level);
     // With nothing created every politeness has a seated region; the second check
@@ -404,9 +417,9 @@ export class AnnouncerController extends Controller<HTMLElement> {
   }
 
   /**
-   * The region a politeness writes into: its target, else its last stand-in. A
-   * morph can drop the stand-in, and only a reconcile pass that created nothing
-   * guarantees it is seated; a detached node announces nothing.
+   * Returns the first authored target for `level` or its generated stand-in.
+   * Reconcile the regions before writing because a morph can remove a stand-in
+   * from the DOM.
    */
   #regionFor(level: Level): HTMLElement | undefined {
     if (level === "assertive" && this.hasAssertiveTarget) return this.assertiveTarget;
@@ -447,8 +460,6 @@ export class AnnouncerController extends Controller<HTMLElement> {
  * Applies the canonical visually-hidden ("sr-only") inline style to a generated
  * live region so its text is announced without being seen. Inline so the library
  * stays self-contained when the consumer provides no target/CSS of its own.
- *
- * Pure (no `this`); exported for direct unit testing.
  */
 export function visuallyHide(node: HTMLElement): void {
   const { style } = node;

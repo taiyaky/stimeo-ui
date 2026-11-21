@@ -250,8 +250,8 @@ export class FocusTrap {
    * first: the start of the way back.
    */
   #openers: HTMLElement[] = [];
-  /** This trap as its document's registry holds it. */
-  readonly #entry: TrapEntry;
+  /** This activation as its document's registry holds it. */
+  #entry: TrapEntry;
   /** The `tabindex` lent to each container that had no stop to focus, by container. */
   readonly #tabindexLoans = new Map<HTMLElement, TabindexLoan>();
   /** Whether the modal side effects are currently applied. */
@@ -274,7 +274,12 @@ export class FocusTrap {
   constructor(getContainer: () => HTMLElement, options: FocusTrapOptions = {}) {
     this.#getContainer = getContainer;
     this.#options = options;
-    this.#entry = {
+    this.#entry = this.#createEntry();
+  }
+
+  /** Gives each activation its own identity and way-back links in the shared registry. */
+  #createEntry(): TrapEntry {
+    return {
       container: () => this.#readContainer(),
       moveFocus: (backward) => this.#moveFocus(backward),
       refocus: () => this.#refocus(),
@@ -300,6 +305,7 @@ export class FocusTrap {
   activate(): void {
     if (this.#activeState) return;
     FocusTrap.#sweep();
+    this.#entry = this.#createEntry();
     this.#activeState = true;
     this.#openers = FocusTrap.#focusPath();
     this.#entry.openedFrom = FocusTrap.#trapHolding(this.#openers[0] ?? null);
@@ -328,14 +334,20 @@ export class FocusTrap {
       this.#returnTabindexes();
       return;
     }
+    const entry = this.#entry;
+    const openers = this.#openers;
+    this.#openers = [];
     this.#activeState = false;
     this.#escapeLayer.deactivate();
-    const above = this.#leaveStack();
-    this.#unlockScroll();
+    const above = this.#leaveStack(entry);
+    this.#unlockScroll(entry);
     FocusTrap.#reconcileBackground(document);
-    const wayBack = this.#handOver(above);
-    if (restoreFocus) this.#restore(wayBack, above);
-    this.#returnTabindexes();
+    try {
+      const wayBack = this.#handOver(entry, openers, above);
+      if (restoreFocus) this.#restore(wayBack, above);
+    } finally {
+      this.#returnTabindexes();
+    }
   }
 
   /**
@@ -433,9 +445,9 @@ export class FocusTrap {
    * trap removes the `Tab` listener and the morph listener. A pass a morph scheduled before
    * then finds no trap and changes nothing.
    */
-  #leaveStack(): TrapEntry[] {
+  #leaveStack(entry: TrapEntry): TrapEntry[] {
     const registry = FocusTrap.#registry(document);
-    const index = registry.stack.indexOf(this.#entry);
+    const index = registry.stack.indexOf(entry);
     const above = registry.stack.slice(index + 1);
     registry.stack.splice(index, 1);
     if (registry.stack.length === 0) {
@@ -479,24 +491,27 @@ export class FocusTrap {
    * Ends this activation's way back: the opener and the shadow hosts around it, `fallbackFocus` and
    * what was handed over, in that order. Each trap in `above` opened from this one gets it behind
    * its own and is pointed at the trap this one was opened from, so the links only ever lead to
-   * traps activated earlier. The record is cleared before anything moves focus, so an activation a
-   * focus listener starts keeps its own.
+   * traps activated earlier. The released record is cleared before the fallback getter runs, so an
+   * activation that getter or a focus listener starts keeps its own. A throwing getter still hands
+   * the opener and inherited way back to the remaining children before its error propagates.
    */
-  #handOver(above: TrapEntry[]): HTMLElement[] {
-    const entry = this.#entry;
-    const wayBack = [
-      ...this.#openers,
-      this.#options.fallbackFocus?.() ?? null,
-      ...entry.handedBack,
-    ].filter((element): element is HTMLElement => element !== null);
-    for (const trap of above) {
-      if (trap.openedFrom !== entry) continue;
-      trap.handedBack = [...trap.handedBack, ...wayBack];
-      trap.openedFrom = entry.openedFrom;
-    }
-    this.#openers = [];
+  #handOver(entry: TrapEntry, openers: HTMLElement[], above: TrapEntry[]): HTMLElement[] {
+    const wayBack = [...openers];
+    const parent = entry.openedFrom;
+    const handedBack = entry.handedBack;
     entry.openedFrom = null;
     entry.handedBack = [];
+    try {
+      const fallback = this.#options.fallbackFocus?.();
+      if (fallback) wayBack.push(fallback);
+    } finally {
+      wayBack.push(...handedBack);
+      for (const trap of above) {
+        if (trap.openedFrom !== entry) continue;
+        trap.handedBack = [...trap.handedBack, ...wayBack];
+        trap.openedFrom = parent;
+      }
+    }
     return wayBack;
   }
 
@@ -581,11 +596,11 @@ export class FocusTrap {
    * released in whatever order, gives that `body` its saved `overflow` back, while the `body`
    * still carries it.
    */
-  #unlockScroll(): void {
+  #unlockScroll(entry: TrapEntry): void {
     const registry = FocusTrap.#registry(document);
-    const body = this.#entry.lockedBody;
-    this.#entry.lockedBody = null;
-    if (!registry.scrollLocks.delete(this.#entry) || !body) return;
+    const body = entry.lockedBody;
+    entry.lockedBody = null;
+    if (!registry.scrollLocks.delete(entry) || !body) return;
     if (!FocusTrap.#isLocked(registry, body)) FocusTrap.#unlock(body);
   }
 

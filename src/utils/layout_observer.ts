@@ -123,7 +123,7 @@ export class LayoutObserver {
     container.addEventListener("load", this.#handleDescendantLoad, true);
   }
 
-  /** Stops reporting descendant loads without affecting element or viewport observation. */
+  /** Releases the load listener and container without affecting element or viewport observation. */
   unobserveDescendantLoads(): void {
     this.#loadContainer?.removeEventListener("load", this.#handleDescendantLoad, true);
     this.#loadContainer = null;

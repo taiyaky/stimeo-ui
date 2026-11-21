@@ -1,3 +1,8 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Script } from "node:vm";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import {
   type ElementNode,
@@ -6,7 +11,38 @@ import {
   type SyntheticElement,
   walk,
 } from "../../src/inspector/html_parser";
-import { withinTimeLimit } from "../helpers/time_limit";
+import { HANG_GUARD_MS, withinTimeLimit } from "../helpers/time_limit";
+
+/** Executes the actual dependency-free parser with its scan bounded inside the VM. */
+const boundedParser = new Script(
+  `${
+    ts.transpileModule(
+      readFileSync(
+        resolve(dirname(fileURLToPath(import.meta.url)), "../..", "src/inspector/html_parser.ts"),
+        "utf8",
+      ),
+      { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+    ).outputText
+  }
+const tags = [];
+exports.walk(exports.parseHtml(source), (node) => tags.push(node.tag));
+tags;`,
+  { filename: "html_parser.ts" },
+);
+
+/** Returns parsed tags without letting an unterminated scan hold the test worker. */
+function boundedTags(source: string): string[] {
+  return boundedParser.runInNewContext(
+    {
+      source,
+      exports: Object.create(null),
+      require: () => {
+        throw new Error("The standalone HTML parser must not import runtime dependencies");
+      },
+    },
+    { timeout: HANG_GUARD_MS },
+  ) as string[];
+}
 
 /** Collects every element node (excluding the synthetic root) into a flat list. */
 function flatten(root: ElementNode): ElementNode[] {
@@ -21,16 +57,17 @@ function flatten(root: ElementNode): ElementNode[] {
  */
 describe("parseHtml", () => {
   it("builds a tree with parent/child relationships", () => {
-    const root = parseHtml("<div><span></span></div>");
+    const root = withinTimeLimit(() => parseHtml("<div><span></span><img/></div>"));
     expect(root.children).toHaveLength(1);
     const div = root.children[0];
     expect(div?.tag).toBe("div");
     expect(div?.children[0]?.tag).toBe("span");
     expect(div?.children[0]?.parent).toBe(div);
+    expect(div?.children[1]?.tag).toBe("img");
   });
 
   it("records attribute names lowercased with values and positions", () => {
-    const root = parseHtml(`<div\n  data-controller="stimeo--menu">`);
+    const root = withinTimeLimit(() => parseHtml(`<div\n  data-controller="stimeo--menu">`));
     const attr = root.children[0]?.attrs[0];
     expect(attr?.name).toBe("data-controller");
     expect(attr?.value).toBe("stimeo--menu");
@@ -88,7 +125,7 @@ describe("parseHtml", () => {
   });
 
   it("resumes parsing after a comment, a declaration and a raw-text element", () => {
-    const source = `<!-- note --><a></a><!DOCTYPE html><b></b><?xml v?><i></i><script></script><p></p>`;
+    const source = `<!-- <em>note</em><s>hidden</s> --><a></a><!DOCTYPE html><b></b><?xml v?><i></i><script></script><p></p>`;
     expect(flatten(parseHtml(source)).map((n) => n.tag)).toEqual(["a", "b", "i", "script", "p"]);
   });
 
@@ -103,6 +140,17 @@ describe("parseHtml", () => {
       return withinTimeLimit(() => flatten(parseHtml(source)).map((n) => n.tag));
     }
 
+    it("finishes unterminated declarations and processing instructions without revisiting markup", () => {
+      expect(boundedTags("<!DOCTYPE html><a></a><?xml v?><b></b>")).toEqual(["a", "b"]);
+      for (const source of ["<!DOCTYPE html <b", "<?xml version='1.0' <b"]) {
+        let parsed: string[] | undefined;
+        expect(() => {
+          parsed = boundedTags(source);
+        }).not.toThrow();
+        expect(parsed).toEqual([]);
+      }
+    });
+
     it("treats an unclosed comment as running to the end of the input", () => {
       expect(tags(`<!-- <div data-controller="stimeo--menu">`)).toEqual([]);
     });
@@ -113,6 +161,10 @@ describe("parseHtml", () => {
 
     it("treats an unclosed end tag as running to the end of the input", () => {
       expect(tags("<a></a></b <i")).toEqual(["a"]);
+    });
+
+    it("does not parse markup inside a raw-text element with no end tag", () => {
+      expect(boundedTags("<a></a><script><b></b>")).toEqual(["a", "script"]);
     });
 
     it("treats a raw-text element whose end tag never closes as running to the end", () => {

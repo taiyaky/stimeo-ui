@@ -26,6 +26,28 @@ Type checks run TypeScript 7 through the `@typescript/native` alias. The separat
 `typescript` dependency stays on TypeScript 6 for the compiler API and declaration
 generation. Use `bun run typecheck` so the compiler is selected explicitly.
 
+### Watching source changes
+
+The watch commands require Linux and the `flock` command from util-linux. Set
+`STIMEO_WATCH_LOCK_ROOT` to an absolute directory on a shared Linux filesystem;
+every writer or cleanup process for the same checkout must use that directory.
+For a local Linux checkout, for example:
+
+```bash
+export STIMEO_WATCH_LOCK_ROOT=/tmp/stimeo-watch-locks
+bun run dev
+```
+
+Watch output is kept in `.stimeo-watch/`, separately from the ordinary `dist/`
+that `bun run build` generates for package use. Wait for the first published
+generation, then use `bun run dev:inspector -- catalog` (or `check` / `mcp`) to
+read its Inspector code, manifest and examples together. To inspect the ordinary
+build instead, run `node dist/inspector/cli_bin.js catalog`.
+
+Old watch generations remain available after rebuilding. Stop the watcher and
+any readers before running `bun run dev:clean` with the same lock directory.
+Cleanup removes those generations, so an existing reader must be restarted.
+
 `bun run test` is the unit suite (Vitest + happy-dom) and covers behavior, ARIA,
 keyboard interaction, machine-detectable a11y, and screen-reader speech order
 (via a virtual screen reader). Please cover your change with unit tests. Only the

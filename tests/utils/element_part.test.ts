@@ -57,10 +57,10 @@ describe("label slot", () => {
     expect(readLabel(root)).toBe("Apple");
   });
 
-  it("reads only the slot's own text when the slot holds the rest of the row", () => {
+  it("reads only the slot's own text, excluding comments and nested element text", () => {
     // A row that is its own label keeps the remove button inside it, and the
     // button's glyph is not part of the label.
-    const root = mount(`<li data-part="label">Apple<button>×</button></li>`);
+    const root = mount(`<li data-part="label">Apple<!--label note--><button>×</button></li>`);
 
     expect(root.textContent).toBe("Apple×");
     expect(readLabel(root)).toBe("Apple");
@@ -79,14 +79,33 @@ describe("label slot", () => {
     expect(root.querySelector("button")).not.toBeNull();
   });
 
-  it("keeps one text node for the label when the slot's text is split around an element", () => {
-    const root = mount(`<li data-part="label">Green <button>×</button>Apple</li>`);
+  it("keeps the first text node in place when the label is split around elements", () => {
+    const root = mount(`<li data-part="label"><i></i>Green <button>×</button>Apple</li>`);
+    const firstText = root.childNodes[1];
 
     writeLabel(root, "Red Apple");
 
     expect(readLabel(root)).toBe("Red Apple");
     expect(root.textContent).toBe("Red Apple×");
+    expect(root.childNodes[1]).toBe(firstText);
+    expect(root.innerHTML).toBe("<i></i>Red Apple<button>×</button>");
   });
+
+  it.each(["Apple", "Apple<!--note-->", "<!--note-->Apple<!--tail-->"])(
+    "replaces the direct label string in a slot without child elements: %s",
+    (content) => {
+      const root = mount(`<span data-part="label">${content}</span>`);
+      root.append(document.createTextNode(" Extra"));
+
+      writeLabel(root, "Pear");
+
+      expect(readLabel(root)).toBe("Pear");
+      expect(root.textContent).toBe("Pear");
+      writeLabel(root, "");
+      expect(readLabel(root)).toBe("");
+      expect(root.textContent).toBe("");
+    },
+  );
 
   it("round-trips a row whose text has not been written yet", () => {
     const root = mount(`<li data-part="label"><button>×</button></li>`);

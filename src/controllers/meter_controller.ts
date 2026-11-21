@@ -7,6 +7,8 @@ import { NumberValueReader } from "../utils/number_value";
 import { clampRange, rangeFraction } from "../utils/range";
 import { TemplateAttributeLease } from "../utils/template_attribute_lease";
 
+export type { NumericValueEvent } from "../utils/coerce";
+
 /** Threshold segment a value falls into, reflected on `data-state`. */
 type MeterState = "low" | "medium" | "high";
 

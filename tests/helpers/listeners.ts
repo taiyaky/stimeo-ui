@@ -202,7 +202,7 @@ const RELEASE_RUNS = [
 /**
  * Connects `controller` on its markup — once, or twice with no disconnect between —
  * disconnects it, and fails when a registration it made is still live, when it did
- * not connect, or when connecting reported an error.
+ * not connect, or when connecting or disconnecting reported an error.
  */
 export async function assertListenersReleased(
   identifier: string,
@@ -225,12 +225,12 @@ export async function assertListenersReleased(
     const instance = host && application.getControllerForElementAndIdentifier(host, identifier);
     expect(instance, `${identifier} connected`).toBeTruthy();
     if (connections === 2) (instance as { connect(): void }).connect();
-    expect(errors).toEqual([]);
   } finally {
     disconnectAndStopApplication(application);
     await tick();
     document.body.innerHTML = "";
   }
+  expect(errors).toEqual([]);
 
   const kept = options.documentLifetime?.[identifier] ?? [];
   const live = ledger

@@ -15,9 +15,8 @@ export const valueConstraintRules: ValueConstraintRules = {
 /**
  * Grammar contracts on the String Values whose accepted set cannot be listed.
  *
- * Kept apart from {@link valueConstraintRules} because they reach the manifest
- * through their own field, which an engine that predates them skips rather than
- * reading through `allowedValues`.
+ * The manifest carries these rules in `valueSyntaxConstraints`, separate from
+ * the enumerated values in {@link valueConstraintRules}.
  */
 export const valueSyntaxConstraintRules: ValueSyntaxConstraintRules = {
   "stimeo--input-mask": [

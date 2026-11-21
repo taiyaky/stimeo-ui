@@ -37,13 +37,7 @@ export function readDatetime(element: Element): number | null {
   const minute = Number(minuteText);
   const second = Number(secondText);
   if (hour === 24 && (minute !== 0 || second !== 0 || /[1-9]/.test(fraction))) return null;
-  let offset = zone;
-  if (zone !== "Z") {
-    const digits = zone.slice(1).replace(":", "");
-    const offsetHour = digits.slice(0, 2);
-    const offsetMinute = digits.slice(2);
-    offset = `${zone[0]}${offsetHour}:${offsetMinute}`;
-  }
+  const offset = zone.replace(/^([+-]\d{2})(\d{2})$/, "$1:$2");
   const milliseconds = fraction.slice(0, 3).padEnd(3, "0");
   const canonical = `${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}.${milliseconds}${offset}`;
   const instant = Date.parse(canonical);

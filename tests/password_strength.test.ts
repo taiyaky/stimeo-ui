@@ -562,6 +562,21 @@ describe("PasswordStrengthController", () => {
     expect(announcementMessages).toEqual(["Strength: good"]);
   });
 
+  it("stays silent when cleared and announces the next level again", async () => {
+    await start('data-stimeo--password-strength-announce-text-value="Strength: {level}"');
+    type("Password1!");
+    await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
+    expect(announcementMessages).toEqual(["Strength: good"]);
+
+    type("");
+    await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
+    expect(announcementMessages).toEqual(["Strength: good"]);
+
+    type("Password1!");
+    await vi.advanceTimersByTimeAsync(ANNOUNCE_MS);
+    expect(announcementMessages).toEqual(["Strength: good", "Strength: good"]);
+  });
+
   it("does not re-announce a level the reader already heard", async () => {
     await start('data-stimeo--password-strength-announce-text-value="{level}"');
     type("Password1!");

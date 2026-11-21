@@ -133,11 +133,9 @@ describe("CollapsibleController", () => {
     expect(content().getAttribute("data-state")).toBe("closed");
   });
 
-  it("stays open on reconnect when the restored DOM reads open (DOM wins over Value)", async () => {
-    // Simulate a Turbo cache restore: the cached snapshot already reads open
-    // (aria-expanded="true", data-state="open", no hidden) even though the
-    // declarative open Value defaults to false. The DOM must win — connect must
-    // not collapse a region the user had opened.
+  it.each(["open", "closed"])("stays open on reconnect with a restored %s panel", async (state) => {
+    // The restored trigger is authoritative even when a retained panel still
+    // carries older closed state and the open Value defaults to false.
     disconnectAndStopApplication(application);
     document.body.innerHTML = `
       <div data-controller="stimeo--collapsible">
@@ -145,7 +143,7 @@ describe("CollapsibleController", () => {
                 data-action="stimeo--collapsible#toggle"
                 aria-expanded="true" aria-controls="more3">Show</button>
         <div id="more3" data-stimeo--collapsible-target="content"
-             data-state="open">Body</div>
+             data-state="${state}" ${state === "closed" ? "hidden" : ""}>Body</div>
       </div>`;
     application = Application.start();
     application.register("stimeo--collapsible", CollapsibleController);
@@ -605,15 +603,10 @@ describe("CollapsibleController", () => {
   });
 
   it("keeps working when its only trigger leaves", async () => {
-    const errors: unknown[] = [];
-    application.handleError = (error) => {
-      errors.push(error);
-    };
     trigger().remove();
     await tick();
     controller().toggle();
 
-    expect(errors).toEqual([]);
     expect(content().getAttribute("data-state")).toBe("open");
   });
 
@@ -669,15 +662,10 @@ describe("CollapsibleController", () => {
   });
 
   it("keeps working when its only content target leaves", async () => {
-    const errors: unknown[] = [];
-    application.handleError = (error) => {
-      errors.push(error);
-    };
     content().remove();
     await tick();
     trigger().click();
 
-    expect(errors).toEqual([]);
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
   });
 
@@ -912,10 +900,10 @@ describe("CollapsibleController", () => {
 
   // --- Expanded / collapsed labels ---
 
-  // The trigger may carry a label pair: one label belongs to the expanded state,
-  // the other to the collapsed one. Which side is shown is a pure function of
-  // `aria-expanded`, written unconditionally, so what the author left on the pair
-  // never survives a connection.
+  /**
+   * A complete label pair reflects the trigger's expanded state. The controller
+   * writes each label's visibility only when it changes.
+   */
   describe("expanded / collapsed labels", () => {
     const labeled = `
       <div data-controller="stimeo--collapsible">

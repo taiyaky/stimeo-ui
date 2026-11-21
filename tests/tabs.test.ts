@@ -476,6 +476,41 @@ describe("TabsController", () => {
 
       expect(capture.seen).toEqual([]);
     });
+
+    it.each([
+      ["a changed preselection", 2],
+      ["no preselection", -1],
+    ] as const)("stays silent while reconnect normalizes %s", async (_scenario, preselected) => {
+      tab(1).click();
+      expect(capture.seen[0]?.detail).toEqual({ index: 1, total: 3, previous: 0, reason: "user" });
+      capture.clear();
+
+      const element = root();
+      const detachedTabs = tabs();
+      element.remove();
+      await tick();
+
+      detachedTabs.forEach((tab, index) => {
+        tab.setAttribute("aria-selected", String(index === preselected));
+      });
+      document.body.append(element);
+      await tick();
+
+      const selected = preselected === -1 ? 0 : preselected;
+      expect(selection()).toEqual(tabs().map((_, index) => String(index === selected)));
+      expect(tabIndexes()).toEqual(tabs().map((_, index) => (index === selected ? 0 : -1)));
+      expect(panelVisibility()).toEqual(panels().map((_, index) => index === selected));
+      expect(capture.seen).toEqual([]);
+
+      tab(1).click();
+      expect(capture.names()).toEqual(["change"]);
+      expect(capture.seen[0]?.detail).toEqual({
+        index: 1,
+        total: 3,
+        previous: selected,
+        reason: "user",
+      });
+    });
   });
 
   // --- Re-entry from a subscriber ---

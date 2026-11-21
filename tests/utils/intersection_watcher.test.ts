@@ -7,6 +7,7 @@ interface ObserverRecord {
   observed: Element[];
   unobserved: Element[];
   disconnectCount: number;
+  targets: Set<Element>;
 }
 
 const entryFor = (target: Element): IntersectionObserverEntry => ({
@@ -25,6 +26,10 @@ const installObserver = ({
   observeErrorAt,
   rejectInvalidOptions = false,
   onConstruct,
+  onObserve,
+  beforeObserve,
+  onUnobserve,
+  onDisconnect,
 }: {
   constructorError?: Error;
   /** 1-based constructions that fail; omitted = every construction fails. */
@@ -32,6 +37,10 @@ const installObserver = ({
   observeErrorAt?: number;
   rejectInvalidOptions?: boolean;
   onConstruct?: (options: IntersectionObserverInit | undefined) => void;
+  onObserve?: (target: Element, record: ObserverRecord) => void;
+  beforeObserve?: (target: Element, record: ObserverRecord) => void;
+  onUnobserve?: (target: Element) => void;
+  onDisconnect?: () => void;
 } = {}): ObserverRecord[] => {
   const records: ObserverRecord[] = [];
   let constructions = 0;
@@ -44,11 +53,11 @@ const installObserver = ({
       callback: (entries: IntersectionObserverEntry[]) => void,
       options?: IntersectionObserverInit,
     ) {
-      constructions += 1;
+      const construction = ++constructions;
       onConstruct?.(options);
       const failsAt = Array.isArray(constructorErrorAt)
-        ? constructorErrorAt.includes(constructions)
-        : constructorErrorAt === undefined || constructions === constructorErrorAt;
+        ? constructorErrorAt.includes(construction)
+        : constructorErrorAt === undefined || construction === constructorErrorAt;
       if (constructorError && failsAt) {
         throw constructorError;
       }
@@ -69,6 +78,7 @@ const installObserver = ({
         observed: [],
         unobserved: [],
         disconnectCount: 0,
+        targets: new Set(),
       };
       records.push(this.#record);
     }
@@ -76,15 +86,22 @@ const installObserver = ({
     observe(target: Element): void {
       this.#observeCount += 1;
       if (this.#observeCount === observeErrorAt) throw new Error("observe failed");
+      beforeObserve?.(target, this.#record);
       this.#record.observed.push(target);
+      this.#record.targets.add(target);
+      onObserve?.(target, this.#record);
     }
 
     unobserve(target: Element): void {
       this.#record.unobserved.push(target);
+      this.#record.targets.delete(target);
+      onUnobserve?.(target);
     }
 
     disconnect(): void {
       this.#record.disconnectCount += 1;
+      this.#record.targets.clear();
+      onDisconnect?.();
     }
   }
 
@@ -308,6 +325,23 @@ describe("IntersectionWatcher", () => {
     expect(onEntries).not.toHaveBeenCalled();
   });
 
+  it("clears platform-default status when fallback observation fails", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const records = installObserver({ rejectInvalidOptions: true, observeErrorAt: 2 });
+    const first = document.createElement("div");
+    const second = document.createElement("div");
+    const watcher = new IntersectionWatcher(() => {});
+
+    expect(() => watcher.start([first, second], { threshold: 2 })).toThrow("observe failed");
+
+    expect(records).toHaveLength(1);
+    expect(records[0]?.options).toEqual({ root: null });
+    expect(records[0]?.observed).toEqual([first]);
+    expect(records[0]?.disconnectCount).toBe(1);
+    expect(watcher.active).toBe(false);
+    expect(watcher.usingPlatformDefaults).toBe(false);
+  });
+
   it("releases the live observer when a restart fails to construct", () => {
     const onConstruct = vi.fn();
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -364,6 +398,658 @@ describe("IntersectionWatcher", () => {
     expect(records[0]?.disconnectCount).toBe(1);
     expect(watcher.active).toBe(false);
   });
+
+  it.each(["root", "rootMargin", "constructor", "warning", "observe"] as const)(
+    "keeps a later start made during %s and retires the interrupted start",
+    (phase) => {
+      const first = document.createElement("div");
+      const later = document.createElement("div");
+      const onEntries = vi.fn();
+      const watcher = new IntersectionWatcher(onEntries);
+      let interrupted = false;
+      const interrupt = () => {
+        if (interrupted) return;
+        interrupted = true;
+        expect(watcher.start(later)).toBe(true);
+      };
+      const records = installObserver({
+        rejectInvalidOptions: phase === "warning",
+        onConstruct: () => {
+          if (phase === "constructor") interrupt();
+        },
+        onObserve: () => {
+          if (phase === "observe") interrupt();
+        },
+      });
+      vi.spyOn(console, "warn").mockImplementation(() => {
+        if (phase === "warning") interrupt();
+      });
+
+      expect(
+        watcher.start(first, {
+          get root() {
+            if (phase === "root") interrupt();
+            return null;
+          },
+          get rootMargin() {
+            if (phase === "rootMargin") interrupt();
+            return phase === "warning" ? "200" : "0px";
+          },
+        }),
+      ).toBe(false);
+
+      expect(watcher.active).toBe(true);
+      expect(watcher.usingPlatformDefaults).toBe(false);
+      for (const record of records) record.callback([entryFor(record.observed[0] ?? first)]);
+      expect(onEntries).toHaveBeenCalledExactlyOnceWith([entryFor(later)]);
+      expect(records.filter((record) => record.disconnectCount === 0)).toHaveLength(1);
+      watcher.stop();
+      expect(records.every((record) => record.disconnectCount > 0)).toBe(true);
+    },
+  );
+
+  it.each(["root", "rootMargin", "constructor", "warning", "observe"] as const)(
+    "honors a stop made during %s before publishing a started observer",
+    (phase) => {
+      const target = document.createElement("div");
+      const onEntries = vi.fn();
+      const watcher = new IntersectionWatcher(onEntries);
+      let interrupted = false;
+      const interrupt = () => {
+        if (interrupted) return;
+        interrupted = true;
+        watcher.stop();
+      };
+      const records = installObserver({
+        rejectInvalidOptions: phase === "warning",
+        onConstruct: () => {
+          if (phase === "constructor") interrupt();
+        },
+        onObserve: () => {
+          if (phase === "observe") interrupt();
+        },
+      });
+      vi.spyOn(console, "warn").mockImplementation(() => {
+        if (phase === "warning") interrupt();
+      });
+
+      expect(
+        watcher.start(target, {
+          get root() {
+            if (phase === "root") interrupt();
+            return null;
+          },
+          get rootMargin() {
+            if (phase === "rootMargin") interrupt();
+            return phase === "warning" ? "200" : "0px";
+          },
+        }),
+      ).toBe(false);
+
+      expect(watcher.active).toBe(false);
+      expect(watcher.usingPlatformDefaults).toBe(false);
+      for (const record of records) record.callback([entryFor(target)]);
+      expect(onEntries).not.toHaveBeenCalled();
+      expect(records.every((record) => record.disconnectCount > 0)).toBe(true);
+    },
+  );
+
+  it("reports inactive platform defaults until fallback targets are fully observed", () => {
+    const target = document.createElement("div");
+    const onEntries = vi.fn();
+    const watcher = new IntersectionWatcher(onEntries);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    installObserver({
+      rejectInvalidOptions: true,
+      onObserve: (_, record) => {
+        expect(watcher.active).toBe(false);
+        expect(watcher.usingPlatformDefaults).toBe(false);
+        record.callback([entryFor(target)]);
+      },
+    });
+
+    expect(watcher.start(target, { threshold: 2 })).toBe(true);
+    expect(watcher.active).toBe(true);
+    expect(watcher.usingPlatformDefaults).toBe(true);
+    expect(onEntries).not.toHaveBeenCalled();
+    watcher.stop();
+  });
+
+  it("releases a failed partial start without stopping a later successful start", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const failure = new Error("observe failed after a later start");
+    const onEntries = vi.fn();
+    const watcher = new IntersectionWatcher(onEntries);
+    const records = installObserver({
+      onObserve: (target) => {
+        if (target !== first) return;
+        watcher.start(later);
+        throw failure;
+      },
+    });
+
+    let caught: unknown;
+    try {
+      watcher.start(first);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(failure);
+    expect(watcher.active).toBe(true);
+    expect(records[0]?.disconnectCount).toBeGreaterThan(0);
+    expect(records[1]?.disconnectCount).toBe(0);
+    records[0]?.callback([entryFor(first)]);
+    records[1]?.callback([entryFor(later)]);
+    expect(onEntries).toHaveBeenCalledExactlyOnceWith([entryFor(later)]);
+    watcher.stop();
+  });
+
+  it.each(["unobserve", "observe"] as const)(
+    "does not continue a retired rearm after a later start during %s",
+    (phase) => {
+      const first = document.createElement("div");
+      const later = document.createElement("div");
+      const watcher = new IntersectionWatcher(() => {});
+      let armed = false;
+      const interrupt = () => {
+        if (!armed) return;
+        armed = false;
+        watcher.start(later);
+      };
+      const records = installObserver({
+        onUnobserve: () => {
+          if (phase === "unobserve") interrupt();
+        },
+        onObserve: () => {
+          if (phase === "observe") interrupt();
+        },
+      });
+      watcher.start(first);
+      armed = true;
+
+      expect(() => watcher.rearm(first)).not.toThrow();
+      expect(watcher.active).toBe(true);
+      expect(records[0]?.disconnectCount).toBeGreaterThan(0);
+      expect(records[1]?.observed).toEqual([later]);
+      watcher.stop();
+    },
+  );
+
+  it("preserves a later start when a retired rearm throws the platform error", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const failure = new Error("unobserve failed after a later start");
+    const watcher = new IntersectionWatcher(() => {});
+    const records = installObserver({
+      onUnobserve: () => {
+        watcher.start(later);
+        throw failure;
+      },
+    });
+    watcher.start(first);
+
+    let caught: unknown;
+    try {
+      watcher.rearm(first);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(failure);
+    expect(watcher.active).toBe(true);
+    expect(records[0]?.disconnectCount).toBeGreaterThan(0);
+    expect(records[1]?.disconnectCount).toBe(0);
+    watcher.stop();
+  });
+
+  it("preserves a later start made while a stopped observer is being disconnected", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const onEntries = vi.fn();
+    const watcher = new IntersectionWatcher(onEntries);
+    let armed = false;
+    const records = installObserver({
+      onDisconnect: () => {
+        if (!armed) return;
+        armed = false;
+        watcher.start(later);
+      },
+    });
+    watcher.start(first);
+    armed = true;
+
+    watcher.stop();
+    expect(watcher.active).toBe(true);
+    records[0]?.callback([entryFor(first)]);
+    records[1]?.callback([entryFor(later)]);
+    expect(onEntries).toHaveBeenCalledExactlyOnceWith([entryFor(later)]);
+    watcher.stop();
+    expect(records[1]?.disconnectCount).toBe(1);
+  });
+
+  it("retires a restart when disconnecting its predecessor starts a later observer", () => {
+    const first = document.createElement("div");
+    const interrupted = document.createElement("div");
+    const later = document.createElement("div");
+    const watcher = new IntersectionWatcher(() => {});
+    let armed = false;
+    const records = installObserver({
+      onDisconnect: () => {
+        if (!armed) return;
+        armed = false;
+        watcher.start(later);
+      },
+    });
+    watcher.start(first);
+    armed = true;
+
+    expect(watcher.start(interrupted)).toBe(false);
+    expect(watcher.active).toBe(true);
+    expect(records.at(-1)?.observed).toEqual([later]);
+    watcher.stop();
+    expect(records.every((record) => record.disconnectCount > 0)).toBe(true);
+  });
+});
+
+describe("IntersectionWatcher reentrant fallback and rearm", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("does not read target length after releasing its predecessor retires the start", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const watcher = new IntersectionWatcher(() => {});
+    let replacing = false;
+    const records = installObserver({
+      onDisconnect: () => {
+        if (!replacing) return;
+        replacing = false;
+        watcher.start(later);
+      },
+    });
+    watcher.start(first);
+    const targets = new Proxy([first], {
+      get: (array, key, receiver) => {
+        if (key === "length") watcher.stop();
+        return Reflect.get(array, key, receiver);
+      },
+    });
+    replacing = true;
+
+    expect(watcher.start(targets)).toBe(false);
+    expect(watcher.active).toBe(true);
+    expect(records[1]?.targets).toEqual(new Set([later]));
+    watcher.stop();
+  });
+
+  it("does not resolve the root after reading target length retires the start", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const watcher = new IntersectionWatcher(() => {});
+    const records = installObserver();
+    const targets = new Proxy([first], {
+      get: (array, key, receiver) => {
+        if (key === "length") watcher.start(later);
+        return Reflect.get(array, key, receiver);
+      },
+    });
+
+    expect(
+      watcher.start(targets, {
+        get root() {
+          watcher.stop();
+          return null;
+        },
+      }),
+    ).toBe(false);
+
+    expect(watcher.active).toBe(true);
+    expect(records[0]?.targets).toEqual(new Set([later]));
+    watcher.stop();
+  });
+
+  it("does not run a fallback factory after its warning starts a later observer", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const watcher = new IntersectionWatcher(() => {});
+    const records = installObserver({
+      rejectInvalidOptions: true,
+      onConstruct: (options) => {
+        if (options && !("rootMargin" in options)) watcher.stop();
+      },
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => watcher.start(later));
+
+    expect(watcher.start(first, { rootMargin: "200" })).toBe(false);
+    expect(watcher.active).toBe(true);
+    expect(records[0]?.targets).toEqual(new Set([later]));
+    watcher.stop();
+  });
+
+  it("does not read configured options after resolving the root retires its start", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const onEntries = vi.fn();
+    const watcher = new IntersectionWatcher(onEntries);
+    const records = installObserver();
+
+    expect(
+      watcher.start(first, {
+        get root() {
+          watcher.start(later);
+          return null;
+        },
+        get rootMargin() {
+          watcher.stop();
+          return "0px";
+        },
+      }),
+    ).toBe(false);
+
+    expect(watcher.active).toBe(true);
+    expect(records[0]?.targets).toEqual(new Set([later]));
+    records[0]?.callback([entryFor(later)]);
+    expect(onEntries).toHaveBeenCalledExactlyOnceWith([entryFor(later)]);
+    watcher.stop();
+  });
+
+  it("does not warn after an option getter starts a later observer and throws", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const onEntries = vi.fn();
+    const watcher = new IntersectionWatcher(onEntries);
+    const records = installObserver();
+    vi.spyOn(console, "warn").mockImplementation(() => watcher.stop());
+
+    expect(
+      watcher.start(first, {
+        get rootMargin(): string {
+          watcher.start(later);
+          throw new Error("retired configured options");
+        },
+      }),
+    ).toBe(false);
+
+    expect(watcher.active).toBe(true);
+    expect(records[0]?.targets).toEqual(new Set([later]));
+    records[0]?.callback([entryFor(later)]);
+    expect(onEntries).toHaveBeenCalledExactlyOnceWith([entryFor(later)]);
+    watcher.stop();
+  });
+
+  it("keeps a later start without converting options from a retired attempt", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const onEntries = vi.fn();
+    const watcher = new IntersectionWatcher(onEntries);
+    const thresholds = [0.5];
+    Object.defineProperty(thresholds, "0", {
+      get: () => {
+        watcher.stop();
+        return 0.5;
+      },
+    });
+    const records = installObserver({
+      onConstruct: (options) => {
+        if (Array.isArray(options?.threshold)) Array.from(options.threshold);
+      },
+    });
+
+    expect(
+      watcher.start(first, {
+        get rootMargin() {
+          watcher.start(later);
+          return "0px";
+        },
+        threshold: thresholds,
+      }),
+    ).toBe(false);
+
+    expect(watcher.active).toBe(true);
+    expect(records[0]?.targets).toEqual(new Set([later]));
+    records[0]?.callback([entryFor(later)]);
+    expect(onEntries).toHaveBeenCalledExactlyOnceWith([entryFor(later)]);
+    watcher.stop();
+  });
+
+  it("does not enter a target iterator after construction retires its start", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const watcher = new IntersectionWatcher(() => {});
+    const targets = [first];
+    Object.defineProperty(targets, Symbol.iterator, {
+      value: function* () {
+        watcher.stop();
+        yield first;
+      },
+    });
+    let constructing = true;
+    const records = installObserver({
+      onConstruct: () => {
+        if (!constructing) return;
+        constructing = false;
+        watcher.start(later);
+      },
+    });
+
+    expect(watcher.start(targets)).toBe(false);
+    expect(watcher.active).toBe(true);
+    expect(records.find((record) => record.targets.has(later))?.targets).toEqual(new Set([later]));
+    expect(records.every((record) => !record.targets.has(first))).toBe(true);
+    watcher.stop();
+  });
+
+  it("does not resume a target iterator after observation retires its start", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const watcher = new IntersectionWatcher(() => {});
+    const targets = [first];
+    Object.defineProperty(targets, Symbol.iterator, {
+      value: function* () {
+        yield first;
+        watcher.stop();
+      },
+    });
+    const records = installObserver({
+      onObserve: (target) => {
+        if (target === first) watcher.start(later);
+      },
+    });
+
+    expect(watcher.start(targets)).toBe(false);
+    expect(watcher.active).toBe(true);
+    expect(records[0]?.targets.size).toBe(0);
+    expect(records[1]?.targets).toEqual(new Set([later]));
+    watcher.stop();
+  });
+
+  it("does not observe a target yielded after its iterator retires the start", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const watcher = new IntersectionWatcher(() => {});
+    const targets = [first];
+    Object.defineProperty(targets, Symbol.iterator, {
+      value: function* () {
+        watcher.start(later);
+        yield first;
+      },
+    });
+    const records = installObserver({
+      beforeObserve: (target) => {
+        if (target === first) watcher.stop();
+      },
+    });
+
+    expect(watcher.start(targets)).toBe(false);
+    expect(watcher.active).toBe(true);
+    expect(records[0]?.targets.size).toBe(0);
+    expect(records[1]?.targets).toEqual(new Set([later]));
+    watcher.stop();
+  });
+
+  it.each(["stop", "start"] as const)(
+    "releases a start registration made after a delegate performs a later %s",
+    (operation) => {
+      const first = document.createElement("div");
+      const later = document.createElement("div");
+      const watcher = new IntersectionWatcher(() => {});
+      const records = installObserver({
+        beforeObserve: (target) => {
+          if (target !== first) return;
+          if (operation === "stop") watcher.stop();
+          else watcher.start(later);
+        },
+      });
+
+      expect(watcher.start(first)).toBe(false);
+      expect(records[0]?.targets.size).toBe(0);
+      expect(watcher.active).toBe(operation === "start");
+      if (operation === "start") expect(records[1]?.targets).toEqual(new Set([later]));
+      watcher.stop();
+    },
+  );
+
+  it.each(["stop", "start"] as const)(
+    "releases a rearm registration made after a delegate performs a later %s",
+    (operation) => {
+      const first = document.createElement("div");
+      const later = document.createElement("div");
+      const onEntries = vi.fn();
+      const watcher = new IntersectionWatcher(onEntries);
+      let rearming = false;
+      const records = installObserver({
+        beforeObserve: (target) => {
+          if (!rearming || target !== first) return;
+          rearming = false;
+          if (operation === "stop") watcher.stop();
+          else watcher.start(later);
+        },
+      });
+      watcher.start(first);
+      rearming = true;
+
+      watcher.rearm(first);
+
+      expect(records[0]?.targets.size).toBe(0);
+      expect(watcher.active).toBe(operation === "start");
+      records[0]?.callback([entryFor(first)]);
+      if (operation === "start") {
+        expect(records[1]?.targets).toEqual(new Set([later]));
+        records[1]?.callback([entryFor(later)]);
+        expect(onEntries).toHaveBeenCalledExactlyOnceWith([entryFor(later)]);
+      } else expect(onEntries).not.toHaveBeenCalled();
+      watcher.stop();
+    },
+  );
+
+  it("keeps a later start made while converting the threshold sequence", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const watcher = new IntersectionWatcher(() => {});
+    const thresholds = [0.5];
+    Object.defineProperty(thresholds, Symbol.iterator, {
+      value: function* () {
+        watcher.start(later);
+        yield 0.5;
+      },
+    });
+    const records = installObserver({
+      onConstruct: (options) => {
+        if (Array.isArray(options?.threshold)) Array.from(options.threshold);
+      },
+    });
+
+    expect(watcher.start(first, { threshold: thresholds })).toBe(false);
+    expect(watcher.active).toBe(true);
+    expect(records.filter((record) => record.disconnectCount === 0)).toHaveLength(1);
+    expect(records.find((record) => record.disconnectCount === 0)?.observed).toEqual([later]);
+    watcher.stop();
+    expect(records.every((record) => record.disconnectCount > 0)).toBe(true);
+  });
+
+  it("does not publish a retired start when its target iterator finishes after a later start", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const watcher = new IntersectionWatcher(() => {});
+    const targets = [first];
+    Object.defineProperty(targets, Symbol.iterator, {
+      value: function* () {
+        yield first;
+        watcher.start(later);
+      },
+    });
+    const records = installObserver();
+
+    expect(watcher.start(targets)).toBe(false);
+    expect(watcher.active).toBe(true);
+    expect(records[0]?.disconnectCount).toBeGreaterThan(0);
+    expect(records[1]?.observed).toEqual([later]);
+    watcher.stop();
+  });
+
+  it("preserves a later start and the exact fallback constructor error", () => {
+    const first = document.createElement("div");
+    const later = document.createElement("div");
+    const failure = new Error("fallback failed after a later start");
+    const watcher = new IntersectionWatcher(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const records = installObserver({
+      rejectInvalidOptions: true,
+      constructorError: failure,
+      constructorErrorAt: 2,
+      onConstruct: (options) => {
+        if (options && !("rootMargin" in options)) watcher.start(later);
+      },
+    });
+
+    let caught: unknown;
+    try {
+      watcher.start(first, { threshold: 2 });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(failure);
+    expect(watcher.active).toBe(true);
+    expect(watcher.usingPlatformDefaults).toBe(false);
+    expect(records).toHaveLength(1);
+    expect(records[0]?.observed).toEqual([later]);
+    expect(records[0]?.disconnectCount).toBe(0);
+    watcher.stop();
+  });
+
+  it.each(["unobserve", "observe"] as const)(
+    "honors a stop made during rearm %s without observing a replacement",
+    (phase) => {
+      const target = document.createElement("div");
+      const onEntries = vi.fn();
+      const watcher = new IntersectionWatcher(onEntries);
+      let armed = false;
+      const interrupt = () => {
+        if (!armed) return;
+        armed = false;
+        watcher.stop();
+      };
+      const records = installObserver({
+        onUnobserve: () => {
+          if (phase === "unobserve") interrupt();
+        },
+        onObserve: () => {
+          if (phase === "observe") interrupt();
+        },
+      });
+      watcher.start(target);
+      armed = true;
+
+      expect(() => watcher.rearm(target)).not.toThrow();
+      expect(watcher.active).toBe(false);
+      expect(records[0]?.observed).toHaveLength(phase === "unobserve" ? 1 : 2);
+      expect(records[0]?.disconnectCount).toBeGreaterThan(0);
+      records[0]?.callback([entryFor(target)]);
+      expect(onEntries).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("isBeforeRootStart", () => {

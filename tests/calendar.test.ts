@@ -1345,17 +1345,12 @@ describe("CalendarController", () => {
 
     it("keeps working when its only fields leave", async () => {
       await withFields();
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       field().remove();
       monthField().remove();
       await tick();
       cellFor("2026-05-14").click();
       await delay(50);
 
-      expect(errors).toEqual([]);
       expect(cellFor("2026-05-14").getAttribute("aria-selected")).toBe("true");
     });
   });
@@ -1429,16 +1424,11 @@ describe("CalendarController", () => {
     });
 
     it("keeps working when its only label leaves", async () => {
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       label().remove();
       await tick();
       next();
       await delay(50);
 
-      expect(errors).toEqual([]);
       expect(document.querySelector("[data-date='2026-06-15']")).not.toBeNull();
     });
   });
@@ -1451,7 +1441,6 @@ describe("CalendarController", () => {
  */
 describe("CalendarController off-contract input", () => {
   let application: Application;
-  let errors: Error[];
 
   const cells = () => {
     let html = "";
@@ -1483,12 +1472,6 @@ describe("CalendarController off-contract input", () => {
       ${close}`;
     application = Application.start();
     application.register("stimeo--calendar", CalendarController);
-    errors = [];
-    // Stimulus reports a handler's exception instead of rethrowing it, so an
-    // assertion on the DOM alone cannot tell a guard from a crash.
-    application.handleError = (error) => {
-      errors.push(error as Error);
-    };
     await delay(150);
   };
 
@@ -1566,7 +1549,6 @@ describe("CalendarController off-contract input", () => {
     typeKey(grid(), "ArrowRight");
     await delay(50);
 
-    expect(errors).toEqual([]);
     expect(days().some((cell) => cell.getAttribute("aria-selected") === "true")).toBe(false);
     expect(days().map((cell) => cell.getAttribute("tabindex"))).toEqual(before);
   });
@@ -1579,7 +1561,6 @@ describe("CalendarController off-contract input", () => {
     controller().next();
     await delay(50);
     expect(document.getElementById("cal-label")?.textContent).toBe(label);
-    expect(errors).toEqual([]);
   });
 
   it("keeps the grid operable when the selected value is malformed", async () => {
@@ -1588,7 +1569,6 @@ describe("CalendarController off-contract input", () => {
     root.setAttribute("data-stimeo--calendar-selected-value", "31-05-2026");
     await delay(50);
 
-    expect(errors).toEqual([]);
     expect(days().filter((cell) => cell.getAttribute("tabindex") === "0")).toHaveLength(1);
     expect(days().every((cell) => cell.hasAttribute("aria-selected"))).toBe(true);
     expect(days()[5]?.getAttribute("data-date")).toBe("2026-05-01");
@@ -1599,7 +1579,6 @@ describe("CalendarController off-contract input", () => {
     // nearest one above it — not the document element's.
     await mount("2026-05", "ja");
 
-    expect(errors).toEqual([]);
     expect(document.getElementById("cal-label")?.textContent).toBe("2026年5月");
   });
 
@@ -1639,7 +1618,6 @@ describe("CalendarController off-contract input", () => {
       });
     }
 
-    expect(errors).toEqual([]);
     expect(asked).toContain(undefined);
     expect(asked).not.toContain("en");
   });
@@ -1657,7 +1635,6 @@ describe("CalendarController off-contract input", () => {
     controller().localeValue = "ja";
     await delay(50);
 
-    expect(errors).toEqual([]);
     expect(document.getElementById("cal-label")?.textContent).toBe("2026年5月");
   });
 
@@ -1669,7 +1646,6 @@ describe("CalendarController off-contract input", () => {
     document.documentElement.lang = "en_US";
     await mount("2026-05");
 
-    expect(errors).toEqual([]);
     expect(document.getElementById("cal-label")?.textContent).toBe("May 2026");
     expect(days().filter((cell) => cell.hasAttribute("data-date"))).toHaveLength(42);
     expect(days().filter((cell) => cell.getAttribute("tabindex") === "0")).toHaveLength(1);
@@ -1685,7 +1661,6 @@ describe("CalendarController off-contract input", () => {
     controller().next();
     await delay(50);
 
-    expect(errors).toEqual([]);
     expect(document.getElementById("cal-label")?.textContent).toBe("June 2026");
     expect(days().filter((cell) => cell.hasAttribute("data-date"))).toHaveLength(42);
     expect(days().filter((cell) => cell.getAttribute("tabindex") === "0")).toHaveLength(1);
@@ -1698,6 +1673,10 @@ describe("CalendarController off-contract input", () => {
     // action's exception through `handleError`, so the repaint is driven by a
     // key move inside the shown month, which repaints synchronously.
     await mount("2026-05");
+    const errors: Error[] = [];
+    application.handleError = (error) => {
+      errors.push(error);
+    };
     const NativeDateTimeFormat = Intl.DateTimeFormat;
     const ThrowingDateTimeFormat = new Proxy(NativeDateTimeFormat, {
       construct(target, argumentsList, newTarget) {
@@ -1740,7 +1719,6 @@ describe("CalendarController off-contract input", () => {
  */
 describe("CalendarController off-contract cell counts", () => {
   let application: Application;
-  let errors: Error[];
 
   const cells = (count: number) => {
     let html = "";
@@ -1763,10 +1741,6 @@ describe("CalendarController off-contract cell counts", () => {
       </div>`;
     application = Application.start();
     application.register("stimeo--calendar", CalendarController);
-    errors = [];
-    application.handleError = (error) => {
-      errors.push(error as Error);
-    };
     await delay(150);
   };
 
@@ -1785,7 +1759,6 @@ describe("CalendarController off-contract cell counts", () => {
     // the missing 42nd cell never reaches it, and the grid leaves the Tab order.
     await mount(41, 'data-stimeo--calendar-selected-value="2026-08-10"');
 
-    expect(errors).toEqual([]);
     expect(days()).toHaveLength(41);
     expect(days().every((cell) => cell.hasAttribute("data-date"))).toBe(true);
     expect(days().filter((cell) => cell.getAttribute("tabindex") === "0")).toHaveLength(1);
@@ -1802,7 +1775,6 @@ describe("CalendarController off-contract cell counts", () => {
     press(spare, "ArrowRight", { bubbles: true });
     await delay(50);
 
-    expect(errors).toEqual([]);
     expect(document.getElementById("cal-label")?.textContent).toBe(label);
     expect(days().findIndex((cell) => cell.getAttribute("tabindex") === "0")).toBe(before);
   });
@@ -1817,7 +1789,6 @@ describe("CalendarController off-contract cell counts", () => {
     (days()[42] as HTMLElement).dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await delay(50);
 
-    expect(errors).toEqual([]);
     expect(selected).toEqual([]);
     expect(
       document.getElementById("cal")?.hasAttribute("data-stimeo--calendar-selected-value"),
@@ -2590,9 +2561,10 @@ describe("CalendarController runtime bounds and week start", () => {
 /**
  * `selected` is the page's request, and `min` / `max` decide whether the grid
  * publishes it: a day outside them is neither announced as selected nor
- * submitted, and it comes back once they allow it again. A move of the
- * published selection that the bounds made is reported as `reconcile`; `select`
- * stays the user's, and nothing is reported while the grid connects.
+ * submitted, and it comes back once they allow it again. A bounds-driven move
+ * of the published selection reports `reconcile`. A pick that moves the
+ * selection reports `select` with its origin, including `api` for an element
+ * passed to `select()`. The grid reports nothing while it connects.
  */
 describe("CalendarController selection held to the bounds", () => {
   let application: Application | undefined;

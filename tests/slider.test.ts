@@ -667,6 +667,25 @@ describe("SliderController", () => {
     expect(thumb().getAttribute("aria-valuenow")).toBe("94");
   });
 
+  it("steps one unit near zero between huge finite bounds", async () => {
+    root().setAttribute("data-stimeo--slider-min-value", "-1e17");
+    root().setAttribute("data-stimeo--slider-max-value", "1e17");
+    root().setAttribute("data-stimeo--slider-step-value", "1");
+    root().setAttribute("data-stimeo--slider-value-value", "0");
+    controller().minValueChanged();
+    controller().maxValueChanged();
+    controller().stepValueChanged();
+    controller().valueValueChanged();
+    await flushMicrotasks();
+    expect(thumb().getAttribute("aria-valuenow")).toBe("0");
+
+    press("ArrowRight");
+    expect(thumb().getAttribute("aria-valuenow")).toBe("1");
+    press("ArrowLeft");
+    press("ArrowLeft");
+    expect(thumb().getAttribute("aria-valuenow")).toBe("-1");
+  });
+
   it("falls back to step one when the authored step is invalid", async () => {
     root().setAttribute("data-stimeo--slider-step-value", "0");
     root().setAttribute("data-stimeo--slider-value-value", "2.6");

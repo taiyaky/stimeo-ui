@@ -85,8 +85,9 @@
         </li>
       <% end %>
     </ul>
-    <%# Validatable mirror: the hidden attribute participates in constraint
-        validation and submits with the form — type="hidden" would do neither. %>
+    <%# The text input is hidden from view and still participates in constraint
+        validation. A named, enabled input of type="hidden" can submit its value
+        and is barred from constraint validation. %>
     <input type="text" hidden required name="plan"
            data-stimeo--form-validation-message-value-missing=
              "<%= t('components.form_validation.demo.messages.plan_required') %>"

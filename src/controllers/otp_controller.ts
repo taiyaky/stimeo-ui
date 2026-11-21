@@ -168,8 +168,8 @@ function statesDiffer(left: OtpState, right: OtpState): boolean {
  * that already carries the residual, after which the end is compared with that value.
  * Until the conversion's end is observed, only its own field waits: a key in another
  * field is handled as a key, a script's input there is distributed past the field
- * still composing without moving focus, and a paste fills every writable field from
- * its own, conversion text included, then advances focus.
+ * still composing without moving focus, and a paste can replace the text in its
+ * starting field, including uncommitted conversion text, and advance focus.
  * A `pattern` drop held for a conversion applies, reported as `reconcile`, ahead of
  * the next key, edit or paste — to every field but one still composing, which keeps
  * its text for its own end and counts a committed character only if the pattern
@@ -798,13 +798,12 @@ export class OtpController extends Controller<HTMLElement> {
   }
 
   /**
-   * Fills `text`'s accepted characters into writable fields at and after the
-   * entry point, preserving any other field's composition and its focus. Without
-   * an active composition, focus advances past the last field filled.
+   * Fills writable fields from the entry point until the accepted characters or
+   * fields run out. With `spare` enabled, any composing field keeps its text and
+   * focus. When no composition is spared and at least one character lands, focus
+   * moves to the next writable field or the last field filled.
    *
-   * A paste passes `spare` false: it lands in the focused field, so no other field can
-   * still be composing, whatever end the tracker has yet to see, and the paste replaces
-   * what its own field holds. It fills every writable field and advances focus.
+   * Paste disables `spare` so it can overwrite the starting field's conversion text.
    */
   #distribute(from: HTMLInputElement, text: string, spare = true, before?: string): void {
     const accepted = Array.from(text).filter((char) => this.#pattern.test(char));

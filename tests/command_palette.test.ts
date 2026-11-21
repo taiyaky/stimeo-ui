@@ -87,10 +87,7 @@ describe("CommandPaletteController", () => {
     });
   };
 
-  /**
-   * The modifier these tests press with the default `mod+k` hotkey: Meta when the user
-   * agent names an Apple platform, Ctrl elsewhere.
-   */
+  /** Chooses one of the two modifiers that `mod+k` accepts on any platform. */
   const hotkeyModifiers = { ctrlKey: !isMac, metaKey: isMac };
 
   /** Runs `act`, lets Stimulus deliver the callbacks, and returns the writes to `attributes`. */
@@ -1198,7 +1195,7 @@ describe("CommandPaletteController", () => {
     expect(dialog().hidden).toBe(true);
   });
 
-  it("shows the empty state when every option is disabled", () => {
+  it("shows the empty state when every option sets data-disabled to true", () => {
     for (const id of ["cmd-new", "cmd-publish", "cmd-delete"]) {
       option(id).setAttribute("data-disabled", "true");
     }
@@ -1477,7 +1474,10 @@ describe("CommandPaletteController", () => {
     };
 
     it("keeps the same active command when a preceding option is removed", async () => {
+      const scroll = vi.spyOn(option("cmd-publish"), "scrollIntoView");
       activatePublish();
+      expect(scroll).toHaveBeenCalledWith({ block: "nearest" });
+      scroll.mockClear();
       const selections: string[] = [];
       listenForSelection((event) => {
         selections.push((event as CustomEvent<{ value: string }>).detail.value);
@@ -1489,6 +1489,7 @@ describe("CommandPaletteController", () => {
       expect(input().getAttribute("aria-activedescendant")).toBe("cmd-publish");
       expect(activeOptionIds()).toEqual(["cmd-publish"]);
       expect(activeMarkerIds()).toEqual(["cmd-publish"]);
+      expect(scroll).not.toHaveBeenCalled();
 
       pressKey(input(), "Enter");
       expect(selections).toEqual(["publish"]);
@@ -2303,7 +2304,10 @@ describe("CommandPaletteController", () => {
       await tick();
       const instance = controller();
       instance.disconnect();
-      // The teardown closed the palette; any write from here on would hide it again.
+      /**
+       * Disconnect releases the modal side effects and preserves the open state.
+       * The departing target leaves the visibility the page sets on the successor intact.
+       */
       successor.hidden = false;
       original.remove();
       instance.dialogTargetDisconnected(original);

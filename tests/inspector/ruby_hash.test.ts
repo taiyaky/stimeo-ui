@@ -246,6 +246,15 @@ describe("readDataOption", () => {
       expect(readDataOption(`tag.div data: { controller: "stimeo--menu" }`, 0).opaque).toBe(false);
     });
 
+    it("reports an unfinished data hash as opaque and keeps the known entries", () => {
+      const scan = readDataOption(`tag.div data: { controller: "stimeo--menu"`, 0);
+      expect(scan).toMatchObject({
+        found: true,
+        opaque: true,
+        attrs: [{ name: "data-controller", value: "stimeo--menu" }],
+      });
+    });
+
     it("stays readable when another argument or the call's end follows the hash", () => {
       expect(
         readDataOption(`link_to "x", "/y", data: { controller: "stimeo--menu" }, class: "b"`, 0)
@@ -310,6 +319,20 @@ describe("readDataOption", () => {
         "data-controller": "stimeo--menu",
       });
     });
+
+    it.each(["name + # },\n  suffix", "%q[},]"])(
+      "ignores entry delimiters while skipping the computed value %s",
+      (value) => {
+        const scan = readDataOption(
+          `tag.div data: { title: ${value}, controller: "stimeo--menu" }`,
+          0,
+        );
+        expect(scan.attrs.map(({ name, value }) => [name, value])).toEqual([
+          ["data-title", null],
+          ["data-controller", "stimeo--menu"],
+        ]);
+      },
+    );
 
     it("ignores a data: key written inside a comment", () => {
       expect(readDataOption(`tag.div # data: { controller: "x" }`, 0).found).toBe(false);

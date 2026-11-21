@@ -48,7 +48,7 @@ const DEFAULT_ACTIVITY_EVENTS = [
  * `events` swaps the watched set: the old listeners go and the declared ones are added
  * once. `timeout` and `promptBefore` move the pending checks to the deadlines the new
  * declaration sets from the same last activity, so the time already spent inactive
- * counts; a deadline the elapsed time has already passed is acted on at once, and a
+ * counts. An expired deadline schedules its check with a zero-delay timer. A
  * cycle past both deadlines goes idle without a warning for a window that is over. A
  * phase already reached stays: a raised warning goes only on activity or at the
  * timeout, and an idle detector schedules nothing until activity arms the next cycle
@@ -214,11 +214,11 @@ export class IdleController extends Controller<HTMLElement> {
 
   /**
    * Schedules the pending checks from the last activity and the current declarations,
-   * replacing whatever was pending. A deadline already behind the elapsed time is checked
-   * at once. The idle check is scheduled first, so when both deadlines have passed it runs
-   * first and the warning check finds the cycle over. A warning that comes due at once
-   * reports the time left from now rather than the whole window. A raised warning is not
-   * scheduled again, and an idle detector schedules nothing.
+   * replacing whatever was pending. Expired deadlines use zero-delay timers. The
+   * idle check is scheduled first, so when both deadlines have passed it runs first
+   * and the warning check finds the cycle over. A warning already due reports the
+   * time left until idle. A raised warning is not scheduled again, and an idle
+   * detector schedules nothing.
    *
    * @stimeoRuntimeOnly `timeout` and `promptBefore` time the checks this call schedules.
    */
@@ -234,7 +234,7 @@ export class IdleController extends Controller<HTMLElement> {
     this.#timeouts.set(() => this.#checkPrompt(left), this.#delayFor(timeout - prompt - elapsed));
   }
 
-  /** The platform delay for a deadline `remaining` ms away: at once when past, capped when far. */
+  /** Clamps the remaining time between zero and the maximum platform timer delay. */
   #delayFor(remaining: number): number {
     return Math.min(Math.max(remaining, 0), MAX_TIMER_DELAY_MS);
   }

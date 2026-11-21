@@ -33,9 +33,8 @@ export interface ControllerManifest {
   readonly valueConstraints: readonly ValueConstraint[];
   /**
    * Grammar contracts on String Values whose accepted set cannot be enumerated
-   * (stage 1). Optional on the wire: a manifest written before the field existed
-   * omits it, and an engine written before it skips it, so either side pairs
-   * with the other. See {@link StringSyntaxConstraint}.
+   * (stage 1). This field is optional. Consumers that only check enumerated
+   * values can ignore it. See {@link StringSyntaxConstraint}.
    */
   readonly valueSyntaxConstraints?: readonly StringSyntaxConstraint[];
   /** Statically decidable relationships between literal Stimulus Values. */
@@ -869,12 +868,9 @@ export interface StringValueConstraint {
  * ask, so it cannot tell a malformed selector from one that simply matches
  * nothing.
  *
- * These live in their own manifest field rather than alongside
- * {@link StringValueConstraint}: an engine that predates them reads every String
- * entry of `valueConstraints` through `allowedValues`, so a grammar contract
- * placed there would be accepted by the shape check and then fail on the first
- * document that declares the Value. A field such an engine never looks at is
- * skipped instead.
+ * The manifest carries grammar constraints in `valueSyntaxConstraints`.
+ * Consumers of `valueConstraints` can treat every String entry as an
+ * enumerated {@link StringValueConstraint} with `allowedValues`.
  */
 export interface StringSyntaxConstraint {
   /** Value name (camelCase, as declared in `static values`). */

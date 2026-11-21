@@ -35,8 +35,6 @@ describe("ScrollspyController", () => {
   let application: Application | undefined;
   let observers: ObserverRecord[];
   let reducedMotion = false;
-  /** Errors Stimulus caught, so a test can assert a path did not throw. */
-  let stimulusErrors: Error[];
   let frames: Map<number, FrameRequestCallback>;
   let nextFrameId: number;
   /** How many frames were requested — the coalescing counter. */
@@ -45,7 +43,6 @@ describe("ScrollspyController", () => {
   beforeEach(() => {
     observers = [];
     reducedMotion = false;
-    stimulusErrors = [];
     frames = new Map();
     nextFrameId = 1;
     frameRequests = 0;
@@ -95,8 +92,6 @@ describe("ScrollspyController", () => {
     document.body.innerHTML = "";
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
-    // An exception Stimulus caught during the case or its teardown fails the case.
-    expect(stimulusErrors).toEqual([]);
   });
 
   /** Runs the frames queued so far (one pass — a frame queued by one is not re-run). */
@@ -141,11 +136,6 @@ describe("ScrollspyController", () => {
   const start = async (markup: string = FIXTURE): Promise<void> => {
     document.body.innerHTML = markup;
     application = Application.start();
-    // Collects Stimulus exceptions, and `afterEach` fails a case that left one (a silent
-    // handler would swallow a controller error and leave the assertion to fail obscurely).
-    application.handleError = (error) => {
-      stimulusErrors.push(error);
-    };
     application.register("stimeo--scrollspy", ScrollspyController);
     await tick();
   };
@@ -246,7 +236,6 @@ describe("ScrollspyController", () => {
       await tick();
       expect(currentIds()).toEqual(["link-usage"]);
       expect(changes).toHaveBeenCalledTimes(1);
-      expect(stimulusErrors).toEqual([]);
     },
   );
 
@@ -368,7 +357,6 @@ describe("ScrollspyController", () => {
     layoutSections({ usage: 500 });
     clickLink("usage");
     expect(window.scrollTo).toHaveBeenCalledWith({ top: 600, behavior: "smooth" });
-    expect(stimulusErrors).toEqual([]);
   });
 
   it("normalizes positive and negative infinite offsets", async () => {
@@ -676,6 +664,25 @@ describe("ScrollspyController", () => {
     deliver([entryFor("intro", false), entryFor("usage", false), entryFor("api", false)]);
 
     expect(currentIds()).toEqual(["link-api"]);
+  });
+
+  it("prefers an intersecting section to a closer tracked section", async () => {
+    await start();
+    const change = vi.fn();
+    requireElement("#scrollspy").addEventListener("stimeo--scrollspy:change", change);
+
+    // Intro ends above the trigger line at 80; its top is closer than usage's.
+    layout(section("intro"), 70, 800, 8);
+    layoutSections({ usage: 120 });
+    deliver([entryFor("intro", false), entryFor("usage", false)]);
+    expect(currentIds()).toEqual(["link-intro"]);
+
+    deliver([entryFor("usage", true)]);
+    expect(currentIds()).toEqual(["link-usage"]);
+    expect(change.mock.calls.map(([event]) => event.detail)).toEqual([
+      { id: "intro", link: link("intro") },
+      { id: "usage", link: link("usage") },
+    ]);
   });
 
   it("never lets a section without a layout box win the fallback", async () => {
@@ -1208,7 +1215,6 @@ describe("ScrollspyController", () => {
 
     // A typo in a data attribute must degrade to viewport spying. Letting the
     // selector error escape `connect()` leaves the controller inert instead.
-    expect(stimulusErrors).toEqual([]);
     expect(observers).toHaveLength(1);
     expect(observers[0]?.options?.root ?? null).toBeNull();
 
@@ -1227,8 +1233,7 @@ describe("ScrollspyController", () => {
       <svg aria-hidden="true"><rect /></svg>
       <section id="intro">Intro</section>`);
 
-    // An SVG node is not a scroll container — it has no scroll box to move —
-    // so adopting it as the observation root would silently break the spy.
+    /** The selector resolves to an SVG element, so the controller uses the viewport. */
     expect(observers).toHaveLength(1);
     expect(observers[0]?.options?.root ?? null).toBeNull();
   });
@@ -1358,10 +1363,6 @@ describe("ScrollspyController", () => {
     // must not lurch to a dangling anchor), but nothing scrolls.
     expect(clickLink("missing").defaultPrevented).toBe(true);
     expect(window.scrollTo).not.toHaveBeenCalled();
-    // And it is a real no-op, not a throw Stimulus quietly absorbed: measuring
-    // the element that is not there raises inside the action handler, which
-    // leaves `scrollTo` uncalled for the wrong reason.
-    expect(stimulusErrors).toEqual([]);
 
     // A link that anchors no id at all is left entirely to the browser.
     expect(clickLink("empty").defaultPrevented).toBe(false);
@@ -1543,7 +1544,6 @@ describe("ScrollspyController", () => {
       controllerFor().scrollTo(descendant ? child : link("intro"));
       expect(window.scrollTo).toHaveBeenLastCalledWith({ top: 120, behavior: "smooth" });
       expect(document.activeElement).toBe(outside);
-      expect(stimulusErrors).toEqual([]);
     },
   );
   it.each(["foreign", "undeclared", "detached", "nested"])(

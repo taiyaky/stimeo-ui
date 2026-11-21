@@ -57,8 +57,7 @@ interface KeyboardSession {
  * `stimeo--sortable` is one, and reordering, dismissal, and resizing are the usual
  * meanings a consumer layers on. No dedicated APG
  * pattern exists for drag-and-drop; the keyboard model below is the accepted
- * alternative-input technique (WCAG 2.1.1 / 2.5.7 Dragging Movements). Core
- * (zero dependencies).
+ * alternative-input technique (WCAG 2.1.1 / 2.5.7 Dragging Movements).
  *
  * Markup contract (identifier: `stimeo--pointer-drag`):
  *   <li data-controller="stimeo--pointer-drag"

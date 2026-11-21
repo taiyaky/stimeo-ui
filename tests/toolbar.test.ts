@@ -689,6 +689,62 @@ describe("ToolbarController", () => {
     expect(document.activeElement).toBe(controls()[1]);
   });
 
+  it("leaves the morphs of a contenteditable control composing to the page, and takes arrows back once one rewrote the conversion", async () => {
+    await startMarkup(`
+      <div data-controller="stimeo--toolbar" role="toolbar" aria-label="Text formatting">
+        <button type="button" tabindex="-1" data-stimeo--toolbar-target="control">Bold</button>
+        <div contenteditable="true" role="textbox" aria-label="Note" tabindex="0"
+             data-stimeo--toolbar-target="control"><em>か</em></div>
+        <button type="button" tabindex="-1" data-stimeo--toolbar-target="control">Italic</button>
+      </div>`);
+    const editor = controls()[1] as HTMLElement;
+    const holder = editor.querySelector("em") as HTMLElement;
+    const text = holder.firstChild as Text;
+    editor.focus();
+    const caret = document.createRange();
+    caret.setStart(text, text.data.length);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(caret);
+    editor.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    text.appendData("に");
+    caret.setStart(text, text.data.length);
+    editor.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertCompositionText",
+        isComposing: true,
+        data: "に",
+      }),
+    );
+    expect(pressKey(editor, "ArrowRight").defaultPrevented).toBe(false);
+
+    // Turbo asks before it morphs or removes an element; none of these is cancelled, so its
+    // morph goes on to rewrite the conversion's text.
+    const notice = (element: HTMLElement, removal: boolean): boolean => {
+      const event = new CustomEvent("turbo:before-morph-element", {
+        bubbles: true,
+        cancelable: true,
+        detail: {
+          currentElement: element,
+          newElement: removal ? undefined : element.cloneNode(true),
+        },
+      });
+      element.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    expect([
+      notice(editor, false),
+      notice(editor, true),
+      notice(holder, false),
+      notice(holder, true),
+    ]).toEqual([false, false, false, false]);
+    text.replaceWith(document.createTextNode("server"));
+
+    expect(pressKey(editor, "ArrowRight").defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(controls()[2]);
+    document.getSelection()?.removeAllRanges();
+  });
+
   it("stops observing its subtree on disconnect", async () => {
     const observe = vi.spyOn(MutationObserver.prototype, "observe");
     await start();

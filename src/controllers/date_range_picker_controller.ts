@@ -584,7 +584,8 @@ export class DateRangePickerController extends Controller<HTMLElement> {
       const iso = toISODateString(date);
 
       el.setAttribute("data-date", iso);
-      el.textContent = String(date.getDate());
+      const dayText = String(date.getDate());
+      if (el.textContent !== dayText) el.textContent = dayText;
       el.setAttribute("data-outside", String(date.getMonth() !== month - 1));
       el.setAttribute("data-today", String(iso === todayStr));
       el.setAttribute("tabindex", iso === focusedStr ? "0" : "-1");

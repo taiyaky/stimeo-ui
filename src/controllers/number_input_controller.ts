@@ -69,11 +69,14 @@ const sameRange = (shown: SteppedRange | undefined, declared: SteppedRange): boo
  *
  * Behavior provided:
  * - `ArrowUp`/`ArrowDown` step by `step`; `PageUp`/`PageDown` by `pageStep`
- *   (default `step × 10`); `Home`/`End` jump to a finite `min`/`max`.
- * - Increment/decrement buttons step too, and are `disabled` at the bounds (focus
- *   is returned to the input before a focused button is disabled).
+ *   (default `step × 10`); `Home`/`End` jump to a finite `min`/`max`. Where a
+ *   number cannot hold every grid value, a step moves the way it points or
+ *   leaves the value as it is. A `pageStep` that would pass the largest finite
+ *   number lands on a finite endpoint that way, and is otherwise unhandled.
+ * - Increment/decrement buttons are `disabled` when a step cannot move the value
+ *   in their direction. Focus returns to the input before a focused button is disabled.
  * - **Press-and-hold auto-repeat**: holding a step button starts repeated steps
- *   after a short delay until release, the bound is reached, or the element
+ *   after a short delay until release, no further step is possible, or the element
  *   disconnects. The `click` binding stays the single-step path (a quick click, a
  *   synthesized/programmatic click, or assistive activation), so a normal click
  *   never double-steps — the trailing click after a hold is swallowed.
@@ -467,16 +470,20 @@ export class NumberInputController extends Controller<HTMLElement> {
             : stepSteppedValue(this.#currentValue(), -10, this.#steppedRange);
         break;
       case "Home":
-        if (!Number.isFinite(this.#safeMin)) return;
         next = this.#safeMin;
         break;
       case "End":
-        if (!Number.isFinite(this.#safeMax)) return;
         next = this.#safeMax;
         break;
       default:
         return;
     }
+    // A page step whose sum passes the largest finite number lands on the finite
+    // endpoint that way. A key whose target is an unbounded side — Home, End or
+    // such a page step — is left unhandled.
+    if (next === Number.POSITIVE_INFINITY) next = this.#safeMax;
+    if (next === Number.NEGATIVE_INFINITY) next = this.#safeMin;
+    if (!Number.isFinite(next)) return;
     event.preventDefault();
     // `preventDefault` stops the browser's own stepping, so the edit below is
     // entirely this widget's and nothing else will report it.
@@ -599,7 +606,7 @@ export class NumberInputController extends Controller<HTMLElement> {
    * Normalizes `raw`, reflects it, and dispatches `{ value: number }` only when
    * the committed numeric value differs from the last reconciled value.
    *
-   * @returns Whether the value changed (drives the auto-repeat's bound stop).
+   * @returns Whether the value changed (auto-repeat stops when a step cannot move it).
    */
   #commit(raw: number, report = false): boolean {
     const value = this.#normalize(raw);
@@ -777,21 +784,27 @@ export class NumberInputController extends Controller<HTMLElement> {
     this.#ariaValueMax.return(input);
   }
 
-  /** Disables a step button at a bound of `range`, returning focus to the input first. */
+  /** Disables each direction in which one step cannot advance the value. */
   #updateButtons(value: number, range: SteppedRange): void {
     const move = this.#move;
-    for (const button of this.incrementTargets) {
-      this.#toggleButton(button, value < range.max, move);
+    const increments = this.incrementTargets;
+    const canIncrement =
+      increments.length > 0 && value < range.max && stepSteppedValue(value, 1, range) > value;
+    for (const button of increments) {
+      this.#toggleButton(button, canIncrement, move);
       if (!this.#moves.isLatest(move)) return;
     }
-    for (const button of this.decrementTargets) {
-      this.#toggleButton(button, value > range.min, move);
+    const decrements = this.decrementTargets;
+    const canDecrement =
+      decrements.length > 0 && value > range.min && stepSteppedValue(value, -1, range) < value;
+    for (const button of decrements) {
+      this.#toggleButton(button, canDecrement, move);
       if (!this.#moves.isLatest(move)) return;
     }
   }
 
   /**
-   * Enables or disables a step button at its bound, never disabling one while it
+   * Reflects whether a step button can move, never disabling one while it
    * holds focus. Owns only the `disabled` it sets itself, recorded by the
    * `data-number-input-disabled` marker, so an author-disabled button (e.g. the whole
    * control disabled) is never re-enabled.

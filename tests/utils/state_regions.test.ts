@@ -127,7 +127,7 @@ describe("state regions", () => {
       expect(off.hidden).toBe(false);
     });
 
-    it("forgets a half once it shows it again, so the author's own hiding stands", () => {
+    it("preserves the page's hidden value after showing the surviving half", () => {
       const host = mount(`<button><span data-off>open</span><span data-on>close</span></button>`);
       const state = labels(host);
       const off = host.querySelector("[data-off]") as HTMLElement;
@@ -374,7 +374,7 @@ describe("state regions", () => {
     hides.mockRestore();
   });
 
-  it("costs a watcher of its subtree two attribute mutations on each region a transition moves, and none for a reflection that moves nothing", async () => {
+  it("writes visibility and its record for one owner and writes neither on an unchanged repeat", async () => {
     const host = mount(`<div><span data-on>on</span><span data-off hidden>off</span></div>`);
     const state = new StateRegions(
       { whenTrue: () => all(host, "[data-on]"), whenFalse: () => all(host, "[data-off]") },
@@ -657,8 +657,8 @@ describe("state regions records", () => {
 
   describe("a write that leaves the region as it is", () => {
     /**
-     * A region the instance takes to `hidden` and back, which the page then takes to `hidden`
-     * before the instance writes `hidden` again.
+     * Moves the region away from its authored visibility and back, then reflects
+     * the same visibility as the page's subsequent write.
      */
     const moved = (authored: string | null, hidden: boolean) => {
       document.body.innerHTML = "<div><p data-region>region</p></div>";
@@ -992,6 +992,36 @@ describe("state regions records", () => {
       expect(seen).toEqual([outerRecord]);
       expect(region.hidden).toBe(false);
       observer.disconnect();
+    });
+
+    it("writes no hidden when releasing to the same visibility beneath it", async () => {
+      document.body.innerHTML = "<div><p data-region>region</p></div>";
+      const region = document.querySelector("[data-region]") as HTMLElement;
+      const outer = outerOf(region);
+      const inner = innerOf(region);
+      outer.reflect(region, false);
+      inner.reflect(region, false);
+      const seen: string[] = [];
+      const observer = new MutationObserver((records) => {
+        for (const record of records) seen.push(record.attributeName ?? "");
+      });
+      observer.observe(region, { attributes: true, attributeFilter: ["hidden"] });
+
+      try {
+        inner.release(region);
+        await flushMicrotasks();
+
+        expect(region.hidden).toBe(true);
+        expect(seen).toEqual([]);
+
+        outer.release(region);
+        await flushMicrotasks();
+
+        expect(region.hasAttribute("hidden")).toBe(false);
+        expect(seen).toEqual(["hidden"]);
+      } finally {
+        observer.disconnect();
+      }
     });
 
     it("keeps the region the inner instance hid when the outer one, which hid it too, releases first", () => {

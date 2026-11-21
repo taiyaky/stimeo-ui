@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { observeScrollDismiss } from "../../src/utils/scroll_dismiss";
+import { withinTimeLimit } from "../helpers/time_limit";
 
 /**
  * Unit tests for {@link observeScrollDismiss}: it must fire on a scroll of a
@@ -25,7 +26,7 @@ describe("observeScrollDismiss", () => {
   it("fires when a scrollable ancestor scrolls", () => {
     const { pane, surface } = build();
     const onScroll = vi.fn();
-    const stop = observeScrollDismiss(surface, onScroll);
+    const stop = withinTimeLimit(() => observeScrollDismiss(surface, onScroll));
 
     pane.dispatchEvent(new Event("scroll"));
 
@@ -36,7 +37,7 @@ describe("observeScrollDismiss", () => {
   it("fires when the window scrolls", () => {
     const { surface } = build();
     const onScroll = vi.fn();
-    const stop = observeScrollDismiss(surface, onScroll);
+    const stop = withinTimeLimit(() => observeScrollDismiss(surface, onScroll));
 
     window.dispatchEvent(new Event("scroll"));
 
@@ -47,7 +48,7 @@ describe("observeScrollDismiss", () => {
   it("stops firing after cleanup", () => {
     const { pane, surface } = build();
     const onScroll = vi.fn();
-    const stop = observeScrollDismiss(surface, onScroll);
+    const stop = withinTimeLimit(() => observeScrollDismiss(surface, onScroll));
 
     stop();
     pane.dispatchEvent(new Event("scroll"));
@@ -60,7 +61,9 @@ describe("observeScrollDismiss", () => {
     document.body.innerHTML = `<div id="plain"><span id="s"></span></div>`;
     const plain = document.getElementById("plain") as HTMLElement;
     const onScroll = vi.fn();
-    const stop = observeScrollDismiss(document.getElementById("s") as HTMLElement, onScroll);
+    const stop = withinTimeLimit(() =>
+      observeScrollDismiss(document.getElementById("s") as HTMLElement, onScroll),
+    );
 
     plain.dispatchEvent(new Event("scroll"));
 

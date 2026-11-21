@@ -405,9 +405,8 @@ describe("CountdownController", () => {
     await start('data-stimeo--countdown-deadline-value="2026-06-06T00:00:10Z"');
     vi.advanceTimersByTime(2000);
     expect(slot("seconds").textContent).toBe("08");
-    // Turbo caches the snapshot with data-state="running" burned in, so the restored
-    // element reconnects with that attribute already set. start() is a no-op while
-    // "running", so connect() has to drop the stale state for autostart to re-arm.
+    // The element reconnects with data-state="running" and no ticking interval.
+    // Connect sets the state to paused before calling start() to re-arm it.
     instance().disconnect();
     instance().connect();
     expect(root().getAttribute("data-state")).toBe("running");
@@ -1675,16 +1674,11 @@ describe("CountdownController", () => {
 
     it.each([...DIGITS, "status"])("keeps working when its only %s slot leaves", async (name) => {
       await start(COMPLETING);
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       slot(name).remove();
       await settle();
       vi.advanceTimersByTime(2000);
       await settle();
 
-      expect(errors).toEqual([]);
       expect(root().getAttribute("data-state")).toBe("complete");
     });
 

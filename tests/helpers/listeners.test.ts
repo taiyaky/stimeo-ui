@@ -238,6 +238,12 @@ describe("assertListenersReleased", () => {
     }
   }
 
+  class FailingOnDisconnect extends Controller {
+    override disconnect(): void {
+      throw new Error("disconnect failed");
+    }
+  }
+
   it.each([1, 2] as const)(
     "passes a controller that releases what it added (%i connections)",
     async (connections) => {
@@ -260,6 +266,12 @@ describe("assertListenersReleased", () => {
 
   it("fails a controller whose connect reports an error", async () => {
     await expect(assertListenersReleased("failing", Failing, 1)).rejects.toThrow();
+  });
+
+  it("fails a controller whose disconnect reports an error", async () => {
+    await expect(
+      assertListenersReleased("failing-disconnect", FailingOnDisconnect, 1),
+    ).rejects.toThrow();
   });
 
   it("fails when the markup gives the controller no host to connect on", async () => {

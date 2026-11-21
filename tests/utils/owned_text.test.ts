@@ -66,6 +66,31 @@ describe.each(["text", "value"] as const)("OwnedText %s channel", (channel) => {
     expect(owner.clear(element)).toBe(false);
   });
 
+  it.each(["", "Busy"])("clears the owned string %j and releases both evidence sources", (text) => {
+    const { element, owner, current } = fixture();
+    owner.write(element, text, "Idle");
+
+    expect(owner.clear(element)).toBe(true);
+
+    expect(current()).toBe("");
+    expect(owner.hasRecord(element)).toBe(false);
+    expect(owner.read(element, { source: "live" })).toBeNull();
+    expect(owner.clear(element)).toBe(false);
+  });
+
+  it("releases both evidence sources when the written string is already the original", () => {
+    const { element, owner, current, author } = fixture();
+    author("Idle");
+    owner.write(element, "Idle");
+
+    expect(owner.restore(element)).toBe(true);
+
+    expect(current()).toBe("Idle");
+    expect(owner.hasRecord(element)).toBe(false);
+    expect(owner.read(element, { source: "live" })).toBeNull();
+    expect(owner.restore(element)).toBe(false);
+  });
+
   it.each([
     "broken",
     "null",
@@ -197,5 +222,39 @@ describe("OwnedText text structure", () => {
     expect(owner.owns(slot)).toBe(false);
     expect(owner.restore(slot)).toBe(false);
     expect(slot.textContent).toBe("Busy");
+  });
+});
+
+/** Releases ownership without rewriting a matching text property. */
+describe.each(["clear", "restore"] as const)("OwnedText %s text release", (operation) => {
+  it.each([false, true])("observes text writes only when the string changes: %s", (changed) => {
+    const slot = document.createElement("span");
+    const target = operation === "clear" ? "" : "Idle";
+    const current = changed ? "Busy" : target;
+    slot.append(document.createTextNode(current));
+    const owner = new OwnedText(ATTRIBUTE);
+    owner.remember(slot, current, target);
+    const observer = new MutationObserver(() => {});
+    observer.observe(slot, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+      attributes: true,
+    });
+    try {
+      expect(owner[operation](slot)).toBe(true);
+      const records = observer.takeRecords();
+      expect(
+        records
+          .filter(({ type }) => type === "attributes")
+          .map(({ attributeName }) => attributeName),
+      ).toEqual([ATTRIBUTE]);
+      expect(records.some(({ type }) => type !== "attributes")).toBe(changed);
+      expect(slot.textContent).toBe(target);
+      expect(owner.read(slot)).toBeNull();
+      expect(owner.read(slot, { source: "live" })).toBeNull();
+    } finally {
+      observer.disconnect();
+    }
   });
 });

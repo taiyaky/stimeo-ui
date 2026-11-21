@@ -300,6 +300,60 @@ describe("ChipRow", () => {
     expect(buttons().map((button) => button.tabIndex)).toEqual([-1, 0, -1]);
   });
 
+  it.each(["explicit", "native"])(
+    "keeps the only zero-tabindex stop when its tabindex is %s",
+    (tabStop) => {
+      const [first, second] = buttons() as [HTMLButtonElement, HTMLButtonElement];
+      first.setAttribute("tabindex", "-2");
+      if (tabStop === "native") second.removeAttribute("tabindex");
+      else second.setAttribute("tabindex", "0");
+
+      chipRow.ensureTabStop();
+      chipRow.ensureTabStop();
+
+      expect(first.tabIndex).toBeLessThan(0);
+      expect(buttons().filter((button) => button.tabIndex === 0)).toEqual([second]);
+    },
+  );
+
+  it.each(["explicit", "native"])(
+    "leaves a valid %s Tab stop quiet and writes when the row needs repair",
+    (tabStop) => {
+      const [first, second] = buttons() as [HTMLButtonElement, HTMLButtonElement];
+      first.tabIndex = -1;
+      if (tabStop === "native") second.removeAttribute("tabindex");
+      else second.tabIndex = 0;
+      const observer = new MutationObserver(() => {});
+      observer.observe(row(), { attributes: true, subtree: true, attributeFilter: ["tabindex"] });
+      try {
+        chipRow.ensureTabStop();
+        chipRow.ensureTabStop();
+        expect(observer.takeRecords()).toEqual([]);
+        expect(buttons().map((button) => button.tabIndex)).toEqual([-1, 0]);
+
+        second.tabIndex = -1;
+        observer.takeRecords();
+        chipRow.ensureTabStop();
+        expect(observer.takeRecords().length).toBeGreaterThan(0);
+        expect(buttons().map((button) => button.tabIndex)).toEqual([0, -1]);
+        chipRow.ensureTabStop();
+        expect(observer.takeRecords()).toEqual([]);
+      } finally {
+        observer.disconnect();
+      }
+    },
+  );
+
+  it("normalizes a positive tabindex when no button is the zero-tabindex stop", () => {
+    const [first, second] = buttons() as [HTMLButtonElement, HTMLButtonElement];
+    first.setAttribute("tabindex", "-2");
+    second.setAttribute("tabindex", "5");
+
+    chipRow.ensureTabStop();
+
+    expect(buttons().map((button) => button.getAttribute("tabindex"))).toEqual(["0", "-1"]);
+  });
+
   it("reports that an empty row has no last chip to focus", () => {
     for (const item of items()) item.remove();
 

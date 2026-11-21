@@ -1271,6 +1271,11 @@ describe("checkSource", () => {
           'data-stimeo--separator-focusable-value="true" aria-controls="pane" ' +
             'data-action="keydown->stimeo--separator#onKeydown"',
         );
+        const alsoWiredOnChild = separator(
+          'data-stimeo--separator-focusable-value="true" aria-controls="pane" ' +
+            'data-action="keydown->stimeo--separator#onKeydown"',
+          '<span data-action="keydown->stimeo--separator#onKeydown"></span>',
+        );
         const wrongEvent = separator(
           'data-stimeo--separator-focusable-value="true" aria-controls="pane" ' +
             'data-action="click->stimeo--separator#onKeydown"',
@@ -1281,6 +1286,7 @@ describe("checkSource", () => {
         );
 
         expect(codes(valid)).not.toContain("missing-required-action");
+        expect(codes(alsoWiredOnChild)).not.toContain("missing-required-action");
         expect(codes(wrongEvent)).toContain("missing-required-action");
         expect(codes(wrongElement)).toContain("missing-required-action");
       });
@@ -1414,22 +1420,42 @@ describe("checkSource", () => {
       return found[0];
     };
 
-    it("fails an orphan target outright and only warns when a generated host may own it", () => {
+    it("fails an orphan target with no possible host", () => {
       const orphan = only(`<div data-stimeo--menu-target="menu"></div>`, "orphan-target");
       expect(orphan).toMatchObject({
         severity: "error",
         message: 'Target "data-stimeo--menu-target" has no enclosing controller "stimeo--menu".',
       });
       expect(orphan?.suggestion).toBeUndefined();
+    });
 
-      const unplaced = only(
-        `<div data-controller="<%= kind %>"><span data-stimeo--menu-target="menu"></span></div>`,
-        "orphan-target",
-      );
+    it.each([
+      {
+        host: "an HTML ancestor with a computed data-controller",
+        source: `<div data-controller="<%= kind %>">
+  <span data-stimeo--menu-target="menu"></span>
+</div>`,
+      },
+      {
+        host: "a helper ancestor with a computed data option",
+        source: `<%= tag.div data: host_attrs do %>
+  <span data-stimeo--menu-target="menu"></span>
+<% end %>`,
+      },
+      {
+        host: "the target element with a computed data-controller",
+        source: `<span
+        data-stimeo--menu-target="menu" data-controller="<%= kind %>"></span>`,
+      },
+    ])("warns when a generated host may own a target ($host)", ({ source }) => {
+      const unplaced = only(source, "orphan-target");
       expect(unplaced).toMatchObject({
         severity: "warning",
+        line: 2,
+        column: 9,
+        message: 'Target "data-stimeo--menu-target" has no enclosing controller "stimeo--menu".',
         suggestion:
-          "An enclosing helper's data: option is not a literal hash, so the host controller may be declared at runtime.",
+          "Generated attributes on the target element or an ancestor may declare the controller at runtime.",
       });
     });
 
@@ -1496,7 +1522,7 @@ describe("checkSource", () => {
       }
     });
 
-    it("asks for an exit only when the opener is bound to the event that opens the state", () => {
+    it("warns about missing completion for start wired to submit", () => {
       const form = (action: string) => `
         <form data-controller="stimeo--submit-once" data-action="${action}">
           <button type="submit">Send</button>
@@ -1597,7 +1623,7 @@ describe("checkSource", () => {
       expect(host('<input type="<%= kind %>" data-stimeo--radio-group-target="radio">')).toEqual(
         [],
       );
-      // Without the list the input is rejected as before.
+      /** The bundled radio-group host rule rejects this radio input because it declares no inputTypes. */
       expect(
         checkSource(
           `<div role="radiogroup" aria-label="Plan" data-controller="stimeo--radio-group">
@@ -1797,7 +1823,7 @@ describe("checkSource", () => {
       expect(codes(validDialog)).toEqual([]);
     });
 
-    it("keeps a form-field error visual and delegates speech to the shared announcer", () => {
+    it("accepts a form-field error target without live-region attributes", () => {
       const source = `
         <div data-controller="stimeo--form-field">
           <input aria-label="Email" data-stimeo--form-field-target="control">
@@ -1898,7 +1924,7 @@ describe("checkSource", () => {
       expect(codeList.filter((c) => c === "missing-aria")).toHaveLength(2);
     });
 
-    it("requires a tablist name and accepts aria-label as an alternative", () => {
+    it("warns when a tablist has no authored name and accepts aria-label", () => {
       const unnamed = validTabs.replace(' aria-labelledby="tabs-title"', "");
       const missing = checkSource(unnamed, manifest).filter((d) => d.code === "missing-aria");
       expect(missing).toHaveLength(1);
@@ -2233,8 +2259,7 @@ describe("checkSource", () => {
         expect(codes(source)).toEqual([]);
       });
 
-      it("does not treat input[type=hidden] as focusable (but a real input is)", () => {
-        // input is natively focusable EXCEPT type="hidden" — never rendered.
+      it("rejects a hidden input and accepts an enabled range input for keyboard reach", () => {
         expect(codes(slider(`<input type="hidden" data-stimeo--slider-target="thumb">`))).toContain(
           "keyboard-inaccessible",
         );
@@ -2247,7 +2272,7 @@ describe("checkSource", () => {
         ).toEqual([]);
       });
 
-      it("does not treat contenteditable=false as focusable (but true/bare is)", () => {
+      it("counts contenteditable=true as focusable and rejects contenteditable=false", () => {
         expect(
           codes(
             slider(
@@ -2446,8 +2471,7 @@ describe("checkSource", () => {
         </div>`;
 
       it("flags a vertical list whose roving leaves orientation on its horizontal default", () => {
-        // The defining composition case: both sides on their defaults (sortable
-        // vertical, roving horizontal) — Tab reaches the handles, arrows die.
+        /** The default horizontal roving leaves focus in place on ArrowUp and ArrowDown. */
         const all = checkSource(sortable(), manifest);
         const mismatches = all.filter((x) => x.code === "composition-mismatch");
         expect(mismatches).toHaveLength(1);
@@ -2779,10 +2803,10 @@ describe("checkSource", () => {
         expect(d?.message).toContain('aria-busy="false"');
       });
 
-      it("does not count inert items as absent", () => {
+      it("does not count disabled menu items as absent", () => {
         // A menu whose items exist but are all disabled is structurally
         // satisfied — the requirement is about the items being *there*.
-        const inert = `
+        const disabled = `
           <div data-controller="stimeo--menubar" role="menubar" aria-label="Main">
             <button id="t-file" role="menuitem" aria-controls="m-file" data-stimeo--menubar-target="top">File</button>
             <ul id="m-file" role="menu" aria-labelledby="t-file" data-stimeo--menubar-target="menu" hidden>
@@ -2790,7 +2814,7 @@ describe("checkSource", () => {
                       data-stimeo--menubar-target="item">New</button></li>
             </ul>
           </div>`;
-        expect(codes(inert)).toEqual([]);
+        expect(codes(disabled)).toEqual([]);
       });
 
       it("accepts a menubar whose only menu is empty and declares itself busy", () => {
@@ -2855,13 +2879,12 @@ describe("checkSource", () => {
         expect(missing[0]?.message).not.toContain("requires");
       });
 
-      describe("names a native tag already provides", () => {
+      describe("elements with native naming paths", () => {
         const grid = (tag: string) =>
           `<${tag} data-controller="stimeo--data-grid" role="grid"></${tag}>`;
 
-        it("disarms on the tag that names the role natively", () => {
-          // A <table> takes its name from <caption>, which no attribute check
-          // can see — flagging it would reject correct markup.
+        it("exempts a table from the explicit grid name check", () => {
+          /** A caption can supply the name. */
           expect(missingAria(grid("table"))).toHaveLength(0);
         });
 
@@ -3340,6 +3363,7 @@ describe("checkSource", () => {
           (x) => x.code === "unknown-ignore-code",
         );
         expect(d?.severity).toBe("warning");
+        expect(d?.message).toBe('Unknown diagnostic code "missin-aria" in data-stimeo-ignore.');
         expect(d?.suggestion).toBe('Did you mean "missing-aria"?');
       });
     });
@@ -3489,9 +3513,8 @@ describe("checkSource", () => {
       expect(codes(source)).toContain("missing-conditional-target");
     });
 
-    // A generated host has no target attribute to read, so which header a half sits
-    // in is undecidable and reporting either way would be a guess.
-    it("leaves a pair alone when the host is rendered by a helper", () => {
+    /** The helper declares the trigger target while leaving its relationship to the label unknown. */
+    it("skips pairing a lone label when its host relationship is unreadable", () => {
       const source = `
       <div data-controller="stimeo--accordion">
         <%= tag.button data: { "stimeo--accordion-target": "trigger" } %>
@@ -3611,7 +3634,7 @@ describe("checkSource", () => {
       expect(codes(source)).not.toContain("invalid-template-root");
     });
 
-    it("leaves the one element alone when a helper generates the target it declares", () => {
+    it("leaves the template row alone when its target name is interpolated", () => {
       const source = `
         <div data-controller="stimeo--tags-input">
           <ul role="list" aria-label="Tags" data-stimeo--tags-input-target="tags"></ul>
@@ -3665,7 +3688,7 @@ describe("checkSource", () => {
       expect(found?.suggestion).toContain("may exist at runtime");
     });
 
-    it("requires one row without naming a target where the row declares none", () => {
+    it("checks the number of top-level elements in a nested-form template", () => {
       const nestedForm = (rows: string) => `
     <div data-controller="stimeo--nested-form">
       <div data-stimeo--nested-form-target="list"></div>
@@ -3910,9 +3933,7 @@ describe("checkSource", () => {
         expect(d?.severity).toBe("warning");
       });
 
-      it("warns instead of failing for targets a helper renders itself", () => {
-        // `f.select` emits the whole listbox; none of its targets is authored,
-        // so the scope's target set cannot be read from the template at all.
+      it("warns about missing targets on a helper-rendered listbox host", () => {
         const source = `<%= f.select :x, [], {}, data: { controller: "stimeo--listbox" } %>`;
         const diagnostics = checkSource(source, manifest);
         expect(diagnostics).not.toHaveLength(0);
@@ -3982,9 +4003,10 @@ describe("checkSource", () => {
       });
 
       it("clears an idiomatic Rails form that mixes both spellings", () => {
-        // The shape a ViewComponent template actually takes: a block helper
-        // scope, helper-rendered targets, literal markup for the parts that
-        // need ARIA, and a sibling controller wired through data-action.
+        /**
+         * A block helper declares the scope, a field helper declares its target and action,
+         * and literal markup declares the description and error targets.
+         */
         const source = `<%= form_with url: "/messages", data: { controller: "stimeo--form-field" } do |f| %>
           <%= f.label :body, "Message" %>
           <%= f.text_area :body, rows: 3,

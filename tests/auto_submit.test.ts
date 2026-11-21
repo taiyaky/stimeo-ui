@@ -603,6 +603,64 @@ describe("AutoSubmitController", () => {
     expect(form().hasAttribute("data-auto-submit-pending")).toBe(false);
   });
 
+  it("leaves the morphs of a contenteditable field composing in the form to the page, and submits once one rewrote the conversion", async () => {
+    await start(`
+      <form data-controller="stimeo--auto-submit"
+            data-stimeo--auto-submit-debounce-value="300"
+            data-action="input->stimeo--auto-submit#submit">
+        <div contenteditable="true" role="textbox" aria-label="Note"><em>か</em></div>
+      </form>`);
+    const submit = stubSubmit();
+    const editor = query<HTMLElement>("[contenteditable]");
+    const holder = editor.querySelector("em") as HTMLElement;
+    const text = holder.firstChild as Text;
+    editor.focus();
+    const caret = document.createRange();
+    caret.setStart(text, text.data.length);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(caret);
+    editor.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    text.appendData("に");
+    caret.setStart(text, text.data.length);
+    editor.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertCompositionText",
+        isComposing: true,
+        data: "に",
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(300);
+    expect(submit).not.toHaveBeenCalled();
+
+    // Turbo asks before it morphs or removes an element; none of these is cancelled, so its
+    // morph goes on to rewrite the conversion's text.
+    const notice = (element: HTMLElement, removal: boolean): boolean => {
+      const event = new CustomEvent("turbo:before-morph-element", {
+        bubbles: true,
+        cancelable: true,
+        detail: {
+          currentElement: element,
+          newElement: removal ? undefined : element.cloneNode(true),
+        },
+      });
+      element.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    expect([
+      notice(editor, false),
+      notice(editor, true),
+      notice(holder, false),
+      notice(holder, true),
+    ]).toEqual([false, false, false, false]);
+    text.replaceWith(document.createTextNode("server"));
+    editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    document.getSelection()?.removeAllRanges();
+  });
+
   it("stops listening for turbo:submit-end after disconnect", async () => {
     await start(SEARCH);
     const controller = application.getControllerForElementAndIdentifier(

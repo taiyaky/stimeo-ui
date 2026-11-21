@@ -225,9 +225,8 @@ describe("StickyObserverController", () => {
     const changes: boolean[] = [];
     root().addEventListener("stimeo--sticky-observer:change", (event) => {
       changes.push((event as CustomEvent<{ stuck: boolean }>).detail.stuck);
-      // A consumer that swaps the region on the first notification (a Turbo
-      // pattern) tears the controller down while the batch is still being
-      // processed; the remaining entries must not touch the detached element.
+      // Disconnecting on the first notification leaves its snapshot in place.
+      // The remaining entries must not overwrite it.
       controller().disconnect();
     });
 
@@ -416,12 +415,6 @@ describe("StickyObserverController", () => {
 
   it("keeps working when its only sticky element leaves", async () => {
     await start();
-    const errors: unknown[] = [];
-    if (application) {
-      application.handleError = (error) => {
-        errors.push(error);
-      };
-    }
     const changes: boolean[] = [];
     root().addEventListener("stimeo--sticky-observer:change", (event) => {
       changes.push((event as CustomEvent<{ stuck: boolean }>).detail.stuck);
@@ -431,7 +424,6 @@ describe("StickyObserverController", () => {
     await tick();
     currentObserver().callback([entry({ isIntersecting: false, bottom: 40, rootTop: 40 })]);
 
-    expect(errors).toEqual([]);
     expect(changes).toEqual([false, true]);
   });
 

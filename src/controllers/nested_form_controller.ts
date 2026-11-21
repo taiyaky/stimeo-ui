@@ -71,10 +71,10 @@ const DESTROYED_VALUES = new Set(["1", "true"]);
  * announced through the shared `stimeo--announcer` (WCAG 2.2 4.1.3) when
  * `announce` + `countMessage` are set; reconciliation stays silent to assistive
  * tech. The add button's `disabled` is managed only while `max` is set, and the
- * authored value is restored on teardown. A template must produce exactly one
- * root element; markup lacking the required `list` / `template` targets, or a
- * template producing anything else, is named on the console once per connection
- * and every operation stays a safe no-op with nothing left in the list. Clicking
+ * authored value is restored on teardown. Adding requires the `list` and
+ * `template` targets and a template that produces exactly one root element.
+ * The controller warns once per connection for missing targets or an invalid
+ * template. Removal uses the existing list and works without a template. Clicking
  * remove on a row whose flag is already truthy only completes its hiding —
  * nothing effective changes, so no event and no announcement. The delegated
  * listener, the observer, and every lease are released on `disconnect()`.

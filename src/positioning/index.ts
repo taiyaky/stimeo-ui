@@ -18,14 +18,10 @@ export { AnchoredController };
  * Opt-in shared positioning helper for Stimeo's floating components
  * (popover / tooltip / hover-card / context-menu).
  *
- * **Why this is a separate entry point.** The core library is zero-runtime-dep:
- * `import "stimeo-ui"` pulls in nothing but `@hotwired/stimulus`. Dynamic
- * placement — measuring the viewport / scroll parents to flip and shift a
- * floating element away from screen edges — genuinely needs a small, trustworthy
- * dependency (`@floating-ui/dom`). To keep that cost *opt-in*, this lives at
- * `stimeo-ui/positioning` and is loaded only when a consumer explicitly imports
- * it. The controllers themselves never import this module, so the core install
- * stays dependency-free.
+ * The core entry point requires only `@hotwired/stimulus`. Import
+ * `stimeo-ui/positioning` to use dynamic placement. This entry point uses the
+ * optional peer `@floating-ui/dom` to measure the viewport and scroll parents
+ * and shift or flip floating elements away from screen edges.
  *
  * **What it does and does not own.** This helper writes **coordinates only** —
  * `position`, `left`, `top` inline
@@ -171,9 +167,8 @@ export const positioningControllers = {
 /**
  * Registers the opt-in positioning controllers (e.g. `stimeo--anchored`) on a
  * Stimulus application. Call this **in addition to** `registerStimeo` only when
- * you want the declarative positioning primitives — importing this module is
- * what pulls in `@floating-ui/dom`, so the core stays zero-dependency for
- * consumers who never call it.
+ * you want the declarative positioning primitives. Importing this entry point
+ * loads the optional peer `@floating-ui/dom`.
  *
  * @param application - The Stimulus application to register controllers on.
  *

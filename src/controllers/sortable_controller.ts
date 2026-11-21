@@ -39,7 +39,7 @@ interface SortSession {
  * and reporting the final `reorder`. No dedicated APG pattern exists for
  * drag-and-drop; the keyboard model (grab → arrows → drop / Escape) comes from
  * `pointer-drag` and the announcements make it non-visually trackable
- * (WCAG 2.1.1 / 2.5.7 / 4.1.3). Core (zero dependencies).
+ * (WCAG 2.1.1 / 2.5.7 / 4.1.3).
  *
  * Markup contract (identifier: `stimeo--sortable`):
  *   <div data-controller="stimeo--sortable">

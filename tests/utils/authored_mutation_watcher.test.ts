@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setAttributeIfChanged } from "../../src/utils/attribute_write";
 import { AuthoredMutationWatcher } from "../../src/utils/authored_mutation_watcher";
+import { withinTimeLimit } from "../helpers/time_limit";
 import { tick } from "../helpers/timing";
 
 /** Authored records survive exact write counts, synchronous drains, and connected lifetimes. */
@@ -27,14 +28,544 @@ describe("AuthoredMutationWatcher", () => {
   });
 
   const observe = () =>
-    watcher.observe(root, {
-      attributes: ["data-state", "data-other"],
-      subtree: true,
-      childList: true,
-      ancestorAttributes: ["contenteditable"],
-    });
+    withinTimeLimit(() =>
+      watcher.observe(root, {
+        attributes: ["data-state", "data-other"],
+        subtree: true,
+        childList: true,
+        ancestorAttributes: ["contenteditable"],
+      }),
+    );
   const write = (value: string | null, target = child, name = "data-state") =>
     setAttributeIfChanged(target, name, value, () => watcher.claim(target, name, value));
+
+  it("reports root writes without observing ancestors unless inherited attributes are configured", async () => {
+    const parent = document.createElement("section");
+    document.body.append(parent);
+    parent.append(root);
+    watcher.observe(root, { attributes: ["data-state"] });
+
+    parent.setAttribute("data-state", "outside");
+    await tick();
+    expect(delivered).not.toHaveBeenCalled();
+
+    root.setAttribute("data-state", "authored");
+    await tick();
+    expect(delivered).toHaveBeenCalledOnce();
+    expect(delivered.mock.calls[0]?.[0].map((record) => record.target)).toEqual([root]);
+
+    delivered.mockClear();
+    withinTimeLimit(() =>
+      watcher.observe(root, {
+        attributes: ["data-state"],
+        ancestorAttributes: ["data-inherited"],
+      }),
+    );
+    parent.setAttribute("data-inherited", "configured");
+    await tick();
+    expect(delivered).toHaveBeenCalledOnce();
+    expect(delivered.mock.calls[0]?.[0].map((record) => record.target)).toEqual([parent]);
+  });
+
+  /** Captures native observer queues while injecting synchronous operation boundaries. */
+  const trackObservers = ({
+    onConstruct,
+    onBeforeObserve,
+    onObserve,
+    onTake,
+    onDisconnect,
+  }: {
+    onConstruct?: () => void;
+    onBeforeObserve?: (target: Node) => void;
+    onObserve?: (target: Node) => void;
+    onTake?: () => void;
+    onDisconnect?: () => void;
+  } = {}) => {
+    const NativeObserver = MutationObserver;
+    const observers: MutationObserver[] = [];
+    class TrackedObserver extends NativeObserver {
+      constructor(callback: MutationCallback) {
+        super(callback);
+        observers.push(this);
+        onConstruct?.();
+      }
+
+      override observe(target: Node, options?: MutationObserverInit): void {
+        onBeforeObserve?.(target);
+        super.observe(target, options);
+        onObserve?.(target);
+      }
+
+      override takeRecords(): MutationRecord[] {
+        const records = super.takeRecords();
+        onTake?.();
+        return records;
+      }
+
+      override disconnect(): void {
+        super.disconnect();
+        onDisconnect?.();
+      }
+    }
+    vi.stubGlobal("MutationObserver", TrackedObserver);
+    return observers;
+  };
+
+  it.each(["disconnect", "observe"] as const)(
+    "releases a root registration created after a preceding %s interrupts observation",
+    (operation) => {
+      const later = document.createElement("div");
+      let interrupted = false;
+      const observers = trackObservers({
+        onBeforeObserve: (target) => {
+          if (target !== root || interrupted) return;
+          interrupted = true;
+          if (operation === "disconnect") watcher.disconnect();
+          else watcher.observe(later, { attributes: ["data-state"] });
+        },
+      });
+      try {
+        watcher.observe(root, { attributes: ["data-state"] });
+        root.setAttribute("data-state", "old");
+        later.setAttribute("data-state", "new");
+        expect(watcher.take().map((record) => record.target)).toEqual(
+          operation === "disconnect" ? [] : [later],
+        );
+        expect(observers[0]?.takeRecords()).toEqual([]);
+      } finally {
+        for (const observer of observers) observer.disconnect();
+      }
+    },
+  );
+
+  it("does not read retired options after releasing an observer starts a later lifetime", () => {
+    const earlier = document.createElement("div");
+    const later = document.createElement("div");
+    let restartOnDisconnect = false;
+    const observers = trackObservers({
+      onDisconnect: () => {
+        if (!restartOnDisconnect) return;
+        restartOnDisconnect = false;
+        watcher.observe(later, { attributes: ["data-state"] });
+      },
+    });
+    try {
+      watcher.observe(earlier, { attributes: ["data-state"] });
+      restartOnDisconnect = true;
+      watcher.observe(root, {
+        get attributes() {
+          watcher.disconnect();
+          return ["data-state"];
+        },
+      });
+      root.setAttribute("data-state", "old");
+      later.setAttribute("data-state", "new");
+      expect(watcher.take().map((record) => record.target)).toEqual([later]);
+      for (const observer of observers) expect(observer.takeRecords()).toEqual([]);
+    } finally {
+      for (const observer of observers) observer.disconnect();
+    }
+  });
+
+  it("does not run a retired constructor boundary after an option getter starts a later lifetime", () => {
+    const later = document.createElement("div");
+    let stopOnConstruct = false;
+    const observers = trackObservers({
+      onConstruct: () => {
+        if (!stopOnConstruct) return;
+        stopOnConstruct = false;
+        watcher.disconnect();
+      },
+    });
+    try {
+      watcher.observe(root, {
+        get attributes() {
+          watcher.observe(later, { attributes: ["data-state"] });
+          stopOnConstruct = true;
+          return ["data-state"];
+        },
+      });
+      root.setAttribute("data-state", "old");
+      later.setAttribute("data-state", "new");
+      expect(watcher.take().map((record) => record.target)).toEqual([later]);
+      for (const observer of observers) expect(observer.takeRecords()).toEqual([]);
+    } finally {
+      for (const observer of observers) observer.disconnect();
+    }
+  });
+
+  it("does not run a retired observe boundary after construction starts a later lifetime", () => {
+    const later = document.createElement("div");
+    let constructed = false;
+    let stopOnOldRoot = false;
+    const observers = trackObservers({
+      onConstruct: () => {
+        if (constructed) return;
+        constructed = true;
+        watcher.observe(later, { attributes: ["data-state"] });
+        stopOnOldRoot = true;
+      },
+      onBeforeObserve: (target) => {
+        if (stopOnOldRoot && target === root) watcher.disconnect();
+      },
+    });
+    try {
+      watcher.observe(root, { attributes: ["data-state"] });
+      root.setAttribute("data-state", "old");
+      later.setAttribute("data-state", "new");
+      expect(watcher.take().map((record) => record.target)).toEqual([later]);
+      for (const observer of observers) expect(observer.takeRecords()).toEqual([]);
+    } finally {
+      for (const observer of observers) observer.disconnect();
+    }
+  });
+
+  it.each(["disconnect", "observe"] as const)(
+    "releases an ancestor registration created after a preceding %s interrupts observation",
+    (operation) => {
+      const parent = document.createElement("section");
+      const later = document.createElement("div");
+      document.body.append(parent);
+      parent.append(root);
+      let interrupted = false;
+      const observers = trackObservers({
+        onBeforeObserve: (target) => {
+          if (target !== parent || interrupted) return;
+          interrupted = true;
+          if (operation === "disconnect") watcher.disconnect();
+          else watcher.observe(later, { attributes: ["data-state"] });
+        },
+      });
+      try {
+        withinTimeLimit(() =>
+          watcher.observe(root, {
+            attributes: ["data-state"],
+            ancestorAttributes: ["data-inherited"],
+          }),
+        );
+        parent.setAttribute("data-inherited", "old");
+        later.setAttribute("data-state", "new");
+        expect(watcher.take().map((record) => record.target)).toEqual(
+          operation === "disconnect" ? [] : [later],
+        );
+        expect(observers[0]?.takeRecords()).toEqual([]);
+      } finally {
+        for (const observer of observers) observer.disconnect();
+      }
+    },
+  );
+
+  it("releases every ancestor registration after an inherited observation disconnects", () => {
+    const parent = document.createElement("section");
+    const grandparent = document.createElement("article");
+    document.body.append(grandparent);
+    grandparent.append(parent);
+    parent.append(root);
+    const observers = trackObservers({
+      onObserve: (target) => {
+        if (target === parent) watcher.disconnect();
+      },
+    });
+    try {
+      withinTimeLimit(() =>
+        watcher.observe(root, {
+          attributes: ["data-state"],
+          ancestorAttributes: ["data-inherited"],
+        }),
+      );
+      grandparent.setAttribute("data-inherited", "outside");
+      expect(watcher.take()).toEqual([]);
+      expect(observers[0]?.takeRecords()).toEqual([]);
+    } finally {
+      for (const observer of observers) observer.disconnect();
+    }
+  });
+
+  it.each([
+    "getter",
+    "iterator",
+    "ancestor getter",
+    "ancestor iterator",
+    "constructor",
+    "observe",
+  ] as const)(
+    "keeps a later observed lifetime created during %s and releases the interrupted observer",
+    (phase) => {
+      const later = document.createElement("div");
+      let interrupted = false;
+      const interrupt = () => {
+        if (interrupted) return;
+        interrupted = true;
+        watcher.observe(later, { attributes: ["data-state"] });
+      };
+      const observers = trackObservers({
+        onConstruct: () => {
+          if (phase === "constructor") interrupt();
+        },
+        onObserve: () => {
+          if (phase === "observe") interrupt();
+        },
+      });
+      const attributes = ["data-state"];
+      const ancestorAttributes = ["contenteditable"];
+      if (phase === "iterator") {
+        Object.defineProperty(attributes, Symbol.iterator, {
+          value: function* () {
+            interrupt();
+            yield "data-state";
+          },
+        });
+      }
+      if (phase === "ancestor iterator") {
+        Object.defineProperty(ancestorAttributes, Symbol.iterator, {
+          value: function* () {
+            interrupt();
+            yield "contenteditable";
+          },
+        });
+      }
+      try {
+        withinTimeLimit(() =>
+          watcher.observe(root, {
+            get attributes() {
+              if (phase === "getter") interrupt();
+              return attributes;
+            },
+            get ancestorAttributes() {
+              if (phase === "ancestor getter") interrupt();
+              return ancestorAttributes;
+            },
+          }),
+        );
+        root.setAttribute("data-state", "old");
+        document.body.setAttribute("contenteditable", "true");
+        later.setAttribute("data-state", "new");
+        expect(watcher.take().map((record) => record.target)).toEqual([later]);
+        for (const observer of observers) expect(observer.takeRecords()).toEqual([]);
+      } finally {
+        for (const observer of observers) observer.disconnect();
+        document.body.removeAttribute("contenteditable");
+      }
+    },
+  );
+
+  it.each([
+    "getter",
+    "iterator",
+    "ancestor getter",
+    "ancestor iterator",
+    "constructor",
+    "observe",
+  ] as const)(
+    "honors disconnect during %s without leaving a native observer registered",
+    (phase) => {
+      let interrupted = false;
+      const interrupt = () => {
+        if (interrupted) return;
+        interrupted = true;
+        watcher.disconnect();
+      };
+      const observers = trackObservers({
+        onConstruct: () => {
+          if (phase === "constructor") interrupt();
+        },
+        onObserve: () => {
+          if (phase === "observe") interrupt();
+        },
+      });
+      const attributes = ["data-state"];
+      const ancestorAttributes = ["contenteditable"];
+      if (phase === "iterator") {
+        Object.defineProperty(attributes, Symbol.iterator, {
+          value: function* () {
+            interrupt();
+            yield "data-state";
+          },
+        });
+      }
+      if (phase === "ancestor iterator") {
+        Object.defineProperty(ancestorAttributes, Symbol.iterator, {
+          value: function* () {
+            interrupt();
+            yield "contenteditable";
+          },
+        });
+      }
+      try {
+        withinTimeLimit(() =>
+          watcher.observe(root, {
+            get attributes() {
+              if (phase === "getter") interrupt();
+              return attributes;
+            },
+            get ancestorAttributes() {
+              if (phase === "ancestor getter") interrupt();
+              return ancestorAttributes;
+            },
+          }),
+        );
+        root.setAttribute("data-state", "old");
+        document.body.setAttribute("contenteditable", "true");
+        expect(watcher.take()).toEqual([]);
+        for (const observer of observers) expect(observer.takeRecords()).toEqual([]);
+      } finally {
+        for (const observer of observers) observer.disconnect();
+        document.body.removeAttribute("contenteditable");
+      }
+    },
+  );
+
+  it("releases partial ancestor registration and preserves the exact observe error", () => {
+    const failure = new Error("ancestor observation failed");
+    const observers = trackObservers({
+      onObserve: (target) => {
+        if (target === document.body) throw failure;
+      },
+    });
+    try {
+      let caught: unknown;
+      try {
+        observe();
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(failure);
+      root.setAttribute("data-state", "old");
+      expect(watcher.take()).toEqual([]);
+      for (const observer of observers) expect(observer.takeRecords()).toEqual([]);
+    } finally {
+      for (const observer of observers) observer.disconnect();
+    }
+  });
+
+  it("keeps a later lifetime when an option iterator throws its original error", () => {
+    const later = document.createElement("div");
+    const failure = new Error("option iterator failed");
+    const attributes = ["data-state"];
+    Object.defineProperty(attributes, Symbol.iterator, {
+      value: function* () {
+        watcher.observe(later, { attributes: ["data-state"] });
+        yield "data-state";
+        throw failure;
+      },
+    });
+
+    let caught: unknown;
+    try {
+      watcher.observe(root, { attributes });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(failure);
+    later.setAttribute("data-state", "new");
+    expect(watcher.take().map((record) => record.target)).toEqual([later]);
+  });
+
+  it("preserves a later lifetime when partial observation throws its exact error", () => {
+    const later = document.createElement("div");
+    const failure = new Error("observe failed after a later observation");
+    const observers = trackObservers({
+      onObserve: (target) => {
+        if (target !== root) return;
+        watcher.observe(later, { attributes: ["data-state"] });
+        throw failure;
+      },
+    });
+    try {
+      let caught: unknown;
+      try {
+        observe();
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(failure);
+      root.setAttribute("data-state", "old");
+      later.setAttribute("data-state", "new");
+      expect(watcher.take().map((record) => record.target)).toEqual([later]);
+      for (const observer of observers) expect(observer.takeRecords()).toEqual([]);
+    } finally {
+      for (const observer of observers) observer.disconnect();
+    }
+  });
+
+  it("does not drain later-lifetime claims when a synchronous take is interrupted", () => {
+    const later = document.createElement("div");
+    let armed = false;
+    const observers = trackObservers({
+      onTake: () => {
+        if (!armed) return;
+        armed = false;
+        watcher.observe(later, { attributes: ["data-state"] });
+        watcher.claim(later, "data-state", "own");
+        later.setAttribute("data-state", "own");
+      },
+    });
+    try {
+      observe();
+      root.setAttribute("data-state", "old");
+      armed = true;
+      expect(watcher.take()).toEqual([]);
+      expect(watcher.take()).toEqual([]);
+    } finally {
+      for (const observer of observers) observer.disconnect();
+    }
+  });
+
+  it("preserves a later lifetime and the exact constructor error", () => {
+    const later = document.createElement("div");
+    const failure = new Error("constructor failed after a later observation");
+    let armed = true;
+    const observers = trackObservers({
+      onConstruct: () => {
+        if (!armed) return;
+        armed = false;
+        watcher.observe(later, { attributes: ["data-state"] });
+        throw failure;
+      },
+    });
+    try {
+      let caught: unknown;
+      try {
+        observe();
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(failure);
+      later.setAttribute("data-state", "new");
+      expect(watcher.take().map((record) => record.target)).toEqual([later]);
+    } finally {
+      for (const observer of observers) observer.disconnect();
+    }
+  });
+
+  it("expires old claims before a callback starts and claims a later lifetime", async () => {
+    const later = document.createElement("div");
+    observe();
+    watcher.claim(child, "data-state", "unused");
+    delivered.mockImplementationOnce(() => {
+      watcher.observe(later, { attributes: ["data-state"] });
+      watcher.claim(later, "data-state", "own");
+      later.setAttribute("data-state", "own");
+    });
+    root.setAttribute("data-other", "author");
+    await tick();
+    expect(delivered).toHaveBeenCalledTimes(1);
+    later.setAttribute("data-state", "author");
+    await tick();
+    expect(delivered).toHaveBeenCalledTimes(2);
+    expect(delivered.mock.calls[1]?.[0].map((record) => record.target)).toEqual([later]);
+  });
+
+  it("finishes observing every element of a finite current ancestor chain", () => {
+    const outer = document.createElement("div");
+    const parent = document.createElement("div");
+    outer.append(parent);
+    parent.append(root);
+    observe();
+    parent.setAttribute("contenteditable", "true");
+    outer.setAttribute("contenteditable", "false");
+    expect(watcher.take().map((record) => record.target)).toEqual([parent, outer]);
+  });
 
   it("delivers an authored batch once without changing the DOM", async () => {
     observe();

@@ -716,8 +716,7 @@ describe("CarouselController", () => {
   });
 
   it("moves picker focus only with Home and End (manual activation)", async () => {
-    // Same contract as the arrows: within a manually-activated tablist every key
-    // moves focus, and Enter/Space/click is what commits.
+    /** Unmodified Home and End move focus. Enter, Space or click activates a picker. */
     await start();
     press(pickers()[0], "End");
     expect(document.activeElement).toBe(pickers()[2]);
@@ -910,8 +909,7 @@ describe("CarouselController", () => {
     });
 
     it("carries an empty detail on play and pause", async () => {
-      // Both are pure notifications: the run state is already readable from the
-      // toggle, so an empty detail is the shape consumers can rely on.
+      /** Both events have empty detail. The root's `data-state` shows whether it is rotating. */
       await start('data-stimeo--carousel-interval-value="500"');
       const details: unknown[] = [];
       const record = (event: Event) => details.push((event as CustomEvent).detail);
@@ -957,8 +955,10 @@ describe("CarouselController", () => {
     });
 
     it("holds the focus suspension while focus moves between its own controls", async () => {
-      // focusout fires before focusin, so a released suspension would stop and
-      // restart the interval — and report it — on every Tab press.
+      /**
+       * Releasing the suspension on an internal `focusout` would restart rotation
+       * before the following `focusin` pauses it again.
+       */
       await start(
         'data-stimeo--carousel-autoplay-value="true" data-stimeo--carousel-interval-value="500"',
       );
@@ -1797,12 +1797,9 @@ describe("CarouselController", () => {
     });
 
     it("settles a whole play toggle that joins after connect", async () => {
-      // A toggle the markup already carries is settled by the opening pass; one that
-      // arrives later reaches the pair only through its own target callback.
       await startWith(toggleMarkup(stoppedPair));
 
-      // The arriving toggle carries no label half of its own, so its own target
-      // callback is the only thing that can publish the rotation state on it.
+      /** The target callback reflects rotation intent on a toggle with no label targets. */
       const late = document.createElement("button");
       late.type = "button";
       late.innerHTML = '<span aria-hidden="true">▶</span>';
@@ -2113,8 +2110,7 @@ describe("CarouselController", () => {
     });
 
     it("moves picker focus once for a key both wirings hear, even when it cannot be cancelled", async () => {
-      // A script's synthetic keydown is not cancelable, so `defaultPrevented` cannot
-      // tell the delegation the authored binding already took it.
+      /** This keydown has `cancelable: false`, so `defaultPrevented` cannot record handling. */
       await start();
       const focus = vi.spyOn(pickers()[1] as HTMLElement, "focus");
 
@@ -2302,9 +2298,10 @@ describe("CarouselController", () => {
     });
 
     it("re-establishes the single selected picker", async () => {
-      // The authored pre-selection is only read on connect, so an appended picker
-      // that arrives `aria-selected="true"` has to be resolved as it connects or
-      // two pickers stay marked at once.
+      /**
+       * The active slide keeps precedence over the appended picker's `aria-selected`.
+       * Reconciliation clears the extra selection.
+       */
       await start();
       expect(selected()).toEqual(["true", "false", "false"]);
 
@@ -2327,7 +2324,6 @@ describe("CarouselController", () => {
       tablist.appendChild(late);
       await vi.advanceTimersByTimeAsync(0);
 
-      // The current slide is kept: a late arrival never steals the selection.
       expect(selected()).toEqual(["true", "false", "false", "false"]);
       expect(pickers().map((picker) => picker.tabIndex)).toEqual([0, -1, -1, -1]);
     });
@@ -2591,16 +2587,11 @@ describe("CarouselController", () => {
 
     it("keeps working when its only viewport leaves", async () => {
       await startWith(trackMarkup());
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       outer().removeAttribute(VIEWPORT);
       await settle();
       click(stepControl("next"));
       await settle();
 
-      expect(errors).toEqual([]);
       expect(states()).toEqual(["inactive", "active"]);
     });
 
@@ -2681,7 +2672,7 @@ describe("CarouselController", () => {
       expect(writes).toEqual([]);
     });
 
-    it("writes nothing onto the viewport while Stimulus tears the controller down", async () => {
+    it("removes controller-added live-region attributes from the viewport on unload", async () => {
       await startWith(trackMarkup());
 
       application.unload("stimeo--carousel");

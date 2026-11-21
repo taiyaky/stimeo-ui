@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CompositionTracker, isCompositionInputType } from "../../src/utils/composition_tracker";
 import { composeDraft } from "../helpers/ime";
 import { keyEvent, typeKey } from "../helpers/keyboard";
+import { flushMicrotasks } from "../helpers/timing";
 
 /** Detached observed fields isolate composition delivery without DOM focus side effects. */
 describe("CompositionTracker", () => {
@@ -230,6 +231,23 @@ describe("CompositionTracker", () => {
     return event;
   };
 
+  /**
+   * Dispatches the cancelable notice Turbo sends before morphing an element and its
+   * children. Turbo sends the same notice without a new element before removing one.
+   */
+  const beforeMorphElement = (target: EventTarget, removal = false): CustomEvent => {
+    const event = new CustomEvent("turbo:before-morph-element", {
+      bubbles: true,
+      cancelable: true,
+      detail: {
+        currentElement: target,
+        newElement: removal ? undefined : document.createElement("div"),
+      },
+    });
+    target.dispatchEvent(event);
+    return event;
+  };
+
   it("keeps a Turbo morph from rewriting the value of a field mid-composition", () => {
     const input = document.createElement("input");
     tracker = new CompositionTracker();
@@ -294,6 +312,687 @@ describe("CompositionTracker", () => {
     field.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
     composeDraft(field, draft);
   };
+
+  /** Writes an editable DOM draft and reports the composition that wrote it. */
+  const composeEditableDraft = (editor: HTMLElement, html = "<strong>か</strong>"): void => {
+    editor.innerHTML = html;
+    editor.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertCompositionText",
+        isComposing: true,
+      }),
+    );
+  };
+
+  it("keeps a native field's composition when its child nodes change without changing its live value", () => {
+    const textarea = document.createElement("textarea");
+    const onAbandon = vi.fn();
+    tracker = new CompositionTracker({ onAbandon });
+    tracker.observe(textarea);
+    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+    composeDraft(textarea, "か");
+
+    textarea.textContent = "server default";
+
+    expect(textarea.value).toBe("か");
+    expect(tracker.composingElement()).toBe(textarea);
+    expect(beforeMorph(textarea, "value").defaultPrevented).toBe(true);
+    expect(onAbandon).not.toHaveBeenCalled();
+  });
+
+  it("detects a page write into the same editable text node", async () => {
+    const editor = document.createElement("div");
+    editor.setAttribute("contenteditable", "true");
+    editor.textContent = "か";
+    const text = editor.firstChild as Text;
+    const onAbandon = vi.fn();
+    tracker = new CompositionTracker({ onAbandon });
+    tracker.observe(editor);
+    editor.dispatchEvent(new CompositionEvent("compositionstart"));
+
+    text.data = "server";
+
+    expect(editor.firstChild).toBe(text);
+    expect(tracker.isComposing()).toBe(false);
+    await Promise.resolve();
+    expect(onAbandon).toHaveBeenCalledExactlyOnceWith(editor, false);
+  });
+
+  it("does not interpret a non-element node's text as an editable field value", () => {
+    const target = document.createTextNode("not an editing surface");
+    tracker = new CompositionTracker();
+    tracker.observe(target);
+    target.dispatchEvent(new CompositionEvent("compositionstart"));
+
+    target.data = "other text";
+
+    expect(tracker.composingElement()).toBe(target);
+  });
+
+  it("tracks a target without an element or live value", () => {
+    const target = new EventTarget();
+    tracker = new CompositionTracker();
+    tracker.observe(target);
+    target.dispatchEvent(new CompositionEvent("compositionstart"));
+    target.dispatchEvent(new InputEvent("input", { isComposing: true }));
+
+    expect(tracker.composingElement()).toBe(target);
+
+    target.dispatchEvent(new CompositionEvent("compositionend"));
+    expect(tracker.isComposing()).toBe(false);
+  });
+
+  it.each(["<em>か</em>", "server", ""])(
+    "ends a contenteditable composition after a page writes %j, preserving the DOM it wrote",
+    async (html) => {
+      const editor = document.createElement("div");
+      editor.contentEditable = "true";
+      const onAbandon = vi.fn();
+      const onEnd = vi.fn();
+      tracker = new CompositionTracker({ onAbandon, onEnd });
+      tracker.observe(editor);
+      editor.dispatchEvent(new CompositionEvent("compositionstart"));
+      composeEditableDraft(editor);
+
+      editor.innerHTML = html;
+
+      expect(tracker.composingElement()).toBeNull();
+      expect(editor.innerHTML).toBe(html);
+      expect(onAbandon).not.toHaveBeenCalled();
+      await flushMicrotasks();
+      expect(onAbandon.mock.calls).toEqual([[editor, false]]);
+      expect(onEnd).not.toHaveBeenCalled();
+      expect(tracker.consumesConfirmedInput(sendInput(editor, "insertText"))).toBe(false);
+    },
+  );
+
+  it.each(["keydown", "input"])(
+    "settles a contenteditable DOM overwrite ahead of an earlier %s handler",
+    (type) => {
+      const editor = document.createElement("div");
+      editor.contentEditable = "true";
+      const seen: string[] = [];
+      editor.addEventListener(type, () => seen.push(`page, composing: ${tracker?.isComposing()}`));
+      tracker = new CompositionTracker({ onAbandon: () => seen.push("abandon") });
+      tracker.observe(editor);
+      editor.dispatchEvent(new CompositionEvent("compositionstart"));
+      composeEditableDraft(editor);
+      seen.length = 0;
+
+      editor.innerHTML = "<em>か</em>";
+      editor.dispatchEvent(type === "keydown" ? keyEvent("x") : new Event("input"));
+
+      expect(seen).toEqual(["abandon", "page, composing: false"]);
+    },
+  );
+
+  it.each([
+    [
+      "the same HTML",
+      (editor: HTMLElement) => {
+        const html = editor.innerHTML;
+        editor.innerHTML = html;
+      },
+    ],
+    [
+      "a nested text node",
+      (editor: HTMLElement) => {
+        editor.querySelector("em")?.replaceChildren(document.createTextNode("か"));
+      },
+    ],
+    [
+      "the order of identical siblings",
+      (editor: HTMLElement) => editor.prepend(editor.lastElementChild as HTMLElement),
+    ],
+    ["an empty trailing node", (editor: HTMLElement) => editor.lastChild?.remove()],
+  ])(
+    "ends a contenteditable composition with no caret in its text when a page replaces %s",
+    async (_name, replace) => {
+      const editor = document.createElement("div");
+      editor.contentEditable = "true";
+      const onAbandon = vi.fn();
+      tracker = new CompositionTracker({ onAbandon });
+      tracker.observe(editor);
+      editor.dispatchEvent(new CompositionEvent("compositionstart"));
+      composeEditableDraft(editor, "<span><em>か</em></span><span><em>か</em></span>");
+      editor.append(document.createTextNode(""));
+      editor.dispatchEvent(new InputEvent("input", { isComposing: true }));
+      const html = editor.innerHTML;
+      expect(tracker.isComposing()).toBe(true);
+
+      replace(editor);
+
+      expect(editor.innerHTML).toBe(html);
+      expect(beforeMorphElement(editor).defaultPrevented).toBe(false);
+      expect(tracker.isComposing()).toBe(false);
+      expect(onAbandon).not.toHaveBeenCalled();
+      await flushMicrotasks();
+      expect(onAbandon.mock.calls).toEqual([[editor, false]]);
+    },
+  );
+
+  /** Composes into the first of two identical spans, with the caret in its text as an engine leaves it. */
+  const composeAtCaret = (editor: HTMLElement): Text => {
+    editor.contentEditable = "true";
+    editor.innerHTML = "<span><em>か</em></span><span><em>か</em></span>";
+    editor.append(document.createTextNode(""));
+    document.body.append(editor);
+    const text = editor.querySelector("em")?.firstChild as Text;
+    const caret = document.createRange();
+    caret.setStart(text, text.data.length);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(caret);
+    editor.dispatchEvent(new CompositionEvent("compositionstart"));
+    text.appendData("に");
+    caret.setStart(text, text.data.length);
+    composedInput(editor, "に");
+    return text;
+  };
+
+  /** The `input` an engine sends after a composition update, carrying the text it composed. */
+  const composedInput = (editor: HTMLElement, data: string): void => {
+    editor.dispatchEvent(
+      new InputEvent("input", { inputType: "insertCompositionText", data, isComposing: true }),
+    );
+  };
+
+  /** A composition `beforeinput` that reports the range it replaces, as Chromium does. */
+  const replacing = (editor: HTMLElement, node: Text, offset: number): void => {
+    const event = new InputEvent("beforeinput", {
+      inputType: "insertCompositionText",
+      isComposing: true,
+    });
+    const target = {
+      startContainer: node,
+      startOffset: offset,
+      endContainer: node,
+      endOffset: offset,
+    };
+    Object.defineProperty(event, "getTargetRanges", { value: () => [target] });
+    editor.dispatchEvent(event);
+  };
+
+  /** The ranges `document.createRange()` hands out while `run` runs. */
+  const rangesDuring = (run: () => void): Range[] => {
+    const ranges: Range[] = [];
+    const createRange = document.createRange.bind(document);
+    const spy = vi.spyOn(document, "createRange").mockImplementation(() => {
+      const range = createRange();
+      ranges.push(range);
+      return range;
+    });
+    try {
+      run();
+    } finally {
+      spy.mockRestore();
+    }
+    return ranges;
+  };
+
+  /** Starts a composition in a new editor holding `data`, with the caret at `offset`. */
+  const startAtCaret = (data: string, offset: number): [HTMLElement, Text, Range] => {
+    const editor = document.createElement("div");
+    editor.contentEditable = "true";
+    editor.textContent = data;
+    document.body.append(editor);
+    const text = editor.firstChild as Text;
+    const caret = document.createRange();
+    caret.setStart(text, offset);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(caret);
+    tracker = new CompositionTracker();
+    tracker.observe(editor);
+    editor.dispatchEvent(new CompositionEvent("compositionstart"));
+    return [editor, text, caret];
+  };
+
+  /** The node and offsets a range spans. */
+  const span = (range: Range | undefined): unknown[] => [
+    range?.startContainer,
+    range?.startOffset,
+    range?.endContainer,
+    range?.endOffset,
+  ];
+
+  it("keeps a contenteditable composition through an edit after its text in the same node", () => {
+    const editor = document.createElement("div");
+    tracker = new CompositionTracker();
+    tracker.observe(editor);
+    const text = composeAtCaret(editor);
+
+    text.appendData("x");
+
+    expect(tracker.composingElement()).toBe(editor);
+  });
+
+  it("lays the range over the text a composition input put where its beforeinput's range starts", () => {
+    const [editor, text, caret] = startAtCaret("か", 0);
+    replacing(editor, text, 0);
+    text.insertData(0, "か");
+    caret.setStart(text, 1);
+
+    const ranges = rangesDuring(() => composedInput(editor, "か"));
+
+    expect(span(ranges.at(-1))).toEqual([text, 0, text, 1]);
+    expect(tracker?.composingElement()).toBe(editor);
+  });
+
+  it("lays the range over the composed text that reaches the caret when no range was reported", () => {
+    const [editor, text, caret] = startAtCaret("か", 1);
+    text.appendData("に");
+    caret.setStart(text, 2);
+
+    const ranges = rangesDuring(() => composedInput(editor, "に"));
+
+    expect(span(ranges.at(-1))).toEqual([text, 1, text, 2]);
+  });
+
+  it("uses the caret for an input without its own beforeinput after a reported replacement", () => {
+    const [editor, text, caret] = startAtCaret("a", 1);
+    replacing(editor, text, 1);
+    text.appendData("か");
+    caret.setStart(text, 2);
+    const first = rangesDuring(() => composedInput(editor, "か"));
+    expect(span(first.at(-1))).toEqual([text, 1, text, 2]);
+
+    text.appendData("か");
+    caret.setStart(text, 3);
+    const next = rangesDuring(() => composedInput(editor, "か"));
+
+    expect(span(next.at(-1))).toEqual([text, 2, text, 3]);
+    expect(tracker?.composingElement()).toBe(editor);
+  });
+
+  it.each([
+    ["one at the end, from the range its beforeinput reported", true, "か\u00a0", "か "],
+    ["one at the end, from the caret", false, "か\u00a0", "か "],
+    ["two in a row", false, "か\u00a0\u00a0", "か  "],
+    ["one the input reports too", false, "か\u00a0", "か\u00a0"],
+  ])(
+    "finds composed text an engine stored with no-break spaces: %s",
+    (_name, reported, stored, data) => {
+      const [editor, text, caret] = startAtCaret("x", 1);
+      if (reported) replacing(editor, text, 1);
+      text.appendData(stored);
+      caret.setStart(text, 1 + stored.length);
+
+      const ranges = rangesDuring(() => composedInput(editor, data));
+
+      expect(span(ranges.at(-1))).toEqual([text, 1, text, 1 + stored.length]);
+    },
+  );
+
+  it("looks around the caret when the start its beforeinput reported does not hold the composed text", () => {
+    const [editor, text, caret] = startAtCaret("x", 1);
+    replacing(editor, text, 0);
+    text.appendData("か");
+    caret.setStart(text, 2);
+
+    const ranges = rangesDuring(() => composedInput(editor, "か"));
+
+    expect(span(ranges.at(-1))).toEqual([text, 1, text, 2]);
+  });
+
+  it("looks around the caret when its beforeinput reported a range in another node", () => {
+    const [editor, text] = startAtCaret("かか", 2);
+    replacing(editor, document.createTextNode("か"), 0);
+
+    const ranges = rangesDuring(() => composedInput(editor, "か"));
+
+    expect(span(ranges.at(-1))).toEqual([text, 1, text, 2]);
+  });
+
+  it("takes the start its beforeinput reported over a later copy of the composed text", () => {
+    const [editor, text, caret] = startAtCaret("xか\u00a0", 1);
+    replacing(editor, text, 1);
+    text.insertData(1, "か\u00a0");
+    caret.setStart(text, 3);
+
+    const ranges = rangesDuring(() => composedInput(editor, "か "));
+
+    expect(span(ranges.at(-1))).toEqual([text, 1, text, 3]);
+  });
+
+  it.each([
+    ["composed text that does not reach the caret", "かx", 2, "か"],
+    ["no composed text", "か", 1, ""],
+  ])("lays the range over the whole caret text node for %s", (_name, data, offset, composed) => {
+    const [editor, text] = startAtCaret(data, offset);
+
+    const ranges = rangesDuring(() => composedInput(editor, composed));
+
+    expect(span(ranges.at(-1))).toEqual([text, 0, text, data.length]);
+    beforeInput(editor, "insertCompositionText", true);
+    expect(tracker?.composingElement()).toBe(editor);
+  });
+
+  it("keeps the range over the conversion's text through the user's own edit", () => {
+    const editor = document.createElement("div");
+    tracker = new CompositionTracker();
+    tracker.observe(editor);
+    composeAtCaret(editor);
+    const edit = new InputEvent("input", { inputType: "insertText", data: "x", bubbles: true });
+    Object.defineProperty(edit, "isTrusted", { value: true });
+
+    expect(rangesDuring(() => editor.dispatchEvent(edit))).toEqual([]);
+    expect(tracker.composingElement()).toBe(editor);
+  });
+
+  it.each([
+    [
+      "the same HTML",
+      (editor: HTMLElement) => {
+        const html = editor.innerHTML;
+        editor.innerHTML = html;
+      },
+    ],
+    [
+      "the text node it runs in",
+      (editor: HTMLElement) =>
+        editor.querySelector("em")?.replaceChildren(document.createTextNode("かに")),
+    ],
+    ["the span it runs in", (editor: HTMLElement) => editor.firstElementChild?.remove()],
+  ])(
+    "ends a contenteditable composition when a page replaces or removes %s",
+    async (_name, write) => {
+      const editor = document.createElement("div");
+      const onAbandon = vi.fn();
+      tracker = new CompositionTracker({ onAbandon });
+      tracker.observe(editor);
+      composeAtCaret(editor);
+
+      write(editor);
+
+      expect(tracker.isComposing()).toBe(false);
+      expect(beforeMorphElement(editor).defaultPrevented).toBe(false);
+      await flushMicrotasks();
+      expect(onAbandon.mock.calls).toEqual([[editor, false]]);
+    },
+  );
+
+  it("ends a contenteditable composition once the live range over its text collapses", async () => {
+    const editor = document.createElement("div");
+    const onAbandon = vi.fn();
+    tracker = new CompositionTracker({ onAbandon });
+    tracker.observe(editor);
+    const ranges = rangesDuring(() => composeAtCaret(editor));
+    expect(tracker.isComposing()).toBe(true);
+
+    /** Simulates both range boundaries falling at the start of the replaced text. */
+    ranges.at(-1)?.collapse(true);
+
+    expect(tracker.isComposing()).toBe(false);
+    await flushMicrotasks();
+    expect(onAbandon.mock.calls).toEqual([[editor, false]]);
+  });
+
+  it("follows the conversion into the text node its next input leaves the caret in", () => {
+    const editor = document.createElement("div");
+    tracker = new CompositionTracker();
+    tracker.observe(editor);
+    const text = composeAtCaret(editor);
+    const next = document.createTextNode("かにほ");
+    text.replaceWith(next);
+    const caret = document.getSelection()?.getRangeAt(0) as Range;
+    caret.setStart(next, next.data.length);
+    caret.collapse(true);
+    composedInput(editor, "にほ");
+
+    editor.querySelector("span:last-of-type em")?.replaceChildren(document.createTextNode("x"));
+    expect(tracker.composingElement()).toBe(editor);
+    next.remove();
+    expect(tracker.composingElement()).toBeNull();
+  });
+
+  it.each([
+    [
+      "an empty text node of the element",
+      (editor: HTMLElement) => editor.appendChild(document.createTextNode("")),
+    ],
+    [
+      "a text node of another element",
+      (editor: HTMLElement) => {
+        const other = document.createElement("p");
+        other.textContent = "elsewhere";
+        editor.after(other);
+        return other.firstChild as Text;
+      },
+    ],
+  ])("keeps a composition that starts with the caret in %s, until its input", (_name, place) => {
+    const editor = document.createElement("div");
+    editor.contentEditable = "true";
+    editor.textContent = "か";
+    document.body.append(editor);
+    const onAbandon = vi.fn();
+    tracker = new CompositionTracker({ onAbandon });
+    tracker.observe(editor);
+    const caret = document.createRange();
+    caret.setStart(place(editor), 0);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(caret);
+
+    editor.dispatchEvent(new CompositionEvent("compositionstart"));
+    beforeInput(editor, "insertCompositionText", true);
+
+    expect(tracker.composingElement()).toBe(editor);
+  });
+
+  it("reads a composition that has had no input yet by the caret's text node", () => {
+    const [editor, text] = startAtCaret("か", 1);
+
+    editor.append(document.createElement("p"));
+
+    expect(tracker?.composingElement()).toBe(editor);
+    text.remove();
+    expect(tracker?.composingElement()).toBeNull();
+  });
+
+  it("holds a focused composition as it is while its target waits to be observed again", async () => {
+    const editor = document.createElement("div");
+    const onAbandon = vi.fn();
+    tracker = new CompositionTracker({ onAbandon });
+    tracker.observe(editor);
+    composeAtCaret(editor);
+    editor.focus();
+
+    tracker.disconnect();
+    editor.innerHTML = "<em>server</em>";
+
+    expect(tracker.composingElement()).toBe(editor);
+    tracker.observe(editor);
+    expect(tracker.composingElement()).toBeNull();
+    await flushMicrotasks();
+    expect(onAbandon.mock.calls).toEqual([[editor, false]]);
+  });
+
+  it("keeps a contenteditable composition across its own DOM drafts and trusted edits", () => {
+    const editor = document.createElement("div");
+    editor.contentEditable = "true";
+    const onAbandon = vi.fn();
+    tracker = new CompositionTracker({ onAbandon });
+    tracker.observe(editor);
+    editor.dispatchEvent(new CompositionEvent("compositionstart"));
+    composeEditableDraft(editor);
+    composeEditableDraft(editor, "<em>かな</em>");
+    editor.innerHTML = "<em>かなz</em>";
+    const edit = new InputEvent("input", { inputType: "insertText", bubbles: true });
+    Object.defineProperty(edit, "isTrusted", { value: true });
+    editor.dispatchEvent(edit);
+
+    expect(tracker.composingElement()).toBe(editor);
+    expect(onAbandon).not.toHaveBeenCalled();
+  });
+
+  it.each(["the surface itself", "an ancestor of the surface"])(
+    "leaves every morph and removal notice of a composing contenteditable surface and its descendants to the page, observing %s",
+    (observed) => {
+      const form = document.createElement("form");
+      const editor = document.createElement("div");
+      editor.contentEditable = "true";
+      form.append(editor);
+      const onAbandon = vi.fn();
+      tracker = new CompositionTracker({ onAbandon });
+      tracker.observe(observed === "the surface itself" ? editor : form);
+      editor.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      composeEditableDraft(editor);
+      const child = editor.firstElementChild as HTMLElement;
+
+      const notices = [
+        beforeMorphElement(editor),
+        beforeMorphElement(editor, true),
+        beforeMorphElement(child),
+        beforeMorphElement(child, true),
+        beforeMorph(editor, "value"),
+      ];
+
+      expect(notices.map((notice) => notice.defaultPrevented)).toEqual([
+        false,
+        false,
+        false,
+        false,
+        false,
+      ]);
+      // A notice writes nothing: the conversion goes on until a write reaches its text.
+      expect(tracker.composingElement()).toBe(editor);
+      expect(onAbandon).not.toHaveBeenCalled();
+    },
+  );
+
+  it("still keeps a morph from writing the value of a field composing beside a contenteditable surface", () => {
+    const form = document.createElement("form");
+    const editor = document.createElement("div");
+    editor.contentEditable = "true";
+    const otherEditor = document.createElement("div");
+    otherEditor.contentEditable = "true";
+    const input = document.createElement("input");
+    form.append(editor, otherEditor, input);
+    tracker = new CompositionTracker();
+    tracker.observe(form);
+    editor.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    composeEditableDraft(editor);
+    editor.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+
+    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+
+    expect(beforeMorph(input, "value").defaultPrevented).toBe(true);
+    expect(beforeMorph(input, "aria-invalid").defaultPrevented).toBe(false);
+    expect(beforeMorph(otherEditor, "value").defaultPrevented).toBe(false);
+    expect(beforeMorphElement(input).defaultPrevented).toBe(false);
+    expect(beforeMorphElement(otherEditor).defaultPrevented).toBe(false);
+    expect(beforeMorphElement(form).defaultPrevented).toBe(false);
+  });
+
+  /**
+   * Runs a Turbo morph of `element` the way Idiomorph does: it asks first, and writes only when
+   * the notice was not cancelled.
+   */
+  const morphLetThrough = (element: HTMLElement, write: () => void): boolean => {
+    if (beforeMorphElement(element).defaultPrevented) return false;
+    write();
+    return true;
+  };
+
+  it.each([
+    [
+      "the surface writes the conversion's text node in place",
+      (editor: HTMLElement) => editor,
+      (text: Text, range: Range | undefined) => {
+        text.data = "server";
+        // A browser collapses the live range over text a write replaces; happy-dom does not.
+        range?.collapse(true);
+      },
+    ],
+    [
+      "the element holding the conversion's text replaces its text node",
+      (editor: HTMLElement) => editor.querySelector("em") as HTMLElement,
+      (text: Text) => text.replaceWith(document.createTextNode("server")),
+    ],
+  ])("reads the end of a conversion when a morph of %s", async (_name, morphed, write) => {
+    const editor = document.createElement("div");
+    const onAbandon = vi.fn();
+    const onEnd = vi.fn();
+    tracker = new CompositionTracker({ onAbandon, onEnd });
+    tracker.observe(editor);
+    const ranges = rangesDuring(() => composeAtCaret(editor));
+    const text = editor.querySelector("em")?.firstChild as Text;
+    expect(tracker.composingElement()).toBe(editor);
+
+    const applied = morphLetThrough(morphed(editor), () => write(text, ranges.at(-1)));
+
+    expect(applied).toBe(true);
+    expect(tracker.composingElement()).toBeNull();
+    await flushMicrotasks();
+    expect(onAbandon.mock.calls).toEqual([[editor, false]]);
+    expect(onEnd).not.toHaveBeenCalled();
+  });
+
+  it("keeps the conversion through a morph it let through that writes beside the conversion's text", () => {
+    const editor = document.createElement("div");
+    const onAbandon = vi.fn();
+    tracker = new CompositionTracker({ onAbandon });
+    tracker.observe(editor);
+    composeAtCaret(editor);
+    const other = editor.querySelector("span:last-of-type em") as HTMLElement;
+
+    const applied = morphLetThrough(editor, () => {
+      other.replaceChildren(document.createTextNode("server"));
+      editor.append(document.createElement("p"));
+    });
+
+    expect(applied).toBe(true);
+    expect(tracker.composingElement()).toBe(editor);
+    expect(onAbandon).not.toHaveBeenCalled();
+  });
+
+  it("lets a contenteditable morph continue after a DOM overwrite and defers its abandon hook", async () => {
+    const editor = document.createElement("div");
+    editor.contentEditable = "true";
+    const onAbandon = vi.fn();
+    tracker = new CompositionTracker({ onAbandon });
+    tracker.observe(editor);
+    editor.dispatchEvent(new CompositionEvent("compositionstart"));
+    composeEditableDraft(editor);
+    editor.innerHTML = "<em>か</em>";
+
+    expect(beforeMorphElement(editor).defaultPrevented).toBe(false);
+    expect(tracker.isComposing()).toBe(false);
+    expect(onAbandon).not.toHaveBeenCalled();
+    await flushMicrotasks();
+    expect(onAbandon.mock.calls).toEqual([[editor, false]]);
+  });
+
+  it.each([
+    ["released", (t: CompositionTracker, editor: HTMLElement) => t.unobserve(editor)],
+    ["disconnected", (t: CompositionTracker) => t.disconnect()],
+  ])(
+    "keeps a focused contenteditable composition through being %s and observed again in the same turn, leaving its morphs to the page",
+    async (_name, release) => {
+      const editor = document.createElement("div");
+      editor.contentEditable = "true";
+      document.body.append(editor);
+      const onEnd = vi.fn();
+      const onAbandon = vi.fn();
+      tracker = new CompositionTracker({ onEnd, onAbandon });
+      tracker.observe(editor);
+      editor.focus();
+      editor.dispatchEvent(new CompositionEvent("compositionstart"));
+      composeEditableDraft(editor);
+      expect(beforeMorphElement(editor).defaultPrevented).toBe(false);
+
+      release(tracker, editor);
+
+      expect(tracker.composingElement()).toBe(editor);
+      expect(beforeMorphElement(editor).defaultPrevented).toBe(false);
+      tracker.observe(editor);
+      await flushMicrotasks();
+      expect(tracker.composingElement()).toBe(editor);
+      expect(beforeMorphElement(editor).defaultPrevented).toBe(false);
+      editor.dispatchEvent(new CompositionEvent("compositionend"));
+      expect(onEnd).toHaveBeenCalledTimes(1);
+      expect(onAbandon).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps composing while the field holds what the composition and the user's own edits left", () => {
     const input = document.createElement("input");
@@ -797,22 +1496,22 @@ describe("CompositionTracker", () => {
     expect(onAbandon).toHaveBeenCalledTimes(1);
   });
 
-  it("reads the end of a composition in an element with no value from the engine's next plain edit", () => {
+  it("reads the end of a contenteditable composition at a query after same-text node replacement", async () => {
     const editor = document.createElement("div");
     editor.contentEditable = "true";
     const onAbandon = vi.fn();
     tracker = new CompositionTracker({ onAbandon });
     tracker.observe(editor);
+    editor.textContent = "x";
     editor.dispatchEvent(new CompositionEvent("compositionstart"));
 
-    // There is no value to compare, so a write alone does not show the end.
-    editor.textContent = "x";
-    editor.dispatchEvent(keyEvent("x", { isComposing: false }));
-    expect(tracker.isComposing()).toBe(true);
-
-    beforeInput(editor, "insertText", false);
+    editor.replaceChildren(document.createTextNode("x"));
 
     expect(tracker.isComposing()).toBe(false);
+    expect(onAbandon).not.toHaveBeenCalled();
+    await flushMicrotasks();
+    expect(onAbandon.mock.calls).toEqual([[editor, false]]);
+    beforeInput(editor, "insertText", false);
     expect(onAbandon).toHaveBeenCalledTimes(1);
   });
 

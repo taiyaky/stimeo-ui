@@ -184,9 +184,7 @@ describe("SpinnerController", () => {
     vi.advanceTimersByTime(100);
     instance().stop();
     vi.advanceTimersByTime(50);
-    // A repeated stop must replace the queued hide, not add a second one: only the
-    // most recently queued id is cancellable, so an extra timer outlives the restart
-    // below and hides the spinner in the middle of the new load.
+    /** A repeated stop replaces the pending hide. Restarting cancels that hide. */
     instance().stop();
     const events: string[] = [];
     root().addEventListener("stimeo--spinner:hide", () => events.push("hide"));
@@ -778,15 +776,10 @@ describe("SpinnerController", () => {
 
   it("keeps working when its only indicator leaves", async () => {
     await start();
-    const errors: unknown[] = [];
-    application.handleError = (error) => {
-      errors.push(error);
-    };
     indicator().remove();
     await vi.advanceTimersByTimeAsync(0);
     instance().start();
 
-    expect(errors).toEqual([]);
     expect(root().getAttribute("data-state")).toBe("loading");
   });
 
@@ -1001,16 +994,11 @@ describe("SpinnerController", () => {
 
     it("keeps working when its only region leaves", async () => {
       await start();
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       instance().start();
       region().remove();
       await settle();
       instance().stop();
 
-      expect(errors).toEqual([]);
       expect(root().getAttribute("data-state")).toBe("idle");
     });
 

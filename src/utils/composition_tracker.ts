@@ -53,8 +53,8 @@ export interface CompositionTrackerOptions {
    * change, the next `compositionstart` — the hook runs there, in the capture phase,
    * ahead of that event's own handlers and of the edit it announces, whoever
    * dispatched it. When a question ({@link CompositionTracker.isComposing},
-   * {@link CompositionTracker.composingElement}) or a Turbo morph's notice for one
-   * attribute shows the end, the hook runs in a microtask after them, never inside
+   * {@link CompositionTracker.composingElement}) or a Turbo morph notice shows
+   * the end, the hook runs in a microtask after them, never inside
    * its caller or a half-applied morph, unless an event the tracker hears comes
    * first. On `compositionstart` it runs after the new composition is set and before
    * `onStart`: {@link CompositionTracker.isComposing} is true again, so work held for
@@ -69,15 +69,111 @@ interface Composition {
   readonly target: EventTarget;
   /** The element composing: the observed field itself, or a field inside an observed ancestor. */
   readonly element: EventTarget;
-  /** The value the composition last left in the element; `undefined` for an element with none. */
+  /** The live value or editable text the composition last left in the element. */
   text: unknown;
+  /** Editable descendants in tree order; value fields have none. */
+  nodes: readonly Node[];
+  /**
+   * In an element without a value, a live range over the conversion's text — or over the
+   * whole text node holding the caret, when the input did not say what it composed or that
+   * node does not hold it — which collapses as the engine's own range over that text does;
+   * `null` while the caret is in no text node of the element.
+   */
+  spot: Range | null;
+  /** The range the next composition input replaces, as its `beforeinput` reported it. */
+  replaced: AbstractRange | null;
 }
 
+/** The element's live value, or its editable text when its content lives in child nodes. */
+const textOf = (element: EventTarget): unknown => {
+  if ("value" in element) return element.value;
+  return element instanceof Element ? element.textContent : undefined;
+};
+
+/** Captures editable node identities, including text nodes, in tree order. */
+const nodesOf = (element: EventTarget): readonly Node[] => {
+  const nodes: Node[] = [];
+  if ("value" in element || !(element instanceof Element)) return nodes;
+  const walker = element.ownerDocument.createTreeWalker(element);
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) nodes.push(node);
+  return nodes;
+};
+
 /**
- * The element's live value; `undefined` for an element without one, which a write never
- * changes.
+ * `text` with each no-break space read as a space: an engine may store a space it composes as
+ * U+00A0 while the `input` reports U+0020.
  */
-const textOf = (element: EventTarget): unknown => (element as { value?: unknown }).value;
+const folded = (text: string): string => text.replaceAll("\u00a0", " ");
+
+/**
+ * Where `data` starts in `node`, its no-break spaces read as spaces: at the start of the
+ * range it replaced, or else where it reaches the caret, or -1 when neither holds it.
+ */
+const startOf = (
+  node: Text,
+  data: string,
+  replaced: AbstractRange | null,
+  caret: number,
+): number => {
+  const text = folded(node.data);
+  const composed = folded(data);
+  if (replaced?.startContainer === node && text.startsWith(composed, replaced.startOffset)) {
+    return replaced.startOffset;
+  }
+  const start = text.lastIndexOf(composed, caret);
+  return start !== -1 && start + composed.length >= caret ? start : -1;
+};
+
+/**
+ * The conversion's text in an element without a value, in the non-empty text node holding
+ * the caret: the `data` a composition input put in place of the range it `replaced`, or the
+ * whole node when the input did not say what it composed or the node does not hold it.
+ * `null` when the caret is in no such node of the element.
+ */
+const spotOf = (
+  element: EventTarget,
+  replaced: AbstractRange | null,
+  data: unknown,
+): Range | null => {
+  if ("value" in element || !(element instanceof Element)) return null;
+  const selection = element.ownerDocument.getSelection();
+  const node = selection?.focusNode;
+  if (!(node instanceof Text) || node.data === "" || !element.contains(node)) return null;
+  const range = element.ownerDocument.createRange();
+  const start =
+    typeof data === "string" && data !== ""
+      ? startOf(node, data, replaced, selection?.focusOffset ?? 0)
+      : -1;
+  if (start === -1) {
+    range.selectNodeContents(node);
+  } else {
+    range.setStart(node, start);
+    range.setEnd(node, start + (data as string).length);
+  }
+  return range;
+};
+
+/** The first range a `beforeinput` reports it replaces, where the engine reports one. */
+const replacedBy = (event: InputEvent): AbstractRange | null =>
+  typeof event.getTargetRanges === "function" ? (event.getTargetRanges()[0] ?? null) : null;
+
+/**
+ * Whether something other than the composition changed what it runs in since its last input.
+ * With the caret in a text node, only the conversion's text counts: its range collapsed — the
+ * text was rewritten, moved or removed — or left the element. Otherwise the element's text and
+ * the identities and order of its descendants count.
+ */
+const rewritten = ({ element, text, nodes, spot }: Composition): boolean => {
+  if (spot !== null) {
+    return spot.collapsed || !(element instanceof Node && element.contains(spot.startContainer));
+  }
+  const current = nodesOf(element);
+  return (
+    textOf(element) !== text ||
+    current.length !== nodes.length ||
+    current.some((node, index) => node !== nodes[index])
+  );
+};
 
 /** Whether `element` is the focused element of the document or shadow root it is in. */
 const holdsFocus = (element: EventTarget): boolean =>
@@ -110,10 +206,11 @@ const holdsFocus = (element: EventTarget): boolean =>
  * at all is left relying on the window alone.
  *
  * **A composition can also end without `compositionend`.** Chromium drops the
- * conversion silently when something other than the IME writes a different value
- * into its field — a Turbo morph, a form reset, a script — and when the field
- * moves or leaves the page, leaving the text it composed. The tracker reads the end
- * from what the engine and the field still say:
+ * conversion silently when something other than the IME changes its field's value,
+ * or replaces, moves or rewrites the text an editable element's conversion runs over —
+ * a Turbo morph, a form reset, a script — and when the field moves or leaves the page,
+ * leaving the text it composed. The tracker reads the end from what the engine
+ * and the field still say:
  *
  * - **The field holds other text than the composition left.** The IME's edits, and
  *   the user's own between them, arrive as an `input` the engine dispatched
@@ -121,7 +218,16 @@ const holdsFocus = (element: EventTarget): boolean =>
  *   field's text from those. A write by anything else changes the text with no such
  *   `input` — at most a synthetic one — so the composition is over, ended with
  *   {@link CompositionTrackerOptions.onAbandon}, before anyone acts on the field.
- *   Writing the same text keeps the conversion, and the match.
+ *   An element without a value is read by the conversion's own text: a live range over
+ *   the text the last composition input put in place of the range its `beforeinput`
+ *   reported, in the text node holding the caret — over that whole node when the input
+ *   did not say what it composed or the node does not hold it — which the user's own
+ *   edits move as they move the engine's. The composition is over once the range collapses, as the engine's own
+ *   range does when that text is rewritten, even to the same text, moved or removed, or
+ *   once it leaves the element. Other nodes added, removed or moved, edits around that
+ *   text in its node, and attribute changes keep the conversion and its history, as they
+ *   keep the engine's. With the caret in no text node of the element, its descendant text
+ *   and node identities in tree order are compared instead.
  * - **The engine edits outside a composition.** A `beforeinput` reporting
  *   `isComposing: false` with an `inputType` outside {@link COMPOSITION_INPUT_TYPES}
  *   is an edit the engine no longer counts as composition — unless the `keydown`
@@ -149,8 +255,12 @@ const holdsFocus = (element: EventTarget): boolean =>
  * a composition is live, a Turbo morph leaves its field's value alone: Idiomorph
  * asks through `turbo:before-morph-attribute` before it writes `value`, as an
  * attribute or as the live text, and the tracker cancels that one notice for the
- * element composing, so the morph keeps the conversion, as it keeps focus. Every
- * other attribute, and every other element, still morphs.
+ * element composing, so the morph keeps the conversion, as it keeps focus. The
+ * field's other attributes, and other elements, still morph. An element without a
+ * value has no single write to cancel — a morph can only be stopped node by node, and
+ * the nodes it inserts not at all — so the tracker leaves its morphs alone: keeping
+ * what it holds through one is for whoever owns its content. A morph that rewrites the
+ * conversion's text ends the conversion, as any other write does.
  *
  * A consumer that observes several fields tells the conversion's own events from
  * edits in the other fields with {@link CompositionTracker.owns}, which holds even
@@ -242,7 +352,9 @@ export class CompositionTracker {
    * the composition waits for its target to be observed again before the turn ends,
    * and goes on; otherwise it ends then — quietly once disconnected, and with
    * {@link CompositionTrackerOptions.onAbandon} for a consumer that only let that one
-   * target go. A move without `moveBefore`, or a removal, takes focus away.
+   * target go. While it waits it is held as it was, and a move that ended the
+   * conversion shows at the first check once its target is observed again. A move
+   * without `moveBefore`, or a removal, takes focus away.
    */
   disconnect(): void {
     this.#connected = false;
@@ -338,15 +450,16 @@ export class CompositionTracker {
 
   /**
    * Ends the composition held if its field left the observed target, taking the
-   * composition's text along, or holds text a write left.
+   * composition's text along, or holds a value or editable DOM a write left. One
+   * waiting for its target to be observed again is held as it is until then.
    */
   #settle(): void {
     const composition = this.#composition;
-    if (composition === null) return;
-    const { target, element, text } = composition;
+    if (composition === null || !this.#observedTargets.has(composition.target)) return;
+    const { target, element } = composition;
     if (target instanceof Node && element instanceof Node && !target.contains(element)) {
       this.#composition = null;
-    } else if (textOf(element) !== text) {
+    } else if (rewritten(composition)) {
       this.#abandon(false);
     }
   }
@@ -383,7 +496,14 @@ export class CompositionTracker {
     // A listener runs while the event is dispatched, so both targets are set.
     const target = event.currentTarget as EventTarget;
     const element = event.target as EventTarget;
-    this.#composition = { target, element, text: textOf(element) };
+    this.#composition = {
+      target,
+      element,
+      text: textOf(element),
+      nodes: nodesOf(element),
+      spot: spotOf(element, null, undefined),
+      replaced: null,
+    };
     this.#runAbandon();
     this.#onStart?.(event);
   };
@@ -406,7 +526,10 @@ export class CompositionTracker {
     this.#keyComposing = (event as KeyboardEvent).isComposing === true;
   };
 
-  /** An edit is about to land: a composition the engine no longer runs ends first. */
+  /**
+   * An edit is about to land: a composition the engine no longer runs ends first. The range
+   * the edit reports it replaces is kept for the composition `input` that follows.
+   */
   readonly #handleBeforeInput = (event: Event): void => {
     const keyComposing = this.#keyComposing;
     this.#keyComposing = false;
@@ -421,13 +544,19 @@ export class CompositionTracker {
     ) {
       this.#abandon(true);
     }
+    const composition = this.#composition;
+    if (composition !== null && event.target === composition.element) {
+      composition.replaced = replacedBy(event as InputEvent);
+    }
     this.#runAbandon();
   };
 
   /**
-   * Takes the composing field's text from an `input` the engine dispatched or one
-   * that reports the composition; any other `input` follows a write the
-   * composition did not make.
+   * Takes the composing field's text and node identities from an `input` the engine
+   * dispatched or one that reports the composition, and the conversion's text from a
+   * composition input; the user's own edits between keep the range over that text, which
+   * moves with them as the engine's does. Any other `input` follows a write the composition
+   * did not make.
    */
   readonly #handleInput = (event: Event): void => {
     const composition = this.#composition;
@@ -438,6 +567,15 @@ export class CompositionTracker {
       (isTrusted || isComposing || isCompositionInputType(inputType))
     ) {
       composition.text = textOf(composition.element);
+      composition.nodes = nodesOf(composition.element);
+      if (isCompositionInputType(inputType)) {
+        composition.spot = spotOf(
+          composition.element,
+          composition.replaced,
+          (event as InputEvent).data,
+        );
+      }
+      composition.replaced = null;
     } else {
       this.#settle();
     }
@@ -460,12 +598,14 @@ export class CompositionTracker {
     if (root.activeElement !== element) this.#composition = null;
   };
 
-  /** Keeps a Turbo morph from writing the value of the element composing. */
+  /** Preserves the composing field's live value when Turbo asks to write it. */
   readonly #handleBeforeMorphAttribute = (event: Event): void => {
     this.#settle();
     const composition = this.#composition;
     if (composition?.target !== event.currentTarget || event.target !== composition.element) return;
     const detail: { readonly attributeName?: unknown } | null = (event as CustomEvent).detail;
-    if (detail?.attributeName === "value") event.preventDefault();
+    if (detail?.attributeName === "value" && "value" in composition.element) {
+      event.preventDefault();
+    }
   };
 }

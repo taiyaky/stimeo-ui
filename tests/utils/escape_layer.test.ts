@@ -147,6 +147,74 @@ describe("EscapeLayer", () => {
     expect(second.instance.ownsEscape).toBe(true);
   });
 
+  it.each(["onDismiss", "claims"] as const)(
+    "keeps ownership when the %s getter releases the last preceding layer",
+    (property) => {
+      const ownerDocument = document.implementation.createHTMLDocument("overlay");
+      const previous = layer();
+      const dismiss = vi.fn();
+      const current = layer();
+      previous.activate(ownerDocument);
+
+      current.instance.activate(ownerDocument, {
+        get onDismiss() {
+          if (property === "onDismiss") previous.instance.deactivate();
+          return dismiss;
+        },
+        get claims() {
+          if (property === "claims") previous.instance.deactivate();
+          return () => true;
+        },
+      });
+
+      expect(current.instance.ownsEscape).toBe(true);
+      expect(pressEscape(ownerDocument).defaultPrevented).toBe(true);
+      expect(dismiss).toHaveBeenCalledOnce();
+      current.instance.deactivate();
+      expect(pressEscape(ownerDocument).defaultPrevented).toBe(false);
+      expect(dismiss).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["onDismiss", "claims"] as const)(
+    "keeps only its current activation when the %s getter reactivates it",
+    (property) => {
+      const ownerDocument = document.implementation.createHTMLDocument("overlay");
+      const belowDismiss = vi.fn();
+      const below = layer({ onDismiss: belowDismiss });
+      const current = layer();
+      const nestedDismiss = vi.fn();
+      const dismiss = vi.fn();
+      below.activate(ownerDocument);
+      const reactivate = () =>
+        current.instance.activate(ownerDocument, { onDismiss: nestedDismiss });
+
+      current.instance.activate(ownerDocument, {
+        get onDismiss() {
+          if (property === "onDismiss") reactivate();
+          return dismiss;
+        },
+        get claims() {
+          if (property === "claims") reactivate();
+          return () => true;
+        },
+      });
+
+      expect(current.instance.ownsEscape).toBe(true);
+      expect(below.instance.ownsEscape).toBe(false);
+      expect(pressEscape(ownerDocument).defaultPrevented).toBe(true);
+      expect(dismiss).toHaveBeenCalledOnce();
+      expect(nestedDismiss).not.toHaveBeenCalled();
+      current.instance.deactivate();
+      expect(below.instance.ownsEscape).toBe(true);
+      expect(pressEscape(ownerDocument).defaultPrevented).toBe(true);
+      expect(belowDismiss).toHaveBeenCalledOnce();
+      expect(nestedDismiss).not.toHaveBeenCalled();
+      below.instance.deactivate();
+      expect(pressEscape(ownerDocument).defaultPrevented).toBe(false);
+    },
+  );
+
   it("does not leave a duplicate behind when the top layer is reactivated", () => {
     const bottom = layer();
     const top = layer();

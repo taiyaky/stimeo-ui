@@ -59,9 +59,9 @@ interface ReflectableController {
  * controller shipped through those entrypoints. Reflecting positioning imports
  * `@floating-ui/dom` here, but only at **build time** for manifest generation —
  * `manifest.ts` is not a shipped browser artifact. The core entrypoint
- * (`dist/index.js` / `import "stimeo-ui"`) still never imports it; only the opt-in
- * `stimeo-ui/positioning` subpath ships `@floating-ui/dom`, keeping the core install
- * dependency-free.
+ * (`dist/index.js` / `import "stimeo-ui"`) requires only
+ * `@hotwired/stimulus`. The opt-in `stimeo-ui/positioning` subpath uses
+ * `@floating-ui/dom`.
  *
  * @param packageVersion - The `stimeo-ui` version to stamp onto the manifest
  *   so consumers can confirm it matches their installed package.

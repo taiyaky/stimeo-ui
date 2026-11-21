@@ -737,6 +737,69 @@ describe("ScrollAreaController", () => {
     expect(frames).toHaveBeenCalledOnce();
   });
 
+  it("keeps scroll work on its frame after its own metadata writes and re-measures external ones", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextHandle = 1;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const handle = nextHandle++;
+      frames.set(handle, callback);
+      return handle;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (handle: number) => {
+      frames.delete(handle);
+    });
+
+    try {
+      await start(`
+        <div data-controller="stimeo--scroll-area"
+             data-stimeo--scroll-area-target="viewport" aria-label="Log output">
+          <button type="button">Action</button>
+        </div>
+      `);
+      layout({ scrollHeight: 150, clientHeight: 200, scrollTop: 0 });
+      await tick();
+
+      // Overflow changes its lease metadata while progress stays at zero. A later
+      // scroll waits for its frame even while those self-generated records deliver.
+      layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+      Object.defineProperty(viewport(), "scrollTop", { configurable: true, value: 300 });
+      viewport().dispatchEvent(new Event("scroll"));
+      expect(frames.size).toBe(1);
+      await tick();
+
+      expect(root().getAttribute("data-overflow")).toBe("true");
+      expect(root().getAttribute("data-scroll")).toBe("start");
+      expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("0");
+      expect(frames.size).toBe(1);
+
+      for (const [handle, callback] of frames) {
+        frames.delete(handle);
+        callback(0);
+      }
+      await tick();
+      expect(root().getAttribute("data-scroll")).toBe("middle");
+      expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("0.5");
+      expect(frames.size).toBe(0);
+
+      // An external metadata change remains a structural input, so it re-measures
+      // the current geometry and supersedes a pending position-only scroll frame.
+      Object.defineProperty(viewport(), "scrollHeight", { configurable: true, value: 150 });
+      Object.defineProperty(viewport(), "scrollTop", { configurable: true, value: 0 });
+      root().removeAttribute("data-stimeo--scroll-area-data-overflow-lease");
+      viewport().dispatchEvent(new Event("scroll"));
+      expect(frames.size).toBe(1);
+      await tick();
+
+      expect(root().getAttribute("data-overflow")).toBe("false");
+      expect(root().getAttribute("data-scroll")).toBe("start");
+      expect(root().style.getPropertyValue("--stimeo--scroll-progress")).toBe("0");
+      expect(root().hasAttribute("data-stimeo--scroll-area-data-overflow-lease")).toBe(true);
+      expect(frames.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("cancels a pending scroll frame on disconnect", async () => {
     // Frames are held by handle so that a cancel really removes one, as an engine
     // does: a frame still held after disconnect would write the state hooks back
@@ -1087,6 +1150,24 @@ describe("ScrollAreaController", () => {
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 300 }); // middle (no edge)
     layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 600 }); // end
     expect(edges).toEqual(["start", "end"]);
+  });
+
+  it("keeps the last reached edge when a later viewport target is added", async () => {
+    await start(markup());
+    const edges: string[] = [];
+    root().addEventListener("stimeo--scroll-area:reach", (event) => {
+      edges.push((event as CustomEvent<{ edge: string }>).detail.edge);
+    });
+    layout({ scrollHeight: 800, clientHeight: 200, scrollTop: 0 });
+    expect(edges).toEqual(["start"]);
+
+    const later = document.createElement("div");
+    later.setAttribute("data-stimeo--scroll-area-target", "viewport");
+    root().append(later);
+    await tick();
+
+    expect(root().getAttribute("data-scroll")).toBe("start");
+    expect(edges).toEqual(["start"]);
   });
 
   it("dispatches reach again only after leaving and re-entering an edge", async () => {

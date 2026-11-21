@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { erbElements, erbRanges, neutralizeErb } from "../../src/inspector/erb";
+import { withinTimeLimit } from "../helpers/time_limit";
 
 /**
  * Tests for ERB neutralization: tags must be blanked while line/column layout
@@ -51,7 +52,7 @@ describe("erbRanges", () => {
 describe("erbElements", () => {
   it("recovers a helper's data: hash as attributes", () => {
     const source = `<%= f.text_area :body, data: { "stimeo--menu-target": "item" } %>`;
-    const [element] = erbElements(source);
+    const [element] = withinTimeLimit(() => erbElements(source));
     expect(element?.attrs.map((a) => [a.name, a.value])).toEqual([
       ["data-stimeo--menu-target", "item"],
     ]);
@@ -111,14 +112,17 @@ describe("erbElements", () => {
       expect(containerEnd(source)).toBe(source.length);
     });
 
-    it("reads a modifier if as the qualifier it is, not as a block", () => {
-      const source = [
-        `<%= form_with url: "/x", data: { controller: "stimeo--menu" } do |f| %>`,
-        `<% render "row" if cond %>`,
-        `<% end %>`,
-      ].join("\n");
-      expect(containerEnd(source)).toBe(source.length);
-    });
+    it.each(['render "row" if cond', 'render("row") if cond', "refresh if cond"])(
+      "pairs the helper block with a modifier inside (%s)",
+      (statement) => {
+        const source = [
+          `<%= form_with url: "/x", data: { controller: "stimeo--menu" } do |f| %>`,
+          `<% ${statement} %>`,
+          `<% end %>`,
+        ].join("\n");
+        expect(containerEnd(source)).toBe(source.length);
+      },
+    );
 
     it("does not open a block on a symbol that spells a keyword", () => {
       // `mode: :do` names a value; the `<% end %>` belongs to the `<% if %>`.
@@ -130,13 +134,27 @@ describe("erbElements", () => {
       expect(containerEnd(source)).toBeNull();
     });
 
-    it("keeps the container when a comment follows the do", () => {
+    it("ignores a block keyword in the comment after do", () => {
       const source = [
-        `<%= form_with url: "/x", data: { controller: "stimeo--menu" } do |f| # the form %>`,
+        `<%= form_with url: "/x", data: { controller: "stimeo--menu" } do |f| # end of form %>`,
         `<% end %>`,
       ].join("\n");
       expect(containerEnd(source)).toBe(source.length);
     });
+
+    it.each(["while ready?; rows.each do |row|", "if ready? then if permitted?"])(
+      "counts a nested block following a statement boundary (%s)",
+      (statement) => {
+        const source = [
+          `<%= form_with url: "/x", data: { controller: "stimeo--menu" } do |f| %>`,
+          `<% ${statement} %>`,
+          `<% end %>`,
+          `<% end %>`,
+          `<% end %>`,
+        ].join("\n");
+        expect(containerEnd(source)).toBe(source.length);
+      },
+    );
 
     it("counts a brace block, and lets a hash literal cancel itself out", () => {
       const braced = `<%= tag.div data: { controller: "stimeo--menu" } %>`;
@@ -150,12 +168,20 @@ describe("erbElements", () => {
     });
 
     it("does not count the do that belongs to a while header", () => {
-      const source = [
+      const standalone = [
         `<% while more? do %>`,
         `<%= tag.div data: { controller: "stimeo--menu" } %>`,
         `<% end %>`,
       ].join("\n");
-      expect(containerEnd(source)).toBeNull();
+      expect(containerEnd(standalone)).toBeNull();
+
+      const source = [
+        `<%= form_with url: "/x", data: { controller: "stimeo--menu" } do |f| %>`,
+        `<% while more? do %>`,
+        `<% end %>`,
+        `<% end %>`,
+      ].join("\n");
+      expect(containerEnd(source)).toBe(source.length);
     });
 
     it("counts a case block inside the container, so its end does not close the helper", () => {

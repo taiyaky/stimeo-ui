@@ -1271,7 +1271,7 @@ describe("TimePickerController", () => {
     expect(seg("minute").getAttribute("aria-valuenow")).toBe("31");
   });
 
-  it("adopts a runtime-added segment and resets a removed unit silently", async () => {
+  it("adopts a runtime-added segment and resets the value of a removed unit", async () => {
     await mount24();
     root().setAttribute("data-stimeo--time-picker-seconds-value", "true");
     controller().secondsValueChanged();
@@ -1440,6 +1440,38 @@ describe("TimePickerController", () => {
     expect(repairs).toEqual([{ value: "15:30" }]);
   });
 
+  it("uses the adopted period when presentation changes before a render", async () => {
+    await mount24({ hour: 21 });
+    seg("minute").insertAdjacentHTML("afterend", segment("AM/PM", "meridiem", 1, 0, 1));
+    await tick();
+    const reconcile = vi.fn();
+    const change = vi.fn();
+    const nativeChange = vi.fn();
+    root().addEventListener("stimeo--time-picker:reconcile", reconcile);
+    root().addEventListener("stimeo--time-picker:change", change);
+    field().addEventListener("change", nativeChange);
+
+    seg("hour").setAttribute("aria-valuenow", "6");
+    // A focus-only key takes in the morning hour without refreshing the period.
+    key(seg("hour"), "ArrowRight");
+    expect(document.activeElement).toBe(seg("minute"));
+    expect(field().value).toBe("21:30");
+    expect(seg("meridiem").getAttribute("aria-valuenow")).toBe("1");
+
+    root().setAttribute("data-stimeo--time-picker-hour-cycle-value", "12");
+    seg("minute").setAttribute("aria-valuenow", "45");
+    await tick();
+
+    expect(field().value).toBe("06:45");
+    expect(seg("hour").getAttribute("aria-valuemax")).toBe("12");
+    expect(seg("meridiem").getAttribute("aria-valuetext")).toBe("AM");
+    expect(reconcile).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ detail: { value: "06:45" } }),
+    );
+    expect(change).not.toHaveBeenCalled();
+    expect(nativeChange).not.toHaveBeenCalled();
+  });
+
   it("keeps a partial direct entry when only the field target is swapped", async () => {
     await mount24();
     seg("hour").focus();
@@ -1466,7 +1498,7 @@ describe("TimePickerController", () => {
     expect(field().value).toBe("14:30");
   });
 
-  it("silently reconciles retained data-segment and render Value morphs", async () => {
+  it("reconciles render Value and data-segment changes without a user change event", async () => {
     await mount12({ hour: 9, minute: 30, meridiem: 1 });
     const changes = vi.fn();
     root().addEventListener("stimeo--time-picker:change", changes);

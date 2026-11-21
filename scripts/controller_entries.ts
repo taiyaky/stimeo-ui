@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from "node:fs";
-import { join, relative } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 /** Source suffix shared by every core controller module. */
 const CONTROLLER_SUFFIX = "_controller.ts";
@@ -22,10 +22,49 @@ export function coreControllerIdentifiers(root: string): string[] {
   });
 }
 
-/** Expected JavaScript and declaration artifacts for one core controller source. */
-export function coreControllerArtifactPaths(root: string, sourceEntry: string): string[] {
+/**
+ * Expected JavaScript and declaration artifacts for one core controller source, in
+ * `distDir` (the repository's `dist/` unless another output directory is given).
+ */
+export function coreControllerArtifactPaths(
+  root: string,
+  sourceEntry: string,
+  distDir: string = join(root, "dist"),
+): string[] {
   const relativeSource = sourceEntry.replace(/^src\//, "").replace(/\.ts$/, "");
-  return [join(root, "dist", `${relativeSource}.js`), join(root, "dist", `${relativeSource}.d.ts`)];
+  return [join(distDir, `${relativeSource}.js`), join(distDir, `${relativeSource}.d.ts`)];
+}
+
+/**
+ * Resolves the build output directory. Uses `dist/` by default. Pass `--dist <dir>`
+ * or `--dist=<dir>` to select another directory inside the repository.
+ *
+ * @throws on any other argument, a missing value, or a directory outside `root` or
+ *   equal to it.
+ */
+export function resolveDistDirectory(root: string, args: readonly string[]): string {
+  let dir = "dist";
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--dist") {
+      const value = args[index + 1];
+      if (value === undefined || value.startsWith("--")) {
+        throw new Error("--dist needs a directory");
+      }
+      dir = value;
+      index += 1;
+    } else if (arg.startsWith("--dist=")) {
+      dir = arg.slice("--dist=".length);
+    } else {
+      throw new Error(`unknown argument "${arg}" (expected --dist <dir>)`);
+    }
+  }
+  const resolved = resolve(root, dir);
+  const inside = relative(root, resolved);
+  if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
+    throw new Error(`--dist must name a directory inside the repository, not "${dir}"`);
+  }
+  return resolved;
 }
 
 /**
@@ -72,11 +111,15 @@ export function assertCoreControllerCoverage(
  * Fails when a public `stimeo-ui/controllers/*` source lacks a built artifact.
  *
  * This runs after tsup so the wildcard package export cannot silently point at
- * a missing JavaScript module or declaration file.
+ * a missing JavaScript module or declaration file. `distDir` is the output directory
+ * that tsup wrote, `dist/` by default.
  */
-export function assertCoreControllerArtifacts(root: string): void {
+export function assertCoreControllerArtifacts(
+  root: string,
+  distDir: string = join(root, "dist"),
+): void {
   const missing = coreControllerEntries(root)
-    .flatMap((entry) => coreControllerArtifactPaths(root, entry))
+    .flatMap((entry) => coreControllerArtifactPaths(root, entry, distDir))
     .filter((artifact) => !existsSync(artifact))
     .map((artifact) => relative(root, artifact));
 

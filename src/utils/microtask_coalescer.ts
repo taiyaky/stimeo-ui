@@ -12,9 +12,9 @@
  * **A microtask is the right horizon, and the reason is specific.** Stimulus
  * drives these callbacks from a `MutationObserver`, whose own callback already
  * runs as a microtask with the whole batch in hand; scheduling one more lands
- * after the last sibling callback of that batch and still before paint or any
- * event handler. A timer would be later than it needs to be, and reconciling
- * synchronously would run once per element against a half-applied DOM.
+ * after the last sibling callback of that batch. A timer would be later than
+ * it needs to be, and reconciling synchronously would run once per element
+ * against a half-applied DOM.
  *
  * **The two guards are not the same guard.** Scheduling is refused before the
  * controller connects, and running is refused after it disconnects:

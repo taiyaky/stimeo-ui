@@ -236,6 +236,30 @@ describe("ResetOnRestoreController", () => {
     expect(Array.from(select.selectedOptions).map((option) => option.value)).toEqual(["a", "b"]);
   });
 
+  it("clears a file selection and finishes the reset sweep", async () => {
+    await start(`
+      <input id="upload" type="file" value="authored.txt" data-reset-value>
+      <input id="next" value="initial" data-reset-value>`);
+    const upload = query<HTMLInputElement>("#upload");
+    const next = query<HTMLInputElement>("#next");
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(["contents"], "chosen.txt"));
+    upload.files = transfer.files;
+    next.value = "edited";
+    expect(upload.files?.[0]?.name).toBe("chosen.txt");
+
+    const seen: unknown[] = [];
+    root().addEventListener("stimeo--reset-on-restore:reset", () => {
+      seen.push([upload.files?.length, next.value]);
+    });
+
+    sweep();
+
+    expect(upload.value).toBe("");
+    expect(upload.getAttribute("value")).toBe("authored.txt");
+    expect(seen).toEqual([[0, "initial"]]);
+  });
+
   it("leaves a field that carries no user state alone", async () => {
     // A hidden field holds a value the page shipped, never one the user typed;
     // writing to it would rewrite the markup instead of restoring it. The second

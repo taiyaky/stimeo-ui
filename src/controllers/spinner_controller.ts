@@ -6,7 +6,7 @@ import { DetachGate } from "../utils/detach_gate";
 import { MinDurationFloor } from "../utils/min_duration_floor";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
-import { SafeTimeout } from "../utils/safe_timeout";
+import { TaskTimeout } from "../utils/safe_timeout";
 
 /**
  * Headless loading-indicator behavior built on the `aria-busy` practice (no
@@ -50,8 +50,8 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *
  * @remarks
  * Behavior only — the visual spinner is the consumer's, alongside the text and
- * `aria-hidden="true"`. Both timers are owned by `SafeTimeout`, kept across
- * an in-page move and dropped on a real detach via `DetachGate`. A load in progress is
+ * `aria-hidden="true"`. `TaskTimeout` owns the timers. They survive an in-page move,
+ * and `DetachGate` releases them on a real detach. A load in progress is
  * never undone on `turbo:before-cache`, which Turbo also dispatches on pages that stay
  * (a promoted frame navigation, a state-less `popstate`, a refresh of a cached URL, a
  * `data-turbo-permanent` element carried to the next page): the load is still running
@@ -93,7 +93,7 @@ export class SpinnerController extends Controller<HTMLElement> {
   declare announceTextValue: string;
   declare announceReadyTextValue: string;
 
-  readonly #timers = new SafeTimeout();
+  readonly #timers = new TaskTimeout();
   readonly #floor = new MinDurationFloor(this.#timers);
   readonly #gate = new DetachGate();
   /** Owns the `aria-busy` written on each region, so one that departs gets its own back. */

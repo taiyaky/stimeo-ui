@@ -1,4 +1,4 @@
-import type { SafeTimeout } from "./safe_timeout";
+import type { TaskTimeout, TimeoutTask } from "./safe_timeout";
 
 /**
  * Holds a transient state visible for a minimum time before letting it end.
@@ -10,11 +10,11 @@ import type { SafeTimeout } from "./safe_timeout";
  * either run it now, because the floor has already passed, or hold it on a timer
  * for whatever is left.
  *
- * The floor **borrows** a {@link SafeTimeout} instead of owning one, so a
+ * The floor **borrows** a {@link TaskTimeout} instead of owning one, so a
  * controller that also schedules other work (a show delay) keeps every timer in a
  * single registry and one `clearAll()` in its teardown still drops them all.
- * Cancelling after such a bulk clear is safe: the registry no-ops on an id it no
- * longer holds.
+ * The finish keeps a registration handle that expires when the registry clears,
+ * so a later cancel cannot reach another timer reusing the released platform id.
  *
  * Scope is the floor itself. **When an end signal is allowed to arrive at all
  * stays with the controller**, because the answers differ — one keeps the first
@@ -24,7 +24,7 @@ import type { SafeTimeout } from "./safe_timeout";
  *
  * @example
  * ```ts
- * readonly #timers = new SafeTimeout();
+ * readonly #timers = new TaskTimeout();
  * readonly #floor = new MinDurationFloor(this.#timers);
  *
  * #show()  { this.#floor.begin(); … }
@@ -32,16 +32,16 @@ import type { SafeTimeout } from "./safe_timeout";
  * ```
  */
 export class MinDurationFloor {
-  readonly #timers: SafeTimeout;
+  readonly #timers: TaskTimeout;
 
-  /** Pending finish timer id, or `null` when nothing is held back. */
-  #timerId: number | null = null;
+  /** Latest finish registration; its handle expires on completion or a bulk clear. */
+  #task: TimeoutTask | null = null;
 
   /** Epoch ms the floor is measured from. */
   #since = 0;
 
   /** @param timers - the controller's registry; the floor schedules into it. */
-  constructor(timers: SafeTimeout) {
+  constructor(timers: TaskTimeout) {
     this.#timers = timers;
   }
 
@@ -52,25 +52,20 @@ export class MinDurationFloor {
 
   /** True while a finish is held back waiting for the floor to elapse. */
   get pending(): boolean {
-    return this.#timerId !== null;
+    return this.#task?.pending ?? false;
   }
 
   /**
    * Runs `finish` once the floor has elapsed, immediately when it already has.
    *
-   * A held-back finish is **replaced**, never stacked: only the most recently
-   * queued id is cancellable, so a second timer would outlive every cancel and
-   * end a state that has since restarted. Controllers that want the first signal
-   * to win guard on {@link pending} before calling.
+   * Scheduling cancels the pending task before replacing it. Controllers that
+   * want the first signal to win guard on {@link pending} before calling.
    */
   schedule(minDuration: number, finish: () => void): void {
     this.cancel();
     const remaining = minDuration - (Date.now() - this.#since);
     if (remaining > 0) {
-      this.#timerId = this.#timers.set(() => {
-        this.#timerId = null;
-        finish();
-      }, remaining);
+      this.#task = this.#timers.setTask(finish, remaining);
     } else {
       finish();
     }
@@ -78,9 +73,6 @@ export class MinDurationFloor {
 
   /** Drops a held-back finish. Safe when none is queued, or after a bulk clear. */
   cancel(): void {
-    if (this.#timerId !== null) {
-      this.#timers.clear(this.#timerId);
-      this.#timerId = null;
-    }
+    this.#task?.cancel();
   }
 }

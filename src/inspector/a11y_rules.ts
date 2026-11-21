@@ -228,10 +228,8 @@ export const a11yRules: A11yRules = {
       suggestion: "Name the popover via aria-labelledby (its title's id) or aria-label.",
     },
   ],
-  // Tooltip (APG): the controller only toggles visibility with show/hide
-  // delays; the tooltip role and the trigger→tooltip description link are
-  // authored (`role="tooltip"` is what makes aria-describedby resolve as the
-  // trigger's description).
+  // Tooltip (APG): author role="tooltip" on the content and use
+  // aria-describedby on the trigger to reference the content by ID.
   "stimeo--tooltip": [
     {
       target: "content",
@@ -509,8 +507,8 @@ export const a11yRules: A11yRules = {
         'Add a localized aria-label to the remove target (for example, aria-label="Remove {label}").',
     },
   ],
-  // Tabs (APG): the controller manages aria-selected and roving tabindex, but
-  // each role and the required tablist's accessible name are authored.
+  // Tabs (APG): author the tab, tabpanel, and tablist roles. The Inspector
+  // requires a name for each panel and recommends a name for the tablist.
   "stimeo--tabs": [
     {
       target: "tab",
@@ -537,10 +535,7 @@ export const a11yRules: A11yRules = {
       severity: "warning",
       suggestion: "Name the tablist via aria-labelledby or aria-label.",
     },
-    // The panel, by contrast, ARIA *requires* a name for — and the contract
-    // already has the author point it at the controlling tab, so nothing here
-    // is new to write. The controller never sets it (it owns aria-selected
-    // only), which is what makes the requirement checkable at all.
+    // The panel's name is authored, usually by referencing the controlling tab.
     {
       target: "panel",
       attrs: ["aria-labelledby", "aria-label"],
@@ -586,9 +581,8 @@ export const a11yRules: A11yRules = {
       values: ["slide"],
       suggestion: 'Add aria-roledescription="slide" to each slide target.',
     },
-    // A slide is a `tabpanel` or a `group`, whose name ARIA requires. Unnamed,
-    // every slide is announced as "slide" and the position the roledescription
-    // promised is exactly the thing the user cannot hear.
+    // The APG Carousel pattern names each slide, whether it is a tabpanel or a
+    // group. The roledescription conveys the role without supplying the name.
     {
       target: "slide",
       attrs: ["aria-labelledby", "aria-label"],

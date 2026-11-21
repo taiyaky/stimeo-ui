@@ -28,6 +28,11 @@ export default defineConfig({
       // happy-dom's MediaQueryList drops the options of addEventListener and keeps one
       // window resize hook per callback; this keeps its listeners as a browser does.
       "tests/setup/browser-media-query-listeners.ts",
+      // Every error a Stimulus application catches from a controller fails the test it
+      // was caught in, with that error as the cause, unless the test handles it on its own
+      // application. Stimulus's own handler only logs it, and formats the element with
+      // `%o`, which throws from happy-dom's interface prototypes.
+      "tests/setup/fatal-stimulus-errors.ts",
     ],
     // The a11y suites run axe-core on the real clock; under a constrained / loaded
     // runner (CI, Docker) those occasionally brush past Vitest's default 5s, flaking

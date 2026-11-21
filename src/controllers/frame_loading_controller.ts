@@ -6,14 +6,15 @@ import { ListenerSet } from "../utils/listener_set";
 import { MinDurationFloor } from "../utils/min_duration_floor";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
-import { SafeTimeout } from "../utils/safe_timeout";
+import { TaskTimeout } from "../utils/safe_timeout";
 
 /**
  * Headless `<turbo-frame>` loading-state behavior: while the frame is fetching it
  * sets `aria-busy` + `data-frame-loading`, reveals an optional skeleton / overlay,
- * suppresses interaction with the stale content, and retreats focus, restoring it on
- * completion (no dedicated APG pattern; supports WCAG 2.2 **4.1.3 Status Messages**
- * via `aria-busy` and 2.4.3 focus order via the retreat/restore).
+ * suppresses interaction with the stale content, and can preserve focus across
+ * the load. Configured start and completion messages go through the announcer
+ * (WCAG 2.2 **4.1.3 Status Messages**). Focus retreat and restoration support
+ * **2.4.3 Focus Order**.
  *
  * Markup contract (identifier: `stimeo--frame-loading`):
  *   <turbo-frame id="panel" data-controller="stimeo--frame-loading">
@@ -36,13 +37,14 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * Behavior only — it ships no skeleton markup or styling (pair with `stimeo--skeleton`
  * or the consumer's CSS); loading is held purely in `aria-busy` / `data-frame-loading`
  * and the optional targets' `hidden`. The `content` target is marked `inert` while
- * loading to block double-submits, and focus inside the frame is explicitly blurred
- * then restored (when `restoreFocus`) so it is testable without relying on emergent
- * `inert` focus behavior. Every one of those attributes is leased, so finishing a load gives
- * back what the author wrote — an authored `aria-busy="false"` stays — and leaves a
- * value the page wrote since alone, and the author's value is recorded on the element
- * for a copy of it to find: a connection with no load of its own gives the hooks a copy
- * of the page carries back to the author, before it reports `reconcile`. Listeners are
+ * loading to block double-submits. With `restoreFocus` enabled, the controller saves
+ * and blurs the focused element inside the frame at the start of a load. On
+ * completion, if still enabled, it tries to focus that element or its replacement
+ * with the same id inside the frame. The loading attributes are leased, so
+ * finishing a load gives back what the author wrote and leaves newer page
+ * writes alone. When a connection finds a cached loading state with no active
+ * load of its own, it restores the recorded authored values before reporting
+ * `reconcile`. Listeners are
  * torn down on `disconnect()` (Turbo navigation included) along with the
  * `MinDurationFloor` holding the finish back, kept across an in-page move and a
  * `data-turbo-permanent` frame Turbo carries to the next page by `DetachGate`. A
@@ -51,7 +53,7 @@ import { SafeTimeout } from "../utils/safe_timeout";
  * `turbo:before-cache`, which Turbo also dispatches on pages that stay — among them
  * the promotion of this very frame's navigation to a page visit, dispatched after
  * `turbo:frame-load` — so a finish held back by `minDuration` still ends the load,
- * announces it and restores focus.
+ * can announce completion and restore focus.
  */
 export class FrameLoadingController extends Controller<HTMLElement> {
   /** Numeric read boundaries share one reader for this controller instance. */
@@ -85,7 +87,7 @@ export class FrameLoadingController extends Controller<HTMLElement> {
   declare announceTextValue: string;
   declare announceReadyTextValue: string;
 
-  readonly #timeouts = new SafeTimeout();
+  readonly #timeouts = new TaskTimeout();
   readonly #floor = new MinDurationFloor(this.#timeouts);
   readonly #gate = new DetachGate();
   readonly #listeners = new ListenerSet();

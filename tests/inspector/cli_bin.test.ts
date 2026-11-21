@@ -72,6 +72,22 @@ describe("stimeo bin", () => {
     expect(exit).toHaveBeenCalledWith(1);
   });
 
+  it.each(["--help", "-h"])(
+    "prints usage for mcp %s without starting the MCP server",
+    async (flag) => {
+      const output = vi.spyOn(console, "log").mockImplementation(() => {});
+      server.runMcpServer.mockResolvedValue(undefined);
+
+      await runBin("mcp", flag);
+
+      const usage = output.mock.calls.flat().join("\n");
+      expect(usage).toContain("Usage:");
+      expect(usage).toContain("stimeo mcp");
+      expect(process.exitCode).toBe(0);
+      expect(server.runMcpServer).not.toHaveBeenCalled();
+    },
+  );
+
   it("mcp writes each server line to stdout followed by a newline", async () => {
     const stdoutWrite = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     server.runMcpServer.mockReturnValue(new Promise(() => {}));

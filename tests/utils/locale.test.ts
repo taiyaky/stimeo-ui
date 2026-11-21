@@ -26,6 +26,13 @@ describe("resolveLocale", () => {
     expect(resolveLocale(element, "ja")).toBe("ja");
   });
 
+  it("passes locale text through as authored", () => {
+    const element = target('<time id="target" lang=" de "></time>');
+
+    expect(resolveLocale(element, " ja ")).toBe(" ja ");
+    expect(resolveLocale(element)).toBe(" de ");
+  });
+
   it("takes the element's own lang when nothing is declared", () => {
     const element = target('<div lang="en"><time id="target" lang="ja"></time></div>');
 

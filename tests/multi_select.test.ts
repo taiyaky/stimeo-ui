@@ -1,5 +1,6 @@
 import { Application } from "@hotwired/stimulus";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AnnouncerController } from "../src/controllers/announcer_controller";
 import { MultiSelectController } from "../src/controllers/multi_select_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { captureFieldCommits } from "./helpers/field_commits";
@@ -1522,6 +1523,62 @@ describe("MultiSelectController", () => {
     expect(tags()).toEqual([]);
     expect(document.activeElement).toBe(input());
   });
+
+  it.each([
+    { source: "chip", delay: 500 },
+    { source: "input", delay: 0 },
+  ])(
+    "publishes removal synchronously and times the live write from $source",
+    async ({ source, delay }) => {
+      await mountFields(
+        'data-stimeo--multi-select-announce-removed-text-value="Removed {label} ({value}); {count} left"',
+        "apple",
+      );
+      application.register("stimeo--announcer", AnnouncerController);
+      document.body.insertAdjacentHTML(
+        "beforeend",
+        '<div data-controller="stimeo--announcer"><div data-stimeo--announcer-target="polite" aria-live="polite"></div></div>',
+      );
+      await tick();
+      const polite = document.querySelector("[data-stimeo--announcer-target=polite]");
+      if (!polite) throw new Error("Missing polite live region");
+      const onChange = vi.fn();
+      root().addEventListener("stimeo--multi-select:change", onChange);
+      const message = "Removed Apple (apple); 0 left";
+
+      vi.useFakeTimers();
+      try {
+        if (source === "chip") {
+          const button = buttons()[0];
+          if (!button) throw new Error("Missing chip button");
+          button.focus();
+          button.click();
+        } else {
+          pressKey(input(), "Backspace");
+        }
+
+        expect(selected()).toEqual(["false", "false"]);
+        expect(tags()).toHaveLength(0);
+        expect(fields()).toHaveLength(0);
+        expect(onChange).toHaveBeenCalledTimes(1);
+        expect(announcements.map((event) => event.message)).toEqual([message]);
+        expect(document.activeElement).toBe(input());
+        expect(polite.textContent).toBe("");
+
+        if (delay > 0) {
+          await vi.advanceTimersByTimeAsync(delay - 1);
+          expect(polite.textContent).toBe("");
+          expect(document.activeElement).toBe(input());
+          await vi.advanceTimersByTimeAsync(1);
+        } else {
+          await vi.advanceTimersByTimeAsync(0);
+        }
+        expect(polite.textContent).toBe(message);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("falls back to the chip value when its backing option disappears before removal", async () => {
     await mount(

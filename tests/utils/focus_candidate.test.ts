@@ -8,10 +8,12 @@ import {
   flatTreeContains,
   flatTreeParent,
   hasTabStop,
+  inheritsFieldsetDisabled,
   isTabStop,
   sequentialTabStops,
   tabStopsWithin,
 } from "../../src/utils/focus_candidate";
+import { withinTimeLimit } from "../helpers/time_limit";
 
 /**
  * Tests for {@link canTakeFocus}.
@@ -34,67 +36,66 @@ describe("canTakeFocus", () => {
 
   it("accepts a plain focusable control", () => {
     document.body.innerHTML = '<button id="a">A</button>';
-    expect(canTakeFocus(el("#a"))).toBe(true);
+    expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(true);
   });
 
   it("accepts a non-form element, which has no disabled property", () => {
     // Landmarks and rows are legitimate rescue destinations once they carry a
     // borrowed tabindex; nothing about them refuses focus.
     document.body.innerHTML = '<div id="a" tabindex="-1"></div>';
-    expect(canTakeFocus(el("#a"))).toBe(true);
+    expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(true);
   });
 
   describe("hidden", () => {
     it("rejects a hidden element", () => {
       document.body.innerHTML = '<button id="a" hidden>A</button>';
-      expect(canTakeFocus(el("#a"))).toBe(false);
+      expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(false);
     });
 
     it("rejects an element inside a hidden ancestor", () => {
       // The common shape: the rescue destination is fine, the wrapper is what
       // just got hidden.
       document.body.innerHTML = '<div hidden><button id="a">A</button></div>';
-      expect(canTakeFocus(el("#a"))).toBe(false);
+      expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(false);
     });
 
     it("rejects a type=hidden input without the hidden attribute", () => {
       document.body.innerHTML = '<input id="a" type="hidden">';
-      expect(canTakeFocus(el("#a"))).toBe(false);
+      expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(false);
     });
   });
 
   describe("disabled", () => {
     it("rejects a natively disabled control", () => {
       document.body.innerHTML = '<button id="a" disabled>A</button>';
-      expect(canTakeFocus(el("#a"))).toBe(false);
+      expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(false);
     });
 
     it("accepts an aria-disabled control", () => {
-      // Not disqualifying: `aria-disabled` marks a control that must stay
-      // discoverable, and the platform still focuses it.
+      // `aria-disabled` does not remove this button from the focus candidates.
       document.body.innerHTML = '<button id="a" aria-disabled="true">A</button>';
-      expect(canTakeFocus(el("#a"))).toBe(true);
+      expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(true);
     });
   });
 
   describe("fieldset inheritance", () => {
     it("rejects a control inside a disabled fieldset", () => {
       document.body.innerHTML = '<fieldset disabled><button id="a">A</button></fieldset>';
-      expect(canTakeFocus(el("#a"))).toBe(false);
+      expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(false);
     });
 
     it("accepts a control in the first direct-child legend", () => {
       // HTML exempts exactly that legend — the control really is operable.
       document.body.innerHTML =
         '<fieldset disabled><legend><button id="a">A</button></legend></fieldset>';
-      expect(canTakeFocus(el("#a"))).toBe(true);
+      expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(true);
     });
 
     it("rejects a control in a second legend", () => {
       document.body.innerHTML =
         "<fieldset disabled><legend>First</legend>" +
         '<legend><button id="a">A</button></legend></fieldset>';
-      expect(canTakeFocus(el("#a"))).toBe(false);
+      expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(false);
     });
 
     it("rejects a legend-exempt control that an outer fieldset still disables", () => {
@@ -103,12 +104,86 @@ describe("canTakeFocus", () => {
       document.body.innerHTML =
         '<fieldset disabled><fieldset disabled><legend><button id="a">A</button></legend>' +
         "</fieldset></fieldset>";
-      expect(canTakeFocus(el("#a"))).toBe(false);
+      expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(false);
     });
 
     it("accepts a control whose fieldset is not disabled", () => {
       document.body.innerHTML = '<fieldset><button id="a">A</button></fieldset>';
-      expect(canTakeFocus(el("#a"))).toBe(true);
+      expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(true);
+    });
+
+    it.each([
+      ["SVG", "http://www.w3.org/2000/svg", "fieldset"],
+      ["SVG with an uppercase local name", "http://www.w3.org/2000/svg", "FIELDSET"],
+      ["HTML with an uppercase local name", "http://www.w3.org/1999/xhtml", "FIELDSET"],
+    ])("does not inherit disabled from a %s fieldset lookalike", (_name, namespace, localName) => {
+      const lookalike = document.createElementNS(namespace, localName);
+      lookalike.setAttribute("disabled", "");
+      const control = document.createElement("button");
+      lookalike.append(control);
+      document.body.append(lookalike);
+
+      expect(withinTimeLimit(() => inheritsFieldsetDisabled(control))).toBe(false);
+      expect(withinTimeLimit(() => canTakeFocus(control))).toBe(true);
+    });
+
+    it.each([
+      ["SVG", "http://www.w3.org/2000/svg", "fieldset"],
+      ["SVG with an uppercase local name", "http://www.w3.org/2000/svg", "FIELDSET"],
+      ["HTML with an uppercase local name", "http://www.w3.org/1999/xhtml", "FIELDSET"],
+    ])(
+      "checks the native fieldset outside a %s lookalike and follows its legend",
+      (_name, namespace, localName) => {
+        const fieldset = document.createElement("fieldset");
+        fieldset.disabled = true;
+        const lookalike = document.createElementNS(namespace, localName);
+        lookalike.setAttribute("disabled", "");
+        const control = document.createElement("button");
+        lookalike.append(control);
+        fieldset.append(lookalike);
+        document.body.append(fieldset);
+
+        expect(withinTimeLimit(() => inheritsFieldsetDisabled(control))).toBe(true);
+        expect(withinTimeLimit(() => canTakeFocus(control))).toBe(false);
+        const legend = document.createElement("legend");
+        fieldset.prepend(legend);
+        legend.append(lookalike);
+        expect(withinTimeLimit(() => inheritsFieldsetDisabled(control))).toBe(false);
+        expect(withinTimeLimit(() => canTakeFocus(control))).toBe(true);
+      },
+    );
+
+    it.each([
+      ["SVG", "http://www.w3.org/2000/svg", "LEGEND"],
+      ["SVG with a lowercase local name", "http://www.w3.org/2000/svg", "legend"],
+      ["HTML with an uppercase local name", "http://www.w3.org/1999/xhtml", "LEGEND"],
+    ])(
+      "keeps the first HTML legend exemption after a %s lookalike is inserted",
+      (_name, namespace, localName) => {
+        document.body.innerHTML =
+          '<fieldset id="fieldset" disabled><legend><button id="a">A</button></legend></fieldset>';
+        const lookalike = document.createElementNS(namespace, localName);
+        document.getElementById("fieldset")?.prepend(lookalike);
+
+        expect(withinTimeLimit(() => canTakeFocus(el("#a")))).toBe(true);
+      },
+    );
+
+    it.each([
+      ["SVG", "http://www.w3.org/2000/svg", "LEGEND"],
+      ["SVG with a lowercase local name", "http://www.w3.org/2000/svg", "legend"],
+      ["HTML with an uppercase local name", "http://www.w3.org/1999/xhtml", "LEGEND"],
+    ])("does not exempt a control inside a %s legend lookalike", (_name, namespace, localName) => {
+      document.body.innerHTML =
+        '<fieldset id="fieldset" disabled><legend id="legend">Legend</legend></fieldset>';
+      const lookalike = document.createElementNS(namespace, localName);
+      const control = document.createElement("button");
+      lookalike.append(control);
+      document.getElementById("fieldset")?.prepend(lookalike);
+
+      expect(withinTimeLimit(() => canTakeFocus(control))).toBe(false);
+      document.getElementById("legend")?.append(control);
+      expect(withinTimeLimit(() => canTakeFocus(control))).toBe(true);
     });
   });
 
@@ -127,19 +202,25 @@ describe("canTakeFocus", () => {
     it("accepts an element whose shadow host and the host's ancestors are shown", () => {
       document.body.innerHTML = '<div id="host"></div>';
       const shadow = shadowOf("#host", '<button id="inner">Inner</button>');
-      expect(canTakeFocus(shadow.querySelector("#inner") as HTMLElement)).toBe(true);
+      expect(
+        withinTimeLimit(() => canTakeFocus(shadow.querySelector("#inner") as HTMLElement)),
+      ).toBe(true);
     });
 
     it("rejects an element whose shadow host is hidden", () => {
       document.body.innerHTML = '<div id="host" hidden></div>';
       const shadow = shadowOf("#host", '<button id="inner">Inner</button>');
-      expect(canTakeFocus(shadow.querySelector("#inner") as HTMLElement)).toBe(false);
+      expect(
+        withinTimeLimit(() => canTakeFocus(shadow.querySelector("#inner") as HTMLElement)),
+      ).toBe(false);
     });
 
     it("rejects an element whose shadow host sits inside an inert element", () => {
       document.body.innerHTML = '<div inert><div id="host"></div></div>';
       const shadow = shadowOf("#host", '<button id="inner">Inner</button>');
-      expect(canTakeFocus(shadow.querySelector("#inner") as HTMLElement)).toBe(false);
+      expect(
+        withinTimeLimit(() => canTakeFocus(shadow.querySelector("#inner") as HTMLElement)),
+      ).toBe(false);
     });
 
     it("rejects an element the engine assigns to no slot, and what it holds, and takes one assigned to a slot", () => {
@@ -156,9 +237,9 @@ describe("canTakeFocus", () => {
         value: shadow.querySelector("slot"),
         configurable: true,
       });
-      expect(canTakeFocus(el("#unslotted"))).toBe(false);
-      expect(canTakeFocus(el("#deep"))).toBe(false);
-      expect(canTakeFocus(el("#slotted"))).toBe(true);
+      expect(withinTimeLimit(() => canTakeFocus(el("#unslotted")))).toBe(false);
+      expect(withinTimeLimit(() => canTakeFocus(el("#deep")))).toBe(false);
+      expect(withinTimeLimit(() => canTakeFocus(el("#slotted")))).toBe(true);
     });
 
     it("rejects a slotted element whose slot sits in a hidden part of the shadow tree", () => {
@@ -170,7 +251,7 @@ describe("canTakeFocus", () => {
         value: shadow.querySelector("slot"),
         configurable: true,
       });
-      expect(canTakeFocus(slotted)).toBe(false);
+      expect(withinTimeLimit(() => canTakeFocus(slotted))).toBe(false);
     });
   });
 });
@@ -204,7 +285,7 @@ describe("sequential Tab stops", () => {
     ["plaintext editor", '<div id="candidate" contenteditable="plaintext-only"></div>'],
     ["aria-disabled button", '<button id="candidate" aria-disabled="true">Save</button>'],
   ])("accepts a %s", (_name, html) => {
-    expect(isTabStop(candidate(html))).toBe(true);
+    expect(withinTimeLimit(() => isTabStop(candidate(html)))).toBe(true);
   });
 
   it.each([
@@ -226,14 +307,16 @@ describe("sequential Tab stops", () => {
     ["inert subtree", '<div inert><button id="candidate">Save</button></div>'],
     ["CSS-hidden button", '<button id="candidate" style="display:none">Save</button>'],
   ])("rejects a %s", (_name, html) => {
-    expect(isTabStop(candidate(html))).toBe(false);
+    expect(withinTimeLimit(() => isTabStop(candidate(html)))).toBe(false);
   });
 
   it("keeps the disabled-fieldset first-legend exception", () => {
     expect(
-      isTabStop(
-        candidate(
-          '<fieldset disabled><legend><button id="candidate">Save</button></legend></fieldset>',
+      withinTimeLimit(() =>
+        isTabStop(
+          candidate(
+            '<fieldset disabled><legend><button id="candidate">Save</button></legend></fieldset>',
+          ),
         ),
       ),
     ).toBe(true);
@@ -243,7 +326,7 @@ describe("sequential Tab stops", () => {
     const element = candidate('<button id="candidate">Save</button>');
     Object.defineProperty(element, "checkVisibility", { configurable: true, value: undefined });
 
-    expect(isTabStop(element)).toBe(true);
+    expect(withinTimeLimit(() => isTabStop(element))).toBe(true);
   });
 
   it("collects only usable descendants in DOM order", () => {
@@ -269,6 +352,56 @@ describe("sequential Tab stops", () => {
     expect(firstTabStop(root)).toBeNull();
     expect(hasTabStop(root)).toBe(false);
   });
+
+  it.each([
+    ["SVG", "http://www.w3.org/2000/svg", "SUMMARY"],
+    ["SVG with a lowercase local name", "http://www.w3.org/2000/svg", "summary"],
+    ["HTML with an uppercase local name", "http://www.w3.org/1999/xhtml", "SUMMARY"],
+  ])("does not promote a %s summary lookalike to a native stop", (_name, namespace, localName) => {
+    document.body.innerHTML =
+      '<div id="root"><details id="details" open></details><button id="after">After</button></div>';
+    const root = document.getElementById("root") as HTMLElement;
+    const lookalike = document.createElementNS(namespace, localName);
+    lookalike.id = "lookalike";
+    lookalike.setAttribute("contenteditable", "false");
+    document.getElementById("details")?.append(lookalike);
+
+    expect(tabStopsWithin(root).map((element) => element.id)).toEqual(["after"]);
+    expect(firstTabStop(root)?.id).toBe("after");
+    expect(sequentialTabStops(root).map((element) => element.id)).toEqual(["after"]);
+  });
+
+  it.each([
+    ["SVG", "http://www.w3.org/2000/svg", "SUMMARY"],
+    ["SVG with a lowercase local name", "http://www.w3.org/2000/svg", "summary"],
+    ["HTML with an uppercase local name", "http://www.w3.org/1999/xhtml", "SUMMARY"],
+  ])(
+    "follows the first HTML summary after a %s lookalike and a DOM reorder",
+    (_name, namespace, localName) => {
+      document.body.innerHTML =
+        '<div id="root"><details id="details" open><summary id="first">First</summary>' +
+        '<summary id="second">Second</summary></details><button id="after">After</button></div>';
+      const root = document.getElementById("root") as HTMLElement;
+      const details = document.getElementById("details") as HTMLElement;
+      const first = document.getElementById("first") as HTMLElement;
+      const second = document.getElementById("second") as HTMLElement;
+      expect(withinTimeLimit(() => isTabStop(first))).toBe(true);
+      expect(withinTimeLimit(() => isTabStop(second))).toBe(false);
+
+      const lookalike = document.createElementNS(namespace, localName);
+      lookalike.setAttribute("contenteditable", "false");
+      details.prepend(lookalike);
+      expect(withinTimeLimit(() => isTabStop(first))).toBe(true);
+      expect(withinTimeLimit(() => isTabStop(second))).toBe(false);
+
+      details.append(first);
+      expect(withinTimeLimit(() => isTabStop(first))).toBe(false);
+      expect(withinTimeLimit(() => isTabStop(second))).toBe(true);
+      expect(tabStopsWithin(root).map((element) => element.id)).toEqual(["second", "after"]);
+      expect(firstTabStop(root)).toBe(second);
+      expect(sequentialTabStops(root).map((element) => element.id)).toEqual(["second", "after"]);
+    },
+  );
 });
 
 /**
@@ -373,12 +506,185 @@ describe("sequentialTabStops", () => {
     expect(ids(sequentialTabStops(r))).toEqual(["s1", "slotted", "s2", "z"]);
   });
 
+  it("omits a slot's fallback stops when its only assigned node is text", () => {
+    const r = root('<div id="host"></div><button id="after">After</button>');
+    const host = el("host");
+    const shadow = host.attachShadow({ mode: "open" });
+    const slot = document.createElement("slot");
+    slot.innerHTML = '<button id="fallback">Fallback</button>';
+    shadow.append(slot);
+
+    expect(ids(flatTreeChildren(slot))).toEqual(["fallback"]);
+    expect(ids(sequentialTabStops(r))).toEqual(["fallback", "after"]);
+
+    const text = document.createTextNode("Slotted text");
+    host.append(text);
+
+    expect(slot.assignedNodes()).toEqual([text]);
+    expect(flatTreeChildren(slot)).toEqual([]);
+    expect(ids(sequentialTabStops(r))).toEqual(["after"]);
+  });
+
   it("walks the root's own open shadow root", () => {
     const r = root('<button id="light">Light</button>');
     r.attachShadow({ mode: "open" }).innerHTML = '<button id="shadow">Shadow</button>';
 
     expect(ids(sequentialTabStops(r))).toEqual(["shadow"]);
   });
+
+  for (const tabindex of [-1, 0]) {
+    it(`continues from within a shadow host with tabindex=${tabindex}`, () => {
+      const r = root(
+        `<button id="before">Before</button><div id="host" tabindex="${tabindex}"></div>` +
+          '<button id="after">After</button>',
+      );
+      const shadow = el("host").attachShadow({ mode: "open" });
+      shadow.innerHTML = '<button id="inner1">One</button><button id="inner2">Two</button>';
+      const one = shadow.getElementById("inner1");
+      const two = shadow.getElementById("inner2");
+      expect(ids(sequentialTabStops(r))).toEqual(
+        tabindex < 0 ? ["before", "after"] : ["before", "host", "inner1", "inner2", "after"],
+      );
+      expect(ids(sequentialTabStops(r, one))).toEqual(
+        tabindex < 0 ? ["inner2", "after", "before"] : ["inner2", "after", "before", "host"],
+      );
+      expect(ids(sequentialTabStops(r, two))).toEqual(
+        tabindex < 0 ? ["after", "before"] : ["after", "before", "host", "inner1"],
+      );
+      expect(ids(sequentialTabStops(r, one, true))).toEqual(
+        tabindex < 0 ? ["before", "after"] : ["host", "before", "after", "inner2"],
+      );
+      expect(ids(sequentialTabStops(r, two, true))).toEqual(
+        tabindex < 0 ? ["inner1", "before", "after"] : ["inner1", "host", "before", "after"],
+      );
+      expect(ids(sequentialTabStops(r, el("host")))).toEqual([
+        "inner1",
+        "inner2",
+        "after",
+        "before",
+      ]);
+      expect(ids(sequentialTabStops(r, el("host"), true))).toEqual(
+        tabindex < 0 ? ["before", "after"] : ["before", "after", "inner2", "inner1"],
+      );
+    });
+  }
+
+  it("finishes nested excluded scopes without re-entering them on wrap", () => {
+    const r = root(
+      '<button id="before">Before</button><div id="host" tabindex="-1"></div>' +
+        '<button id="after">After</button>',
+    );
+    const shadow = el("host").attachShadow({ mode: "open" });
+    shadow.innerHTML =
+      '<button id="local-before">Before</button><div id="nested" tabindex="-1"></div>' +
+      '<button id="local-after">After</button>';
+    const nested = shadow.getElementById("nested") as HTMLElement;
+    const inner = nested.attachShadow({ mode: "open" });
+    inner.innerHTML = '<button id="one">One</button><button id="two">Two</button>';
+
+    expect(ids(sequentialTabStops(r, inner.getElementById("one")))).toEqual([
+      "two",
+      "local-after",
+      "after",
+      "before",
+    ]);
+    expect(ids(sequentialTabStops(r, inner.getElementById("two"), true))).toEqual([
+      "one",
+      "local-before",
+      "before",
+      "after",
+    ]);
+    expect(ids(sequentialTabStops(r, el("host")))).toEqual([
+      "local-before",
+      "local-after",
+      "after",
+      "before",
+    ]);
+  });
+
+  it("keeps local remaining stops when the enclosing root has no ordinary stops", () => {
+    const r = root('<div id="host" tabindex="-1"></div>');
+    const shadow = el("host").attachShadow({ mode: "open" });
+    shadow.innerHTML = '<button id="one">One</button><button id="two">Two</button>';
+
+    expect(ids(sequentialTabStops(r, shadow.getElementById("one")))).toEqual(["two"]);
+    expect(ids(sequentialTabStops(r, shadow.getElementById("two")))).toEqual([]);
+    expect(ids(sequentialTabStops(r, shadow.getElementById("two"), true))).toEqual(["one"]);
+    expect(ids(sequentialTabStops(r, shadow.getElementById("one"), true))).toEqual([]);
+  });
+
+  it("leaves an excluded scope backward from a non-stop before its first stop", () => {
+    const r = root(
+      '<button id="before">Before</button><div id="host" tabindex="-1"></div><button id="after">After</button>',
+    );
+    const shadow = el("host").attachShadow({ mode: "open" });
+    shadow.innerHTML = '<h2 tabindex="-1" id="start">Start</h2><button id="inner">Inner</button>';
+
+    expect(ids(sequentialTabStops(r, shadow.getElementById("start"), true))).toEqual([
+      "before",
+      "after",
+    ]);
+  });
+
+  it("enters an excluded host's local tabindex order and keeps its radio-group stop", () => {
+    const r = root(
+      '<button id="before">Before</button><div id="host" tabindex="-1"></div>' +
+        '<button id="after">After</button>',
+    );
+    const shadow = el("host").attachShadow({ mode: "open" });
+    shadow.innerHTML =
+      '<button id="zero">Zero</button><button id="positive" tabindex="1">Positive</button>' +
+      '<input type="radio" name="g" id="radio1"><input type="radio" name="g" id="radio2">';
+
+    expect(ids(sequentialTabStops(r, el("host")))).toEqual([
+      "positive",
+      "zero",
+      "radio1",
+      "after",
+      "before",
+    ]);
+    expect(ids(sequentialTabStops(r, shadow.getElementById("zero")))).toEqual([
+      "radio1",
+      "after",
+      "before",
+    ]);
+    expect(ids(sequentialTabStops(r, shadow.getElementById("radio2"), true))).toEqual([
+      "zero",
+      "positive",
+      "before",
+      "after",
+    ]);
+  });
+
+  for (const owner of ["host", "slot", "fallback"]) {
+    it(`keeps the original root's radio group while exiting an excluded ${owner}`, () => {
+      const r = root(
+        '<button id="before">Before</button><div id="host"></div><button id="after">After</button>',
+      );
+      const host = el("host");
+      const shadow = host.attachShadow({ mode: "open" });
+      const children =
+        '<button id="inside-button">Inside</button><input type="radio" name="g" id="inside-radio">';
+      const outside = '<input type="radio" name="g" id="outside-radio" checked>';
+      if (owner === "fallback") {
+        shadow.innerHTML = `<slot tabindex="-1">${children}</slot>${outside}`;
+      } else {
+        host.innerHTML = children;
+        host.insertAdjacentHTML("afterend", outside);
+        shadow.innerHTML = owner === "slot" ? '<slot tabindex="-1"></slot>' : "<slot></slot>";
+        if (owner === "host") host.tabIndex = -1;
+        // happy-dom does not report assignedSlot; these children are assigned to this slot.
+        for (const child of host.children) {
+          Object.defineProperty(child, "assignedSlot", { value: shadow.querySelector("slot") });
+        }
+      }
+      const start =
+        owner === "fallback" ? shadow.getElementById("inside-button") : el("inside-button");
+
+      expect(ids(sequentialTabStops(r, start))).toEqual(["outside-radio", "after", "before"]);
+      expect(ids(sequentialTabStops(r, start, true))).toEqual(["before", "after", "outside-radio"]);
+    });
+  }
 
   it("moves backward from an element outside the order to the nearest stop before it", () => {
     const r = root(
@@ -410,7 +716,7 @@ describe("sequentialTabStops", () => {
       el("svg-xlink").setAttributeNS(XLINK, "xlink:href", "#x");
 
       expect(ids(sequentialTabStops(r))).toEqual(["svg-href", "svg-xlink"]);
-      expect(isTabStop(el("svg-href"))).toBe(false);
+      expect(withinTimeLimit(() => isTabStop(el("svg-href")))).toBe(false);
       expect(tabStopsWithin(r).map((element) => element.id)).toEqual([]);
     });
 
@@ -511,7 +817,7 @@ describe("deepActiveElement", () => {
     document.body.innerHTML = '<button id="a">A</button>';
     (document.getElementById("a") as HTMLElement).focus();
 
-    expect(deepActiveElement(document)?.id).toBe("a");
+    expect(withinTimeLimit(() => deepActiveElement(document))?.id).toBe("a");
   });
 
   it("looks through nested open shadow roots", () => {
@@ -522,7 +828,7 @@ describe("deepActiveElement", () => {
     inner.innerHTML = '<button id="deep">Deep</button>';
     (inner.getElementById("deep") as HTMLElement).focus();
 
-    expect(deepActiveElement(document)?.id).toBe("deep");
+    expect(withinTimeLimit(() => deepActiveElement(document))?.id).toBe("deep");
   });
 
   it("stops at a closed shadow host", () => {
@@ -532,7 +838,7 @@ describe("deepActiveElement", () => {
     closed.innerHTML = "<button>Inside</button>";
     (closed.querySelector("button") as HTMLElement).focus();
 
-    expect(deepActiveElement(document)).toBe(host);
+    expect(withinTimeLimit(() => deepActiveElement(document))).toBe(host);
   });
 });
 

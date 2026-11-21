@@ -128,12 +128,18 @@ describe("BulkSelectController", () => {
     expect(all().checked).toBe(true);
   });
 
-  it("clear unchecks everything and hides the bar", async () => {
+  it.each([false, true])("clears the rows and header (all selected: %s)", async (allSelected) => {
     await start(MARKUP());
-    setChecked(all(), true);
+    if (allSelected) setChecked(all(), true);
+    else setChecked(itemAt(0), true);
+    expect(all().checked).toBe(allSelected);
+    expect(all().indeterminate).toBe(!allSelected);
+
     query<HTMLButtonElement>("[data-action*='clear']").click();
+
     expect(items().some((i) => i.checked)).toBe(false);
     expect(all().checked).toBe(false);
+    expect(all().indeterminate).toBe(false);
     expect(bar().hidden).toBe(true);
     expect(root().getAttribute("data-selected-count")).toBe("0");
   });
@@ -752,31 +758,21 @@ describe("BulkSelectController", () => {
 
     it("keeps working when its only bar leaves", async () => {
       await start(MARKUP());
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       bar().remove();
       await tick();
       setChecked(itemAt(0), true);
       await tick();
 
-      expect(errors).toEqual([]);
       expect(root().getAttribute("data-selected-count")).toBe("1");
     });
 
     it("keeps working when its only count leaves", async () => {
       await start(MARKUP());
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       count().remove();
       await tick();
       setChecked(itemAt(0), true);
       await tick();
 
-      expect(errors).toEqual([]);
       expect(bar().hidden).toBe(false);
     });
 

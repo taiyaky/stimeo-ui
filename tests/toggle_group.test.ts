@@ -471,7 +471,7 @@ describe("ToggleGroupController", () => {
     expect(tabindexes()).toEqual([0, -1, -1]);
   });
 
-  it("dispatches the exact change detail only for user activation", async () => {
+  it("dispatches the exact change detail for a click with reason user", async () => {
     await start();
     const details: Array<{ value: string; pressed: boolean; values: string[] }> = [];
     root().addEventListener("stimeo--toggle-group:change", (event) => {
@@ -1226,6 +1226,15 @@ describe("ToggleGroupController", () => {
       expect(commits.seen).toEqual([]);
     });
 
+    it("keeps an authored initial Tab stop ahead of an implicitly tabbable pressed button", async () => {
+      await start(withFields(`${item("bold", "false", 0)}${item("italic", "true", null)}`));
+
+      expect(tabindexes()).toEqual([0, -1]);
+      expect(pressed()).toEqual(["false", "true"]);
+      expect(submitted()).toEqual(["values[]=italic"]);
+      expect(commits.seen).toEqual([]);
+    });
+
     it("writes and reports once per toggle the user made", async () => {
       await start(withFields());
       commits.clear();
@@ -1679,8 +1688,7 @@ describe("ToggleGroupController", () => {
       await tick();
       await tick();
 
-      // Observation resumes before the report, so the listener's write is a page
-      // change of its own: the next pass reports it and the fields follow it.
+      /** The observer stays active through notification, so the next pass sees the write. */
       expect(heard()).toEqual([
         { name: "reconcile", detail: { values: ["bold", "italic"] } },
         { name: "reconcile", detail: { values: ["bold", "italic", "underline"] } },

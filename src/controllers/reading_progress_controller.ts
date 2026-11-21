@@ -14,7 +14,7 @@ const PROGRESS_PROPERTY = "--stimeo--reading-progress";
  * `IntersectionObserver` alone cannot express this (the ratio is constant
  * while a tall article scrolls through the viewport), so this controller owns
  * the scroll math; compose with `stimeo--intersection` when you also need
- * enter/exit triggers. Core (zero dependencies).
+ * enter/exit triggers.
  *
  * Markup contract (identifier: `stimeo--reading-progress`):
  *   <article data-controller="stimeo--reading-progress">…</article>

@@ -1,7 +1,6 @@
-<%# Markup for the dismissible (element dismissed via a close button) demo.
-    The close button (or Escape) removes the element, and if focus was inside before
-    removal it is moved to a safe place (fallback → next/previous focusable → body).
-    Here it uses hide mode (adds hidden) and allows closing with Escape too.
+<%# The close button or Escape hides the banner. If focus was inside,
+    the controller tries the fallback target, then the next or previous
+    focusable element, then the document body.
     Semantics like role="status" are the consumer markup's responsibility. %>
 <div
   class="dismissible"

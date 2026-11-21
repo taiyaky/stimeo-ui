@@ -405,9 +405,8 @@ describe("EmptyStateController", () => {
   });
 
   it("syncs an empty placeholder replaced in two phases, once the old one leaves", async () => {
-    // Turbo Stream `after` / `before` / `append` + `remove` swaps a placeholder in two
-    // steps. While both are in the DOM the single-target getter still resolves to the
-    // original, so the replacement is only reachable after the original leaves.
+    // Inserting the replacement after the original keeps the original first.
+    // The single-target getter resolves to the replacement once the original is removed.
     await mount("<li>a</li>");
     const old = empty();
     const fresh = makeTarget("p", "empty");
@@ -462,16 +461,9 @@ describe("EmptyStateController", () => {
         <p data-stimeo--empty-state-target="empty" hidden>No items</p>
       </div>`;
     application = Application.start();
-    // Stimulus reports a lifecycle exception instead of rethrowing it, so a DOM
-    // assertion alone cannot tell the guard from a crash.
-    const errors: Error[] = [];
-    application.handleError = (error) => {
-      errors.push(error as Error);
-    };
     application.register("stimeo--empty-state", EmptyStateController);
     await tick();
 
-    expect(errors).toEqual([]);
     expect(root().hasAttribute("data-count")).toBe(false);
     expect(root().hasAttribute("data-empty")).toBe(false);
     expect(empty().hidden).toBe(true); // untouched
@@ -504,14 +496,9 @@ describe("EmptyStateController", () => {
         <ul data-stimeo--empty-state-target="list"></ul>
       </div>`;
     application = Application.start();
-    const errors: Error[] = [];
-    application.handleError = (error) => {
-      errors.push(error as Error);
-    };
     application.register("stimeo--empty-state", EmptyStateController);
     await tick();
 
-    expect(errors).toEqual([]);
     expect(root().getAttribute("data-empty")).toBe("true");
     expect(list().hidden).toBe(true);
 

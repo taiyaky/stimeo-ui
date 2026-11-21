@@ -1,3 +1,6 @@
+/** The namespace whose elements carry native HTML semantics. */
+const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+
 /**
  * Whether a disabled `<fieldset>` ancestor actually reaches `control`.
  *
@@ -12,8 +15,12 @@
 export function inheritsFieldsetDisabled(control: HTMLElement): boolean {
   let fieldset: Element | null = control.closest("fieldset[disabled]");
   while (fieldset) {
-    const legend = Array.from(fieldset.children).find((child) => child.tagName === "LEGEND");
-    if (!legend?.contains(control)) return true;
+    if (fieldset.namespaceURI === HTML_NAMESPACE && fieldset.localName === "fieldset") {
+      const legend = Array.from(fieldset.children).find(
+        (child) => child.namespaceURI === HTML_NAMESPACE && child.localName === "legend",
+      );
+      if (!legend?.contains(control)) return true;
+    }
     fieldset = fieldset.parentElement?.closest("fieldset[disabled]") ?? null;
   }
   return false;
@@ -67,26 +74,13 @@ export function flatTreeChildren(element: Element): Element[] {
 }
 
 /**
- * Whether an element can actually take focus, checked **before** `focus()` runs.
- *
- * A controller that must move focus off a control it is about to disable or hide
- * picks a destination and calls `focus()` on it. If that destination cannot take
- * focus, the call **fails silently**: `hidden` and natively `disabled` elements
- * swallow it, so the caret stays in the subtree that is disappearing and lands on
- * `<body>` a frame later — the exact outcome the rescue exists to prevent, minus
- * any signal that it happened.
- *
- * Testing after the fact is the obvious alternative and is deliberately not the
- * rule. Reading `document.activeElement` back only works in a real browser, and
- * looping over candidates that way performs a real focus move per failure —
- * observable to assistive technology. Checking first costs nothing and catches
- * the cases that actually occur.
+ * Rejects candidates with HTML states that block focus. Callers select eligible elements
+ * and decide how to handle a focus attempt that leaves focus unchanged.
  *
  * **`aria-disabled` is not disqualifying.** It is the attribute an author uses
  * for a control that must stay *discoverable*, and the roving contract keeps
- * such items reachable. Only the conditions that make the platform refuse
- * focus are checked: `hidden` / `inert` on the element or a flat-tree ancestor
- * (the host of an open shadow root it sits in, the slot it is assigned to), the
+ * such items reachable. The checks cover `hidden` / `inert` on the element or a
+ * flat-tree ancestor (such as a shadow host or the slot it is assigned to), the
  * element or an ancestor left out of the flat tree (one the engine assigns to no
  * slot of the open shadow root its parent hosts), `input[type="hidden"]`, the
  * native `disabled` property, and `disabled` inherited from an ancestor
@@ -176,14 +170,13 @@ function hasNativeTabStop(element: HTMLElement): boolean {
   if (element.tagName === "AUDIO" || element.tagName === "VIDEO") {
     return element.hasAttribute("controls");
   }
-  if (element instanceof HTMLElement && element.tagName === "SUMMARY") {
-    const details = element.parentElement;
-    return (
-      details instanceof HTMLDetailsElement &&
-      Array.from(details.children).find((child) => child.tagName === "SUMMARY") === element
-    );
-  }
-  return false;
+  const details = element.parentElement;
+  return (
+    details instanceof HTMLDetailsElement &&
+    Array.from(details.children).find(
+      (child) => child.namespaceURI === HTML_NAMESPACE && child.localName === "summary",
+    ) === element
+  );
 }
 
 /** Whether an explicit `contenteditable` value creates an editable tab stop. */
@@ -342,8 +335,9 @@ function isSequentialStop(element: TabStopElement): boolean {
 function ownedScope(element: Element): Element[] | null {
   if (element.shadowRoot) return Array.from(element.shadowRoot.children);
   if (element instanceof HTMLSlotElement) {
-    const assigned = element.assignedElements();
-    return assigned.length > 0 ? assigned : Array.from(element.children);
+    return element.assignedNodes().length > 0
+      ? element.assignedElements()
+      : Array.from(element.children);
   }
   return null;
 }
@@ -365,6 +359,8 @@ interface OrderWalk {
    * meets it.
    */
   fromAt: number;
+  /** The excluded scope containing `from`, if one interrupts the walk. */
+  excludedScope: Element | null;
 }
 
 /**
@@ -378,15 +374,22 @@ function orderScope(elements: Element[], walk: OrderWalk): TabStopElement[] {
   const visit = (element: Element): void => {
     if (element === walk.from) walk.fromAt = walk.tree.length;
     const tabindex = authoredTabindex(element) ?? 0;
-    const stop =
-      (element instanceof HTMLElement || element instanceof SVGElement) && isSequentialStop(element)
-        ? element
-        : null;
-    if (stop) walk.tree.push(stop);
+    let stop: TabStopElement | null = null;
+    if (
+      (element instanceof HTMLElement || element instanceof SVGElement) &&
+      isSequentialStop(element)
+    ) {
+      stop = element;
+      walk.tree.push(element);
+    }
     const owned = ownedScope(element);
     if (owned) {
       if (tabindex >= 0) {
         entries.push({ tabindex, stops: [...(stop ? [stop] : []), ...orderScope(owned, walk)] });
+      } else if (walk.from && flatTreeContains(element, walk.from)) {
+        walk.fromAt = walk.tree.length;
+        walk.excludedScope = element;
+        orderScope(owned, { from: walk.from, tree: walk.tree, fromAt: -1, excludedScope: null });
       }
       return;
     }
@@ -398,6 +401,12 @@ function orderScope(elements: Element[], walk: OrderWalk): TabStopElement[] {
   positive.sort((a, b) => a.tabindex - b.tabindex);
   const rest = entries.filter((entry) => entry.tabindex === 0);
   return [...positive, ...rest].flatMap((entry) => entry.stops);
+}
+
+/** Radio-group membership stays bounded by the original root, across local scope exits. */
+interface RadioContext {
+  readonly tree: TabStopElement[];
+  readonly focusedRadio: HTMLInputElement | null;
 }
 
 /**
@@ -426,7 +435,7 @@ function passesRadioRule(
  * not meet is outside: the move enters at the first stop, or the last going backward. A
  * start that is a stop moves one place along the order. Any other start (the root, an
  * element with a negative `tabindex`) moves to the nearest stop after it in tree order,
- * or before it going backward, and wraps when there is none.
+ * or before it going backward. With no neighbour it returns the boundary beyond that end.
  */
 function startIndex(
   order: TabStopElement[],
@@ -441,7 +450,50 @@ function startIndex(
     ? walk.tree.slice(0, walk.fromAt).reverse().find(isStop)
     : walk.tree.slice(walk.fromAt).find(isStop);
   if (neighbour) return order.indexOf(neighbour);
-  return backward ? order.length - 1 : 0;
+  return backward ? -1 : order.length;
+}
+
+/**
+ * Lists moves within a root, optionally wrapping. A start in an excluded scope first
+ * finishes that scope without wrapping, then continues from its owner's tree position.
+ */
+function movesWithin(
+  root: Element,
+  from: Element | null,
+  backward: boolean,
+  wrap: boolean,
+  radioContext?: RadioContext,
+): TabStopElement[] {
+  const walk: OrderWalk = {
+    from,
+    tree: [],
+    fromAt: from === root ? 0 : -1,
+    excludedScope: null,
+  };
+  const order = orderScope(ownedScope(root) ?? Array.from(root.children), walk);
+  const radios = radioContext ?? {
+    tree: walk.tree,
+    focusedRadio: walk.fromAt >= 0 && isRadio(from) ? from : null,
+  };
+  const isStop = (element: TabStopElement): boolean =>
+    passesRadioRule(element, radios.tree, radios.focusedRadio);
+  const start = startIndex(
+    order,
+    walk,
+    backward,
+    (element) => order.includes(element) && isStop(element),
+  );
+  const remaining = backward ? order.slice(0, start + 1).reverse() : order.slice(start);
+  const wrapped = wrap ? (backward ? order.slice(start + 1).reverse() : order.slice(0, start)) : [];
+  const excluded = walk.excludedScope;
+  const prefix =
+    excluded && !(backward && from === excluded)
+      ? movesWithin(excluded, from === excluded ? null : from, backward, false, radios)
+      : [];
+  return [
+    ...prefix,
+    ...[...remaining, ...wrapped].filter((element) => element !== from && isStop(element)),
+  ];
 }
 
 /**
@@ -458,6 +510,9 @@ function startIndex(
  * and otherwise on its first radio that can, unless focus is already in the group.
  * A link inside editable content without its own `tabindex` is not a stop. Every stop
  * also passes its applicable focusability and rendering checks.
+ * A negative-tabindex shadow host or slot excludes its scope from entry. A move starting
+ * on that owner or a stop inside its scope finishes the local order in the requested direction,
+ * then continues outside; wrapping does not re-enter the excluded scope.
  *
  * @param root - The element whose descendants are ordered; it is not a stop itself.
  * @param from - Where the move starts, usually {@link deepActiveElement}.
@@ -468,16 +523,7 @@ export function sequentialTabStops(
   from: Element | null = null,
   backward = false,
 ): TabStopElement[] {
-  const walk: OrderWalk = { from, tree: [], fromAt: from === root ? 0 : -1 };
-  const order = orderScope(ownedScope(root) ?? Array.from(root.children), walk);
-  const focusedRadio = walk.fromAt >= 0 && isRadio(from) ? from : null;
-  const isStop = (element: TabStopElement): boolean =>
-    passesRadioRule(element, walk.tree, focusedRadio);
-  const start = startIndex(order, walk, backward, isStop);
-  const visited = backward
-    ? [...order.slice(0, start + 1).reverse(), ...order.slice(start + 1).reverse()]
-    : [...order.slice(start), ...order.slice(0, start)];
-  return visited.filter((element) => element !== from && isStop(element));
+  return movesWithin(root, from, backward, true);
 }
 
 /**

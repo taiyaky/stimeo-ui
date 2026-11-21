@@ -13,6 +13,13 @@ describe("rangeFraction", () => {
     expect(rangeFraction(50, 0, 200)).toBe(0.25);
   });
 
+  it("normalizes the midpoint of a narrow finite range", () => {
+    const min = 10;
+    const step = Number.EPSILON * 8;
+
+    expect(rangeFraction(min + step, min, min + 2 * step)).toBe(0.5);
+  });
+
   // With `min = 0` the numerator is the raw value, so only a non-zero `min`
   // distinguishes a shifted origin from an unshifted one.
   it("subtracts a non-zero min from the value", () => {

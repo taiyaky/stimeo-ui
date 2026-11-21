@@ -46,13 +46,12 @@ type SelectionDetail = { count: number; allPages: boolean };
  * leaves that mode, because the selection is no longer the whole set.
  *
  * @remarks
- * Behavior only — it never runs the batch action (that is the consumer's
- * form/Turbo) nor fetches/pages rows. Selection lives **only** in each checkbox's
- * `checked` (no module-scope set), so `connect()` recomputes idempotently from the
- * DOM after a Turbo swap. Row `change` is handled by **delegation** on the
- * container, so dynamically-added rows work without per-row `data-action`, while
- * rows arriving or leaving on their own are picked up by the target callbacks and
- * coalesced into one repair per batch.
+ * The consumer runs the batch action and fetches the rows. Row selection lives in
+ * each row checkbox's `checked` state. `data-all-pages` preserves all-pages mode
+ * across reconnects, so `connect()` recomputes from the DOM after a Turbo swap.
+ * Row `change` is handled by **delegation** on the container, so dynamically
+ * added rows work without per-row `data-action`. Target callbacks pick up rows
+ * arriving or leaving on their own and coalesce the changes into one repair per batch.
  *
  * `change` is dispatched when the user moves the selection; `reconcile` when the
  * controller repairs the figures itself — a row added or removed by the page, or a
@@ -198,10 +197,6 @@ export class BulkSelectController extends Controller<HTMLElement> {
   /** Clears every selection (rows + select-all) and exits all-pages mode. */
   clear(): void {
     for (const item of this.itemTargets) item.checked = false;
-    if (this.hasAllTarget) {
-      this.allTarget.checked = false;
-      this.allTarget.indeterminate = false;
-    }
     this.#exitAllPages();
     this.#reportChange(this.#recompute());
   }

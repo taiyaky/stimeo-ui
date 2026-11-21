@@ -9,6 +9,9 @@ package-lock.json
 
 # Build output (rebuilt by `bun run build`; published to npm, never committed)
 dist/
+# Local build output
+.dist-next/
+.stimeo-watch/
 *.tsbuildinfo
 
 # Test coverage

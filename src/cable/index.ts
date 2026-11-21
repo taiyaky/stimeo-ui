@@ -19,12 +19,9 @@ export { LiveCounterController, PresenceController, TypingIndicatorController };
  * on an Action Cable / Turbo stream rather than in client memory: presence,
  * typing indicators, live counters.
  *
- * **Why this is a separate entry point.** The core library is zero-runtime-dep:
- * `import "stimeo-ui"` pulls in nothing but `@hotwired/stimulus`. Binding the
- * DOM to a server stream genuinely needs `@rails/actioncable`, so — exactly
- * like `stimeo-ui/positioning` and `@floating-ui/dom` — that cost is opt-in:
- * this module lives at `stimeo-ui/cable`, `@rails/actioncable` is an *optional*
- * peer, and nothing in the core imports it.
+ * The core entry point requires only `@hotwired/stimulus`. The
+ * `stimeo-ui/cable` entry point binds the DOM to a server stream using its
+ * optional peer `@rails/actioncable`.
  *
  * When the app already owns a consumer (`app/javascript/channels/consumer.js`),
  * hand it over once at boot so no second websocket is opened:

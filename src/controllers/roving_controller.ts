@@ -17,7 +17,7 @@ const STATE_ATTRIBUTES = ["disabled", "hidden"];
  * shared `RovingTabindex` util (the same split `stimeo--focus` makes over its trap),
  * giving the orientation / wrap / Home-End the util deliberately leaves out. No
  * dedicated APG pattern; it is the technique the APG Toolbar, Menu and Radio Group
- * patterns share. Core (zero dependencies).
+ * patterns share.
  *
  * Markup contract (identifier: `stimeo--roving`):
  *   <div data-controller="stimeo--roving"

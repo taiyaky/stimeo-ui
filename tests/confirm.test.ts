@@ -4,17 +4,11 @@ import { ConfirmController } from "../src/controllers/confirm_controller";
 import { expectNoA11yViolations } from "./helpers/a11y";
 import { query } from "./helpers/dom";
 import { press as pressKey, typeKey } from "./helpers/keyboard";
+import { recordListeners } from "./helpers/listeners";
 import { expectUpperModalOnTop, openUpperModal, TARGET_SWAPS } from "./helpers/modal_stack";
 import { captureSpeech } from "./helpers/speech";
 import { disconnectAndStopApplication } from "./helpers/stimulus";
 import { tick } from "./helpers/timing";
-
-/**
- * Behavioral tests for {@link ConfirmController}: the Turbo confirm-hook swap and
- * restore, Promise resolution on confirm/cancel/Escape, message + label injection,
- * the open/resolve events, the click-interception `request` mode, the single-dialog
- * re-prompt rule, and the no-dialog native fallback.
- */
 
 /** Turbo's confirm method: the message, the form being submitted and its submitter. */
 type TurboConfirm = (
@@ -27,6 +21,12 @@ interface TurboStub {
   config: { forms: { confirm?: TurboConfirm | (() => boolean) } };
 }
 
+/**
+ * Behavioral tests for {@link ConfirmController}: the Turbo confirm-hook swap and
+ * restore, Promise resolution on confirm/cancel/Escape, message + label injection,
+ * the open/resolve events, the click-interception `request` mode, the single-dialog
+ * re-prompt rule, and the no-dialog native fallback.
+ */
 describe("ConfirmController", () => {
   let application: Application;
 
@@ -112,23 +112,19 @@ describe("ConfirmController", () => {
     expect(document.activeElement).not.toBe(opener);
   });
 
-  it("releases the global keydown listener on disconnect", async () => {
+  it("releases the document keydown listeners on disconnect", async () => {
     await start(DIALOG);
     document.body.insertAdjacentHTML("afterbegin", `<button id="opener">Open</button>`);
     const opener = query<HTMLButtonElement>("#opener");
+    const ledger = recordListeners();
     turboConfirm()("Delete?");
+    // The first active trap registers the document's Tab and Escape handlers.
+    expect(ledger.live(document, "keydown")).toHaveLength(2);
 
-    const controller = application.getControllerForElementAndIdentifier(
-      query("[data-controller='stimeo--confirm']"),
-      "stimeo--confirm",
-    ) as ConfirmController;
-    controller.disconnect();
+    controller().disconnect();
 
-    // Escape cannot probe the leak here: disconnect already settled the pending
-    // confirmation, so a leaked handler would no-op on Escape anyway. A leaked trap
-    // WOULD still yank outside focus back into the dialog on Tab — assert it doesn't.
-    opener.focus();
-    typeKey(document, "Tab");
+    expect(ledger.live(document, "keydown")).toHaveLength(0);
+    pressKey(opener, "Tab");
     expect(document.activeElement).toBe(opener);
   });
 
@@ -384,9 +380,7 @@ describe("ConfirmController", () => {
   });
 
   // --- Speech-order check ----------------------------------------------------
-  // The Turbo-hook bridge routes `data-turbo-confirm` through this accessible
-  // alertdialog; freeze the announced role, name, and the injected message in
-  // order so a change in the bridge surfaces as a diff.
+  // Capture the role, name, and injected message of the alertdialog opened by the confirm hook.
   it("announces the alertdialog role, name, and injected message in order", async () => {
     await start(DIALOG);
     turboConfirm()("Delete this item?");
@@ -528,6 +522,37 @@ describe("ConfirmController", () => {
     query<HTMLButtonElement>("#b").click();
 
     expect(message().textContent).toBe("Delete this item?");
+  });
+
+  it("follows an intercepted link only after approval", async () => {
+    await start(`
+      <div data-controller="stimeo--confirm">
+        <a id="link" href="#confirmed-destination"
+           data-action="click->stimeo--confirm#request">Continue</a>
+        ${REQUEST_DIALOG}
+        <p id="confirmed-destination">Destination</p>
+      </div>`);
+    const originalUrl = window.location.href;
+    const originalHash = window.location.hash;
+    const link = query<HTMLAnchorElement>("#link");
+
+    try {
+      link.click();
+      expect(dialog().hidden).toBe(false);
+      expect(window.location.hash).toBe(originalHash);
+
+      cancelBtn().click();
+      await tick();
+      expect(dialog().hidden).toBe(true);
+      expect(window.location.hash).toBe(originalHash);
+
+      link.click();
+      confirmBtn().click();
+      await tick();
+      expect(window.location.hash).toBe("#confirmed-destination");
+    } finally {
+      window.history.replaceState(window.history.state, "", originalUrl);
+    }
   });
 
   it("submits the form with the intercepted button as its submitter", async () => {
@@ -1021,15 +1046,12 @@ describe("ConfirmController", () => {
       copy.hidden = true;
       return copy;
     };
-    /** Records the open and resolve events, and any error Stimulus reports. */
+    /** Records the open and resolve events. */
     const record = () => {
       const seen: string[] = [];
       for (const type of ["stimeo--confirm:open", "stimeo--confirm:resolve"]) {
         root().addEventListener(type, () => seen.push(type));
       }
-      application.handleError = (error) => {
-        seen.push(`error: ${String(error)}`);
-      };
       return seen;
     };
     /** Collects the writes to `attributes` on `element` that `act` causes. */
@@ -1282,14 +1304,12 @@ describe("ConfirmController", () => {
     });
 
     it("settles the prompt when its message and its dialog leave in one task", async () => {
-      const seen = record();
       const answer = settlement(turboConfirm()("Delete?"));
       message().remove();
       dialog().remove();
       await tick();
 
       expect(answer.value).toBe(false);
-      expect(seen.filter((entry) => entry.startsWith("error"))).toEqual([]);
     });
 
     it("settles the prompt as cancelled when the only dialog loses its target token", async () => {

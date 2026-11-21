@@ -48,24 +48,19 @@ const hookOwners = sharedRegistry(
  * In the default (self) mode the controller element is highlighted once on
  * `connect()`. With `observe`, a `MutationObserver` instead highlights every element
  * child added to the container (e.g. Turbo Stream appends). Each highlight sets
- * `data-highlight="true"`, dispatches `start`, and after `duration` removes it and
- * dispatches `end` — both carry `detail.element`.
- *
- * `start` and `end` dispatch `{ element }`.
+ * `data-highlight="true"` and dispatches `start` with `{ element: HTMLElement }`.
+ * When its timer completes after `duration`, it clears the hook and dispatches
+ * `end` with `{ element: HTMLElement }`.
  *
  * @remarks
  * Behavior only — it ships no color or animation, just the hook (pair with CSS, and
  * with `stimeo--announcer` / `stimeo--flash` for non-visual notice). Under
  * `prefers-reduced-motion: reduce` the emphasis is suppressed entirely (the element
- * simply appears), so no hook or event is emitted. A hook never outlives the connection
- * that set it: the observer and pending timers are torn down on `disconnect()` (Turbo
- * navigation included), and
- * `connect()` clears any hook that arrived with the DOM — a page Turbo restores from its
- * cache, an in-page move — because the timer that would have removed it is gone.
- * An element carries at most one emphasis at a time: highlighting it again — a reorder
- * inside one container, or a move into another watched one — takes the hook over and
- * releases the timer that held it, so `duration` is measured from the latest highlight
- * and `end` fires once per emphasis.
+ * simply appears), so no hook or event is emitted. `disconnect()` stops observing
+ * and cancels pending removal timers. `connect()` clears the root's inherited
+ * hook before applying the current mode. Highlighting an element again, such as
+ * when reordering it or moving it to another watched container, replaces the
+ * pending timer. The latest highlight's timer determines when `end` fires.
  *
  * `observe` follows a runtime change (a Turbo morph, an author script): turned on, the
  * element starts watching its children and drops any hook a child carries that no

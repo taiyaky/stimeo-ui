@@ -624,17 +624,12 @@ describe("NetworkStatusController", () => {
       async (name) => {
         setOnline(false);
         await start();
-        const errors: unknown[] = [];
-        application.handleError = (error) => {
-          errors.push(error);
-        };
         query(`[${TARGET}='${name}']`).remove();
         await tick();
         goOnline();
         goOffline();
         await tick();
 
-        expect(errors).toEqual([]);
         expect(root().getAttribute("data-state")).toBe("offline");
       },
     );

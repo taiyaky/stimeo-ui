@@ -1200,6 +1200,29 @@ describe("OtpController", () => {
     expect(combined()).toBe("2");
   });
 
+  it("leaves a composition in fields a nested group took over to that group", async () => {
+    // The fields move into a wrapper that becomes a group of its own after the
+    // outer one connected. The nested group owns them now, and no target attribute
+    // changed for the outer group to notice.
+    const nested = document.createElement("div");
+    root().prepend(nested);
+    nested.append(...fields());
+    await tick();
+    nested.setAttribute("data-controller", "stimeo--otp");
+    await tick();
+
+    const second = fields()[1] as HTMLInputElement;
+    second.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    second.value = "2";
+    /** With happy-dom's error capture disabled, a throwing listener fails this dispatch. */
+    expect(() =>
+      second.dispatchEvent(new Event("compositionend", { bubbles: true })),
+    ).not.toThrow();
+    await tick();
+
+    expect(combined()).toBe("");
+  });
+
   it("rewrites a combined value a Turbo morph emptied while the digits stayed, reporting nothing", async () => {
     paste(fields()[0] as HTMLElement, "1234");
     await tick();
@@ -1830,8 +1853,7 @@ describe("OtpController", () => {
   });
 
   it("keeps a server-rendered value the pattern rejects", async () => {
-    // The controller reads the fields as the truth on connect; an authored value
-    // is the server's, not something a declaration change may quietly drop.
+    // On the first connection, the controller reads the authored field values as they stand.
     document.body.innerHTML = markup({ fieldAttrs: (index) => (index === 0 ? 'value="a"' : "") });
     const changeHandler = vi.fn();
     root().addEventListener("stimeo--otp:change", changeHandler);
@@ -2914,16 +2936,11 @@ describe("OtpController", () => {
     });
 
     it("keeps working when its only value field leaves", async () => {
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       valueField().remove();
       await tick();
       paste(fields()[0] as HTMLInputElement, "1234");
       await tick();
 
-      expect(errors).toEqual([]);
       expect(root().getAttribute("data-state")).toBe("complete");
     });
 
@@ -3059,10 +3076,6 @@ describe("OtpController", () => {
     });
 
     it("keeps working when its only error target leaves", async () => {
-      const errors: unknown[] = [];
-      application.handleError = (error) => {
-        errors.push(error);
-      };
       type(fields()[0] as HTMLInputElement, "あ");
       await tick();
       errorElement().remove();
@@ -3070,7 +3083,6 @@ describe("OtpController", () => {
       type(fields()[0] as HTMLInputElement, "い");
       await tick();
 
-      expect(errors).toEqual([]);
       expect(fields()[0]?.getAttribute("aria-invalid")).toBe("true");
     });
 

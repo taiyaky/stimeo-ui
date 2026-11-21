@@ -38,6 +38,8 @@ function holdsFocus(element: HTMLElement): boolean {
  * — owns it now, and removing it there silently discards authored markup. The
  * bookkeeping is dropped when returned. With `preserveFocus`, a focused element
  * still showing this loan keeps its hold and record until a later return can finish.
+ * Returning to the same `tabindex` value performs no write to that attribute; ownership
+ * records are likewise reflected only when their serialized values change.
  *
  * **Never borrow over a value no loan holds.** An element whose `tabindex` no loan
  * holds — the author's, or one the page wrote over the loans — is the author's to

@@ -427,6 +427,11 @@ describe("RadioGroupController", () => {
     expect(checkedValues()).toEqual(["true", "false", "false"]);
   });
 
+  it.each([false, true])("leaves Tab navigation to the browser (shift=%s)", (shiftKey) => {
+    const event = pressKey(radios()[0] as HTMLElement, "Tab", { shiftKey });
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it("moves and checks with the horizontal arrows under LTR", () => {
     // The APG Radio Group pattern pairs `ArrowRight` with `ArrowDown` and
     // `ArrowLeft` with `ArrowUp`; this case covers the horizontal half.
@@ -523,12 +528,20 @@ describe("RadioGroupController", () => {
     expect(changes).toEqual(["pro"]);
   });
 
-  it("does not fire a native change for the connect-time reflection", () => {
-    // The preselected radio is mirrored on connect, but that is not a user edit:
-    // a listener attached after connect must not see a change until interaction.
+  it("reflects the initial selection without firing a native change", async () => {
+    application.unload("stimeo--radio-group");
+    const input = field();
     const changes: string[] = [];
-    field().addEventListener("change", () => changes.push(field().value));
+    input.value = "";
+    input.addEventListener("change", () => changes.push(input.value));
+
+    application.register("stimeo--radio-group", RadioGroupController);
+    await tick();
+
+    expect(input.value).toBe("basic");
     expect(changes).toEqual([]);
+    radios()[1]?.click();
+    expect(changes).toEqual(["pro"]);
   });
 
   it("moves and selects with ArrowDown, wrapping at the end", () => {
@@ -841,8 +854,8 @@ describe("RadioGroupController", () => {
     await tick();
     document.removeEventListener("stimeo--radio-group:reconcile", rewrite);
 
-    // Observation resumes before the report, so the listener's write is a page
-    // change of its own: the next pass reports it and the field follows it.
+    // The observer tracks the listener's write as a page change. The next pass
+    // reports it and updates the field.
     expect(events.seen.map(({ name, detail }) => ({ name, detail }))).toEqual([
       { name: "reconcile", detail: { value: "max", radio: radios()[2] } },
       { name: "reconcile", detail: { value: "max-2", radio: radios()[2] } },
@@ -1184,6 +1197,38 @@ describe("RadioGroupController", () => {
     instance.connect();
     expect(added.hasAttribute("aria-checked")).toBe(false);
     expect(added.hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("leaves initial Space on a button radio to the native click", async () => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "radio");
+    button.setAttribute("aria-checked", "false");
+    button.setAttribute("data-value", "native");
+    button.setAttribute("data-stimeo--radio-group-target", "radio");
+    root().append(button);
+    await tick();
+
+    const nativeChange = vi.fn();
+    const change = vi.fn();
+    field().addEventListener("change", nativeChange);
+    root().addEventListener("stimeo--radio-group:change", change);
+
+    const space = pressKey(button, " ");
+    expect(space.defaultPrevented).toBe(false);
+    expect(button.getAttribute("aria-checked")).toBe("false");
+    expect(field().value).toBe("basic");
+    expect(nativeChange).not.toHaveBeenCalled();
+    expect(change).not.toHaveBeenCalled();
+
+    // happy-dom does not synthesize the browser's activation click from Space.
+    button.click();
+    expect(button.getAttribute("aria-checked")).toBe("true");
+    expect(field().value).toBe("native");
+    expect(nativeChange).toHaveBeenCalledOnce();
+    expect(change).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ detail: { value: "native", radio: button, reason: "user" } }),
+    );
   });
 
   it("prevents repeated Space from triggering a native button activation", async () => {

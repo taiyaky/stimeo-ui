@@ -787,6 +787,31 @@ describe("NumberInputController", () => {
     expect(incrementBtn().disabled).toBe(false);
   });
 
+  it.each([
+    { step: 1, value: 1e17, increase: false, decrease: false },
+    { step: 1e308, value: 1e308, increase: false, decrease: true },
+    { step: 1e308, value: -1e308, increase: true, decrease: false },
+  ])("offers only usable steps from $value with step $step", async (testCase) => {
+    root().removeAttribute("data-stimeo--number-input-min-value");
+    root().removeAttribute("data-stimeo--number-input-max-value");
+    root().setAttribute("data-stimeo--number-input-step-value", String(testCase.step));
+    input().removeAttribute("min");
+    input().removeAttribute("max");
+    input().step = String(testCase.step);
+    await tick();
+
+    input().value = String(testCase.value);
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(input().value).toBe(String(testCase.value));
+    expect(incrementBtn().disabled).toBe(!testCase.increase);
+    expect(decrementBtn().disabled).toBe(!testCase.decrease);
+
+    input().value = "0";
+    input().dispatchEvent(new Event("change", { bubbles: true }));
+    expect(incrementBtn().disabled).toBe(false);
+    expect(decrementBtn().disabled).toBe(false);
+  });
+
   it("keeps focus on the input after using a step button", () => {
     incrementBtn().click();
     expect(document.activeElement).toBe(input());
@@ -3497,4 +3522,162 @@ describe("NumberInputController with an unconfirmed draft", () => {
     await tick();
     expect(custom).toEqual(["reconcile:123"]);
   });
+});
+
+/**
+ * Tests stepping near the limits of number precision, including single-unit moves,
+ * page steps, finite bounds, and unrepresentable results.
+ */
+describe("NumberInputController at the limits of number precision", () => {
+  let application: Application;
+
+  /** Mounts a text spinbutton holding `value` under the given data Values. */
+  const mount = async (values: Record<string, string>, value: string) => {
+    const declarations = Object.entries(values)
+      .map(([name, declared]) => `data-stimeo--number-input-${name}-value="${declared}"`)
+      .join(" ");
+    document.body.innerHTML = `
+      <div data-controller="stimeo--number-input" ${declarations}>
+        <input type="text" role="spinbutton" inputmode="numeric" value="${value}" aria-label="Amount"
+               data-stimeo--number-input-target="input"
+               data-action="change->stimeo--number-input#onInput
+                            keydown->stimeo--number-input#onKeydown" />
+        <button type="button" aria-label="Increase" tabindex="-1"
+                data-stimeo--number-input-target="increment"
+                data-action="click->stimeo--number-input#increment">+</button>
+      </div>`;
+    application = Application.start();
+    application.register("stimeo--number-input", NumberInputController);
+    await tick();
+  };
+
+  afterEach(() => {
+    disconnectAndStopApplication(application);
+    document.body.innerHTML = "";
+  });
+
+  const root = () =>
+    document.querySelector<HTMLElement>("[data-controller='stimeo--number-input']") as HTMLElement;
+  const input = () =>
+    document.querySelector<HTMLInputElement>(
+      "[data-stimeo--number-input-target='input']",
+    ) as HTMLInputElement;
+  const incrementBtn = () =>
+    document.querySelector<HTMLButtonElement>(
+      "[data-stimeo--number-input-target='increment']",
+    ) as HTMLButtonElement;
+  const valueNow = () => input().getAttribute("aria-valuenow");
+
+  /** The controller's own `change` detail values, in dispatch order. */
+  const customChanges = (): unknown[] => {
+    const seen: unknown[] = [];
+    root().addEventListener("stimeo--number-input:change", (event) => {
+      seen.push((event as CustomEvent).detail.value);
+    });
+    return seen;
+  };
+
+  it("leaves an unbounded value where the next unit is no distinct number", async () => {
+    await mount({ step: "1" }, "100000000000000000");
+    const changes = customChanges();
+
+    keyboardPress(input(), "ArrowUp");
+    keyboardPress(input(), "ArrowDown");
+    incrementBtn().click();
+
+    expect(changes).toEqual([]);
+    expect(valueNow()).toBe("100000000000000000");
+    expect(input().value).toBe("100000000000000000");
+  });
+
+  it("steps one unit at a time at the largest safe integer", async () => {
+    await mount({ min: "0", step: "1" }, "9007199254740990");
+    const changes = customChanges();
+
+    keyboardPress(input(), "ArrowUp");
+    expect(valueNow()).toBe("9007199254740991");
+    keyboardPress(input(), "ArrowDown");
+    expect(valueNow()).toBe("9007199254740990");
+    expect(changes).toEqual([9007199254740991, 9007199254740990]);
+  });
+
+  it("keeps a unit step near zero when a huge minimum anchors the grid", async () => {
+    await mount({ min: "-1e17", step: "1" }, "0");
+    const changes = customChanges();
+
+    keyboardPress(input(), "ArrowUp");
+    expect(valueNow()).toBe("1");
+    keyboardPress(input(), "ArrowDown");
+    keyboardPress(input(), "ArrowDown");
+    expect(valueNow()).toBe("-1");
+    expect(changes).toEqual([1, 0, -1]);
+  });
+
+  it("leaves a page step past the largest number unhandled, as Home and End are", async () => {
+    await mount({ step: "1", "page-step": "1e308" }, "1e308");
+    expect(valueNow()).toBe("1e+308");
+    const changes = customChanges();
+
+    const handled = (["PageUp", "PageDown", "PageDown", "PageDown"] as const).map((key) => {
+      const event = keyEvent(key);
+      keyboardPress(input(), event);
+      return [key, event.defaultPrevented, valueNow()];
+    });
+
+    expect(handled).toEqual([
+      ["PageUp", false, "1e+308"],
+      ["PageDown", true, "0"],
+      ["PageDown", true, "-1e+308"],
+      ["PageDown", false, "-1e+308"],
+    ]);
+    expect(changes).toEqual([0, -1e308]);
+  });
+
+  it.each([
+    {
+      side: "max",
+      endpoint: "1.5e308",
+      value: "1e308",
+      keys: ["PageUp", "PageDown", "PageDown", "PageDown", "PageDown"],
+      expected: [
+        [true, "1.5e+308"],
+        [true, "5e+307"],
+        [true, "-5e+307"],
+        [true, "-1.5e+308"],
+        [false, "-1.5e+308"],
+      ],
+      changes: [1.5e308, 5e307, -5e307, -1.5e308],
+    },
+    {
+      side: "min",
+      endpoint: "-1.5e308",
+      value: "-1e308",
+      keys: ["PageDown", "PageUp", "PageUp", "PageUp", "PageUp"],
+      expected: [
+        [true, "-1.5e+308"],
+        [true, "-5e+307"],
+        [true, "5e+307"],
+        [true, "1.5e+308"],
+        [false, "1.5e+308"],
+      ],
+      changes: [-1.5e308, -5e307, 5e307, 1.5e308],
+    },
+  ])(
+    "clamps an overflowing page step at the finite $side bound",
+    async ({ side, endpoint, value, keys, expected, changes }) => {
+      await mount({ [side]: endpoint, step: "1", "page-step": "1e308" }, value);
+      const seen = customChanges();
+
+      // The first step would overflow and lands on the finite bound. The last
+      // would overflow in the unbounded direction and is left unhandled.
+      const handled = keys.map((key) => {
+        const event = keyEvent(key);
+        keyboardPress(input(), event);
+        return [event.defaultPrevented, valueNow()];
+      });
+
+      expect(handled).toEqual(expected);
+      expect(seen).toEqual(changes);
+    },
+  );
 });

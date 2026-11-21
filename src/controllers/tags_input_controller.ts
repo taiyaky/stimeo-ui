@@ -301,7 +301,8 @@ export class TagsInputController extends Controller<HTMLElement> {
     const value = tag.dataset.value ?? "";
     tag.remove();
     const tags = this.#values;
-    if (!this.#publishTags(tags, false, value)) return;
+    const afterFocus = focus === "neighbor" && tags.length === 0 && this.hasInputTarget;
+    if (!this.#publishTags(tags, false, value, afterFocus)) return;
     if (focus === "input") {
       this.#focusInput();
       return;
@@ -338,7 +339,7 @@ export class TagsInputController extends Controller<HTMLElement> {
   }
 
   /** Writes the whole tag state before notifying observers of a real transition. */
-  #publishTags(tags: string[], added: boolean, value: string): boolean {
+  #publishTags(tags: string[], added: boolean, value: string, afterFocus = false): boolean {
     const changed = !this.#sameTags(this.#tagValues, tags);
     const fieldChanged = this.#syncState(tags);
     this.#tagValues = tags;
@@ -346,7 +347,7 @@ export class TagsInputController extends Controller<HTMLElement> {
     const token = this.#moves.record();
     if (fieldChanged) commitField(this.fieldsTarget);
     if (!this.#moves.isLatest(token)) return false;
-    this.#announceTransition(added, value, tags.length);
+    this.#announceTransition(added, value, tags.length, afterFocus);
     if (!this.#moves.isLatest(token)) return false;
     this.dispatch("change", { detail: { tags } });
     return this.#moves.isLatest(token);
@@ -369,9 +370,9 @@ export class TagsInputController extends Controller<HTMLElement> {
    *
    * @stimeoRuntimeOnly The texts word the one announcement of this change.
    */
-  #announceTransition(added: boolean, value: string, count: number): void {
+  #announceTransition(added: boolean, value: string, count: number, afterFocus: boolean): void {
     const template = added ? this.announceTextValue : this.announceRemovedTextValue;
-    announce(fillTemplate(template, { label: value, value, count }));
+    announce(fillTemplate(template, { label: value, value, count }), { afterFocus });
   }
 
   /** Reports rejection with `{ value, reason: "duplicate" | "empty" | "max" }`. */

@@ -11,8 +11,7 @@ const DEFAULT_DURATION = 1200;
  * Headless **count-up**: animates a number from `from` up to the value already
  * in the DOM — typically started the moment the element scrolls into view by
  * composing with the `stimeo--intersection` primitive (the classic "animate
- * when visible"). Distinct from `stimeo--countdown` (time-based). Core
- * (zero dependencies).
+ * when visible"). Use `stimeo--countdown` for a time-based countdown.
  *
  * Markup contract (identifier: `stimeo--count-up`):
  *   <span data-controller="stimeo--intersection stimeo--count-up"

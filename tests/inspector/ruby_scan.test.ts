@@ -4,7 +4,9 @@ import {
   maskHeredocs,
   previousSignificant,
   readString,
+  skipBraces,
   skipLiteral,
+  skipTrivia,
 } from "../../src/inspector/ruby_scan";
 import { withinTimeLimit } from "../helpers/time_limit";
 
@@ -21,15 +23,35 @@ describe("endOfLine", () => {
   });
 });
 
-describe("readString", () => {
-  it("ends a string with an undecoded escape at its own closing quote", () => {
-    const literal = readString('"\\u0041" + x', 0);
-    expect(literal).toMatchObject({ end: 8, literal: false });
+describe("skipTrivia", () => {
+  it("stops at the first code character after whitespace and a comment", () => {
+    const source = "  # comment\n  value";
+    const offset = withinTimeLimit(() => skipTrivia(source, 0));
+    expect(source.slice(offset)).toBe("value");
   });
+});
+
+describe("readString", () => {
+  it.each(['"\\u0041"', '"\\u0041\\"b"'])(
+    "ends a string with an undecoded escape at its own closing quote (%s)",
+    (text) => {
+      const source = `${text} + x`;
+      const literal = readString(source, 0);
+      expect(literal.literal).toBe(false);
+      expect(source.slice(literal.end)).toBe(" + x");
+    },
+  );
 
   it("ends an interpolated string at its own closing quote, past the braces", () => {
     const literal = readString('"a#{b}c" + d', 0);
     expect(literal).toMatchObject({ end: 8, literal: false });
+  });
+});
+
+describe("skipBraces", () => {
+  it("skips a closing brace inside a quoted string", () => {
+    const source = '{ call("}") } + rest';
+    expect(source.slice(skipBraces(source, 0))).toBe(" + rest");
   });
 });
 
@@ -66,6 +88,16 @@ describe("skipLiteral", () => {
 
     it("runs an unterminated literal to the end of the input", () => {
       expect(skipLiteral("%w[a b", 0)).toBe(6);
+    });
+
+    it("skips an escaped closing delimiter inside the literal", () => {
+      const source = "%q[a\\]b] + rest";
+      expect(source.slice(skipLiteral(source, 0))).toBe(" + rest");
+    });
+
+    it("skips nested delimiters up to the outer close", () => {
+      const source = "%q[a[b]c] + rest";
+      expect(source.slice(skipLiteral(source, 0))).toBe(" + rest");
     });
   });
 
@@ -117,6 +149,14 @@ describe("maskHeredocs", () => {
   it("stops masking at the line that closes the heredoc", () => {
     expect(mask("f <<~A\n  x\nA\ndata")).toBe("f <<~A\n   \n \ndata");
   });
+
+  it.each(['"<<~A"', "%q[<<~A]"])(
+    "leaves text resembling a heredoc opener inside the literal %s",
+    (literal) => {
+      const source = `x = ${literal}\nkeep\nA\n`;
+      expect(mask(source)).toBe(source);
+    },
+  );
 
   it("resumes right after an unquoted tag, so a comment written against it stays a comment", () => {
     expect(mask("f <<~A#it's\nx\nA\ng <<~B\ny\nB\n")).toBe("f <<~A#it's\n \n \ng <<~B\n \n \n");

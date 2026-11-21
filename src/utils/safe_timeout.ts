@@ -63,6 +63,37 @@ abstract class TimerRegistry {
   }
 }
 
+/** One timeout registration, independent of any later reuse of its platform id. */
+export interface TimeoutTask {
+  /** Whether this registration still awaits its callback. */
+  readonly pending: boolean;
+  /** Cancels only this registration; safe after it fires or its registry clears. */
+  cancel(): void;
+}
+
+/** Keeps registration identity apart from the callback's scheduling scope. */
+class TimeoutRegistration implements TimeoutTask {
+  #registration: { owner: TaskTimeout; id: number } | null;
+
+  constructor(owner: TaskTimeout, id: number) {
+    this.#registration = { owner, id };
+  }
+
+  get pending(): boolean {
+    return this.#registration !== null;
+  }
+
+  cancel(): void {
+    const registration = this.#registration;
+    if (registration) registration.owner.clear(registration.id);
+  }
+
+  /** Releases the registry and platform handle when this registration expires. */
+  expire(): void {
+    this.#registration = null;
+  }
+}
+
 /**
  * `setTimeout` wrapper that auto-forgets each timer once it fires and supports
  * bulk teardown on disconnect.
@@ -102,6 +133,46 @@ export class SafeTimeout extends TimerRegistry {
 
   protected cancel(id: number): void {
     window.clearTimeout(id);
+  }
+}
+
+/**
+ * A timeout registry that also provides handles for individual registration lifetimes.
+ * Numeric timers retain the {@link SafeTimeout} API; task handles expire on fire,
+ * individual cancellation or a bulk clear, before user callbacks or platform cleanup.
+ */
+export class TaskTimeout extends SafeTimeout {
+  /** Identity-bearing registrations, expired before cancellation or completion returns. */
+  readonly #tasks = new Map<number, TimeoutRegistration>();
+
+  /**
+   * Schedules a timeout whose handle follows this registration rather than its id.
+   * The handle expires before the callback and on `clear()` or `clearAll()`, so
+   * keeping or cancelling it cannot reach a later timer reusing the same id.
+   */
+  setTask(callback: () => void, delay: number): TimeoutTask {
+    const id = this.set(() => {
+      this.#tasks.delete(id);
+      registration.expire();
+      callback();
+    }, delay);
+    const registration = new TimeoutRegistration(this, id);
+    this.#tasks.set(id, registration);
+    return registration;
+  }
+
+  /** Expires the task for `id`, then releases the underlying timer if it is owned. */
+  override clear(id: number): void {
+    this.#tasks.get(id)?.expire();
+    this.#tasks.delete(id);
+    super.clear(id);
+  }
+
+  /** Expires every task before the inherited registry clears all its numeric timers. */
+  override clearAll(): void {
+    for (const registration of this.#tasks.values()) registration.expire();
+    this.#tasks.clear();
+    super.clearAll();
   }
 }
 

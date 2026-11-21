@@ -85,9 +85,8 @@ import { targetSelector } from "../utils/target_selector";
  * @remarks
  * Behavior only. Panel layout, mega-menu styling, and animation are the
  * consumer's CSS. Static placement is CSS; viewport-edge collision avoidance is
- * delegated to the opt-in `stimeo-ui/positioning` module (never imported here, so
- * the core stays zero-dependency). For an app command menu with arrow roving and
- * `role="menu"`, use `stimeo--menubar` instead.
+ * delegated to the opt-in `stimeo-ui/positioning` module. For an app command menu
+ * with arrow roving and `role="menu"`, use `stimeo--menubar`.
  *
  * Each move of a panel's open state is reported: `stimeo--navigation-menu:open`
  * and `stimeo--navigation-menu:close` dispatch

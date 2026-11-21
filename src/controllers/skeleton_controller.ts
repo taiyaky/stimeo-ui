@@ -5,7 +5,7 @@ import { DetachGate } from "../utils/detach_gate";
 import { MinDurationFloor } from "../utils/min_duration_floor";
 import { NUMBER_BOUNDS, type NumberValueConstraints } from "../utils/number_bounds";
 import { NumberValueReader } from "../utils/number_value";
-import { SafeTimeout } from "../utils/safe_timeout";
+import { TaskTimeout } from "../utils/safe_timeout";
 
 /**
  * Headless skeleton/placeholder manager. No dedicated APG pattern; it follows
@@ -29,7 +29,7 @@ import { SafeTimeout } from "../utils/safe_timeout";
  *
  * @remarks
  * Behavior only — skeleton shapes/animation are the consumer's. The
- * min-duration wait is held by `MinDurationFloor` on a `SafeTimeout`,
+ * min-duration wait is held by `MinDurationFloor` on a `TaskTimeout`,
  * kept across an in-page move and dropped on a real detach via `DetachGate`.
  */
 export class SkeletonController extends Controller<HTMLElement> {
@@ -58,7 +58,7 @@ export class SkeletonController extends Controller<HTMLElement> {
   declare minDurationValue: number;
   declare announceReadyTextValue: string;
 
-  readonly #timers = new SafeTimeout();
+  readonly #timers = new TaskTimeout();
   readonly #floor = new MinDurationFloor(this.#timers);
   readonly #gate = new DetachGate();
   /** Owns the `hidden` written on each placeholder and content, so a departed one gets it back. */

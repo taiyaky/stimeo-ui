@@ -252,6 +252,31 @@ describe("OTP interrupted composition publication", () => {
     });
   }
 
+  it("keeps the incoming edit visible while publishing a held pattern drop", async () => {
+    const h = await mount("a", "[0-9a-f]");
+    begin(h.first, "う");
+    await h.patternTo("[0-9]");
+    expect(h.hidden.value).toBe("23a");
+    expect(h.events).toEqual([]);
+    const duringReconcile: ReturnType<typeof h.snapshot>[] = [];
+    h.root.addEventListener("stimeo--otp:reconcile", () => duringReconcile.push(h.snapshot()), {
+      once: true,
+    });
+
+    edit(h.last, "5");
+
+    expect(duringReconcile).toMatchObject([
+      { fields: ["う", "2", "3", "5"], value: "23", submitted: "23" },
+    ]);
+    expect(h.snapshot().fields).toEqual(["う", "2", "3", "5"]);
+    expect(document.activeElement).toBe(h.first);
+    expect(h.hidden.value).toBe("235");
+    expect(h.events).toEqual([
+      ["reconcile", { value: "23" }],
+      ["change", { value: "235" }],
+    ]);
+  });
+
   it("does not consume a later real compositionend or its following ordinary edit", async () => {
     const h = await mount();
     begin(h.last, "う");

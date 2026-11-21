@@ -377,6 +377,34 @@ describe("ListboxController", () => {
     expect(listEl().scrollTop).toBe(60);
   });
 
+  it("keeps manual scrolling until the active option moves", () => {
+    const list = listEl();
+    const [apple, banana] = options() as [HTMLElement, HTMLElement, HTMLElement];
+    Object.defineProperties(list, {
+      scrollHeight: { value: 200, configurable: true },
+      clientHeight: { value: 80, configurable: true },
+    });
+    vi.spyOn(list, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 100, 80));
+    vi.spyOn(apple, "getBoundingClientRect").mockImplementation(
+      () => new DOMRect(0, -list.scrollTop, 100, 40),
+    );
+    vi.spyOn(banana, "getBoundingClientRect").mockImplementation(
+      () => new DOMRect(0, 40 - list.scrollTop, 100, 40),
+    );
+
+    pressKey(trigger(), "ArrowDown");
+    expect(active()).toBe("opt-1");
+    list.scrollTop = 80;
+
+    expect(pressKey(trigger(), "F2").defaultPrevented).toBe(false);
+    expect(active()).toBe("opt-1");
+    expect(list.scrollTop).toBe(80);
+
+    pressKey(trigger(), "ArrowDown");
+    expect(active()).toBe("opt-2");
+    expect(list.scrollTop).toBe(40);
+  });
+
   it("opens with ArrowDown and activates the first option (focus stays on trigger)", () => {
     trigger().focus();
     pressKey(trigger(), "ArrowDown");
@@ -397,9 +425,7 @@ describe("ListboxController", () => {
   });
 
   it("leaves a modified arrow to the browser", () => {
-    // This listbox is select-only — multi-select is out of scope — so no
-    // modifier is claimed by any of its bindings and every chord goes to the
-    // browser.
+    /** The select-only listbox leaves modified arrow keys to the browser. */
     trigger().focus();
     pressKey(trigger(), "ArrowDown"); // open, active opt-1
     expect(active()).toBe("opt-1");
@@ -410,8 +436,6 @@ describe("ListboxController", () => {
     expect(active()).toBe("opt-1");
     expect(listEl().hidden).toBe(false);
 
-    // Shift and Control are claimed by the APG multi-select models, which this
-    // select-only listbox does not implement — so they are not claimed here.
     for (const modifier of ["shiftKey", "ctrlKey"] as const) {
       const chord = pressKey(trigger(), "ArrowDown", { [modifier]: true });
       expect(chord.defaultPrevented).toBe(false);
@@ -1581,8 +1605,7 @@ describe("ListboxController markup variants", () => {
 });
 
 /**
- * The active marker moves on every arrow press, so its cost has to stay
- * independent of how many options the consumer supplies.
+ * Moving the active marker scans the options and writes only where the marker changes.
  */
 describe("ListboxController active-marker writes", () => {
   let application: Application;
@@ -1654,7 +1677,7 @@ describe("ListboxController active-marker writes", () => {
  * Typeahead runs on the shared {@link Typeahead} primitive. The fixture carries
  * repeated first letters and an `aria-label` that disagrees with the visible
  * text, the two contracts under test: a repeated key cycles through the matches
- * instead of growing the query, and matching reads the accessible name.
+ * instead of growing the query, and matching uses the supplied `aria-label`.
  */
 describe("ListboxController typeahead", () => {
   let application: Application;
@@ -1776,8 +1799,7 @@ describe("ListboxController typeahead", () => {
       expect(vi.getTimerCount()).toBe(1);
 
       disconnectAndStopApplication(application);
-      // The typeahead owns its own registry, so `#timers.clearAll()` alone would
-      // leave this timer to fire against a detached controller.
+      /** Disconnect resets the typeahead and cancels its pending idle timer. */
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -1788,9 +1810,9 @@ describe("ListboxController typeahead", () => {
 /**
  * A selection the page moves — a morph, a Turbo Stream, a script — is the
  * controller's to reconcile and report as `reconcile`, once per batch and only
- * when the selection it publishes moved. The trigger label follows the same
- * selection: with nothing selected it shows `placeholder`, else the text it held
- * before the controller first wrote into it.
+ * when the selection it publishes moved. The trigger shows the selected option's
+ * label. With no selection it shows the declared `placeholder` or restores the
+ * authored text when no placeholder is set.
  */
 describe("ListboxController a selection the page moves", () => {
   let application: Application;
@@ -2641,7 +2663,7 @@ describe("ListboxController settled reports", () => {
     root().querySelector("button")?.removeAttribute("data-stimeo--listbox-target");
     expect(() => instance.onTriggerKeydown(keyEvent("Shift"))).not.toThrow();
   });
-  it("leaves open and close inert after the optional live list disappears", () => {
+  it("tolerates open and close calls after the list target is removed", () => {
     const list = root().querySelector('[data-stimeo--listbox-target="list"]') as HTMLElement;
     list.removeAttribute("data-stimeo--listbox-target");
     const instance = application.getControllerForElementAndIdentifier(

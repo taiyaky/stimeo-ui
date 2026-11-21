@@ -20,6 +20,21 @@ describe("TemplateAttributeLease", () => {
     document.body.innerHTML = "";
   });
 
+  it("leaves no intent or mutation for an empty source until a template is set", () => {
+    const observer = new MutationObserver(() => {});
+    observer.observe(element, { attributes: true });
+
+    lease.render(element, "", null);
+
+    expect(element.getAttribute("aria-valuetext")).toBe("Author");
+    expect(element.hasAttribute(record)).toBe(false);
+    expect(observer.takeRecords()).toHaveLength(0);
+    lease.render(element, "{value}", "40");
+    expect(element.getAttribute("aria-valuetext")).toBe("40");
+    expect(observer.takeRecords().some((mutation) => mutation.attributeName === record)).toBe(true);
+    observer.disconnect();
+  });
+
   it("suspends a template without forgetting its source", () => {
     lease.render(element, "{value}", "40");
     lease.render(element, "{value}", null);
@@ -37,6 +52,29 @@ describe("TemplateAttributeLease", () => {
     expect(copy.getAttribute("aria-valuetext")).toBe("60");
     restored.release(copy);
     expect(copy.getAttribute("aria-valuetext")).toBe("Author");
+  });
+
+  it("continues an active template on a copy and restores its authored baseline", () => {
+    lease.render(element, "{value}", "40");
+    const copy = element.cloneNode(true) as HTMLElement;
+    const restored = new TemplateAttributeLease("aria-valuetext", "stimeo--reading");
+
+    restored.render(copy, "{value}", "60");
+    expect(copy.getAttribute("aria-valuetext")).toBe("60");
+    restored.release(copy);
+    expect(copy.getAttribute("aria-valuetext")).toBe("Author");
+  });
+
+  it("continues copied template intent when the attribute ownership record was dropped", () => {
+    lease.render(element, "{value}", "40");
+    const copy = element.cloneNode(true) as HTMLElement;
+    copy.removeAttribute("data-stimeo--reading-aria-valuetext-lease");
+    const restored = new TemplateAttributeLease("aria-valuetext", "stimeo--reading");
+
+    restored.render(copy, "{value}", "60");
+
+    expect(copy.getAttribute("aria-valuetext")).toBe("60");
+    restored.release(copy);
   });
 
   it("returns a restored ownership record when no template intent remains", () => {

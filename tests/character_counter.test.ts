@@ -155,44 +155,37 @@ describe("CharacterCounterController", () => {
         "",
         "abc",
       );
-      if (!application) throw new Error("Application was not started");
-      const errors = vi.spyOn(application, "handleError").mockImplementation(() => {});
-      try {
-        const previous = field();
-        const arriving = document.createElement("textarea");
-        arriving.value = "xy";
-        arriving.setAttribute("data-stimeo--character-counter-target", "input");
-        root().append(arriving);
-        await vi.advanceTimersByTimeAsync(0);
-        if (reconnect) {
-          const instance = controller();
-          instance.disconnect();
-          instance.connect();
-        }
-        type("abcd", previous);
-        const changes = captureChanges();
-        const reconciles = captureReconciles();
-        arriving.focus();
-        arriving.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-        composeDraft(arriving, "xyに");
-        previous.remove();
-        await vi.advanceTimersByTimeAsync(0);
-        expect(output().textContent).toBe("6");
-        expect(changes).toEqual([]);
-        expect(reconciles).toEqual([]);
-        expect(errors).not.toHaveBeenCalled();
-        await vi.advanceTimersByTimeAsync(ANNOUNCE_MS + 1);
-        expect(announcementMessages).toEqual([]);
-        arriving.value = "xy似";
-        arriving.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
-        expect(output().textContent).toBe("7");
-        expect(changes).toEqual([{ length: 3, remaining: 7, over: false }]);
-        expect(reconciles).toEqual([]);
-        await vi.advanceTimersByTimeAsync(ANNOUNCE_MS + 1);
-        expect(announcementMessages).toEqual(["7 left"]);
-      } finally {
-        errors.mockRestore();
+      const previous = field();
+      const arriving = document.createElement("textarea");
+      arriving.value = "xy";
+      arriving.setAttribute("data-stimeo--character-counter-target", "input");
+      root().append(arriving);
+      await vi.advanceTimersByTimeAsync(0);
+      if (reconnect) {
+        const instance = controller();
+        instance.disconnect();
+        instance.connect();
       }
+      type("abcd", previous);
+      const changes = captureChanges();
+      const reconciles = captureReconciles();
+      arriving.focus();
+      arriving.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      composeDraft(arriving, "xyに");
+      previous.remove();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(output().textContent).toBe("6");
+      expect(changes).toEqual([]);
+      expect(reconciles).toEqual([]);
+      await vi.advanceTimersByTimeAsync(ANNOUNCE_MS + 1);
+      expect(announcementMessages).toEqual([]);
+      arriving.value = "xy似";
+      arriving.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+      expect(output().textContent).toBe("7");
+      expect(changes).toEqual([{ length: 3, remaining: 7, over: false }]);
+      expect(reconciles).toEqual([]);
+      await vi.advanceTimersByTimeAsync(ANNOUNCE_MS + 1);
+      expect(announcementMessages).toEqual(["7 left"]);
     },
   );
 

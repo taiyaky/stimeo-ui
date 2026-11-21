@@ -292,7 +292,8 @@ describe("NestedFormController", () => {
     addButton().click();
     list().remove();
     await tick();
-    // The observer rebind copes with "no list left": no Stimulus-reported error.
+    // The observer rebind copes with "no list left": nothing is logged, and an error
+    // Stimulus caught here would fail the test (tests/setup/fatal-stimulus-errors.ts).
     expect(error).not.toHaveBeenCalled();
     addButton().click(); // and later operations degrade to the missing-target no-op
     expect(warn).toHaveBeenCalledTimes(1);

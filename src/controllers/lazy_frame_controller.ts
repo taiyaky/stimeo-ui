@@ -17,21 +17,19 @@ import { ListenerSet } from "../utils/listener_set";
  *
  * The URL is *held* in the `url` value (not on `src`) so Turbo does not load it eagerly;
  * when the frame intersects (within `rootMargin`) or focus enters it, the controller
- * writes `url` to `src` — **writing `src` is what starts the fetch** — marks
- * `data-lazy-loaded`, and emits `load`. Focus is the fallback for the *first* load only;
- * once the frame has loaded, its listener is released and further focus moves inside the
- * frame change nothing.
+ * writes `url` to `src`, sets `data-lazy-loaded`, and emits `load`. Focus is a
+ * fallback until that first assignment, when the controller releases its listener.
  *
  * With `once` (default) the controller then stops observing. With `once` off it keeps
- * watching and re-fetches on a **re-entry** — the frame has to be seen inside the
- * observed area, leave it, and come back. Where a connection first finds the frame is the
- * baseline rather than a movement, so a focus-started load and a cache restore each begin
- * the visit wherever the frame sits — in view or out of it — and re-fetch nothing until it
- * leaves and returns. A re-entry serves the held `url`: when it still matches `src`, the
- * host's own `reload()` refetches it; when it has moved on, writing the new `url` to `src`
- * is the fetch.
+ * watching for a **re-entry**. The first observation establishes where the
+ * frame sits, including after a focus-triggered load or cache restore. Once the
+ * observer has seen the frame inside, then outside, a return assigns a non-empty
+ * `url` if it differs from `src`. Otherwise it calls the frame's `reload()` when
+ * available.
  *
- * `load` dispatches `{ url }` — always the URL the fetch actually started for.
+ * `load` dispatches `{ url }` after assigning `src` or calling `reload()`. It
+ * reports the assigned URL or the frame's current `src` for a reload. Turbo
+ * controls the request.
  *
  * `once` follows a runtime change for a frame that has loaded: turned off, the frame is
  * observed again and the visit begins wherever the observer first finds it, exactly as on a
@@ -168,9 +166,9 @@ export class LazyFrameController extends Controller<HTMLElement> {
   }
 
   /**
-   * Starts the load by writing the held URL to `src`.
+   * Assigns the held URL to `src` for the first load.
    *
-   * @stimeoRuntimeOnly `url` is the address this one load fetches and `once` decides whether it
+   * @stimeoRuntimeOnly `url` is the address this call assigns and `once` decides whether it
    *   stops the watcher.
    */
   #load(): void {
@@ -185,23 +183,19 @@ export class LazyFrameController extends Controller<HTMLElement> {
   }
 
   /**
-   * Re-entry while `once` is off: fetch the held URL again.
+   * On re-entry with `once` off, assigns a changed URL or invokes the frame's reload.
    *
-   * @stimeoRuntimeOnly `url` is the address this one re-entry reloads.
+   * @stimeoRuntimeOnly A non-empty `url` supplies the address for this re-entry.
    */
   #reload(): void {
     const src = this.element.getAttribute("src");
     if (this.urlValue && this.urlValue !== src) {
-      // The held URL moved on. Writing it to `src` is the fetch, the same start
-      // the first load uses, so it works on any host.
       this.element.setAttribute("src", this.urlValue);
       this.dispatch("load", { detail: { url: this.urlValue } });
       return;
     }
     const frame = this.element as HTMLElement & { reload?: () => void };
-    // Refetching the URL already on `src` needs the host's own `reload()`. On a
-    // non-`<turbo-frame>` host there is none, and firing `load` would announce a
-    // fetch that never started.
+    // Report a reload only when the host provides the reload path.
     if (typeof frame.reload !== "function") return;
     frame.reload();
     this.dispatch("load", { detail: { url: src ?? "" } });

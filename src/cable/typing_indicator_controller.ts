@@ -31,8 +31,7 @@ const DEFAULT_THROTTLE = 2000;
  * signals from *other* clients render "X is typing…" into a visible `status` slot
  * and auto-clear after `timeout` ms of silence. The whole behavior is HTML + a
  * broadcast — no app JS, no client store, no reconciler. Ships in the opt-in
- * `stimeo-ui/cable` subpath (`@rails/actioncable` optional peer); the core stays
- * zero-dep.
+ * `stimeo-ui/cable` subpath, which uses the optional peer `@rails/actioncable`.
  *
  * Markup contract (identifier: `stimeo--typing-indicator`):
  *   <div data-controller="stimeo--typing-indicator"
@@ -62,9 +61,8 @@ const DEFAULT_THROTTLE = 2000;
  *
  * @remarks
  * Behavior only — the indicator's look is the consumer's CSS, keyed off the
- * `data-typing` hook; the copy is localizable through the `data-one` /
- * `data-many` templates (`{name}` / `{names}` / `{count}`), with terse English
- * as the fallback. The own echo is
+ * `data-typing` hook. Use `{name}` in `data-one` and `{names}` and `{count}`
+ * in `data-many`. The fallback copy is English. The own echo is
  * dropped by comparing the broadcast `name` against `name` (a same-name guard,
  * not authentication — identity belongs to the server). Sending tracks the full
  * subscription lifecycle (via the shared confirmation-aware subscription):
@@ -394,9 +392,8 @@ export class TypingIndicatorController extends Controller<HTMLElement> {
   }
 
   /**
-   * Builds the status copy. Localizable through `data-one` / `data-many`
-   * templates on the status target (`{name}` / `{names}` / `{count}`); terse
-   * English is the fallback.
+   * Builds the status copy from `data-one` with `{name}` or `data-many`
+   * with `{names}` and `{count}`. The fallback copy is English.
    */
   #message(names: string[]): string {
     if (names.length === 0) return "";

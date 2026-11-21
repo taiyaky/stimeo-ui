@@ -7,6 +7,8 @@ import { NumberValueReader } from "../utils/number_value";
 import { clampRange, rangeFraction } from "../utils/range";
 import { TemplateAttributeLease } from "../utils/template_attribute_lease";
 
+export type { NumericValueEvent } from "../utils/coerce";
+
 /**
  * Headless progress-bar behavior backed by the WAI-ARIA `progressbar` role.
  *
@@ -91,9 +93,10 @@ export class ProgressController extends Controller<HTMLElement> {
   }
 
   /**
-   * Updates the progress value from an action param (`amount`) or a
-   * `detail.value` CustomEvent, normalizes it into range, syncs ARIA, and
-   * dispatches `change` (always) plus `complete` when `max` is reached.
+   * Updates progress from a valid `amount` action param or `detail.value` in a
+   * CustomEvent, normalizes it into range, syncs ARIA, and dispatches `change`.
+   * Each call whose normalized value is at `max` also dispatches `complete`
+   * and sends the configured announcement.
    */
   setValue(event: NumericValueEvent): void {
     const next = eventNumber(event);
@@ -105,8 +108,6 @@ export class ProgressController extends Controller<HTMLElement> {
     this.dispatch("change", { detail: { value, ratio: this.#ratio } });
     if (value >= this.#safeMax) {
       this.dispatch("complete", { detail: { value } });
-      // Reaching the end is the transition worth reading out; the running numbers in
-      // between are state the consumer can see, not news.
       announce(
         fillTemplate(this.announceTextValue, { value, percent: Math.round(this.#ratio * 100) }),
       );

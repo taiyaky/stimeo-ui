@@ -13,8 +13,8 @@ const DEFAULT_OFFSET = 80;
 /**
  * Headless **smart sticky header**: hides the header on scroll-down and
  * reveals it on scroll-up, published as a `data-header-hidden` hook the
- * consumer's CSS translates away (`stimeo--sticky-observer` detects *stuck*,
- * but has no direction sense; this adds it). Core (zero dependencies).
+ * consumer's CSS uses to translate the header. Use `stimeo--sticky-observer`
+ * to detect when an element is stuck.
  *
  * Markup contract (identifier: `stimeo--smart-sticky-header`):
  *   <header data-controller="stimeo--smart-sticky-header"

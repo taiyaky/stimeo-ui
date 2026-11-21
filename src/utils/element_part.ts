@@ -29,14 +29,10 @@ export function matchingPart<E extends HTMLElement = HTMLElement>(
  * element the text goes into — the remove button among them. Replacing the whole
  * subtree takes those with it and leaves a chip that is rendered but has nothing to
  * press, so only the slot's own text moves: the first text node carries the value
- * and the rest go, which puts the label where the template left room for it. A slot
- * holding nothing but text is written whole, which is the ordinary row.
+ * and the rest go, which puts the label where the template left room for it. When
+ * there is no text node, the label is placed before the existing children.
  */
 export function writeLabel(slot: HTMLElement, text: string): void {
-  if (slot.childElementCount === 0) {
-    slot.textContent = text;
-    return;
-  }
   let first: ChildNode | null = null;
   for (const node of Array.from(slot.childNodes)) {
     if (node.nodeType !== Node.TEXT_NODE) continue;

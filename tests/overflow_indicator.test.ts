@@ -177,10 +177,6 @@ describe("OverflowIndicatorController", () => {
 
   it("stops viewport observation when a batch removes every candidate", async () => {
     await start();
-    const errors: Error[] = [];
-    application.handleError = (error) => {
-      errors.push(error);
-    };
     layout({ scrollLeft: 0, scrollWidth: 1000, clientWidth: 300 });
     const first = viewport();
     const second = document.createElement("div");
@@ -191,12 +187,10 @@ describe("OverflowIndicatorController", () => {
     second.removeAttribute("data-stimeo--overflow-indicator-target");
     first.removeAttribute("data-stimeo--overflow-indicator-target");
     await tick();
-    expect(errors).toEqual([]);
     first.setAttribute("data-stimeo--overflow-indicator-target", "viewport");
     await tick();
     layout({ scrollLeft: 700, scrollWidth: 1000, clientWidth: 300 });
     expect(first.getAttribute("data-overflow-end")).toBe("false");
-    expect(errors).toEqual([]);
   });
 
   it("cancels the old viewport frame when the same target moves within the root", async () => {

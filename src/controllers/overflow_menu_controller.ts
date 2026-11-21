@@ -31,7 +31,7 @@ const SAVED_TABINDEX = "tabindex";
 const SAVED_MENU_TARGET = "saved-menu";
 /** The `stimeo--menu` target attribute, set to `item` while banked so that controller drives it. */
 const MENU_TARGET = "data-stimeo--menu-target";
-/** Everything this controller writes on an item; all removed on the way back to the bar. */
+/** Bookkeeping attributes cleared when an item returns to the bar. */
 const BOOKKEEPING = [BANKED, INDEX, SAVED_ROLE, SAVED_TABINDEX, SAVED_MENU_TARGET] as const;
 /**
  * Suffix of the marker on the More label this controller wrote into the trigger;
@@ -49,7 +49,7 @@ interface MovableParent {
 
 /**
  * Headless **overflow / priority menu**: items that no longer fit their container are
- * moved into a "More" dropdown (lowest `data-priority` first) and moved back as space
+ * moved into a "More" dropdown by `data-priority` and moved back as space
  * returns, watched with a {@link ResizeObserver} (no dedicated APG pattern — a
  * composition; the menu's a11y is delegated to `stimeo--menu`, so it is not
  * re-implemented).
@@ -101,10 +101,12 @@ interface MovableParent {
  * controller's again.
  *
  * On connect (and every debounced resize) it measures the items against the container's
- * content width and, when they overflow, banks the lowest-priority ones into the More
- * menu — giving each `role="menuitem"` / `tabindex="-1"` and the menu's `item` target so
- * `stimeo--menu` drives it — until the rest fit beside the More button. When nothing
- * overflows the More wrapper (button *and* menu) is `hidden`. The controller element carries
+ * content width and moves items into the More menu until the rest fit beside the More
+ * button. Each moved item gets `role="menuitem"`, `tabindex="-1"`, and the menu's
+ * `item` target so `stimeo--menu` drives it. When the item returns to the bar,
+ * those attributes return to their saved values, with absent or empty values
+ * removed. If nothing overflows, the More wrapper (button *and* menu) is
+ * `hidden`. The controller element carries
  * `data-overflowing` / `data-overflow-count`, and a `change` event fires on connect and
  * on later update or resize transitions; retained-element morphs report `reconcile`.
  *
@@ -141,8 +143,8 @@ interface MovableParent {
  * it to the last item that can actually hold it (`hidden` and disabled ones cannot), or to
  * the root when none can.
  *
- * **Priority.** Lower `data-priority` is kept longer; a value that is absent, empty, or
- * not a number ranks lowest and drops first.
+ * **Priority.** Higher `data-priority` values overflow first. An absent, blank, or
+ * non-numeric value has the same rank as positive infinity. Ties move later items first.
  *
  * **Turbo.** The managed set and the canonical order are rebuilt *from the DOM* every
  * pass, so a fresh `connect()` onto markup that already holds banked items (cache restore,
